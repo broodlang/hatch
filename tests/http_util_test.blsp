@@ -1,0 +1,40 @@
+(defmodule http-util-test (:use http/util) (:use test))
+
+(describe "hex-char->int"
+  (test "digits"  (assert= (hex-char->int "0") 0))
+  (test "nine"    (assert= (hex-char->int "9") 9))
+  (test "upper-A" (assert= (hex-char->int "A") 10))
+  (test "upper-F" (assert= (hex-char->int "F") 15))
+  (test "lower-a" (assert= (hex-char->int "a") 10))
+  (test "lower-f" (assert= (hex-char->int "f") 15)))
+
+(describe "url-decode"
+  (test "plain string"  (assert= (url-decode "hello") "hello"))
+  (test "plus to space" (assert= (url-decode "hello+world") "hello world"))
+  (test "percent space" (assert= (url-decode "hello%20world") "hello world"))
+  (test "UTF-8 two-byte" (assert= (url-decode "caf%C3%A9") "café"))
+  (test "mixed"         (assert= (url-decode "foo%3Dbar") "foo=bar"))
+  (test "empty string"  (assert= (url-decode "") "")))
+
+(describe "parse-query"
+  (test "single pair"   (assert= (parse-query "name=Alice") {"name" "Alice"}))
+  (test "two pairs"     (assert= (parse-query "a=1&b=2") {"a" "1" "b" "2"}))
+  (test "percent encoded key" (assert= (parse-query "n%61me=x") {"name" "x"}))
+  (test "percent encoded val" (assert= (parse-query "q=caf%C3%A9") {"q" "café"}))
+  (test "value-less key" (assert= (parse-query "flag") {"flag" ""}))
+  (test "empty string"   (assert= (parse-query "") {}))
+  (test "nil"            (assert= (parse-query nil) {})))
+
+(describe "status-text"
+  (test "200" (assert= (status-text 200) "OK"))
+  (test "201" (assert= (status-text 201) "Created"))
+  (test "204" (assert= (status-text 204) "No Content"))
+  (test "301" (assert= (status-text 301) "Moved Permanently"))
+  (test "302" (assert= (status-text 302) "Found"))
+  (test "304" (assert= (status-text 304) "Not Modified"))
+  (test "400" (assert= (status-text 400) "Bad Request"))
+  (test "401" (assert= (status-text 401) "Unauthorized"))
+  (test "403" (assert= (status-text 403) "Forbidden"))
+  (test "404" (assert= (status-text 404) "Not Found"))
+  (test "500" (assert= (status-text 500) "Internal Server Error"))
+  (test "unknown" (assert= (status-text 999) "Unknown")))
