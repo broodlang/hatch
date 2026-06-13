@@ -1,0 +1,56 @@
+(defmodule http/response "HTTP/1.1 response serialization."
+  (:use http/util))
+
+(defn format-response (resp)
+  "Serialize a response map to an HTTP/1.1 response string ready to send over TCP."
+  (let (status  (get resp :status 200)
+        body    (get resp :body "")
+        headers (get resp :headers {})
+        headers (if (contains? headers :content-type)
+                  headers
+                  (assoc headers :content-type "text/html; charset=utf-8"))
+        headers (assoc headers :content-length (str (string-length body)))
+        headers (assoc headers :connection "keep-alive"))
+    (str "HTTP/1.1 " status " " (status-text status) "\r\n"
+         (join "" (map format-header (entries headers)))
+         "\r\n"
+         body)))
+
+(defn format-header (kv)
+  "Format a `[keyword value]` pair as an HTTP header line."
+  (let ([k v] kv)
+    (str (header-name k) ": " v "\r\n")))
+
+(defn header-name (k)
+  "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."
+  (join "-" (map capitalize (string-split (name k) "-"))))
+
+(defn capitalize (s)
+  "Uppercase the first character of `s`, leaving the rest unchanged."
+  (if (blank? s)
+    s
+    (str (upper (substring s 0 1)) (substring s 1 (string-length s)))))
+
+(defn ok (body)
+  "200 OK response with HTML body."
+  {:status 200 :body body})
+
+(defn ok-text (body)
+  "200 OK response with plain-text body."
+  {:status 200 :headers {:content-type "text/plain; charset=utf-8"} :body body})
+
+(defn ok-json (body)
+  "200 OK response with JSON body (caller supplies the JSON string)."
+  {:status 200 :headers {:content-type "application/json"} :body body})
+
+(defn not-found (&optional (body "<h1>404 Not Found</h1>"))
+  "404 Not Found response."
+  {:status 404 :body body})
+
+(defn redirect (url &optional (status 302))
+  "Redirect response to `url`."
+  {:status status :headers {:location url} :body ""})
+
+(defn error-resp (msg)
+  "500 Internal Server Error response."
+  {:status 500 :body (str "<h1>Internal Server Error</h1><pre>" msg "</pre>")})

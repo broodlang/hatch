@@ -1,0 +1,66 @@
+(defmodule http-request-test (:use http/request) (:use test))
+
+(describe "parse-request-line"
+  (test "GET no query"
+    (assert= (parse-request-line "GET / HTTP/1.1") [:ok "GET" "/" ""]))
+  (test "GET with query"
+    (assert= (parse-request-line "GET /search?q=foo HTTP/1.1") [:ok "GET" "/search" "q=foo"]))
+  (test "POST path"
+    (assert= (parse-request-line "POST /users HTTP/1.1") [:ok "POST" "/users" ""]))
+  (test "lowercase method normalized"
+    (assert= (parse-request-line "get / HTTP/1.1") [:ok "GET" "/" ""]))
+  (test "garbage returns error"
+    (let (r (parse-request-line "GARBAGE"))
+      (assert= (first r) :error))))
+
+(describe "try-parse: incomplete"
+  (test "empty buffer"   (assert= (try-parse "") [:incomplete]))
+  (test "partial header" (assert= (try-parse "GET / HTTP/1.1\r\n") [:incomplete])))
+
+(describe "try-parse: errors"
+  (test "bad request line"
+    (let (r (try-parse "GARBAGE\r\n\r\n"))
+      (assert= (first r) :error))))
+
+(describe "try-parse: successful GET"
+  (test "returns :ok"
+    (let (r (try-parse "GET /hello?name=world HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+      (assert= (first r) :ok)))
+  (test "method"
+    (let ([_ req _] (try-parse "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= (get req :method) "GET")))
+  (test "path"
+    (let ([_ req _] (try-parse "GET /hello?x=1 HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= (get req :path) "/hello")))
+  (test "query"
+    (let ([_ req _] (try-parse "GET /p?a=b HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= (get req :query) "a=b")))
+  (test "params parsed"
+    (let ([_ req _] (try-parse "GET /p?name=Alice HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= (get (get req :params) "name") "Alice")))
+  (test "header keyword-ized"
+    (let ([_ req _] (try-parse "GET / HTTP/1.1\r\nContent-Type: text/html\r\n\r\n"))
+      (assert= (get (get req :headers) :content-type) "text/html")))
+  (test "empty remainder when no pipeline"
+    (let ([_ _ rem] (try-parse "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= rem ""))))
+
+(describe "try-parse: POST with body"
+  (test "body extracted"
+    (let (raw "POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+          [_ req _] (try-parse raw))
+      (assert= (get req :body) "hello")))
+  (test "remainder empty after full body"
+    (let (raw "POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+          [_ _ rem] (try-parse raw))
+      (assert= rem "")))
+  (test "incomplete when body not yet fully arrived"
+    (let (raw "POST /data HTTP/1.1\r\nContent-Length: 100\r\n\r\nshort")
+      (assert= (try-parse raw) [:incomplete]))))
+
+(describe "try-parse: pipelined requests"
+  (test "remainder is second request"
+    (let (raw (str "GET /first HTTP/1.1\r\nHost: x\r\n\r\n"
+                   "GET /second HTTP/1.1\r\nHost: x\r\n\r\n")
+          [_ _ rem] (try-parse raw))
+      (assert= rem "GET /second HTTP/1.1\r\nHost: x\r\n\r\n"))))

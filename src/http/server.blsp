@@ -1,0 +1,62 @@
+(defmodule http/server "HTTP/1.1 TCP server: listener process and per-connection workers."
+  (:use http/request)
+  (:use http/response))
+
+(defn start (port handler)
+  "Spawn an HTTP listener on `port`, dispatching each request to `handler`.
+  Returns the listener pid. The server runs until `(http/server/stop)` is called."
+  ; tcp-listen must be called INSIDE the spawned process — accepts go to the
+  ; calling process's mailbox, so we can't call it here and hand off the socket.
+  (let (pid (spawn :http-listener (listen-and-serve port handler)))
+    (sleep 50)  ; let the listener bind before returning
+    pid))
+
+(defn listen-and-serve (port handler)
+  ; Runs inside the listener process so tcp-listen's accept messages
+  ; land in this process's mailbox.
+  (let (lsock (tcp-listen "0.0.0.0" port))
+    (println "listening on http://localhost:" port)
+    (listener--loop lsock handler)))
+
+(defn stop ()
+  "Gracefully stop the HTTP listener."
+  (let (pid (whereis :http-listener))
+    (if pid
+      (send pid :stop)
+      (println "http/server: no listener running"))))
+
+(defn listener--loop (lsock handler)
+  (receive
+    ([:tcp-accept ~lsock client]
+     (let (worker (spawn (worker--run client handler "")))
+       (tcp-controlling-process client worker)
+       (listener--loop lsock handler)))
+    (:stop
+     (tcp-close lsock)
+     (println "http/server: stopped"))))
+
+(defn worker--run (sock handler buf)
+  (match (try-parse buf)
+    ([:ok request remainder]
+     (let (response (try (handler request)
+                         (catch e (error-resp (error-message e)))))
+       (tcp-send sock (format-response response))
+       (if (keep-alive? request response)
+         (worker--run sock handler remainder)
+         (tcp-close sock))))
+    ([:incomplete]
+     (receive
+       ([:tcp ~sock chunk]
+        (worker--run sock handler (str buf chunk)))
+       ([:tcp-closed ~sock]
+        nil)))
+    ([:error msg]
+     (tcp-send sock (format-response {:status 400 :body msg}))
+     (tcp-close sock))))
+
+(defn keep-alive? (request response)
+  "True if the connection should be reused for another request."
+  (let (req-conn  (lower (get-in request  [:headers :connection] ""))
+        resp-conn (lower (get-in response [:headers :connection] "")))
+    (and (not (= req-conn  "close"))
+         (not (= resp-conn "close")))))

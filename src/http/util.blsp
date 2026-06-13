@@ -1,0 +1,77 @@
+(defmodule http/util "HTTP utility functions: URL decoding, query-string parsing, status codes.")
+
+;; ---- hex helpers ----
+
+(defn hex-char->int (c)
+  "Convert a single hex digit character to its integer value (0–15)."
+  (let (code (char->int c))
+    (cond
+      (and (>= code 48) (<= code 57))  (- code 48)
+      (and (>= code 65) (<= code 70))  (- code 55)
+      (and (>= code 97) (<= code 102)) (- code 87)
+      else 0)))
+
+(defn hex-str->bytes (hex)
+  "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
+  (map (fn (pair) (+ (* (hex-char->int (first pair)) 16)
+                     (hex-char->int (first (rest pair)))))
+       (partition 2 (string->list hex))))
+
+;; ---- URL decode ----
+
+(defn url-decode (s)
+  "Percent-decode a URL-encoded string, correctly handling multi-byte UTF-8 sequences."
+  (utf8-bytes->string (into [] (reverse (url-decode--acc (string->list s) nil)))))
+
+(defn url-decode--acc (chars acc)
+  (match chars
+    (nil acc)
+    (("%" h l & rest)
+     (url-decode--acc rest (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
+    (("+" & rest)
+     (url-decode--acc rest (cons 32 acc)))
+    ((c & rest)
+     (let (cp (char->int c))
+       (if (< cp 128)
+         (url-decode--acc rest (cons cp acc))
+         (url-decode--acc rest (fold (fn (a b) (cons b a)) acc (string->utf8-bytes c))))))))
+
+;; ---- query-string parser ----
+
+(defn parse-query (s)
+  "Parse a URL query string (\"key=val&key2=val2\") into a string→string map."
+  (if (or (nil? s) (blank? s))
+    {}
+    (fold (fn (m pair)
+            (let (eq (index-of pair "="))
+              (if (= eq -1)
+                (assoc m (url-decode pair) "")
+                (assoc m
+                       (url-decode (substring pair 0 eq))
+                       (url-decode (substring pair (+ eq 1) (string-length pair)))))))
+          {}
+          (string-split s "&"))))
+
+;; ---- status codes ----
+
+(defn status-text (code)
+  "Return the HTTP reason phrase for a numeric status code."
+  (match code
+    (200 "OK")
+    (201 "Created")
+    (204 "No Content")
+    (301 "Moved Permanently")
+    (302 "Found")
+    (304 "Not Modified")
+    (400 "Bad Request")
+    (401 "Unauthorized")
+    (403 "Forbidden")
+    (404 "Not Found")
+    (405 "Method Not Allowed")
+    (409 "Conflict")
+    (422 "Unprocessable Entity")
+    (429 "Too Many Requests")
+    (500 "Internal Server Error")
+    (502 "Bad Gateway")
+    (503 "Service Unavailable")
+    (_   "Unknown")))

@@ -1,0 +1,67 @@
+(defmodule http-response-test (:use http/response) (:use test))
+
+(describe "capitalize"
+  (test "lowercase word" (assert= (capitalize "content") "Content"))
+  (test "already upper"  (assert= (capitalize "Content") "Content"))
+  (test "empty string"   (assert= (capitalize "") ""))
+  (test "single char"    (assert= (capitalize "x") "X")))
+
+(describe "header-name"
+  (test "single segment"  (assert= (header-name :host) "Host"))
+  (test "content-type"    (assert= (header-name :content-type) "Content-Type"))
+  (test "content-length"  (assert= (header-name :content-length) "Content-Length"))
+  (test "x-request-id"   (assert= (header-name :x-request-id) "X-Request-Id")))
+
+(describe "ok"
+  (test "status 200"
+    (assert= (get (ok "hi") :status) 200))
+  (test "body preserved"
+    (assert= (get (ok "hi") :body) "hi")))
+
+(describe "ok-text"
+  (test "status 200"
+    (assert= (get (ok-text "hi") :status) 200))
+  (test "content-type header"
+    (assert= (get (get (ok-text "hi") :headers) :content-type) "text/plain; charset=utf-8")))
+
+(describe "ok-json"
+  (test "content-type application/json"
+    (assert= (get (get (ok-json "{}") :headers) :content-type) "application/json")))
+
+(describe "not-found"
+  (test "status 404"
+    (assert= (get (not-found) :status) 404))
+  (test "custom body"
+    (assert= (get (not-found "gone") :body) "gone")))
+
+(describe "redirect"
+  (test "default 302"
+    (assert= (get (redirect "/new") :status) 302))
+  (test "custom 301"
+    (assert= (get (redirect "/new" 301) :status) 301))
+  (test "location header"
+    (assert= (get (get (redirect "/new") :headers) :location) "/new")))
+
+(describe "error-resp"
+  (test "status 500"
+    (assert= (get (error-resp "oops") :status) 500))
+  (test "body includes message"
+    (let (body (get (error-resp "oops") :body))
+      (assert= (includes? body "oops") true))))
+
+(describe "format-response"
+  (test "starts with status line"
+    (let (r (format-response (ok "hello")))
+      (assert= (includes? r "HTTP/1.1 200 OK") true)))
+  (test "includes content-length"
+    (let (r (format-response (ok "hello")))
+      (assert= (includes? r "Content-Length: 5") true)))
+  (test "body at end"
+    (let (r (format-response (ok "hello")))
+      (assert= (includes? r "\r\n\r\nhello") true)))
+  (test "404 status line"
+    (let (r (format-response (not-found "gone")))
+      (assert= (includes? r "HTTP/1.1 404 Not Found") true)))
+  (test "custom header included"
+    (let (r (format-response (redirect "/new")))
+      (assert= (includes? r "Location: /new") true))))
