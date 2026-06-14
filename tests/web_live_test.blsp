@@ -51,7 +51,8 @@
 (describe "live-route registry"
   (test "register, look up, and miss"
     (do
-      (register-live "/reg-test" (fn () {:ok true}))
-      (let (s (lookup-live "/reg-test"))
-        (assert= (s) {:ok true}))
+      (register-live "/reg-test" (fn () {:ok true}) :admin)
+      (let (e (lookup-live "/reg-test"))
+        (assert= ((get e :spec)) {:ok true})  ; the registered spec thunk
+        (assert= (get e :session) :admin))  ; its live-session group
       (assert= (lookup-live "/never-registered-xyz") nil))))

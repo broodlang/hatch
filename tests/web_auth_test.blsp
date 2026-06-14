@@ -1,0 +1,37 @@
+(defmodule web-auth-test
+  (:use web/auth)
+  (:use web/conn)
+  (:use encoding)  ; base64-encode — build the Authorization header for the tests
+  (:use test))
+
+(defn conn-with-auth (val)
+  "A GET conn whose Authorization header is `val` (nil = no header sent)."
+  (build {:method "GET" :path "/dev" :query "" :params {} :headers {:authorization val} :body ""}))
+
+(defn basic (user pass)
+  "A `Basic <base64>` Authorization header value for `user`:`pass`."
+  (str "Basic " (base64-encode (str user ":" pass))))
+
+(describe "basic-auth"
+  (test "valid credentials pass through (not halted) and assign current-user"
+    (let (conn ((basic-auth "admin" "admin") (conn-with-auth (basic "admin" "admin"))))
+      (assert= (halted? conn) false)
+      (assert= (get-assign conn :current-user) "admin")))
+
+  (test "wrong password halts with a 401 + challenge for the realm"
+    (let (conn ((basic-auth "admin" "admin" "Dev") (conn-with-auth (basic "admin" "nope"))))
+      (assert= (halted? conn) true)
+      (assert= (get conn :status) 401)
+      (assert= (includes? (get-in conn [:resp-headers :www-authenticate]) "Dev") true)))
+
+  (test "missing Authorization header halts with a 401"
+    (let (conn ((basic-auth "admin" "admin") (conn-with-auth nil)))
+      (assert= (halted? conn) true)
+      (assert= (get conn :status) 401)))
+
+  (test "a non-Basic scheme is rejected"
+    (let (conn ((basic-auth "admin" "admin") (conn-with-auth "Bearer abc.def")))
+      (assert= (get conn :status) 401)))
+
+  (test "basic-auth-creds decodes the Basic header to user:pass"
+    (assert= (basic-auth-creds (conn-with-auth (basic "alice" "s3cret"))) "alice:s3cret")))

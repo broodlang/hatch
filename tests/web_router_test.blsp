@@ -108,6 +108,16 @@
   (test "present" (assert= (plist-get (list :title "X") :title) "X"))
   (test "absent" (assert= (plist-get (list :a 1) :title) nil)))
 
+(describe "defrouter live-session"
+  (defrouter ls-router
+    (live-session "admin"
+      (get "/admin/page" (fn (conn) "admin page"))
+      (get "/admin/info" (fn (conn) "admin info"))))
+  (test "a get inside a live-session is an ordinary route"
+    (assert= (get (ls-router (conn-for "GET" "/admin/page")) :resp-body) "admin page"))
+  (test "every clause in the block routes"
+    (assert= (get (ls-router (conn-for "GET" "/admin/info")) :resp-body) "admin info")))
+
 (describe "defrouter macro"
   (defrouter sample-router
     (get "/" (fn (conn) (html-resp conn "home")))
@@ -124,3 +134,33 @@
     (assert= (get (sample-router (conn-for "POST" "/items")) :resp-body) "created"))
   (test "unknown route 404"
     (assert= (get (sample-router (conn-for "GET" "/gone")) :status) 404)))
+
+; Plugs for the `through` tests: one enriches the conn, one halts it.
+(defn tag-plug (conn) (assign conn :tag "tagged"))
+(defn deny-plug (conn) (halt (send-resp conn 403 "denied")))
+
+(describe "defrouter through"
+  (defrouter through-router
+    (through [tag-plug]
+      (get "/ok" (fn (conn) (html-resp conn (or (get-assign conn :tag) "no-tag")))))
+    (through [deny-plug]
+      (get "/secret" (fn (conn) (html-resp conn "secret"))))
+    (get "/open" (fn (conn) (html-resp conn "open"))))
+
+  (test "a non-halting plug runs before the handler and enriches the conn"
+    (assert= (get (through-router (conn-for "GET" "/ok")) :resp-body) "tagged"))
+  (test "a halting plug short-circuits the handler with its own response"
+    (let (resp (through-router (conn-for "GET" "/secret")))
+      (assert= (get resp :status) 403)
+      (assert= (get resp :resp-body) "denied")))
+  (test "routes outside a through group are unaffected"
+    (assert= (get (through-router (conn-for "GET" "/open")) :resp-body) "open")))
+
+(describe "defrouter nested groups"
+  ; through nests inside live-session — the recursive compiler composes both.
+  (defrouter nested-router
+    (live-session "admin"
+      (through [tag-plug]
+        (get "/admin/ok" (fn (conn) (or (get-assign conn :tag) "no-tag"))))))
+  (test "a plug inside live-session > through still runs"
+    (assert= (get (nested-router (conn-for "GET" "/admin/ok")) :resp-body) "tagged")))
