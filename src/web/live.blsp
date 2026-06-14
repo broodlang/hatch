@@ -1,7 +1,9 @@
-(defmodule web/live "LiveBrood: per-session WebSocket actor + deflive macro."
+(defmodule web/live
+  "LiveBrood: per-session WebSocket actor + deflive macro."
   (:use http/websocket)
   (:use web/template)
-  (:use protocol))   ; defprotocol / defimpl
+  (:use web/conn)  ; send-resp / put-resp-header (client-js-handler)
+  (:use protocol))  ; defprotocol / defimpl
 
 ; ---- JSON encode via the Encode protocol -----------------------------------
 ; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
@@ -11,27 +13,27 @@
 (defn json-str (s)
   "Encode a Brood string as a JSON string (with escaping)."
   (str "\""
-       (-> s
-           (replace "\\" "\\\\")
-           (replace "\"" "\\\"")
-           (replace "\n" "\\n")
-           (replace "\r" "\\r")
-           (replace "\t" "\\t"))
-       "\""))
+    (-> s
+      (replace "\\" "\\\\")
+      (replace "\"" "\\\"")
+      (replace "\n" "\\n")
+      (replace "\r" "\\r")
+      (replace "\t" "\\t"))
+    "\""))
 
 (defprotocol Encode
   "JSON-encode a value to its wire string."
   (encode [v] :-> string))
 
-(defimpl Encode :nil     (encode [_] "null"))
-(defimpl Encode :bool    (encode [b] (if b "true" "false")))
-(defimpl Encode :int     (encode [n] (str n)))
-(defimpl Encode :float   (encode [n] (str n)))
-(defimpl Encode :string  (encode [s] (json-str s)))
-(defimpl Encode :vector  (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :pair    (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :map     (encode [m] (str "{" (join "," (map encode--entry (entries m))) "}")))
-(defimpl Encode :default (encode [v] (json-str (str v))))   ; keywords, symbols, …
+(defimpl Encode :nil (encode [_] "null"))
+(defimpl Encode :bool (encode [b] (if b "true" "false")))
+(defimpl Encode :int (encode [n] (str n)))
+(defimpl Encode :float (encode [n] (str n)))
+(defimpl Encode :string (encode [s] (json-str s)))
+(defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
+(defimpl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
+(defimpl Encode :map (encode [m] (str "{" (join "," (map encode--entry (entries m))) "}")))
+(defimpl Encode :default (encode [v] (json-str (str v))))  ; keywords, symbols, …
 
 (defn encode--entry (kv)
   (let ([k val] kv)
@@ -47,14 +49,14 @@
 
 (defn json-parse--value (s)
   (cond
-    (blank? s)              [nil ""]
+    (blank? s) [nil ""]
     (starts-with? s "null") [nil (substring s 4 (string-length s))]
     (starts-with? s "true") [true (substring s 4 (string-length s))]
-    (starts-with? s "false")[false (substring s 5 (string-length s))]
-    (starts-with? s "\"")   (json-parse--string s)
-    (starts-with? s "{")    (json-parse--object s)
-    (starts-with? s "[")    (json-parse--array s)
-    else                    (json-parse--number s)))
+    (starts-with? s "false") [false (substring s 5 (string-length s))]
+    (starts-with? s "\"") (json-parse--string s)
+    (starts-with? s "{") (json-parse--object s)
+    (starts-with? s "[") (json-parse--array s)
+    else (json-parse--number s)))
 
 (defn json-parse--string (s)
   (json-parse--string--acc (substring s 1 (string-length s)) ""))
@@ -66,22 +68,20 @@
           rest (substring s 1 (string-length s)))
       (cond
         (= c "\"") [acc rest]
-        (= c "\\")
-        (let (esc (char-at rest 0)
-              rest2 (substring rest 1 (string-length rest)))
-          (cond
-            (= esc "n")  (json-parse--string--acc rest2 (str acc "\n"))
-            (= esc "r")  (json-parse--string--acc rest2 (str acc "\r"))
-            (= esc "t")  (json-parse--string--acc rest2 (str acc "\t"))
-            (= esc "\\") (json-parse--string--acc rest2 (str acc "\\"))
-            (= esc "\"") (json-parse--string--acc rest2 (str acc "\""))
-            else         (json-parse--string--acc rest2 (str acc esc))))
+        (= c "\\") (let (esc (char-at rest 0)
+                         rest2 (substring rest 1 (string-length rest)))
+                     (cond
+                       (= esc "n") (json-parse--string--acc rest2 (str acc "\n"))
+                       (= esc "r") (json-parse--string--acc rest2 (str acc "\r"))
+                       (= esc "t") (json-parse--string--acc rest2 (str acc "\t"))
+                       (= esc "\\") (json-parse--string--acc rest2 (str acc "\\"))
+                       (= esc "\"") (json-parse--string--acc rest2 (str acc "\""))
+                       else (json-parse--string--acc rest2 (str acc esc))))
         else (json-parse--string--acc rest (str acc c))))))
 
 (defn json-parse--number (s)
   (let (end (json-parse--num-end s 0))
-    [(string->number (substring s 0 end))
-     (substring s end (string-length s))]))
+    [(string->number (substring s 0 end)) (substring s end (string-length s))]))
 
 (defn json-parse--num-end (s i)
   (if (>= i (string-length s))
@@ -101,11 +101,11 @@
       (let (s (if (starts-with? s ",") (substring s 1 (string-length s)) s)
             s (trim s)
             [k rest] (json-parse--string s)
-            rest     (trim rest)
-            rest     (if (starts-with? rest ":") (substring rest 1 (string-length rest)) rest)
-            rest     (trim rest)
+            rest (trim rest)
+            rest (if (starts-with? rest ":") (substring rest 1 (string-length rest)) rest)
+            rest (trim rest)
             [v rest] (json-parse--value rest)
-            rest     (trim rest))
+            rest (trim rest))
         (json-parse--object--acc rest (assoc acc k v))))))
 
 (defn json-parse--array (s)
@@ -115,10 +115,10 @@
   (let (s (trim s))
     (if (starts-with? s "]")
       [acc (substring s 1 (string-length s))]
-      (let (s    (if (starts-with? s ",") (substring s 1 (string-length s)) s)
-            s    (trim s)
+      (let (s (if (starts-with? s ",") (substring s 1 (string-length s)) s)
+            s (trim s)
             [v r] (json-parse--value s)
-            r    (trim r))
+            r (trim r))
         (json-parse--array--acc r (into acc [v]))))))
 
 ; ---- wire protocol messages ----
@@ -134,13 +134,12 @@
   caller can resume reading after handling the tick)."
   (match (parse-frame buf)
     ([:ok opcode payload rem] [:ok opcode payload rem])
-    ([:incomplete]
-     (receive
-       ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk)))
-       ([:tcp-closed ~sock]    [:closed])
-       ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))
-       ([:tick key]            [:tick key buf])
-       ([:reload]              [:reload buf])))
+    ([:incomplete] (receive
+                     ([:tcp ~sock chunk] (recv-frame--loop sock (str buf chunk)))
+                     ([:tcp-closed ~sock] [:closed])
+                     ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))
+                     ([:tick key] [:tick key buf])
+                     ([:reload] [:reload buf])))
     ([:error msg] [:error msg])))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
@@ -156,8 +155,18 @@
 
 (defn ticker-loop--wait (target ms)
   (receive
-    ([:down _ _ _] nil)   ; the session ended — stop ticking
+    ([:down _ _ _] nil)  ; the session ended — stop ticking
     (after ms (do (send target [:tick ms]) (ticker-loop--wait target ms)))))
+
+; ---- named singleton processes ----
+; Both live registries below are "get-or-spawn a process registered under a name".
+
+(defn ensure-named (nm start)
+  "The pid registered as `nm`; on first use spawn `(start)` and register it under `nm`.
+  Safe under a spawn/register race: if registration loses, fall back to the winner."
+  (or (whereis nm)
+    (try (let (pid (spawn (start))) (register nm pid) pid)
+      (catch _ (whereis nm)))))
 
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
 ; Hot reload already rebinds the view's globals (docs/shared-code.md); we just need
@@ -168,26 +177,26 @@
 
 (defn live--registry-loop (pids)
   (receive
-    ([:register p]   (live--registry-loop (cons p pids)))
+    ([:register p] (live--registry-loop (cons p pids)))
     ([:unregister p] (live--registry-loop (filter (fn (q) (not (= q p))) pids)))
-    ([:reload]       (dolist (p pids) (send p [:reload])) (live--registry-loop pids))))
+    ([:reload] (dolist (p pids) (send p [:reload])) (live--registry-loop pids))))
 
 (defn live--registry ()
-  "The registry pid, spawned and named `:hatch-live` on first use."
-  (or (whereis :hatch-live)
-    (try (let (pid (spawn (live--registry-loop nil))) (register :hatch-live pid) pid)
-      (catch _ (whereis :hatch-live)))))
+  "The reload-registry pid, spawned and named `:hatch-live` on first use."
+  (ensure-named :hatch-live (fn () (live--registry-loop nil))))
 
 (defn live--register (pid) (send (live--registry) [:register pid]) nil)
 
 (defn live--unregister (pid)
-  (let (r (whereis :hatch-live)) (when r (send r [:unregister pid]))) nil)
+  (let (r (whereis :hatch-live)) (when r (send r [:unregister pid])))
+  nil)
 
 (defn notify-reload ()
   "Signal every open live session to re-render with freshly hot-reloaded code. A
   `deflive` sentinel calls this on each (re)load of the view module; a no-op when no
   registry/sessions are running (e.g. the first load at startup)."
-  (let (r (whereis :hatch-live)) (when r (send r [:reload]))) nil)
+  (let (r (whereis :hatch-live)) (when r (send r [:reload])))
+  nil)
 
 ; ---- session actor ----
 
@@ -209,87 +218,120 @@
       (let (me (self))
         (dolist (ms ticks)
           (spawn (ticker-loop me ms))))))
-  (let (model (get view :model))
-    (send-msg sock {:event "render" :html (render view model)})
+  (push-update sock view buf "render" (get view :model)))
+
+; The loop's one render-and-reply step: set the new model on the view, push a frame
+; ("render" for a full page, "diff" for an update), and go back to listening. Every
+; state transition below funnels through here.
+(defn push-update (sock view buf kind model)
+  "Set `model` on the view, push a `kind` frame with the freshly-rendered HTML, and
+  keep listening on `buf`."
+  (let (view (assoc view :model model))
+    (send-msg sock {:event kind :html (render view model)})
     (session-recv sock view buf)))
+
+(defn close-session (sock)
+  "Drop out of the reload registry and close the socket cleanly."
+  (live--unregister (self))
+  (tcp-send sock (close-frame))
+  (tcp-close sock))
 
 (defn session-recv (sock view buf)
   (match (recv-frame--loop sock buf)
-    ([:ok 8 _ _]
-     ; client closed
-     (live--unregister (self))
-     (tcp-send sock (close-frame))
-     (tcp-close sock))
-    ([:ok 9 payload _]
-     ; ping → pong
-     (tcp-send sock (pong-frame payload))
-     (session-recv sock view buf))
-    ([:ok 1 payload rem]
-     ; text frame — JSON message from client
-     (session-dispatch sock view rem payload))
-    ([:ok _ _ rem]
-     ; ignore other opcodes
-     (session-recv sock view rem))
-    ([:tick key buf2]
-     ; a server tick fired, keyed by its interval ms — advance the model via the
-     ; matching tick handler, push a diff, and keep listening.
-     (let (model (try ((get view :handle-tick) key (get view :model)) (catch _ (get view :model)))
-           view  (assoc view :model model))
-       (send-msg sock {:event "diff" :html (render view model)})
-       (session-recv sock view buf2)))
-    ([:reload buf2]
-     ; hot reload — re-resolve the view's functions through its spec thunk (late
-     ; binding picks up the freshly loaded render/handlers) and push a render with
-     ; the current model. State (the model) is preserved across the reload.
+    ([:ok 8 _ _] (close-session sock))                                  ; client close
+    ([:ok 9 payload _] (tcp-send sock (pong-frame payload))             ; ping → pong
+      (session-recv sock view buf))
+    ([:ok 1 payload rem] (session-dispatch sock view rem payload))      ; client message
+    ([:ok _ _ rem] (session-recv sock view rem))                        ; ignore other opcodes
+    ([:tick key buf2]                                                   ; server tick → diff
+     (push-update sock view buf2 "diff"
+       (try ((get view :handle-tick) key (get view :model)) (catch _ (get view :model)))))
+    ([:reload buf2]                                                     ; hot reload → re-render
      (let (spec (try ((get view :spec-fn)) (catch _ nil))
            view (if spec (merge view spec) view))
-       (send-msg sock {:event "render" :html (render view (get view :model))})
-       (session-recv sock view buf2)))
+       (push-update sock view buf2 "render" (get view :model))))
     ([:closed] (live--unregister (self)) nil)
-    ([:error _] (live--unregister (self)) (tcp-send sock (close-frame)) (tcp-close sock))))
+    ([:error _] (close-session sock))))
 
 (defn session-dispatch (sock view buf payload)
   ; `payload` is a byte string (binary mode) holding the client's UTF-8 JSON —
   ; decode the bytes back to text before parsing.
-  (let (msg    (try (json-decode (byte-string->utf8 payload)) (catch _ nil))
-        event  (get msg "event" "")
+  (let (msg (try (json-decode (byte-string->utf8 payload)) (catch _ nil))
+        event (get msg "event" "")
         params (get msg "params" {}))
     (match event
-      ("join"
-       (let (model  ((get view :mount) params)
-             view   (assoc view :model model))
-         (send-msg sock {:event "render" :html (render view model)})
-         (session-recv sock view buf)))
-      ("event"
-       (let (name   (get msg "name" "")
-             model  (get view :model)
-             model  (try ((get view :handle-event) name params model)
-                         (catch _ model))
-             view   (assoc view :model model))
-         (send-msg sock {:event "diff" :html (render view model)})
-         (session-recv sock view buf)))
-      (_
-       (session-recv sock view buf)))))
+      ("join" (push-update sock view buf "render" ((get view :mount) params)))
+      ("event" (let (name (get msg "name" "")
+                     model (get view :model))
+                 (push-update sock view buf "diff"
+                   (try ((get view :handle-event) name params model) (catch _ model)))))
+      (_ (session-recv sock view buf)))))
 
 (defn render (view model)
   "Call the view's render fn and convert to an HTML string."
   (let (node ((get view :render) model))
     (web/template/render node)))
 
-; ---- ws-handler factory ----
+; ---- session start ----
 
-(defn ws-handler-for (spec-fn)
-  "Return a `(fn [sock request])` suitable as http/server's ws-handler. `spec-fn` is
-  a 0-arg thunk returning `{:mount :render :handle-event :handle-tick :ticks}`. It is
-  called fresh per connection — and again on each hot reload — so the live view always
-  runs the latest code (the thunk resolves the view's functions by name, so the
-  language's late binding picks up reloaded definitions)."
+(defn start-session (sock request spec-fn)
+  "Run a live session for `spec-fn` on a freshly-upgraded socket: build the initial
+  model from the request params, then enter the per-connection event loop. `spec-fn`
+  is called fresh here (and again on each hot reload via the session loop's spec-fn),
+  so the view always runs the latest code."
+  (let (params (get request :params {})
+        spec (spec-fn)
+        model ((get spec :mount) params)
+        view (merge spec {:spec-fn spec-fn :params params :model model}))
+    (session-loop sock view "")))
+
+; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
+; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
+; server's single ws-handler (`live-dispatcher`) looks the path up per connection. A
+; named process holds the table because the router registers at load while the worker
+; dispatches per request — different processes that need to share the mapping.
+
+(defn live--routes-loop (table)
+  (receive
+    ([:put path spec-fn] (live--routes-loop (assoc table path spec-fn)))
+    ([:get path from] (send from [:spec (get table path)]) (live--routes-loop table))))
+
+(defn live--routes ()
+  "The live-route registry pid, spawned and named `:hatch-live-routes` on first use."
+  (ensure-named :hatch-live-routes (fn () (live--routes-loop {}))))
+
+(defn register-live (path spec-fn)
+  "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`.
+  `(live path module)` calls this at load; idempotent, so a hot reload just re-puts."
+  (send (live--routes) [:put path spec-fn])
+  nil)
+
+(defn lookup-live (path)
+  "The spec thunk registered for `path` via `register-live`, or nil if none."
+  (let (r (live--routes))
+    (send r [:get path (self)])
+    (receive
+      ([:spec s] s)
+      (after 1000 nil))))
+
+(defn live--ws-path (req-path)
+  "The app path a `/live/ws<path>` WebSocket URL targets. brood_live.js connects to
+  `/live/ws` + the page's `data-live` path, so `/live/ws/counter` → `/counter`."
+  (let (prefix "/live/ws")
+    (if (starts-with? req-path prefix)
+      (substring req-path (string-length prefix) (string-length req-path))
+      req-path)))
+
+(defn live-dispatcher ()
+  "The server's single ws-handler: route each `/live/ws<path>` upgrade to the live view
+  registered at `<path>` (via `(live path module)` in the router); close the socket on
+  an unknown path. Wire it in the endpoint:
+    (server/start port adapter (live/live-dispatcher))"
   (fn (sock request)
-    (let (params (get request :params {})
-          spec   (spec-fn)
-          model  ((get spec :mount) params)
-          view   (merge spec {:spec-fn spec-fn :params params :model model}))
-      (session-loop sock view ""))))
+    (let (spec-fn (lookup-live (live--ws-path (get request :path))))
+      (if spec-fn
+        (start-session sock request spec-fn)
+        (tcp-close sock)))))
 
 ; ---- the LiveView behaviour ----
 ; The contract a live-view module satisfies — exactly what `deflive` generates.
@@ -307,9 +349,9 @@
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
 
-  Expands to `mount`, `render`, `handle-event`, `handle-tick`, and `live-ticks`
-  definitions. Wire it up with `(ws-handler-for mount render handle-event
-  live-ticks handle-tick)`.
+  Expands to `mount`, `render`, `handle-event`, `handle-tick`, `live-ticks`, and the
+  `live-spec` thunk. Wire it into the router with `(live path module)`, whose
+  `live-dispatcher` routes WebSocket connections to this view by path.
 
   Multiple `(tick ms …)` clauses are allowed — each runs its own ticker at its own
   interval (use distinct ms values), so a view can update at several frequencies.
@@ -321,60 +363,124 @@
       (on \"event-name\" (params model) updated-model)
       (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
       ...)"
-  (let (mount-clause   (first (filter (fn (c) (= (first c) 'mount))   clauses))
-        render-clause  (first (filter (fn (c) (= (first c) 'render))  clauses))
-        on-clauses     (filter (fn (c) (= (first c) 'on)) clauses)
-        tick-clauses   (filter (fn (c) (= (first c) 'tick)) clauses)
-        mount-args     (first (rest mount-clause))
-        mount-body     (rest (rest mount-clause))
-        render-args    (first (rest render-clause))
-        render-body    (rest (rest render-clause))
-        event-arms     (map (fn (c)
-                              (let (ev-name (first (rest c))
-                                    args    (first (rest (rest c)))
-                                    body    (rest (rest (rest c))))
-                                (list ev-name args body)))
-                            on-clauses)
-        handle-body    (cons 'match
-                          (cons 'event--name
-                            (concat
-                              (map (fn (arm)
-                                     (let (ev-name (first arm)
-                                           args    (first (rest arm))
-                                           body    (first (rest (rest arm))))
-                                       (list ev-name
-                                             (list 'let
-                                               (list (first args) 'event--params
-                                                     (first (rest args)) 'event--model)
-                                               (cons 'do body)))))
-                                   event-arms)
-                              (list (list '_ 'event--model)))))
+  (let (mount-clause (first (filter (fn (c) (= (first c) 'mount)) clauses))
+        render-clause (first (filter (fn (c) (= (first c) 'render)) clauses))
+        on-clauses (filter (fn (c) (= (first c) 'on)) clauses)
+        tick-clauses (filter (fn (c) (= (first c) 'tick)) clauses)
+        mount-args (first (rest mount-clause))
+        mount-body (rest (rest mount-clause))
+        render-args (first (rest render-clause))
+        render-body (rest (rest render-clause))
+        event-arms (map (fn (c)
+                          (let (ev-name (first (rest c))
+                                args (first (rest (rest c)))
+                                body (rest (rest (rest c))))
+                            (list ev-name args body)))
+                     on-clauses)
+        handle-body (cons 'match
+                      (cons 'event--name
+                        (concat (map (fn (arm)
+                                       (let (ev-name (first arm)
+                                             args (first (rest arm))
+                                             body (first (rest (rest arm))))
+                                         (list ev-name
+                                           (list 'let
+                                             (list (first args)
+                                               'event--params
+                                               (first (rest args))
+                                               'event--model)
+                                             (cons 'do body)))))
+                                  event-arms)
+                          (list (list '_ 'event--model)))))
         ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
         ; tick--model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
-        tick-arms      (map (fn (c)
-                              (let (ms   (first (rest c))
-                                    msym (first (first (rest (rest c))))
-                                    body (rest (rest (rest c))))
-                                (list ms
-                                      (list 'let (list msym 'tick--model)
-                                            (cons 'do body)))))
-                            tick-clauses)
+        tick-arms (map (fn (c)
+                         (let (ms (first (rest c))
+                               msym (first (first (rest (rest c))))
+                               body (rest (rest (rest c))))
+                           (list ms
+                             (list 'let
+                               (list msym 'tick--model)
+                               (cons 'do body)))))
+                    tick-clauses)
         handle-tick-body (cons 'match
                            (cons 'tick--key
                              (concat tick-arms (list (list '_ 'tick--model))))))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       (list 'defn 'render render-args (cons 'do render-body))
-      (list 'defn 'handle-event (list 'event--name 'event--params 'event--model)
-            handle-body)
+      (list 'defn
+        'handle-event
+        (list 'event--name 'event--params 'event--model)
+        handle-body)
       (list 'defn 'handle-tick (list 'tick--key 'tick--model) handle-tick-body)
       (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses)))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
-      ; session can pick up hot-reloaded code. Wire it with (ws-handler-for live-spec).
-      (list 'defn 'live-spec (list)
-            {:mount 'mount :render 'render :handle-event 'handle-event
-             :handle-tick 'handle-tick :ticks 'live-ticks})
+      ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
+      (list 'defn
+        'live-spec
+        (list)
+        {:mount 'mount
+         :render 'render
+         :handle-event 'handle-event
+         :handle-tick 'handle-tick
+         :ticks 'live-ticks})
       ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
       ; top-level defs), so a save signals open sessions to re-render. No-op at first
       ; load (no registry yet).
       (list 'def 'live--reloaded (list 'web/live/notify-reload)))))
+
+; ---- page chrome: helpers so apps don't copy-paste the live-view client wiring ----
+; A live page needs three bits of boilerplate in its layout: the client <script>, the
+; connection-status CSS, and the status pill. These helpers return that markup as
+; Hiccup so a layout composes them instead of re-typing them.
+
+(def *hatch-root*
+  ; This file is <hatch>/src/web/live.blsp; strip the known suffix to find <hatch>,
+  ; so we can serve the bundled brood_live.js without the app vendoring a copy.
+  (replace (current-file) "/src/web/live.blsp" ""))
+
+(defn asset-path ()
+  "Absolute path to hatch's bundled `static/brood_live.js`."
+  (str *hatch-root* "/static/brood_live.js"))
+
+(defn client-js ()
+  "The framework's brood_live.js source, or nil if it can't be located."
+  (try (slurp (asset-path)) (catch _ nil)))
+
+(defn client-js-handler ()
+  "A conn handler that serves hatch's brood_live.js with the right content-type, so an
+  app can serve the client straight from the package:
+    (get \"/static/brood_live.js\" (live/client-js-handler))
+  instead of copying the file into its own static/ dir."
+  (fn (conn)
+    (send-resp (put-resp-header conn :content-type "text/javascript; charset=utf-8")
+      200
+      (or (client-js) ""))))
+
+(def *status-css*
+  (str ".brood-status{position:fixed;top:.75rem;right:.75rem;z-index:9999;"
+    "font:13px/1 sans-serif;background:#b91c1c;color:#fff;padding:.35rem .7rem;"
+    "border-radius:999px;opacity:0;pointer-events:none;transition:opacity .2s ease;transition-delay:1s}"
+    "html.brood-disconnected .brood-status{opacity:.95;transition-delay:1s}"
+    "html.brood-connected .brood-status{opacity:0;transition-delay:0s}"))
+
+(defn status-style ()
+  "A `<style>` element with the connection-status CSS (put it in <head>)."
+  [:style {} *status-css*])
+
+(defn status-bar (&optional (label "● reconnecting…"))
+  "The connection-status pill (put it in <body>); shown only while a live socket is
+  down — brood_live.js toggles `brood-disconnected` on <html>, the CSS does the rest."
+  [:div {:class "brood-status"} label])
+
+(defn client-script (&optional (src "/static/brood_live.js"))
+  "The `<script>` tag that loads the live-view client (put it in <head>)."
+  [:script {:src src :defer true}])
+
+(defn live-chrome (&optional (src "/static/brood_live.js"))
+  "Everything a live page needs — the client `<script>`, the status CSS, and the
+  status pill — as one list of Hiccup nodes. The router's `(live …)` clause drops this
+  into its generated mount page, so only live pages carry the live-view wiring; a plain
+  page's layout stays free of it."
+  (list (status-style) (client-script src) (status-bar)))

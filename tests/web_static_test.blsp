@@ -1,0 +1,42 @@
+(defmodule web-static-test (:use web/static) (:use web/conn) (:use test))
+
+(defn conn-with (params)
+  (build {:method "GET" :path "/static" :query "" :params params :headers {} :body ""}))
+
+(describe "extension"
+  (test "js" (assert= (extension "app.js") "js"))
+  (test "nested path" (assert= (extension "css/site.min.css") "css"))
+  (test "uppercase normalized" (assert= (extension "LOGO.SVG") "svg"))
+  (test "no extension" (assert= (extension "README") "")))
+
+(describe "mime-type"
+  (test "js" (assert= (mime-type "x.js") "text/javascript; charset=utf-8"))
+  (test "css" (assert= (mime-type "x.css") "text/css; charset=utf-8"))
+  (test "unknown fallback" (assert= (mime-type "x.bin") "application/octet-stream")))
+
+(describe "safe-segments"
+  (test "normal path" (assert= (safe-segments "css/app.css") (list "css" "app.css")))
+  (test "rejects .." (assert= (safe-segments "../secret") nil))
+  (test "rejects nested .." (assert= (safe-segments "a/../b") nil))
+  (test "rejects ." (assert= (safe-segments "./x") nil)))
+
+(describe "serve"
+  (test "traversal attempt is 404"
+    (assert= (get (serve (conn-with {}) "static" "../CLAUDE.md") :status) 404))
+  (test "missing file is 404"
+    (assert= (get (serve (conn-with {}) "static" "does-not-exist.js") :status) 404))
+  (test "existing file is 200"
+    (assert= (get (serve (conn-with {}) "static" "brood_live.js") :status) 200))
+  (test "existing file sets MIME"
+    (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers) :content-type)
+      "text/javascript; charset=utf-8")))
+
+(describe "handler"
+  (test "reads the splat param"
+    (let (h (handler "static")
+          c (conn-with {"path" "brood_live.js"}))
+      (assert= (get (h c) :status) 200)))
+  (test "missing maps to 404"
+    (let (h (handler "static")
+          c (conn-with {"path" "nope.css"}))
+      (assert= (get (h c) :status) 404))))

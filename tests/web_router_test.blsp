@@ -4,9 +4,9 @@
   (build {:method method :path path :query "" :params {} :headers {} :body ""}))
 
 (describe "path-segments"
-  (test "root"         (assert= (path-segments "/") nil))
-  (test "single"       (assert= (path-segments "/foo") (list "foo")))
-  (test "nested"       (assert= (path-segments "/foo/bar") (list "foo" "bar")))
+  (test "root" (assert= (path-segments "/") nil))
+  (test "single" (assert= (path-segments "/foo") (list "foo")))
+  (test "nested" (assert= (path-segments "/foo/bar") (list "foo" "bar")))
   (test "no leading /" (assert= (path-segments "foo/bar") (list "foo" "bar"))))
 
 (describe "parse-pattern"
@@ -15,7 +15,11 @@
   (test "captures"
     (assert= (parse-pattern "/users/:id") (list "users" :id)))
   (test "multi-capture"
-    (assert= (parse-pattern "/a/:b/c/:d") (list "a" :b "c" :d))))
+    (assert= (parse-pattern "/a/:b/c/:d") (list "a" :b "c" :d)))
+  (test "splat"
+    (assert= (parse-pattern "/static/*path") (list "static" [:splat "path"])))
+  (test "bare splat captures as splat"
+    (assert= (parse-pattern "/files/*") (list "files" [:splat "splat"]))))
 
 (describe "match-path"
   (test "exact match"
@@ -31,54 +35,89 @@
   (test "multi-capture"
     (assert= (match-path ["a" :b "c" :d] ["a" "1" "c" "2"]) {"b" "1" "d" "2"}))
   (test "root pattern"
-    (assert= (match-path nil nil) {})))
+    (assert= (match-path nil nil) {}))
+  (test "splat captures remaining segments"
+    (assert= (match-path ["static" [:splat "path"]] ["static" "css" "app.css"])
+      {"path" "css/app.css"}))
+  (test "splat captures a single segment"
+    (assert= (match-path ["static" [:splat "path"]] ["static" "x.js"]) {"path" "x.js"}))
+  (test "splat captures empty tail"
+    (assert= (match-path ["static" [:splat "path"]] ["static"]) {"path" ""})))
 
 (describe "dispatch"
   (test "exact GET route"
     (let (routes [(make-route "GET" "/" (fn (c) (html-resp c "<h1>home</h1>")))]
-          resp   (dispatch routes (conn-for "GET" "/")))
+          resp (dispatch routes (conn-for "GET" "/")))
       (assert= (get resp :status) 200)))
 
   (test "path param captured into params"
-    (let (routes [(make-route "GET" "/users/:id"
-                    (fn (c) (html-resp c (param c "id"))))]
-          resp   (dispatch routes (conn-for "GET" "/users/42")))
-      (assert= (get resp :body) "42")))
+    (let (routes [(make-route "GET" "/users/:id" (fn (c) (html-resp c (param c "id"))))]
+          resp (dispatch routes (conn-for "GET" "/users/42")))
+      (assert= (get resp :resp-body) "42")))
 
   (test "wrong method returns 404"
     (let (routes [(make-route "GET" "/" (fn (c) (html-resp c "ok")))]
-          resp   (dispatch routes (conn-for "POST" "/")))
+          resp (dispatch routes (conn-for "POST" "/")))
       (assert= (get resp :status) 404)))
 
   (test "no matching route returns 404"
     (let (routes [(make-route "GET" "/foo" (fn (c) (html-resp c "foo")))]
-          resp   (dispatch routes (conn-for "GET" "/bar")))
+          resp (dispatch routes (conn-for "GET" "/bar")))
       (assert= (get resp :status) 404)))
 
   (test "wildcard method matches any"
     (let (routes [(make-route "*" "/any" (fn (c) (html-resp c "ok")))]
-          resp   (dispatch routes (conn-for "DELETE" "/any")))
+          resp (dispatch routes (conn-for "DELETE" "/any")))
       (assert= (get resp :status) 200)))
 
+  (test "string handler result becomes a 200 body"
+    (let (routes [(make-route "GET" "/hi" (fn (c) "hello"))]
+          resp (dispatch routes (conn-for "GET" "/hi")))
+      (assert= (get resp :status) 200)
+      (assert= (get resp :resp-body) "hello")))
+
   (test "first matching route wins"
-    (let (routes [(make-route "GET" "/x" (fn (c) (html-resp c "first")))
-                  (make-route "GET" "/x" (fn (c) (html-resp c "second")))]
-          resp   (dispatch routes (conn-for "GET" "/x")))
-      (assert= (get resp :body) "first"))))
+    (let (routes [(make-route "GET" "/x" (fn (c) (html-resp c "first"))) (make-route "GET"
+                                                                           "/x"
+                                                                           (fn (c)
+                                                                             (html-resp c "second")))]
+          resp (dispatch routes (conn-for "GET" "/x")))
+      (assert= (get resp :resp-body) "first")))
+
+  (test "splat route captures the rest into params"
+    (let (routes [(make-route "GET" "/static/*path" (fn (c) (html-resp c (param c "path"))))]
+          resp (dispatch routes (conn-for "GET" "/static/css/app.css")))
+      (assert= (get resp :resp-body) "css/app.css")))
+
+  (test "404 body escapes the path (no reflected XSS)"
+    (let (routes [(make-route "GET" "/ok" (fn (c) (html-resp c "ok")))]
+          resp (dispatch routes (conn-for "GET" "/<script>")))
+      (assert= (includes? (get resp :resp-body) "<script>") false)
+      (assert= (includes? (get resp :resp-body) "&lt;script&gt;") true))))
+
+(describe "live-title"
+  (test "single segment" (assert= (live-title "/counter") "Counter"))
+  (test "multi segment" (assert= (live-title "/users/online") "Users Online"))
+  (test "root is Home" (assert= (live-title "/") "Home"))
+  (test "override wins" (assert= (live-title "/counter" "Dashboard") "Dashboard")))
+
+(describe "plist-get"
+  (test "present" (assert= (plist-get (list :title "X") :title) "X"))
+  (test "absent" (assert= (plist-get (list :a 1) :title) nil)))
 
 (describe "defrouter macro"
   (defrouter sample-router
-    (get "/"          (fn (c) (html-resp c "home")))
+    (get "/" (fn (c) (html-resp c "home")))
     (get "/users/:id" (fn (c) (html-resp c (param c "id"))))
-    (post "/items"    (fn (c) (html-resp c "created"))))
+    (post "/items" (fn (c) (html-resp c "created"))))
 
   (test "GET /"
     (assert= (get (sample-router (conn-for "GET" "/")) :status) 200))
   (test "GET / body"
-    (assert= (get (sample-router (conn-for "GET" "/")) :body) "home"))
+    (assert= (get (sample-router (conn-for "GET" "/")) :resp-body) "home"))
   (test "GET /users/:id captures id"
-    (assert= (get (sample-router (conn-for "GET" "/users/7")) :body) "7"))
+    (assert= (get (sample-router (conn-for "GET" "/users/7")) :resp-body) "7"))
   (test "POST /items"
-    (assert= (get (sample-router (conn-for "POST" "/items")) :body) "created"))
+    (assert= (get (sample-router (conn-for "POST" "/items")) :resp-body) "created"))
   (test "unknown route 404"
     (assert= (get (sample-router (conn-for "GET" "/gone")) :status) 404)))

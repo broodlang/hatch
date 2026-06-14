@@ -1,0 +1,71 @@
+(defmodule web/static
+  "Static file serving: a MIME table and a path-traversal-safe handler factory.
+
+  `(handler root)` returns a conn handler for a splat route — wire it as
+  `(get \"/static/*path\" (static/handler \"static\"))`: the `*path` capture is
+  sanitized (no `..`/`.`/backslash segments) and resolved under `root` (relative to
+  the working directory). A miss or a traversal attempt yields a 404.
+
+  Bodies are read with `slurp` (text), so this serves text assets — JS, CSS, HTML,
+  SVG, JSON. Binary assets (images, fonts) need byte-faithful file reads + a binary
+  socket and aren't supported yet."
+  (:use web/conn))  ; not-found-resp, send-resp, put-resp-header, param
+
+; ---- MIME types ----
+
+(def *mime-types*
+  {"html" "text/html; charset=utf-8"
+   "htm" "text/html; charset=utf-8"
+   "css" "text/css; charset=utf-8"
+   "js" "text/javascript; charset=utf-8"
+   "mjs" "text/javascript; charset=utf-8"
+   "json" "application/json"
+   "map" "application/json"
+   "txt" "text/plain; charset=utf-8"
+   "xml" "application/xml"
+   "svg" "image/svg+xml"
+   "ico" "image/x-icon"
+   "webmanifest" "application/manifest+json"})
+
+(defn extension (path)
+  "The lowercase file extension of `path` (after the last dot of the last segment),
+  or \"\" when there's no extension."
+  (let (seg (last (string-split path "/"))
+        parts (string-split seg "."))
+    (if (> (count parts) 1) (lower (last parts)) "")))
+
+(defn mime-type (path)
+  "Content-Type for `path`, chosen by extension; `application/octet-stream` if unknown."
+  (get *mime-types* (extension path) "application/octet-stream"))
+
+; ---- path safety ----
+
+(defn unsafe-segment? (s)
+  "True if a path segment would escape the root or is otherwise unsafe."
+  (or (= s "..") (= s ".") (includes? s "\\")))
+
+(defn safe-segments (rel)
+  "Path segments of `rel` (empties dropped), or `nil` if any segment is unsafe —
+  i.e. a path-traversal attempt like `../../etc/passwd`."
+  (let (segs (filter (fn (s) (not (blank? s))) (string-split rel "/")))
+    (if (empty? (filter unsafe-segment? segs)) segs nil)))
+
+; ---- serving ----
+
+(defn serve (conn root rel)
+  "Serve `rel` under `root` into `conn`: 200 with the file's MIME type on success,
+  404 on a traversal attempt or a missing/unreadable file."
+  (let (segs (safe-segments rel))
+    (if (or (nil? segs) (empty? segs))
+      (not-found-resp conn)
+      (let (path (str root "/" (join "/" segs))
+            body (try (slurp path) (catch _ nil)))
+        (if (nil? body)
+          (not-found-resp conn)
+          (send-resp (put-resp-header conn :content-type (mime-type path)) 200 body))))))
+
+(defn handler (root &optional (capture "path"))
+  "A conn handler that serves files under `root` from a splat route. `capture` is the
+  splat param name (the `*name` in the route pattern; defaults to `path`)."
+  (fn (conn)
+    (serve conn root (or (param conn capture) ""))))

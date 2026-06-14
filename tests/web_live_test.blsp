@@ -1,0 +1,57 @@
+(defmodule web-live-test (:use web/live) (:use web/template) (:use test))
+
+(describe "client-script"
+  (test "default src + defer"
+    (let (h (render (client-script)))
+      (assert= (starts-with? h "<script") true)
+      (assert= (includes? h "src=\"/static/brood_live.js\"") true)
+      (assert= (includes? h "defer") true)))
+  (test "custom src"
+    (assert= (includes? (render (client-script "/assets/live.js")) "src=\"/assets/live.js\"") true)))
+
+(describe "status-bar"
+  (test "default pill"
+    (let (h (render (status-bar)))
+      (assert= (includes? h "class=\"brood-status\"") true)
+      (assert= (includes? h "reconnecting") true)))
+  (test "custom label"
+    (assert= (includes? (render (status-bar "offline")) ">offline<") true)))
+
+(describe "live-chrome"
+  (test "bundles the client script, status style, and status pill"
+    (let (h (render (live-chrome)))
+      (assert= (includes? h "src=\"/static/brood_live.js\"") true)
+      (assert= (includes? h ".brood-status") true)
+      (assert= (includes? h "reconnecting") true)))
+  (test "custom client src"
+    (assert= (includes? (render (live-chrome "/x.js")) "src=\"/x.js\"") true)))
+
+(describe "status-style"
+  (test "style element with the status class"
+    (let (h (render (status-style)))
+      (assert= (starts-with? h "<style>") true)
+      (assert= (includes? h ".brood-status") true))))
+
+(describe "client-js"
+  (test "serves the bundled client source"
+    (let (js (client-js))
+      (assert= (string? js) true)
+      (assert= (includes? js "BroodLive") true))))
+
+(describe "live--ws-path"
+  (test "strips the /live/ws prefix"
+    (assert= (web/live/live--ws-path "/live/ws/counter") "/counter"))
+  (test "root live path" (assert= (web/live/live--ws-path "/live/ws/") "/"))
+  (test "passes non-ws paths through" (assert= (web/live/live--ws-path "/counter") "/counter")))
+
+; One test, run sequentially: registering and looking up both touch the shared
+; :hatch-live-routes process, and concurrent tests would race its first-time init
+; (a race that can't happen in production — the router registers at load, before any
+; connection looks a path up).
+(describe "live-route registry"
+  (test "register, look up, and miss"
+    (do
+      (register-live "/reg-test" (fn () {:ok true}))
+      (let (s (lookup-live "/reg-test"))
+        (assert= (s) {:ok true}))
+      (assert= (lookup-live "/never-registered-xyz") nil))))

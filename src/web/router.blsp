@@ -1,5 +1,7 @@
-(defmodule web/router "HTTP router: pattern matching, path params, pipeline dispatch."
-  (:use web/conn))
+(defmodule web/router
+  "HTTP router: pattern matching, path params, pipeline dispatch."
+  (:use web/conn)
+  (:use web/template))  ; escape-html (404 body)
 
 ; ---- path matching ----
 
@@ -9,64 +11,105 @@
 
 (defn match-path (pattern segments)
   "Match a pattern list against path segments.
-  Patterns may be literal strings or `:param-name` keywords (captured).
+  Pattern elements may be literal strings, `:param-name` keywords (capture one
+  segment), or a `[:splat name]` catch-all (captures the remaining segments, joined
+  by `/`, as `name`). A splat is meant to be the last element.
   Returns `nil` on mismatch or a map of captured params on success."
   (match-path--acc pattern segments {}))
 
+(defn splat? (p)
+  "True if a parsed pattern element is a `[:splat name]` catch-all."
+  (and (vector? p) (= (first p) :splat)))
+
 (defn match-path--acc (pattern segments acc)
-  (cond
-    (and (nil? pattern) (nil? segments)) acc
-    (or  (nil? pattern) (nil? segments)) nil
-    else
-    (let (p (first pattern)
-          s (first segments))
-      (cond
-        (keyword? p)
-        (match-path--acc (rest pattern) (rest segments)
-                         (assoc acc (name p) s))
-        (= p s)
-        (match-path--acc (rest pattern) (rest segments) acc)
-        else nil))))
+  (let (p (first pattern))
+    (cond
+      ; A splat consumes everything that remains (including nothing).
+      (splat? p) (assoc acc (first (rest p)) (if (nil? segments) "" (join "/" segments)))
+      (and (nil? pattern) (nil? segments)) acc
+      (or (nil? pattern) (nil? segments)) nil
+      (keyword? p) (match-path--acc (rest pattern)
+                     (rest segments)
+                     (assoc acc (name p) (first segments)))
+      (= p (first segments)) (match-path--acc (rest pattern) (rest segments) acc)
+      else nil)))
 
 (defn parse-pattern (path)
-  "Parse a route pattern string like `\"/users/:id/edit\"` into a segment list."
+  "Parse a route pattern string into a segment list. `:name` becomes a one-segment
+  capture keyword; `*name` (or bare `*`) becomes a `[:splat name]` catch-all."
   (map (fn (seg)
-         (if (starts-with? seg ":")
-           (keyword (substring seg 1 (string-length seg)))
-           seg))
-       (path-segments path)))
+         (cond
+           (starts-with? seg ":") (keyword (substring seg 1 (string-length seg)))
+           (starts-with? seg "*") [:splat (parse-pattern--splat-name seg)]
+           else seg))
+    (path-segments path)))
+
+(defn parse-pattern--splat-name (seg)
+  "The capture name for a `*name` splat segment; bare `*` captures as `splat`."
+  (let (n (substring seg 1 (string-length seg)))
+    (if (blank? n) "splat" n)))
 
 ; ---- route table ----
 
 (defn make-route (method pattern handler)
   "Build a route entry map."
-  {:method  method
+  {:method method
    :pattern (parse-pattern pattern)
    :handler handler})
 
 (defn dispatch (routes conn)
   "Find the first matching route and call its handler with the conn.
   Path params are merged into conn :params.
-  Returns a response map, or a 404 if no route matches."
-  (let (method   (get conn :method)
+  Returns a response conn, or a 404 if no route matches."
+  (let (method (get conn :method)
         segments (path-segments (get conn :path)))
     (dispatch--find routes conn method segments)))
+
+(defn ->resp-conn (conn result)
+  "Coerce a handler's return value into a response conn. A handler usually returns a
+  conn (via `html-resp`/`text-resp`/…), but may return a plain string as a shorthand
+  for a 200 response with that body — `(get \"/hi\" (fn (c) \"hello\"))`. Anything else
+  (an already-built conn) passes through untouched."
+  (if (string? result) (html-resp conn result) result))
 
 (defn dispatch--find (routes conn method segments)
   (if (nil? routes)
     (not-found-resp conn
       (str "<h1>404 Not Found</h1><p>No route for "
-           method " /" (join "/" segments) "</p>"))
-    (let (route      (first routes)
-          r-method   (get route :method)
-          r-pattern  (get route :pattern)
-          r-handler  (get route :handler)
-          matched    (and (or (= r-method method) (= r-method "*"))
-                         (match-path r-pattern segments)))
+        (escape-html method)
+        " /"
+        (escape-html (join "/" segments))
+        "</p>"))
+    (let (route (first routes)
+          r-method (get route :method)
+          r-pattern (get route :pattern)
+          r-handler (get route :handler)
+          matched (and (or (= r-method method) (= r-method "*"))
+                    (match-path r-pattern segments)))
       (if matched
         (let (conn (assoc conn :params (into (get conn :params {}) matched)))
-          (r-handler conn))
+          (->resp-conn conn (r-handler conn)))
         (dispatch--find (rest routes) conn method segments)))))
+
+; ---- live-view wiring ----
+
+(defn live-title (path &optional (override nil))
+  "The mount-page `<title>` for a `(live path …)` route: the explicit `:title`
+  override, else derived from the path — segments title-cased and space-joined
+  (`/users/online` → `Users Online`), `/` → `Home`."
+  (if override
+    override
+    (let (segs (path-segments path))
+      (if (empty? segs)
+        "Home"
+        (join " " (map string-capitalize segs))))))
+
+(defn plist-get (plist key)
+  "Look `key` up in a flat keyword/value list `(:a 1 :b 2)`; nil if absent."
+  (cond
+    (nil? plist) nil
+    (= (first plist) key) (first (rest plist))
+    else (plist-get (rest (rest plist)) key)))
 
 ; ---- defrouter macro ----
 
@@ -75,23 +118,54 @@
 
   Syntax:
     (defrouter my-router
-      (get \"/\"        home-handler)
-      (post \"/items\"  create-handler)
-      (get \"/items/:id\" show-handler))
+      (get  \"/\"          home-handler)
+      (post \"/items\"     create-handler)
+      (get  \"/items/:id\" show-handler)
+      (live \"/counter\"   web/views/counter))         ; live view, optional :title
 
-  Each clause is `(method path handler-fn)`. Method is a symbol: `get`,
-  `post`, `put`, `patch`, `delete`, or `any` (matches all)."
-  (let (route-forms
-        (map (fn (r)
-               (let (verb    (first r)
-                     path    (first (rest r))
-                     handler (first (rest (rest r)))
-                     method  (if (= verb 'any)
-                               "*"
-                               (upper (name verb))))
-                 (list 'make-route method path handler)))
-             routes))
-    (list 'defn router-name (list 'conn)
-          (list 'dispatch
-                (cons 'list route-forms)
-                'conn))))
+  Each plain clause is `(method path handler-fn)`. Method is a symbol: `get`,
+  `post`, `put`, `patch`, `delete`, or `any` (matches all). A handler takes a conn
+  and returns a conn (via `html-resp`/`text-resp`/…) — or, as a shorthand, a plain
+  string, which becomes a 200 response with that body: `(get \"/hi\" (fn (c) \"hello\"))`.
+
+  A `(live path module [:title t])` clause wires a live view: it loads `module`,
+  registers `module/live-spec` for WebSocket dispatch at `path` (served by
+  `web/live/live-dispatcher`), and adds a `GET path` route serving the mount page.
+  The page is built with the `layout` in scope in this module — a plain layout, since
+  the clause injects the live-view client + status chrome itself (`live/live-chrome`),
+  so only live pages carry it. The `<title>` comes from `live-title` — pass `:title`
+  to override the path-derived default."
+  (let (compiled (map (fn (r)
+                        (let (verb (first r))
+                          (if (= verb 'live)
+                            (let (path (first (rest r))
+                                  module (first (rest (rest r)))
+                                  opts (rest (rest (rest r)))
+                                  title (plist-get opts :title)
+                                  spec (symbol (str (name module) "/live-spec"))
+                                  body (vector :div
+                                         {:data-live path}
+                                         (vector :p {} "Connecting…"))
+                                  handler (list 'fn
+                                            (list 'c)
+                                            (list 'web/conn/html-resp
+                                              'c
+                                              (list 'web/template/html
+                                                (list 'layout
+                                                  (list 'web/router/live-title path title)
+                                                  (list 'web/live/live-chrome)
+                                                  body)))))
+                              {:route (list 'make-route "GET" path handler)
+                               :setup (list (list 'require (list 'quote module))
+                                        (list 'web/live/register-live path spec))})
+                            (let (path (first (rest r))
+                                  handler (first (rest (rest r)))
+                                  method (if (= verb 'any) "*" (upper (name verb))))
+                              {:route (list 'make-route method path handler)
+                               :setup nil}))))
+                   routes)
+        route-forms (map (fn (c) (get c :route)) compiled)
+        setup-forms (apply concat (map (fn (c) (or (get c :setup) (list))) compiled)))
+    (cons 'do
+      (concat setup-forms
+        (list (list 'defn router-name (list 'conn) (list 'dispatch (cons 'list route-forms) 'conn)))))))
