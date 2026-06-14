@@ -20,25 +20,61 @@
   (test "braced attribute value becomes a form"
     (assert= (parse "<a href={u}>x</a>") [:a {:href 'u} "x"])))
 
-(describe "parse — directives"
+(describe "parse — @name assign shorthand"
+  (test "@name in text expands to (get model :name)"
+    (assert= (parse "<p>{@count}</p>") [:p {} (list 'get 'model :count)]))
+  (test "@name inside a larger expression"
+    (assert= (parse "<p>{(inc @count)}</p>") [:p {} (list 'inc (list 'get 'model :count))]))
+  (test "@kebab-name keeps the dashes"
+    (assert= (parse "<p>{@user-name}</p>") [:p {} (list 'get 'model :user-name)]))
+  (test "@ inside a string literal is left alone"
+    (assert= (parse "<p>{(str \"a@b\")}</p>") [:p {} (list 'str "a@b")])))
+
+(describe "parse — attribute interpolation"
+  (test "mixed literal + {…} becomes a (str …)"
+    (assert= (parse "<a class=\"btn {@kind}\">x</a>")
+      [:a {:class (list 'str "btn " (list 'get 'model :kind))} "x"]))
+  (test "a quoted value that is exactly {…} is the bare expression"
+    (assert= (parse "<a class=\"{@kind}\">x</a>") [:a {:class (list 'get 'model :kind)} "x"]))
+  (test "a plain quoted value stays a string"
+    (assert= (parse "<a class=\"btn\">x</a>") [:a {:class "btn"} "x"]))
+  (test "an interpolation may contain Brood strings (inner quotes don't end the attr)"
+    (assert= (render-bml "<p style=\"c:{(if @on \"red\" \"blue\")}\">x</p>" {:on true})
+      "<p style=\"c:red\">x</p>")))
+
+(describe "parse — directives (brace syntax)"
   (test ":for wraps the element in a for"
-    (assert= (parse "<li :for=\"x <- xs\">{x}</li>")
+    (assert= (parse "<li :for={x <- xs}>{x}</li>")
       (list 'for (list 'x 'xs) [:li {} 'x])))
+  (test ":for over @items expands the collection"
+    (assert= (parse "<li :for={x <- @items}>{x}</li>")
+      (list 'for (list 'x (list 'get 'model :items)) [:li {} 'x])))
   (test ":if wraps the element in an if"
-    (assert= (parse "<p :if=\"flag\">y</p>")
-      (list 'if 'flag [:p {} "y"] nil))))
+    (assert= (parse "<p :if={flag}>y</p>")
+      (list 'if 'flag [:p {} "y"] nil)))
+  (test ":if + :for becomes a per-item :when on the comprehension"
+    (assert= (parse "<li :for={x <- xs} :if={(even? x)}>{x}</li>")
+      (list 'for (list 'x 'xs :when (list 'even? 'x)) [:li {} 'x])))
+  (test "a directive without a brace value errors"
+    (assert-error (parse "<p :if=\"flag\">y</p>"))))
 
 (describe "render — end to end"
-  (test "interpolation renders the model value"
-    (assert= (render-bml "<p>{(get model :n)}</p>" {:n 42}) "<p>42</p>"))
+  (test "@name renders the model value"
+    (assert= (render-bml "<p>{@n}</p>" {:n 42}) "<p>42</p>"))
+  (test "attribute interpolation renders"
+    (assert= (render-bml "<a class=\"btn {@kind}\">x</a>" {:kind "primary"})
+      "<a class=\"btn primary\">x</a>"))
   (test ":for renders one node per item"
-    (assert= (render-bml "<ul><li :for=\"x <- (get model :xs)\">{x}</li></ul>" {:xs [1 2 3]})
+    (assert= (render-bml "<ul><li :for={x <- @xs}>{x}</li></ul>" {:xs [1 2 3]})
       "<ul><li>1</li><li>2</li><li>3</li></ul>"))
   (test ":if false renders nothing"
-    (assert= (render-bml "<p :if=\"(get model :show)\">hi</p>" {:show false}) ""))
+    (assert= (render-bml "<p :if={@show}>hi</p>" {:show false}) ""))
+  (test ":if + :for filters per item (test sees the loop binding)"
+    (assert= (render-bml "<li :for={x <- @xs} :if={(even? x)}>{x}</li>" {:xs [1 2 3 4]})
+      "<li>2</li><li>4</li>"))
   (test "text is HTML-escaped"
-    (assert= (render-bml "<p>{(get model :s)}</p>" {:s "<b>"}) "<p>&lt;b&gt;</p>"))
+    (assert= (render-bml "<p>{@s}</p>" {:s "<b>"}) "<p>&lt;b&gt;</p>"))
   (test "raw opts out of escaping"
     ; render-bml evals at root, so qualify raw; in a view module `(:use web/template)`
     ; lets a template write `{(raw …)}` bare.
-    (assert= (render-bml "<p>{(web/template/raw (get model :s))}</p>" {:s "<b>"}) "<p><b></p>")))
+    (assert= (render-bml "<p>{(web/template/raw @s)}</p>" {:s "<b>"}) "<p><b></p>")))

@@ -356,13 +356,6 @@
 
 ; ---- deflive macro ----
 
-(defn template--path (filename)
-  "Resolve a `(template …)` filename against the directory of the view module being
-  compiled. Called at macro-expansion time, so `(current-file)` is the view's source."
-  (let (parts (string-split (current-file) "/")
-        dir (join "/" (take (- (count parts) 1) parts)))
-    (str dir "/" filename)))
-
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
 
@@ -431,18 +424,18 @@
                              (concat tick-arms (list (list '_ 'tick--model)))))
         ; render comes from an inline (render …) clause or, failing that, a
         ; (template "file.bml") clause compiled to Hiccup here at expansion time.
-        ; The template is compiled here at expansion. Under the advisory checker /
-        ; LSP, `current-file`/`slurp` may not resolve the view's path — so fall back to
-        ; an empty render rather than letting the macro throw (which would leave the
-        ; whole `deflive` form unexpanded). The real runtime load reads the file fine.
+        ; If compiling the template throws (a missing file, or a BML syntax error),
+        ; emit a render that re-raises that error when *called* rather than letting
+        ; the macro throw — the latter would leave the whole `deflive` form
+        ; unexpanded (an "unbound deflive" cascade in the advisory checker / LSP,
+        ; which can't resolve the view's path). At real runtime the file compiles, so
+        ; the error render is only reached on a genuine bad template, and loudly.
         render-defn (if render-clause
                       (list 'defn 'render render-args (cons 'do render-body))
                       (list 'defn
                         'render
                         (list 'model)
-                        (try
-                          (parse-file (template--path (first (rest template-clause))))
-                          (catch _ nil)))))
+                        (compile-template (first (rest template-clause))))))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       render-defn
