@@ -106,3 +106,9 @@
   view of what `handle-info` does when send-info (PubSub/Presence/a timer) delivers a
   message to a running session."
   ((get spec :handle-info) msg model))
+
+(defn live-unmount (spec model)
+  "Run `spec`'s unmount cleanup for `model` — the unit-test view of what happens when a
+  session live-navigates away (it runs in the caller's process, so `(self)` stands in for
+  the session pid that any pubsub/presence cleanup targets)."
+  ((get spec :unmount) model))

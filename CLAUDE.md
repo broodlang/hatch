@@ -56,7 +56,7 @@ src/
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     static.blsp     — MIME table + path-safe static file handler
-    live.blsp       — deflive macro (mount/render/on/tick/handle-info), session actor,
+    live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
                       page-chrome
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
