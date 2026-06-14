@@ -34,9 +34,9 @@
 (describe "handler"
   (test "reads the splat param"
     (let (h (handler "static")
-          c (conn-with {"path" "brood_live.js"}))
-      (assert= (get (h c) :status) 200)))
+          conn (conn-with {"path" "brood_live.js"}))
+      (assert= (get (h conn) :status) 200)))
   (test "missing maps to 404"
     (let (h (handler "static")
-          c (conn-with {"path" "nope.css"}))
-      (assert= (get (h c) :status) 404))))
+          conn (conn-with {"path" "nope.css"}))
+      (assert= (get (h conn) :status) 404))))

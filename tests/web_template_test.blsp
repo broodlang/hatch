@@ -1,14 +1,14 @@
 (defmodule web-template-test (:use web/template) (:use test))
 
 (describe "escape-html"
-  (test "ampersand"     (assert= (escape-html "&") "&amp;"))
-  (test "less-than"     (assert= (escape-html "<") "&lt;"))
-  (test "greater-than"  (assert= (escape-html ">") "&gt;"))
-  (test "double-quote"  (assert= (escape-html "\"") "&quot;"))
-  (test "single-quote"  (assert= (escape-html "'") "&#39;"))
-  (test "mixed"         (assert= (escape-html "<b>") "&lt;b&gt;"))
-  (test "safe string"   (assert= (escape-html "hello") "hello"))
-  (test "amp first"     (assert= (escape-html "a&b<c") "a&amp;b&lt;c")))
+  (test "ampersand" (assert= (escape-html "&") "&amp;"))
+  (test "less-than" (assert= (escape-html "<") "&lt;"))
+  (test "greater-than" (assert= (escape-html ">") "&gt;"))
+  (test "double-quote" (assert= (escape-html "\"") "&quot;"))
+  (test "single-quote" (assert= (escape-html "'") "&#39;"))
+  (test "mixed" (assert= (escape-html "<b>") "&lt;b&gt;"))
+  (test "safe string" (assert= (escape-html "hello") "hello"))
+  (test "amp first" (assert= (escape-html "a&b<c") "a&amp;b&lt;c")))
 
 (describe "raw"
   (test "bypass escaping"
@@ -19,10 +19,10 @@
     (assert= (raw? "x") false)))
 
 (describe "render: primitives"
-  (test "nil is empty"    (assert= (render nil) ""))
-  (test "string escaped"  (assert= (render "<x>") "&lt;x&gt;"))
-  (test "integer"         (assert= (render 42) "42"))
-  (test "float"           (assert= (render 3.14) "3.14")))
+  (test "nil is empty" (assert= (render nil) ""))
+  (test "string escaped" (assert= (render "<x>") "&lt;x&gt;"))
+  (test "integer" (assert= (render 42) "42"))
+  (test "float" (assert= (render 3.14) "3.14")))
 
 (describe "render: simple elements"
   (test "div no attrs"
@@ -33,13 +33,13 @@
     (assert= (render [:p {}]) "<p></p>"))
   (test "nested children"
     (assert= (render [:div {} [:span {} "a"] [:span {} "b"]])
-             "<div><span>a</span><span>b</span></div>"))
+      "<div><span>a</span><span>b</span></div>"))
   (test "text escaping in children"
     (assert= (render [:p {} "<script>"]) "<p>&lt;script&gt;</p>")))
 
 (describe "render: void elements"
-  (test "br"       (assert= (render [:br {}]) "<br>"))
-  (test "hr"       (assert= (render [:hr {}]) "<hr>"))
+  (test "br" (assert= (render [:br {}]) "<br>"))
+  (test "hr" (assert= (render [:hr {}]) "<hr>"))
   (test "input starts with tag"
     (assert= (starts-with? (render [:input {:type "text"}]) "<input") true))
   (test "input contains type attr"
@@ -51,7 +51,8 @@
   (test "img alt attr"
     (assert= (includes? (render [:img {:src "/x.png" :alt "X"}]) "alt=\"X\"") true))
   (test "link rel attr"
-    (assert= (includes? (render [:link {:rel "stylesheet" :href "/x.css"}]) "rel=\"stylesheet\"") true)))
+    (assert= (includes? (render [:link {:rel "stylesheet" :href "/x.css"}]) "rel=\"stylesheet\"")
+      true)))
 
 (describe "render: boolean attrs"
   (test "checked true present"
@@ -64,16 +65,16 @@
 (describe "render: class vector"
   (test "class list joined"
     (assert= (render [:div {:class ["foo" "bar"]} "x"])
-             "<div class=\"foo bar\">x</div>")))
+      "<div class=\"foo bar\">x</div>")))
 
 (describe "render: lists of children"
   (test "list rendered as concatenation"
     (let (items ["a" "b" "c"]
-          node  [:ul {} (map (fn (x) [:li {} x]) items)])
+          node [:ul {} (map (fn (x) [:li {} x]) items)])
       (assert= (render node) "<ul><li>a</li><li>b</li><li>c</li></ul>")))
   (test "nested list flattened"
     (assert= (render [:div {} (list [:span {} "1"] [:span {} "2"])])
-             "<div><span>1</span><span>2</span></div>")))
+      "<div><span>1</span><span>2</span></div>")))
 
 (describe "render: no attrs shorthand"
   (test "attrs map optional"

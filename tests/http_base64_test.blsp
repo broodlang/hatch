@@ -27,6 +27,6 @@
 (describe "encode-sha1 (websocket accept key)"
   ; RFC 6455 §1.3 example: key "dGhlIHNhbXBsZSBub25jZQ==" → "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
   (test "rfc6455 test vector"
-    (let (input  "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-          hex    (%sha1 input))
+    (let (input "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+          hex (%sha1 input))
       (assert= (encode-sha1 hex) "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))))

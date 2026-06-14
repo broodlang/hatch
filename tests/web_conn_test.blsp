@@ -17,8 +17,8 @@
 
 (describe "assign / get-assign"
   (test "round-trip"
-    (let (c (assign (build *req*) :user "alice"))
-      (assert= (get-assign c :user) "alice")))
+    (let (conn (assign (build *req*) :user "alice"))
+      (assert= (get-assign conn :user) "alice")))
   (test "missing key is nil"
     (assert= (get-assign (build *req*) :missing) nil)))
 
@@ -44,8 +44,8 @@
 
 (describe "conn->response"
   (test "serializes status / headers / body"
-    (let (c (text-resp (build *req*) "hi")
-          r (conn->response c))
+    (let (conn (text-resp (build *req*) "hi")
+          r (conn->response conn))
       (assert= (get r :status) 200)
       (assert= (get r :body) "hi")
       (assert= (get (get r :headers) :content-type) "text/plain; charset=utf-8")))
@@ -70,14 +70,14 @@
 
 (describe "run-pipeline"
   (test "applies plugs in order"
-    (let (p1 (fn (c) (assign c :step1 true))
-          p2 (fn (c) (assign c :step2 true))
-          c (run-pipeline (build *req*) [p1 p2]))
-      (assert= (get-assign c :step1) true)
-      (assert= (get-assign c :step2) true)))
+    (let (p1 (fn (conn) (assign conn :step1 true))
+          p2 (fn (conn) (assign conn :step2 true))
+          conn (run-pipeline (build *req*) [p1 p2]))
+      (assert= (get-assign conn :step1) true)
+      (assert= (get-assign conn :step2) true)))
   (test "stops at halt"
-    (let (p1 (fn (c) (halt (assign c :step1 true)))
-          p2 (fn (c) (assign c :step2 "should not run"))
-          c (run-pipeline (build *req*) [p1 p2]))
-      (assert= (get-assign c :step1) true)
-      (assert= (get-assign c :step2) nil))))
+    (let (p1 (fn (conn) (halt (assign conn :step1 true)))
+          p2 (fn (conn) (assign conn :step2 "should not run"))
+          conn (run-pipeline (build *req*) [p1 p2]))
+      (assert= (get-assign conn :step1) true)
+      (assert= (get-assign conn :step2) nil))))

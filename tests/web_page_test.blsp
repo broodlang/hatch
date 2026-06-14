@@ -1,0 +1,15 @@
+(defmodule web-page-test (:use web/page) (:use web/conn) (:use test))
+
+(defn conn-for ()
+  (build {:method "GET" :path "/" :query "" :params {} :headers {} :body ""}))
+
+(describe "page"
+  (test "renders a Hiccup node to a 200 HTML-document response"
+    (let (resp (page (conn-for) [:h1 {} "Hello"]))
+      (assert= (get resp :status) 200)
+      (assert= (get resp :resp-body) "<!DOCTYPE html><h1>Hello</h1>")))
+
+  (test "escapes text content"
+    (let (resp (page (conn-for) [:p {} "<script>"]))
+      (assert= (includes? (get resp :resp-body) "&lt;script&gt;") true)
+      (assert= (includes? (get resp :resp-body) "<script>") false))))

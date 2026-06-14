@@ -4,8 +4,8 @@
   "Shout a value."
   (shout [v] :-> string))
 
-(defimpl Shout :int     (shout [n] (str "INT:" n)))
-(defimpl Shout :string  (shout [s] (upper s)))
+(defimpl Shout :int (shout [n] (str "INT:" n)))
+(defimpl Shout :string (shout [s] (upper s)))
 (defimpl Shout :default (shout [v] "?"))
 
 (describe "protocol dispatch"

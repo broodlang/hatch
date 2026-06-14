@@ -1,4 +1,5 @@
-(defmodule http/request "HTTP/1.1 request parsing."
+(defmodule http/request
+  "HTTP/1.1 request parsing."
   (:use http/util))
 
 (defn try-parse (buf)
@@ -9,41 +10,44 @@
     (if (= sep -1)
       [:incomplete]
       (let (header-block (substring buf 0 sep)
-            body-start   (+ sep 4)
-            lines        (string-split header-block "\r\n"))
+            body-start (+ sep 4)
+            lines (string-split header-block "\r\n"))
         (match lines
           (nil [:error "empty request"])
-          ((req-line & header-lines)
-           (match (parse-request-line req-line)
-             ([:error e] [:error e])
-             ([:ok method path query]
-              (let (headers  (parse-headers header-lines)
-                    clen     (string->number (get headers :content-length "0"))
-                    clen     (if (nil? clen) 0 clen)
-                    body-end (+ body-start clen)
-                    buflen   (string-length buf))
-                (if (< buflen body-end)
-                  [:incomplete]
-                  [:ok {:method  method
-                        :path    path
-                        :query   query
-                        :params  (parse-query query)
-                        :version "1.1"
-                        :headers headers
-                        :body    (substring buf body-start body-end)}
-                       (substring buf body-end buflen)]))))))))))
+          ((req-line & header-lines) (match (parse-request-line req-line)
+                                       ([:error e] [:error e])
+                                       ([:ok method path query] (let (headers (parse-headers header-lines)
+                                                                      clen (string->number (get headers
+                                                                                             :content-length
+                                                                                             "0"))
+                                                                      clen (if (nil? clen) 0 clen)
+                                                                      body-end (+ body-start clen)
+                                                                      buflen (string-length buf))
+                                                                  (if (< buflen body-end)
+                                                                    [:incomplete]
+                                                                    [:ok {:method method
+                                                                          :path path
+                                                                          :query query
+                                                                          :params (parse-query query)
+                                                                          :version "1.1"
+                                                                          :headers headers
+                                                                          :body (substring buf
+                                                                                  body-start
+                                                                                  body-end)}
+                                                                      (substring buf
+                                                                        body-end
+                                                                        buflen)]))))))))))
 
 (defn parse-request-line (line)
   "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query]` or `[:error msg]`."
   (let (parts (string-split line " "))
     (match parts
-      ((method target _version & _)
-       (let (qi (index-of target "?"))
-         (if (= qi -1)
-           [:ok (upper method) target ""]
-           [:ok (upper method)
-                (substring target 0 qi)
-                (substring target (+ qi 1) (string-length target))])))
+      ((method target _version & _) (let (qi (index-of target "?"))
+                                      (if (= qi -1)
+                                        [:ok (upper method) target ""]
+                                        [:ok (upper method)
+                                          (substring target 0 qi)
+                                          (substring target (+ qi 1) (string-length target))])))
       (_ [:error (str "invalid request line: " line)]))))
 
 (defn parse-headers (lines)
@@ -55,5 +59,5 @@
               (let (k (keyword (lower (substring line 0 ci)))
                     v (trim (substring line (+ ci 2) (string-length line))))
                 (assoc m k v)))))
-        {}
-        lines))
+    {}
+    lines))

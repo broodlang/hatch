@@ -6,16 +6,15 @@
   "Convert a single hex digit character to its integer value (0–15)."
   (let (code (char->int c))
     (cond
-      (and (>= code 48) (<= code 57))  (- code 48)
-      (and (>= code 65) (<= code 70))  (- code 55)
+      (and (>= code 48) (<= code 57)) (- code 48)
+      (and (>= code 65) (<= code 70)) (- code 55)
       (and (>= code 97) (<= code 102)) (- code 87)
       else 0)))
 
 (defn hex-str->bytes (hex)
   "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
-  (map (fn (pair) (+ (* (hex-char->int (first pair)) 16)
-                     (hex-char->int (first (rest pair)))))
-       (partition 2 (string->list hex))))
+  (map (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))
+    (partition 2 (string->list hex))))
 
 ;; ---- URL decode ----
 
@@ -26,15 +25,13 @@
 (defn url-decode--acc (chars acc)
   (match chars
     (nil acc)
-    (("%" h l & rest)
-     (url-decode--acc rest (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
-    (("+" & rest)
-     (url-decode--acc rest (cons 32 acc)))
-    ((c & rest)
-     (let (cp (char->int c))
-       (if (< cp 128)
-         (url-decode--acc rest (cons cp acc))
-         (url-decode--acc rest (fold (fn (a b) (cons b a)) acc (string->utf8-bytes c))))))))
+    (("%" h l & rest) (url-decode--acc rest
+                        (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
+    (("+" & rest) (url-decode--acc rest (cons 32 acc)))
+    ((c & rest) (let (cp (char->int c))
+                  (if (< cp 128)
+                    (url-decode--acc rest (cons cp acc))
+                    (url-decode--acc rest (fold (fn (a b) (cons b a)) acc (string->utf8-bytes c))))))))
 
 ;; ---- query-string parser ----
 
@@ -47,10 +44,11 @@
               (if (= eq -1)
                 (assoc m (url-decode pair) "")
                 (assoc m
-                       (url-decode (substring pair 0 eq))
-                       (url-decode (substring pair (+ eq 1) (string-length pair)))))))
-          {}
-          (string-split s "&"))))
+                  (url-decode (substring pair 0 eq)) (url-decode (substring pair
+                                                                   (+ eq 1)
+                                                                   (string-length pair)))))))
+      {}
+      (string-split s "&"))))
 
 ;; ---- status codes ----
 
@@ -74,4 +72,4 @@
     (500 "Internal Server Error")
     (502 "Bad Gateway")
     (503 "Service Unavailable")
-    (_   "Unknown")))
+    (_ "Unknown")))

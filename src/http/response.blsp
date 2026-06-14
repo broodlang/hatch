@@ -1,4 +1,5 @@
-(defmodule http/response "HTTP/1.1 response serialization."
+(defmodule http/response
+  "HTTP/1.1 response serialization."
   (:use http/util))
 
 (defn byte-length (s)
@@ -10,18 +11,22 @@
 
 (defn format-response (resp)
   "Serialize a response map to an HTTP/1.1 response string ready to send over TCP."
-  (let (status  (get resp :status 200)
-        body    (get resp :body "")
+  (let (status (get resp :status 200)
+        body (get resp :body "")
         headers (get resp :headers {})
         headers (if (contains? headers :content-type)
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8"))
         headers (assoc headers :content-length (str (byte-length body)))
         headers (assoc headers :connection "keep-alive"))
-    (str "HTTP/1.1 " status " " (status-text status) "\r\n"
-         (join "" (map format-header (entries headers)))
-         "\r\n"
-         body)))
+    (str "HTTP/1.1 "
+      status
+      " "
+      (status-text status)
+      "\r\n"
+      (join "" (map format-header (entries headers)))
+      "\r\n"
+      body)))
 
 (defn format-header (kv)
   "Format a `[keyword value]` pair as an HTTP header line."

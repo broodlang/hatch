@@ -68,7 +68,7 @@
 (defn ->resp-conn (conn result)
   "Coerce a handler's return value into a response conn. A handler usually returns a
   conn (via `html-resp`/`text-resp`/…), but may return a plain string as a shorthand
-  for a 200 response with that body — `(get \"/hi\" (fn (c) \"hello\"))`. Anything else
+  for a 200 response with that body — `(get \"/hi\" (fn (conn) \"hello\"))`. Anything else
   (an already-built conn) passes through untouched."
   (if (string? result) (html-resp conn result) result))
 
@@ -126,7 +126,7 @@
   Each plain clause is `(method path handler-fn)`. Method is a symbol: `get`,
   `post`, `put`, `patch`, `delete`, or `any` (matches all). A handler takes a conn
   and returns a conn (via `html-resp`/`text-resp`/…) — or, as a shorthand, a plain
-  string, which becomes a 200 response with that body: `(get \"/hi\" (fn (c) \"hello\"))`.
+  string, which becomes a 200 response with that body: `(get \"/hi\" (fn (conn) \"hello\"))`.
 
   A `(live path module [:title t])` clause wires a live view: it loads `module`,
   registers `module/live-spec` for WebSocket dispatch at `path` (served by
@@ -147,9 +147,9 @@
                                          {:data-live path}
                                          (vector :p {} "Connecting…"))
                                   handler (list 'fn
-                                            (list 'c)
+                                            (list 'conn)
                                             (list 'web/conn/html-resp
-                                              'c
+                                              'conn
                                               (list 'web/template/html
                                                 (list 'layout
                                                   (list 'web/router/live-title path title)
@@ -164,8 +164,8 @@
                               {:route (list 'make-route method path handler)
                                :setup nil}))))
                    routes)
-        route-forms (map (fn (c) (get c :route)) compiled)
-        setup-forms (apply concat (map (fn (c) (or (get c :setup) (list))) compiled)))
+        route-forms (map (fn (clause) (get clause :route)) compiled)
+        setup-forms (apply concat (map (fn (clause) (or (get clause :setup) (list))) compiled)))
     (cons 'do
       (concat setup-forms
         (list (list 'defn router-name (list 'conn) (list 'dispatch (cons 'list route-forms) 'conn)))))))

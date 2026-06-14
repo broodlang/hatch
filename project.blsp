@@ -1,8 +1,13 @@
 ;; hatch — a Brood project.
-(project :name
-  "hatch"
-  :version
-  "0.1.0")
+(project
+  :name "hatch"
+  :version "0.1.0"
+  ;; Formatter rules for Hatch's macros. A depending project opts in with
+  ;; `:format-plugins [hatch]` (see hatch-demo) and the formatter then indents these
+  ;; macros correctly. Each entry is head-symbol → how many args ride the head line
+  ;; when the form breaks: deflive 0 (every clause on its own line); mount/render 1
+  ;; (the arg-list rides); on/tick 2 (the event-name|ms + the arg-list ride).
+  :format-headers {deflive 0 mount 1 render 1 on 2 tick 2})
 
 ;; To depend on other Brood packages, add a :dependencies vector to the form
 ;; above (ADR-037). Dep names are bare symbols (no quoting):

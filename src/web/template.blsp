@@ -2,9 +2,20 @@
 
 ; Void elements have no closing tag and no children.
 (def *void-tags*
-  {:area true :base true :br true :col true :embed true
-   :hr true :img true :input true :link true :meta true
-   :param true :source true :track true :wbr true})
+  {:area true
+   :base true
+   :br true
+   :col true
+   :embed true
+   :hr true
+   :img true
+   :input true
+   :link true
+   :meta true
+   :param true
+   :source true
+   :track true
+   :wbr true})
 
 (defn raw (html)
   "Wrap a pre-built HTML string to bypass escaping in `render`."
@@ -16,15 +27,15 @@
 
 (defn escape-html (s)
   "Escape HTML special characters: & < > \" '."
-  (replace
-    (replace
-      (replace
-        (replace
-          (replace (str s) "&" "&amp;")
-          "<" "&lt;")
-        ">" "&gt;")
-      "\"" "&quot;")
-    "'" "&#39;"))
+  (replace (replace (replace (replace (replace (str s) "&" "&amp;")
+                               "<"
+                               "&lt;")
+                      ">"
+                      "&gt;")
+             "\""
+             "&quot;")
+    "'"
+    "&#39;"))
 
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.
@@ -32,11 +43,11 @@
   (let ([k v] kv
         n (name k))
     (cond
-      (= v true)  (str " " n)
+      (= v true) (str " " n)
       (= v false) ""
-      (nil? v)    ""
+      (nil? v) ""
       (vector? v) (str " " n "=\"" (escape-html (join " " (map str v))) "\"")
-      else        (str " " n "=\"" (escape-html (str v)) "\""))))
+      else (str " " n "=\"" (escape-html (str v)) "\""))))
 
 (defn render-attrs (attrs)
   "Serialize an attribute map to an HTML attribute string."
@@ -52,29 +63,34 @@
   - `[:tag attrs & children]` → HTML element
   - list of any of the above  → concatenated"
   (cond
-    (nil? node)    ""
-    (raw? node)    (get node :__raw__)
+    (nil? node) ""
+    (raw? node) (get node :__raw__)
     (string? node) (escape-html node)
-    (int? node)    (str node)
-    (float? node)  (str node)
-    (bool? node)   ""
+    (int? node) (str node)
+    (float? node) (str node)
+    (bool? node) ""
     (vector? node) (render--element node)
-    (pair? node)   (join "" (map render node))
-    else           (escape-html (str node))))
+    (pair? node) (join "" (map render node))
+    else (escape-html (str node))))
 
 (defn render--element (node)
-  (let (tag      (first node)
-        tail     (rest node)
-        has-map  (and (not (nil? tail)) (map? (first tail)))
-        attrs    (if has-map (first tail) {})
+  (let (tag (first node)
+        tail (rest node)
+        has-map (and (not (nil? tail)) (map? (first tail)))
+        attrs (if has-map (first tail) {})
         children (if has-map (rest tail) tail)
         tag-name (name tag)
         attr-str (render-attrs attrs))
     (if (contains? *void-tags* tag)
       (str "<" tag-name attr-str ">")
-      (str "<" tag-name attr-str ">"
-           (render--children children)
-           "</" tag-name ">"))))
+      (str "<"
+        tag-name
+        attr-str
+        ">"
+        (render--children children)
+        "</"
+        tag-name
+        ">"))))
 
 (defn render--children (children)
   (join "" (map render (flatten children))))
