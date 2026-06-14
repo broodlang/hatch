@@ -14,47 +14,44 @@
             lines (string-split header-block "\r\n"))
         (match lines
           (nil [:error "empty request"])
-          ((req-line & header-lines) (match (parse-request-line req-line)
-                                       ([:error e] [:error e])
-                                       ([:ok method path query] (let (headers (parse-headers header-lines))
-                                                                  (cond
-                                                                    ; We don't de-chunk: reject Transfer-Encoding rather than
-                                                                    ; mis-read a chunked body as a pipelined second request
-                                                                    ; (request smuggling). De-chunking is a future Tier-2 item.
-                                                                    (contains? headers :transfer-encoding)
-                                                                    [:error "transfer-encoding not supported"]
-                                                                    ; Conflicting Content-Length values → ambiguous framing.
-                                                                    (content-length-conflict? header-lines)
-                                                                    [:error "conflicting Content-Length"]
-                                                                    ; Content-Length, when present, must be a non-negative
-                                                                    ; integer. Without this a negative value made body-end <
-                                                                    ; body-start and `substring` threw, crashing the worker.
-                                                                    (not (valid-content-length? (get headers :content-length)))
-                                                                    [:error "invalid Content-Length"]
-                                                                    else
-                                                                    (let (clen (content-length-value (get headers :content-length))
-                                                                          body-end (+ body-start clen)
-                                                                          buflen (string-length buf))
-                                                                      (if (< buflen body-end)
-                                                                        [:incomplete]
-                                                                        [:ok {:method method
-                                                                              :path path
-                                                                              :query query
-                                                                              :params (parse-query query)
-                                                                              :version "1.1"
-                                                                              :headers headers
-                                                                              :body (substring buf
-                                                                                      body-start
-                                                                                      body-end)}
-                                                                          (substring buf
-                                                                            body-end
-                                                                            buflen)]))))))))))))
+          ((req-line & header-lines)
+            (match (parse-request-line req-line)
+              ([:error e] [:error e])
+              ([:ok method path query]
+                (let (headers (parse-headers header-lines))
+                  (cond
+                    ; We don't de-chunk: reject Transfer-Encoding rather than
+                    ; mis-read a chunked body as a pipelined second request
+                    ; (request smuggling). De-chunking is a future Tier-2 item.
+                    (contains? headers :transfer-encoding) [:error "transfer-encoding not supported"]
+                    ; Conflicting Content-Length values → ambiguous framing.
+                    (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                    ; Content-Length, when present, must be a non-negative
+                    ; integer. Without this a negative value made body-end <
+                    ; body-start and `substring` threw, crashing the worker.
+                    (not (valid-content-length? (get headers :content-length))) [:error "invalid Content-Length"]
+                    else (let (clen (content-length-value (get headers :content-length))
+                               body-end (+ body-start clen)
+                               buflen (string-length buf))
+                           (if (< buflen body-end)
+                             [:incomplete]
+                             [:ok {:method method
+                                   :path path
+                                   :query query
+                                   :params (parse-query query)
+                                   :version "1.1"
+                                   :headers headers
+                                   :body (substring buf
+                                           body-start
+                                           body-end)}
+                               (substring buf
+                                 body-end
+                                 buflen)]))))))))))))
 
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
   (and (not (blank? s))
-    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57))))
-              (string->list s)))))
+    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string->list s)))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,

@@ -12,10 +12,14 @@
 ;   :read-timeout-ms   — idle wait for request bytes before answering 408 and closing
 ;   :max-request-bytes — accumulated request bytes before answering 413 and closing
 ;   :max-connections   — concurrent connections; the listener refuses any over this
+;   :error-handler     — (fn (request err-message) -> response) for a handler that raises;
+;                        default `server-error-resp`, a generic 500 that leaks no internals
+;                        (the detail goes to the [:hatch :request :exception] telemetry event)
 (def default-config
   {:read-timeout-ms 30000
    :max-request-bytes 8388608
-   :max-connections 1024})
+   :max-connections 1024
+   :error-handler (fn (request err) (server-error-resp))})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -110,36 +114,49 @@
                                                                                   :body "<h1>413 Payload Too Large</h1>"}))
                                                               (tcp-close sock))
     else (match (try-parse buf)
-           ([:ok request remainder] (if (and ws-handler (upgrade-request? request))
-                                      (let (key (get (get request :headers) :sec-websocket-key ""))
-                                        ; WebSocket framing is binary (control bytes ≥ 0x80, masked
-                                        ; payloads). Switch the socket to binary mode BEFORE the 101 —
-                                        ; the client only sends frames after it sees the 101, so this
-                                        ; closes the race where the reader would otherwise decode the
-                                        ; first frame(s) as UTF-8-lossy text and corrupt them (the
-                                        ; ws-handler may do a slow registry lookup before its own
-                                        ; tcp-set-binary, leaving a window the client beats).
-                                        (tcp-set-binary sock true)
-                                        (tcp-send sock (upgrade-response key))
-                                        (ws-handler sock request))
-                                      (let (t0 (now)
-                                            response (try
-                                                       (handler request)
-                                                       (catch e (error-resp (error-message e)))))
-                                        ; Telemetry: one event per handled request (method/path/status +
-                                        ; duration). Just a fire-and-forget send to the telemetry
-                                        ; listener — handlers run THERE, so a slow or buggy handler can
-                                        ; never slow or crash this request worker. A no-op until the app
-                                        ; starts telemetry + attaches a handler (see (require 'telemetry)).
-                                        (telemetry/emit [:hatch :request :stop]
-                                          {:duration (- (now) t0)}
-                                          {:method (get request :method)
-                                           :path (get request :path)
-                                           :status (get response :status 200)})
-                                        (tcp-send sock (format-response response))
-                                        (if (keep-alive? request response)
-                                          (worker--run sock handler ws-handler config remainder)
-                                          (tcp-close sock)))))
+           ([:ok request remainder]
+             (if (and ws-handler (upgrade-request? request))
+               (let (key (get (get request :headers) :sec-websocket-key ""))
+                 ; WebSocket framing is binary (control bytes ≥ 0x80, masked
+                 ; payloads). Switch the socket to binary mode BEFORE the 101 —
+                 ; the client only sends frames after it sees the 101, so this
+                 ; closes the race where the reader would otherwise decode the
+                 ; first frame(s) as UTF-8-lossy text and corrupt them (the
+                 ; ws-handler may do a slow registry lookup before its own
+                 ; tcp-set-binary, leaving a window the client beats).
+                 (tcp-set-binary sock true)
+                 (tcp-send sock (upgrade-response key))
+                 (ws-handler sock request))
+               (let (t0 (now)
+                     response (try
+                                (handler request)
+                                (catch e
+                                  ; Don't leak internals: the
+                                  ; detail goes to telemetry (a
+                                  ; logging hook), the body is
+                                  ; whatever :error-handler returns
+                                  ; (a generic 500 by default).
+                                  (do
+                                    (telemetry/emit [:hatch :request :exception]
+                                      {}
+                                      {:method (get request :method)
+                                       :path (get request :path)
+                                       :error (error-message e)})
+                                    ((get config :error-handler) request (error-message e))))))
+                 ; Telemetry: one event per handled request (method/path/status +
+                 ; duration). Just a fire-and-forget send to the telemetry
+                 ; listener — handlers run THERE, so a slow or buggy handler can
+                 ; never slow or crash this request worker. A no-op until the app
+                 ; starts telemetry + attaches a handler (see (require 'telemetry)).
+                 (telemetry/emit [:hatch :request :stop]
+                   {:duration (- (now) t0)}
+                   {:method (get request :method)
+                    :path (get request :path)
+                    :status (get response :status 200)})
+                 (tcp-send sock (format-response response))
+                 (if (keep-alive? request response)
+                   (worker--run sock handler ws-handler config remainder)
+                   (tcp-close sock)))))
            ; Waiting for more request bytes: bound the wait so a client that connects and
            ; then stalls (slow-loris) can't pin this worker forever — answer 408 and close.
            ([:incomplete] (receive

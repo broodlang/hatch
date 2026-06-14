@@ -81,5 +81,13 @@
   {:status status :headers {:location url} :body ""})
 
 (defn error-resp (msg)
-  "500 Internal Server Error response."
+  "500 Internal Server Error response that includes `msg` in the body. A debugging
+  helper — do NOT use it for untrusted/production traffic, since it echoes internal
+  detail to the client (see `server-error-resp` and http/server's `:error-handler`)."
   {:status 500 :body (str "<h1>Internal Server Error</h1><pre>" msg "</pre>")})
+
+(defn server-error-resp ()
+  "A generic 500 that leaks no internals — http/server's default `:error-handler`. The
+  exception detail goes to telemetry (the `[:hatch :request :exception]` event), not the
+  response body."
+  {:status 500 :body "<h1>500 Internal Server Error</h1>"})
