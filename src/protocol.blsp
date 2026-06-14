@@ -56,15 +56,16 @@
     (defprotocol Encode
       \"JSON-encode a value.\"
       (encode [v] :-> string))"
-  (cons 'do
-    (cons (list 'protocol/register-protocol (list 'quote pname) (list 'quote specs))
-      (map (fn (op)
-             (let (op-name  (first op)
-                   arg-syms (map (fn (s) s) (second op)))   ; arg vector → list
-               (list 'defn op-name arg-syms
-                 (list 'protocol/dispatch
-                   (list 'quote pname) (list 'quote op-name) (cons 'list arg-syms)))))
-        (filter (fn (s) (pair? s)) specs)))))
+  (let (ops (filter (fn (s) (pair? s)) specs))   ; drop the optional leading docstring
+    (cons 'do
+      (cons (list 'protocol/register-protocol (list 'quote pname) (list 'quote ops))
+        (map (fn (op)
+               (let (op-name  (first op)
+                     arg-syms (map (fn (s) s) (second op)))   ; arg vector → list
+                 (list 'defn op-name arg-syms
+                   (list 'protocol/dispatch
+                     (list 'quote pname) (list 'quote op-name) (cons 'list arg-syms)))))
+          ops)))))
 
 (defmacro defimpl (pname key & methods)
   "Register implementations of protocol `pname` for dispatch key `key` (a `type-of`
