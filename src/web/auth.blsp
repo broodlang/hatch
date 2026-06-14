@@ -1,0 +1,40 @@
+(defmodule web/auth
+  "Authentication plugs for the router's `through` groups. A plug is a conn→conn
+  function: it either passes the conn along (optionally enriched, e.g. with an assigned
+  `:current-user`) or halts it with a rejection response. `basic-auth` is the one built
+  in — HTTP Basic credentials, enough to gate a dev/admin endpoint:
+    (through [(auth/basic-auth \"admin\" \"admin\")]
+      (get \"/dev\" dev-info))"
+  (:use web/conn)  ; header, put-resp-header, send-resp, halt, assign
+  (:use encoding))  ; base64-decode — Authorization carries base64(user:pass)
+
+(defn basic-auth (username password &optional (realm "Restricted"))
+  "A plug that requires HTTP Basic auth matching `username`:`password`. On a match it
+  assigns `:current-user` (the username) and passes the conn through; otherwise it halts
+  the conn with a 401 + `WWW-Authenticate: Basic` challenge, which makes a browser show
+  its native login prompt. `realm` labels that prompt."
+  (fn (conn)
+    (if (basic-auth-ok? conn username password)
+      (assign conn :current-user username)
+      (halt (basic-auth-challenge conn realm)))))
+
+(defn basic-auth-ok? (conn username password)
+  "True if the conn's Authorization header carries Basic creds equal to
+  `username`:`password`."
+  (let (creds (basic-auth-creds conn))
+    (and creds (= creds (str username ":" password)))))
+
+(defn basic-auth-creds (conn)
+  "The decoded `user:pass` string from a `Basic <base64>` Authorization header, or nil
+  if the header is absent or not well-formed Basic auth."
+  (let (raw (header conn :authorization)
+        prefix "Basic ")
+    (if (and raw (starts-with? raw prefix))
+      (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
+      nil)))
+
+(defn basic-auth-challenge (conn realm)
+  "A 401 conn carrying the `WWW-Authenticate: Basic` challenge for `realm`."
+  (-> conn
+    (put-resp-header :www-authenticate (str "Basic realm=\"" realm "\", charset=\"UTF-8\""))
+    (send-resp 401 "<h1>401 Unauthorized</h1>")))

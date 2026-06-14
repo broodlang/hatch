@@ -91,6 +91,22 @@
           (->resp-conn conn (r-handler conn)))
         (dispatch--find (rest routes) conn method segments)))))
 
+; ---- route pipelines: `through` groups ----
+
+(defn through-handler (plugs handler)
+  "Wrap a route `handler` so a `through` group's `plugs` run first. Plugs are conn→conn
+  functions, run left-to-right by `run-pipeline`; if one halts the conn (`web/conn/halt`),
+  that halted conn is returned as the response and `handler` never runs — the rejection
+  path (e.g. a 401 from `web/auth/basic-auth`). A plug that doesn't halt may enrich the
+  conn (an assign like `:current-user`), which `handler` then sees.
+
+  This guards the HTTP request only: a `(live …)` mount page inside a `through` group is
+  protected here, but the view's WebSocket is not — use a `live-session` group as the
+  socket-side boundary."
+  (fn (conn)
+    (let (piped (run-pipeline conn plugs))
+      (if (halted? piped) piped (handler piped)))))
+
 ; ---- live-view wiring ----
 
 (defn live-title (path &optional (override nil))
@@ -110,6 +126,78 @@
     (nil? plist) nil
     (= (first plist) key) (first (rest plist))
     else (plist-get (rest (rest plist)) key)))
+
+; ---- defrouter clause compilation (at macro time) ----
+; A router reads as nested groups but compiles to one flat list of routes. `compile-
+; routes` walks the clauses once, carrying an inherited context: the live `:session`
+; from any enclosing `live-session`, and the `:plugs` from any enclosing `through`
+; groups. Each leaf clause (`live`, or a plain `method`) emits a `{:route :setup}` map;
+; a group clause just extends the context and recurses — so `live-session` and
+; `through` nest in any order and compose.
+
+(def empty-route-ctx {:session nil :plugs (list)})
+
+(defn compile-routes (clauses ctx)
+  "Flatten `clauses` into a list of `{:route :setup}` maps under context `ctx`."
+  (apply concat (map (fn (c) (compile-clause c ctx)) clauses)))
+
+(defn compile-clause (clause ctx)
+  (let (head (first clause))
+    (cond
+      ; (live-session name & clauses): tag the enclosed live views with the session.
+      (= head 'live-session)
+      (compile-routes (rest (rest clause)) (assoc ctx :session (first (rest clause))))
+      ; (through plugs & clauses): run the enclosed routes behind `plugs`. Composes
+      ; with any outer `through` — outer plugs run first.
+      (= head 'through)
+      (compile-routes (rest (rest clause))
+        (assoc ctx :plugs (concat (get ctx :plugs) (list (first (rest clause))))))
+      ; leaves
+      (= head 'live) (list (with-plugs (compile-live clause (get ctx :session)) ctx))
+      else (list (with-plugs (compile-route clause) ctx)))))
+
+(defn compile-route (clause)
+  "A plain `(method path handler)` clause → a `{:route :setup}` map (no :setup)."
+  (let (verb (first clause)
+        path (first (rest clause))
+        handler (first (rest (rest clause)))
+        method (if (= verb 'any) "*" (upper (name verb))))
+    {:route (list 'make-route method path handler)
+     :setup nil}))
+
+(defn compile-live (clause session)
+  "A `(live path module & opts)` clause → a GET mount-page route plus :setup that loads
+  the module and registers its `live-spec` for WebSocket dispatch in live-session group
+  `session` (an explicit `:session` opt overrides the enclosing group). The mount page
+  uses the in-scope `layout` and injects the live-view client chrome itself."
+  (let (path (first (rest clause))
+        module (first (rest (rest clause)))
+        opts (rest (rest (rest clause)))
+        session (or (plist-get opts :session) session)
+        title (plist-get opts :title)
+        spec (symbol (str (name module) "/live-spec"))
+        body (vector :div {:data-live path} (vector :p {} "Connecting…"))
+        handler (list 'fn (list 'conn)
+                  (list 'web/conn/html-resp 'conn
+                    (list 'web/template/html
+                      (list 'layout
+                        (list 'web/router/live-title path title)
+                        (list 'web/live/live-chrome)
+                        body)))))
+    {:route (list 'make-route "GET" path handler)
+     :setup (list (list 'require (list 'quote module))
+              (list 'web/live/register-live path spec session))}))
+
+(defn with-plugs (compiled ctx)
+  "If `ctx` carries `through` plugs, wrap the route's handler so they run first
+  (`through-handler`); nested groups compose into one `(concat …)` plug list."
+  (let (plugs (get ctx :plugs))
+    (if (empty? plugs)
+      compiled
+      (let (route (get compiled :route))
+        (assoc compiled :route
+          (list (nth route 0) (nth route 1) (nth route 2)
+            (list 'web/router/through-handler (cons 'concat plugs) (nth route 3))))))))
 
 ; ---- defrouter macro ----
 
@@ -134,36 +222,36 @@
   The page is built with the `layout` in scope in this module — a plain layout, since
   the clause injects the live-view client + status chrome itself (`live/live-chrome`),
   so only live pages carry it. The `<title>` comes from `live-title` — pass `:title`
-  to override the path-derived default."
-  (let (compiled (map (fn (r)
-                        (let (verb (first r))
-                          (if (= verb 'live)
-                            (let (path (first (rest r))
-                                  module (first (rest (rest r)))
-                                  opts (rest (rest (rest r)))
-                                  title (plist-get opts :title)
-                                  spec (symbol (str (name module) "/live-spec"))
-                                  body (vector :div
-                                         {:data-live path}
-                                         (vector :p {} "Connecting…"))
-                                  handler (list 'fn
-                                            (list 'conn)
-                                            (list 'web/conn/html-resp
-                                              'conn
-                                              (list 'web/template/html
-                                                (list 'layout
-                                                  (list 'web/router/live-title path title)
-                                                  (list 'web/live/live-chrome)
-                                                  body)))))
-                              {:route (list 'make-route "GET" path handler)
-                               :setup (list (list 'require (list 'quote module))
-                                        (list 'web/live/register-live path spec))})
-                            (let (path (first (rest r))
-                                  handler (first (rest (rest r)))
-                                  method (if (= verb 'any) "*" (upper (name verb))))
-                              {:route (list 'make-route method path handler)
-                               :setup nil}))))
-                   routes)
+  to override the path-derived default. Pass `:session <group>` to put the view in a
+  live-session group: a socket live-navigates only within its own group; crossing
+  groups forces a full reload (the auth boundary — `(live \"/admin\" … :session :admin)`).
+
+  A `(live-session name & clauses)` block tags every `live` clause inside it with
+  `:session name`, grouping a set of views:
+    (live-session \"admin\"
+      (live \"/admin/counter\" web/views/counter)
+      (live \"/admin/users\"   web/views/admin-users))
+  The session is server-determined from the path, so a path belongs to exactly one
+  session — use distinct paths across sessions (the same view module can be reused at
+  different paths). Plain `(get …)` clauses inside a block are ordinary routes.
+
+  A `(through plugs & clauses)` block runs every route inside it behind a pipeline of
+  plugs — conn→conn functions applied before the handler (see `through-handler`). A
+  plug that halts the conn (`web/conn/halt`) short-circuits with its own response, so
+  this is where auth hooks in:
+    (through [(web/auth/basic-auth \"admin\" \"admin\")]
+      (get \"/dev\" dev-info))
+  `plugs` is any expression evaluating to a list/vector of plugs; it's re-evaluated per
+  request, so `(basic-auth …)`-style plug factories are fine.
+
+  Groups nest in any order and compose. Auth a whole admin live-session at once:
+    (through [(web/auth/require-admin)]
+      (live-session \"admin\"
+        (live \"/admin\"       web/views/admin-home)
+        (live \"/admin/users\" web/views/admin-users)))
+  Every admin route then runs behind the auth plug (HTTP side) and shares the `admin`
+  live-session (socket side) — neither the mount nor live-navigation can skip auth."
+  (let (compiled (compile-routes routes empty-route-ctx)
         route-forms (map (fn (clause) (get clause :route)) compiled)
         setup-forms (apply concat (map (fn (clause) (or (get clause :setup) (list))) compiled)))
     (cons 'do

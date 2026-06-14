@@ -287,21 +287,27 @@
       ; updates the URL). A path with no registered live view → tell the client to do
       ; a normal navigation (full load), the dead-view fallback.
       ("navigate"
-       (let (path (get msg "path" "")
-             _dbg (println (str "NAV: navigate to " path))
-             spec-fn (lookup-live path)
-             _dbg2 (println (str "NAV: spec-fn? " (not (nil? spec-fn)))))
-         (if spec-fn
-           (let (_ (stop-tickers (get view :ticker-pids))
-                 spec (spec-fn)
-                 model ((get spec :mount) params)
-                 new-view (merge spec {:spec-fn spec-fn
-                                       :params params
-                                       :model model
-                                       :ticker-pids (start-tickers (get spec :ticks))}))
-             (push-update sock new-view buf "render" model))
-           (do (send-msg sock {:event "redirect" :path path})
-             (session-recv sock view buf)))))
+        (let (path (get msg "path" "")
+              entry (lookup-live path))
+          (if (and entry (= (get entry :session) (get view :session)))
+            ; same live-session group → swap the view over this socket, no reload
+            (let (spec-fn (get entry :spec)
+                  _ (stop-tickers (get view :ticker-pids))
+                  spec (spec-fn)
+                  model ((get spec :mount) params)
+                  new-view (merge spec
+                             {:spec-fn spec-fn
+                              :session (get entry :session)
+                              :params params
+                              :model model
+                              :ticker-pids (start-tickers (get spec :ticks))}))
+              (push-update sock new-view buf "render" model))
+            ; unknown path, OR a different live-session group → full reload, which
+            ; re-enters the HTTP pipeline (and that group's auth). The socket can't
+            ; cross the boundary on its own.
+            (do
+              (send-msg sock {:event "redirect" :path path})
+              (session-recv sock view buf)))))
       (_ (session-recv sock view buf)))))
 
 (defn render (view model)
@@ -311,15 +317,20 @@
 
 ; ---- session start ----
 
-(defn start-session (sock request spec-fn)
-  "Run a live session for `spec-fn` on a freshly-upgraded socket: build the initial
-  model from the request params, then enter the per-connection event loop. `spec-fn`
-  is called fresh here (and again on each hot reload via the session loop's spec-fn),
-  so the view always runs the latest code."
-  (let (params (get request :params {})
+(defn start-session (sock request entry)
+  "Run a live session for the registry `entry` (`{:spec :session}`) on a freshly-upgraded
+  socket: build the initial model from the request params, then enter the per-connection
+  event loop. The session remembers its `:session` group, so live navigation can refuse
+  to cross into another group (forcing a full reload that re-runs that group's auth)."
+  (let (spec-fn (get entry :spec)
+        params (get request :params {})
         spec (spec-fn)
         model ((get spec :mount) params)
-        view (merge spec {:spec-fn spec-fn :params params :model model}))
+        view (merge spec
+               {:spec-fn spec-fn
+                :session (get entry :session)
+                :params params
+                :model model}))
     (session-loop sock view "")))
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
@@ -330,25 +341,28 @@
 
 (defn live--routes-loop (table)
   (receive
-    ([:put path spec-fn] (live--routes-loop (assoc table path spec-fn)))
-    ([:get path from] (send from [:spec (get table path)]) (live--routes-loop table))))
+    ([:put path entry] (live--routes-loop (assoc table path entry)))
+    ([:get path from] (send from [:entry (get table path)]) (live--routes-loop table))))
 
 (defn live--routes ()
   "The live-route registry pid, spawned and named `:hatch-live-routes` on first use."
   (ensure-named :hatch-live-routes (fn () (live--routes-loop {}))))
 
-(defn register-live (path spec-fn)
-  "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`.
-  `(live path module)` calls this at load; idempotent, so a hot reload just re-puts."
-  (send (live--routes) [:put path spec-fn])
+(defn register-live (path spec-fn session)
+  "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`,
+  in live-session group `session` (any value; nil = the default group). Views in the
+  same group can live-navigate between each other; crossing groups forces a full
+  reload — the auth boundary. `(live path module …)` calls this at load; idempotent,
+  so a hot reload just re-puts."
+  (send (live--routes) [:put path {:spec spec-fn :session session}])
   nil)
 
 (defn lookup-live (path)
-  "The spec thunk registered for `path` via `register-live`, or nil if none."
+  "The registry entry `{:spec :session}` for `path`, or nil if no live view is there."
   (let (r (live--routes))
     (send r [:get path (self)])
     (receive
-      ([:spec s] s)
+      ([:entry e] e)
       (after 1000 nil))))
 
 (defn live--ws-path (req-path)
@@ -365,9 +379,9 @@
   an unknown path. Wire it in the endpoint:
     (server/start port adapter (live/live-dispatcher))"
   (fn (sock request)
-    (let (spec-fn (lookup-live (live--ws-path (get request :path))))
-      (if spec-fn
-        (start-session sock request spec-fn)
+    (let (entry (lookup-live (live--ws-path (get request :path))))
+      (if entry
+        (start-session sock request entry)
         (tcp-close sock)))))
 
 ; ---- the LiveModule behaviour ----
