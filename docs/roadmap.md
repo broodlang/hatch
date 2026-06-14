@@ -120,12 +120,14 @@ Live updates no longer re-send the full HTML — only the dynamic slots that cha
 
 ### Phase 7 — Sessions, CSRF, and auth
 
-- **`web/session`** — process-backed session store (named `defprocess`
-  mapping session-id → session-map); signed-cookie session ID via
-  `%hmac-sha256`; pluggable persistence adapter interface
-- **`web/csrf`** — double-submit CSRF token (plug + `deflive` integration)
+- **`web/session`** ✅ — signed-cookie session store (Phase 6); a process-backed
+  store + pluggable persistence adapters remain a later option.
+- **`web/csrf`** ✅ — synchronizer-token CSRF: a per-session token (minted by the
+  `protect-from-forgery` plug), embedded in forms via `csrf-input`, verified
+  (constant-time) on POST/PUT/PATCH/DELETE; an `X-CSRF-Token` header is accepted for
+  fetch/JSON clients. Demo: `/account`.
 - **Auth convention** — `(on-mount-guard ...)` clause in `deflive` for
-  redirect-if-not-authenticated; session reads in `mount`
+  redirect-if-not-authenticated; session reads in `mount` (still to do).
 
 ### Phase 8 — LiveComponents
 

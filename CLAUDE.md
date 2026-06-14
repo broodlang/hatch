@@ -55,6 +55,7 @@ src/
     page.blsp       — plain (non-live) page render helper: (page conn hiccup)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
+    csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input)
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
@@ -76,6 +77,7 @@ tests/
   http_websocket_test.blsp
   web_template_test.blsp
   web_conn_test.blsp
+  web_csrf_test.blsp
   web_router_test.blsp
   web_session_test.blsp
   web_static_test.blsp
