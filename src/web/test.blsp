@@ -100,3 +100,9 @@
 (defn live-tick (spec key model)
   "The model after the ticker keyed `key` fires on `spec` at `model`."
   ((get spec :handle-tick) key model))
+
+(defn live-info (spec msg model)
+  "The model after out-of-band message `msg` is handled by `spec` at `model` — the unit-test
+  view of what `handle-info` does when send-info (PubSub/Presence/a timer) delivers a
+  message to a running session."
+  ((get spec :handle-info) msg model))

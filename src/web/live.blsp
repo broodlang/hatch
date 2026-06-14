@@ -139,15 +139,19 @@
   caller can resume reading after handling the tick)."
   (match (parse-frame buf)
     ([:ok opcode payload rem] [:ok opcode payload rem])
-    ([:incomplete] (receive
-                     ([:tcp ~sock chunk] (recv-frame--loop sock (str buf chunk)))
-                     ([:tcp-closed ~sock] [:closed])
-                     ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
-                                               (recv-frame--loop sock buf)
-                                               [:closed]))
-                     ([:tick key] [:tick key buf])
-                     ([:reload] [:reload buf])
-                     ([:reload-css] [:reload-css buf])))
+    ([:incomplete]
+      (receive
+        ([:tcp ~sock chunk] (recv-frame--loop sock (str buf chunk)))
+        ([:tcp-closed ~sock] [:closed])
+        ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
+                                  (recv-frame--loop sock buf)
+                                  [:closed]))
+        ([:tick key] [:tick key buf])
+        ; an out-of-band message for the view's handle-info (PubSub/Presence
+        ; broadcast, a timer, anything that holds this session's pid)
+        ([:info payload] [:info payload buf])
+        ([:reload] [:reload buf])
+        ([:reload-css] [:reload-css buf])))
     ([:error msg] [:error msg])))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
@@ -265,6 +269,14 @@
   "Kill the given ticker processes — used when a session swaps to a different view."
   (dolist (p pids) (exit p :kill)))
 
+(defn send-info (session payload)
+  "Deliver an out-of-band `payload` to a live `session` process; it arrives at the view's
+  `handle-info`, which returns a new model and triggers a re-render. This is the delivery
+  primitive PubSub/Presence (and one-off timers) build on. `session` is a live session pid
+  — the value `(self)` has inside a running session, e.g. captured in `mount` to subscribe."
+  (send session [:info payload])
+  nil)
+
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
   `view` is a map {:mount :render :handle-event :handle-tick :ticks :model :ticker-pids}."
@@ -323,6 +335,17 @@
                         (try
                           ((get view :handle-tick) key (get view :model))
                           (catch _ (get view :model)))))
+    ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
+    ; view's handle-info and push the resulting diff. A view without a handle-info clause
+    ; (or one that throws) keeps its current model, so a stray message is harmless.
+    ([:info payload buf2] (push-update sock
+                            view
+                            buf2
+                            "diff"
+                            (let (h (get view :handle-info))
+                              (if h
+                                (try (h payload (get view :model)) (catch _ (get view :model)))
+                                (get view :model)))))
     ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
                           view (if spec (merge view spec) view))
                       (push-update sock view buf2 "render" (get view :model))))
@@ -489,12 +512,19 @@
       (render (model) hiccup-template)    ; — or —  (template \"view.bml\")
       (on \"event-name\" (params model) updated-model)
       (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
-      ...)"
+      (handle-info (msg model) updated-model) ; optional: out-of-band messages
+      ...)
+
+  An optional `(handle-info (msg model) …)` clause handles out-of-band messages delivered
+  to the session with `web/live/send-info` — PubSub/Presence broadcasts and timers. `msg`
+  is the delivered payload; return the new model (it re-renders, like an event). Omit it and
+  such messages are ignored."
   (let (mount-clause (first (filter (fn (c) (= (first c) 'mount)) clauses))
         render-clause (first (filter (fn (c) (= (first c) 'render)) clauses))
         template-clause (first (filter (fn (c) (= (first c) 'template)) clauses))
         on-clauses (filter (fn (c) (= (first c) 'on)) clauses)
         tick-clauses (filter (fn (c) (= (first c) 'tick)) clauses)
+        info-clause (first (filter (fn (c) (= (first c) 'handle-info)) clauses))
         mount-args (first (rest mount-clause))
         mount-body (rest (rest mount-clause))
         render-args (first (rest render-clause))
@@ -547,7 +577,16 @@
                       (list 'defn
                         'render
                         (list 'model)
-                        (compile-template (first (rest template-clause))))))
+                        (compile-template (first (rest template-clause)))))
+        ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
+        ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
+        ; view that doesn't opt in just ignores such messages, keeping its model.
+        handle-info-defn (if info-clause
+                           (list 'defn
+                             'handle-info
+                             (first (rest info-clause))
+                             (cons 'do (rest (rest info-clause))))
+                           (list 'defn 'handle-info (list 'info--msg 'info--model) 'info--model)))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       render-defn
@@ -556,6 +595,7 @@
         (list 'event--name 'event--params 'event--model)
         handle-body)
       (list 'defn 'handle-tick (list 'tick--key 'tick--model) handle-tick-body)
+      handle-info-defn
       (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses)))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
@@ -566,6 +606,7 @@
          :render 'render
          :handle-event 'handle-event
          :handle-tick 'handle-tick
+         :handle-info 'handle-info
          :ticks 'live-ticks})
       ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
       ; top-level defs), so a save signals open sessions to re-render. No-op at first
