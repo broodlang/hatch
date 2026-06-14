@@ -73,9 +73,17 @@
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text."
   (utf8-bytes->string (into [] (map (fn (i) (byte-at s i)) (range (string-length s))))))
 
+(defn u64-be (n)
+  "Eight-byte big-endian byte string of a non-negative integer `n` (RFC 6455's 64-bit
+  extended length; the high bit must be 0, which holds for any realistic payload)."
+  (join "" (map (fn (shift) (byte->char (bit-and (bit-shift-right n shift) 255)))
+             [56 48 40 32 24 16 8 0])))
+
 (defn text-frame (payload)
   "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a byte string.
-  Send it over a binary-mode socket so the bytes reach the wire verbatim."
+  Send it over a binary-mode socket so the bytes reach the wire verbatim. Uses the
+  7-bit, 16-bit, or 64-bit length form by size — so a large render (>64 KB of HTML)
+  produces a valid frame instead of raising and crashing the live session."
   (let (body (utf8-byte-string payload)
         n (string-length body))
     (cond
@@ -84,15 +92,22 @@
                      (byte->char (quot n 256))
                      (byte->char (mod n 256))
                      body)
-      else (error "websocket/text-frame: payload too large: " n))))
+      else (str "\x81\x7f" (u64-be n) body))))
 
 (defn close-frame ()
   "Build a WebSocket connection-close frame (opcode 0x8, FIN=1, no payload)."
   "\x88\x00")
 
 (defn pong-frame (payload)
-  "Build a WebSocket pong frame (opcode 0xA, FIN=1)."
-  (str "\x8a" (byte->char (string-length payload)) payload))
+  "Build a WebSocket pong frame (opcode 0xA, FIN=1). Control frames are capped at 125
+  bytes (RFC 6455), so an over-long payload is truncated — guarding against an echoed
+  length that would overflow the single length byte into an extended-length marker."
+  (let (p (if (> (string-length payload) 125) (substring payload 0 125) payload))
+    (str "\x8a" (byte->char (string-length p)) p)))
+
+(defn ping-frame ()
+  "Build an empty WebSocket ping frame (opcode 0x9, FIN=1) — used for server keepalive."
+  "\x89\x00")
 
 ; ---- frame parsing (client → server, masked) ----
 
@@ -109,18 +124,29 @@
             plen7 (bit-and byte1 127))
         (parse-frame--sized buf buflen opcode masked plen7)))))
 
+(defn control-opcode? (opcode)
+  "True for a WebSocket control opcode (close 0x8, ping 0x9, pong 0xA). Control frames
+  must carry ≤125 bytes and may not use extended length (RFC 6455 §5.5)."
+  (>= opcode 8))
+
 (defn parse-frame--sized (buf buflen opcode masked plen7)
   (cond
-    (= plen7 126)
+    ; Control frames (close/ping/pong) must be ≤125 bytes — reject an extended length
+    ; rather than let an oversized ping drive a huge unmask / overflow `pong-frame`.
+    (and (control-opcode? opcode) (>= plen7 126))
+    [:error "websocket: control frame too large (must be <= 125 bytes)"]
     ; 16-bit extended length
+    (= plen7 126)
     (if (< buflen 4)
       [:incomplete]
       (let (plen (+ (* (byte-at buf 2) 256) (byte-at buf 3))
             hlen (if (= masked 1) 8 4))
-        (parse-frame--payload buf buflen opcode masked plen hlen))) (= plen7
-                                                                                                                                                                                                                    127)
-    [:error "websocket: 64-bit frame length not supported"] else
+        (parse-frame--payload buf buflen opcode masked plen hlen)))
+    ; 64-bit extended length — not supported (caps inbound frames at ~64 KB)
+    (= plen7 127)
+    [:error "websocket: 64-bit frame length not supported"]
     ; 7-bit length
+    else
     (let (hlen (if (= masked 1) 6 2))
       (parse-frame--payload buf buflen opcode masked plen7 hlen))))
 

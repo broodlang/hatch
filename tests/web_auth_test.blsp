@@ -1,7 +1,8 @@
 (defmodule web-auth-test
   (:use web/auth)
   (:use web/conn)
-  (:use encoding)  ; base64-encode — build the Authorization header for the tests
+  ; base64-encode — build the Authorization header for the tests
+  (:use encoding)
   (:use test))
 
 (defn conn-with-auth (val)

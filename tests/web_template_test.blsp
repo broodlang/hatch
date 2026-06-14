@@ -87,3 +87,10 @@
   (test "contains element content"
     (let (r (html [:p {} "hello"]))
       (assert= (includes? r "<p>hello</p>") true))))
+
+(describe "stylesheet"
+  (test "renders a void rel=stylesheet link to the href"
+    (let (r (render (stylesheet "/static/app.css")))
+      (assert= (starts-with? r "<link") true)
+      (assert= (includes? r "rel=\"stylesheet\"") true)
+      (assert= (includes? r "href=\"/static/app.css\"") true))))

@@ -60,6 +60,43 @@ Rust — TLS is handled by a reverse proxy.*
 - `static/brood_live.js` — vanilla JS client: WS connect, join, event push,
   render/diff handling, DOM morphing, auto-reconnect (~200 lines, no npm)
 
+### Phase 6 — HTTP Tier-1: params, cookies, sessions, flash ✅
+- **Body params** — `http/util/parse-body-params` parses
+  `application/x-www-form-urlencoded` and `application/json` bodies; `web/conn/build`
+  merges them into `:params` (query < body < path), so handlers read form/JSON fields the
+  same way as query params. multipart/uploads still deferred (Phase 9).
+- **Cookies** — `web/conn` parses the request `Cookie` header into `:cookies`
+  (`get-cookie`), and `put-cookie`/`delete-cookie` accumulate `Set-Cookie`s;
+  `http/response` emits one header line per list-valued header (multiple `Set-Cookie`).
+- **Before-send hook** — `web/conn/register-before-send` runs conn→conn callbacks at
+  `conn->response` time (à la Plug's `register_before_send`), the seam sessions/flash use
+  to write cookies from the finished conn.
+- **`web/session`** — signed cookie session store (HMAC-SHA256 over base64url(JSON),
+  constant-time verify; Phoenix's default `:cookie` store shape). `fetch-session` plug,
+  `get`/`put`/`delete`/`clear-session`, write-back only when changed. (The Phase 7 sketch
+  of a process-backed store + session-id cookie can layer on later as an adapter; an
+  encrypted variant is a small follow-up — ChaCha20-Poly1305 is already in the stdlib.)
+- **Flash** — `put-flash`/`get-flash` + the `fetch-flash` plug, one-shot messages carried
+  in the session across a redirect (POST→redirect→GET).
+- Demo: live `/signup` (as-you-type validation over the socket) + plain `/account`
+  (form body params + session + flash via PRG).
+
+### Assets & dev tooling ✅
+- `web/assets` — build-step-agnostic bundler glue over one config map: `watch`
+  (dev watchers via `proc-spawn`, output → log), `build` (one-shot, fail-loud),
+  `install` (first-time download). No framework coupling to any tool. See
+  `docs/assets.md`.
+- **CSS hot-reload** — a watcher rebuild → `web/live/notify-reload-css` →
+  `[:reload-css]` to open sessions → `brood_live.js` re-stamps `<link>` hrefs.
+  Stylesheet swaps in place; live model/state untouched (no page reload).
+- `web/template/stylesheet` — `<link rel=stylesheet>` Hiccup helper.
+- **Tailwind v4 + daisyUI** in the demo (no npm): standalone CLI + vendored plugin,
+  `bin/setup` installs them, `assets/app.css` is the source, layout links the output.
+- `web/test` — view test harness: synthetic conns, `request`/`call` through a router
+  or handler, `status`/`body`/`body-contains?`/`resp-header`, and live-view drivers
+  `live-mount`/`live-event`/`live-tick`/`live-render`/`live-html`. (Supersedes the
+  Phase 10 `web/conn/test` sketch.)
+
 ---
 
 ## What's left
@@ -110,8 +147,8 @@ insight is that only the dynamic slots need to change.
 - **`nest new myapp --template web-api`** — JSON API variant (no live layer)
 - **Hot reload** — `nest run --watch src/` triggers re-render diffs in
   running live sessions without a server restart
-- **`web/conn/test`** — test helpers for pure-function handler testing:
-  `(conn-for :get "/path" {:params {...}})`, `(assert-status resp 200)`
+- ~~**`web/conn/test`** — test helpers for pure-function handler testing~~ ✅
+  shipped as `web/test` (see Assets & dev tooling above)
 
 ### Phase 11 — Production hardening
 

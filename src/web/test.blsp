@@ -1,0 +1,102 @@
+; template/render — live HTML lowering
+(defmodule web/test
+  "A test harness for Hatch views — drive handlers and live views as plain functions,
+  with no server, socket, or browser. Pair it with the `test` framework's `assert=`.
+
+  Plain pages (web/page handlers and routers):
+
+    (defrouter r (get \"/\" home/index))
+    (let (resp (request r \"GET\" \"/\"))
+      (assert= (status resp) 200)
+      (assert= (body-contains? resp \"Welcome\") true))
+
+    ; a single handler, no router:
+    (let (resp (call home/index (conn-for \"GET\" \"/\")))
+      (assert= (status resp) 200))
+
+    ; a `through`-gated route, with and without credentials:
+    (assert= (status (request r \"GET\" \"/dev\")) 401)
+    (assert= (status (request r \"GET\" \"/dev\"
+                       {:headers {:authorization \"Basic YWRtaW46YWRtaW4=\"}})) 200)
+
+  Live views (a `deflive` module's `live-spec` thunk):
+
+    (let (spec (web/views/counter/live-spec)
+          m0   (live-mount spec {\"start\" \"5\"})
+          m1   (live-event spec \"increment\" {} m0))
+      (assert= (get m1 :count) 6)
+      (assert= (includes? (live-render spec m1) \"6\") true))"
+  ; build, html-resp — synthetic conns + string-return coercion
+  (:use web/conn)
+  (:alias web/template))
+; ---- synthetic conns -------------------------------------------------------
+
+(defn conn-for (method path &optional (opts {}))
+  "Build a conn as if `method path` arrived from the server. `opts` may carry `:params`
+  (string-keyed map), `:query` (string), `:headers` (keyword-keyed map), and `:body`
+  (string) — the same fields web/conn/build receives, so handlers see a realistic conn.
+  `method` is upcased, matching how the HTTP parser presents it."
+  (build {:method (upper method)
+          :path path
+          :query (get opts :query "")
+          :params (get opts :params {})
+          :headers (get opts :headers {})
+          :body (get opts :body "")}))
+
+; ---- dispatching -----------------------------------------------------------
+
+(defn request (router method path &optional (opts {}))
+  "Send a synthetic `method path` request through `router` (a `defrouter` fn) and return
+  the response conn. Exercises the full route table — params, `through` plugs, the 404
+  fallback — exactly as a live request would."
+  (router (conn-for method path opts)))
+
+(defn call (handler conn)
+  "Call a plain handler with `conn`, coercing a bare-string return into a 200 conn (the
+  same shorthand the router allows). Use to test one handler without a router."
+  (let (r (handler conn))
+    (if (string? r) (html-resp conn r) r)))
+
+; ---- response accessors ----------------------------------------------------
+
+(defn status (resp)
+  "The response conn's status — defaulting to 200 when unset, as conn->response does."
+  (or (get resp :status) 200))
+
+(defn body (resp)
+  "The response conn's body string."
+  (get resp :resp-body ""))
+
+(defn resp-header (resp key)
+  "A response header by keyword key (e.g. `:content-type`), or nil."
+  (get (get resp :resp-headers {}) key))
+
+(defn body-contains? (resp s)
+  "True if the response body contains substring `s`."
+  (includes? (body resp) s))
+
+; ---- live views ------------------------------------------------------------
+; A live `spec` is the map `deflive` produces via the module's `live-spec` thunk:
+; {:mount :render :handle-event :handle-tick :ticks}. Pass `(some/view/live-spec)`.
+
+(defn live-mount (spec params)
+  "The initial model for `spec` mounted with `params` (string-keyed, as the client sends
+  on join)."
+  ((get spec :mount) params))
+
+(defn live-render (spec model)
+  "Render `spec` at `model` to an HTML string — the same lowering the live session does."
+  (web/template/render ((get spec :render) model)))
+
+(defn live-html (spec params)
+  "Mount `spec` with `params` and render the result — the HTML a fresh session first
+  paints. Shorthand for `(live-render spec (live-mount spec params))`."
+  (live-render spec (live-mount spec params)))
+
+(defn live-event (spec event-name params model)
+  "The model after event `event-name` (with `params`) fires on `spec` at `model`."
+  ((get spec :handle-event) event-name params model))
+
+(defn live-tick (spec key model)
+  "The model after the ticker keyed `key` fires on `spec` at `model`."
+  ((get spec :handle-tick) key model))

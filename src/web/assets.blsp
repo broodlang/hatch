@@ -1,0 +1,137 @@
+; log/log-info, log/log-warn, log/log-error
+(defmodule web/assets
+  "Build-step-agnostic asset integration. Hatch only ever *serves* `static/`; this
+  module is the optional glue that *produces* what goes there by shelling out to an
+  external bundler — Tailwind, esbuild, sass, UnoCSS, anything with a CLI.
+
+  Everything is driven by one plain-data config map, so swapping tools is a data edit,
+  not a code change. Shape:
+
+    (def *assets*
+      {:watchers [{:cmd [\"bin/tailwindcss\" \"-i\" \"assets/app.css\"
+                         \"-o\" \"static/app.css\" \"--watch\"]
+                   :reload-on \"Done in\"}]   ; a stdout/stderr substring → hot-swap CSS
+       :build    [[\"bin/tailwindcss\" \"-i\" \"assets/app.css\"
+                  \"-o\" \"static/app.css\" \"--minify\"]]
+       :install  [[\"sh\" \"-c\" \"...download the standalone binary...\"]]})
+
+  Three verbs:
+    (watch config)   — dev: long-running watchers, output piped to the log; a rebuild
+                       nudges open live sessions to hot-swap their stylesheet (no reload)
+    (build config)   — release: one-shot builds, fails loudly on a non-zero exit
+    (install config) — first-time setup: one-shot install/download commands
+
+  Each watcher map carries a `:cmd` argv and optional `:cwd` (string), `:env` (a
+  string->string map), and `:reload-on` (a substring that marks a finished rebuild;
+  defaults to \"Done in\", set to nil to never trigger a CSS reload). `:build` and
+  `:install` entries are plain argv vectors run one-shot, in order."
+  ; notify-reload-css — the hot CSS swap over open sockets
+  (:use web/live)
+  (:alias log))
+(def *default-reload-marker* "Done in")
+
+; ---- dev watchers ----------------------------------------------------------
+
+(defn watch (config)
+  "Start every watcher in `config` (`:watchers`), each as its own green process that
+  pipes the bundler's output to the log and, on a finished rebuild, hot-swaps CSS in
+  open live sessions. Returns the manager pids (close them to stop watching). Call from
+  the endpoint when running in dev — see web/assets' module doc."
+  (map (fn (w) (spawn (fn () (watcher-loop w)))) (or (get config :watchers) (list))))
+
+(defn watcher-loop (w)
+  "Spawn one watcher child and forward its output until it exits. The child is spawned
+  inside this process so its [:proc …] messages land in this mailbox."
+  (let (cmd (get w :cmd)
+        handle (try
+                 (proc-spawn (first cmd) (rest cmd) (proc-opts w))
+                 (catch e
+                   (do
+                     (log/log-error (str "[assets] cannot start watcher `"
+                                      (join " " cmd)
+                                      "`: "
+                                      (error-message e)))
+                     nil))))
+    (when handle
+      (log/log-info (str "[assets] watching: " (join " " cmd)))
+      (watcher-recv handle (get w :reload-on *default-reload-marker*) (join " " cmd)))))
+
+(defn watcher-recv (handle marker label)
+  "Drain a watcher child's piped stdout/stderr: log each line and, when a line marks a
+  finished rebuild (`marker`), tell open live sessions to reload their CSS. On exit, log
+  and stop (a dead watcher is usually a config error; restart the server to retry)."
+  (receive
+    ([:proc ~handle data] (on-output data marker) (watcher-recv handle marker label))
+    ([:proc-err ~handle data] (on-output data marker) (watcher-recv handle marker label))
+    ([:proc-closed ~handle code] (log/log-warn (str "[assets] watcher exited (code "
+                                                 code
+                                                 "): "
+                                                 label)))))
+
+(defn on-output (data marker)
+  "Log a chunk of watcher output line-by-line; if it contains `marker`, hot-swap CSS."
+  (emit-lines data)
+  (when (and marker (includes? data marker)) (web/live/notify-reload-css)))
+
+(defn emit-lines (data)
+  "Log each non-blank line of `data` under an `[assets]` prefix."
+  (dolist (line (string-split (trimr data) "\n"))
+    (when (not (blank? line)) (log/log-info (str "[assets] " line)))))
+
+(defn proc-opts (w)
+  "The proc-spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
+  (let (base (if (get w :cwd) {:cwd (get w :cwd)} {}))
+    (if (get w :env) (assoc base :env (get w :env)) base)))
+
+; ---- one-shot build / install ----------------------------------------------
+
+(defn build (config)
+  "Run `config`'s `:build` commands one-shot, in order (a release step). Each inherits
+  stdio so its output goes straight to the console; a non-zero exit raises, so a broken
+  build fails the boot/release loudly rather than shipping stale assets."
+  (run-each (or (get config :build) (list)) "build"))
+
+(defn install (config)
+  "Run `config`'s `:install` commands one-shot, in order — first-time setup, e.g.
+  downloading a standalone bundler binary. Same fail-loud semantics as `build`."
+  (run-each (or (get config :install) (list)) "install"))
+
+; ---- dev one-call: make assets ready, then watch ---------------------------
+
+(defn ensure (config)
+  "Dev convenience — the single call an endpoint makes in dev so styles just work on
+  `nest run`, no manual setup step. In order:
+
+    1. If `:install-probe` (a path, e.g. the bundler binary) is given and missing, run
+       `:install` — the first-time toolchain download (`bin/setup`). Skipped once the
+       probe exists, so it's a one-time cost, not every boot.
+    2. Run `:build` once, so `static/` is populated *before* the server takes its first
+       request — no 404 window while the watcher's first rebuild is still in flight.
+    3. Start the `:watchers` for live rebuilds.
+
+  Steps 1–2 are best-effort: if they fail (offline, no toolchain), log a clear warning
+  and still start watching + serving, so a missing download degrades to 'no styles yet'
+  rather than a server that won't boot. Release builds should call `build` directly
+  (fail-loud), not this."
+  (try
+    (do
+      (when (and (get config :install-probe)
+              (not (file-exists? (get config :install-probe))))
+        (log/log-info (str "[assets] toolchain missing (" (get config :install-probe)
+                        ") — running one-time install"))
+        (install config))
+      (build config))
+    (catch e
+      (log/log-warn (str "[assets] could not prepare assets (" (error-message e)
+                      "); serving without a fresh build — styles may be missing until the watcher rebuilds"))))
+  (watch config))
+
+(defn run-each (cmds label)
+  "Run each argv in `cmds` with `run-process` (inherited stdio), in order; raise on the
+  first non-zero exit."
+  (dolist (cmd cmds)
+    (log/log-info (str "[assets] " label ": " (join " " cmd)))
+    (let (code (run-process (first cmd) (rest cmd)))
+      (when (not (= code 0))
+        (error "[assets] " label " failed (exit " code "): " (join " " cmd)))))
+  nil)

@@ -1,0 +1,168 @@
+(defmodule web/session
+  "Signed cookie sessions and flash messages — Hatch's stateless session store, à la
+  Phoenix's default `Plug.Session` cookie store. The whole session map is serialized to
+  JSON, base64url-encoded, and HMAC-SHA256 signed into a single cookie: no server-side
+  store, so it survives restarts and scales across nodes. The signature is *authentication*,
+  not secrecy — the payload is readable by the client, so don't put secrets in it; it can't
+  be forged or tampered with without the secret. (An encrypted variant is a small follow-up:
+  the crypto stdlib already has ChaCha20-Poly1305.)
+
+  Wire two plugs into a `through` group, session first:
+
+    (def secret (or (getenv \"HATCH_SECRET_KEY_BASE\") \"dev-only-change-me\"))
+    (through [(session/fetch-session secret) session/fetch-flash]
+      (get  \"/login\"  login/form)
+      (post \"/login\"  login/create))
+
+  Then handlers use get/put-session and get/put-flash on the conn; the (possibly mutated)
+  session is re-signed into a Set-Cookie before the response is sent — but only if it
+  changed, so plain GETs don't churn the cookie."
+  ; get-cookie, put-cookie, register-before-send — the conn plumbing this builds on
+  (:use web/conn)
+  ; json-encode / json-parse — the session payload is JSON
+  (:use json)
+  ; base64-url-encode / base64-url-decode — cookie-safe payload encoding
+  (:use encoding)
+  ; hmac-sha256 — the cookie signature
+  (:use hash)
+  ; secure=? — constant-time signature comparison (no timing oracle)
+  (:use crypto))
+
+(def *default-cookie* "_hatch_session")
+(def *flash-key* "__flash__")
+
+; ---- signing / verification ----
+
+(defn encode-session (secret data)
+  "Serialize session `data` (a map) into a signed cookie string: `payload.signature`,
+  where payload is base64url(JSON) and signature is HMAC-SHA256(secret, payload)."
+  (let (payload (base64-url-encode (json-encode data))
+        sig (hmac-sha256 secret payload))
+    (str payload "." sig)))
+
+(defn decode-session (secret cookie)
+  "Verify and decode a signed session `cookie` back into a string-keyed map. Returns `{}`
+  for an absent, malformed, or tampered cookie (signature mismatch) — a bad cookie reads as
+  an empty session, never an error. base64url has no `.`, so the final `.` cleanly splits
+  payload from signature."
+  (if (or (nil? cookie) (blank? cookie))
+    {}
+    (let (dot (index-of cookie "."))
+      (if (= dot -1)
+        {}
+        (let (payload (substring cookie 0 dot)
+              sig (substring cookie (+ dot 1) (string-length cookie))
+              expected (hmac-sha256 secret payload))
+          (if (secure=? (string->utf8-bytes sig) (string->utf8-bytes expected))
+            (decode-payload payload)
+            {}))))))
+
+(defn decode-payload (payload)
+  "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
+  parse failure, or if the payload isn't a JSON object."
+  (try
+    (let (json (base64-url-decode payload)
+          parsed (if (nil? json) nil (json-parse json)))
+      (if (map? parsed) (stringify-keys parsed) {}))
+    (catch _e {})))
+
+(defn stringify-keys (v)
+  "Recursively replace every map key in `v` with its string name, recursing through map
+  values and vectors. JSON parses object keys to keywords, but sessions are string-keyed
+  end to end (to match query/form params) — including nested maps like the flash store, so
+  the normalization must be deep, not just top-level."
+  (cond
+    (map? v) (fold (fn (acc kv) (assoc acc (name (first kv)) (stringify-keys (first (rest kv)))))
+               {}
+               (entries v))
+    (vector? v) (into [] (map stringify-keys v))
+    else v))
+
+; ---- the fetch-session plug ----
+
+(defn fetch-session (secret &optional (opts {}))
+  "A plug that loads the signed session cookie into `conn :session` and registers a
+  before-send callback to write it back (re-signed) — but only if a handler changed it.
+  `opts`: `:cookie` (name, default `_hatch_session`), `:max-age` (seconds), `:path`
+  (default \"/\"), `:same-site` (default \"Lax\"), `:http-only` (default true), `:secure`."
+  (fn (conn)
+    (let (cookie-name (get opts :cookie *default-cookie*)
+          data (decode-session secret (get-cookie conn cookie-name)))
+      (register-before-send
+        (assoc conn
+          :session data
+          :session-config {:secret secret :opts opts :cookie cookie-name}
+          :session-changed? false)
+        write-session))))
+
+(defn write-session (conn)
+  "Before-send callback: if the session was changed this request, re-sign it into a
+  Set-Cookie; otherwise leave the response untouched."
+  (if (get conn :session-changed? false)
+    (let (cfg (get conn :session-config {})
+          secret (get cfg :secret)
+          opts (get cfg :opts {})
+          value (encode-session secret (get conn :session {})))
+      (put-cookie conn (get cfg :cookie) value (session-cookie-opts opts)))
+    conn))
+
+(defn session-cookie-opts (opts)
+  "The put-cookie options for the session cookie, defaulting to a secure-by-default shape
+  (HttpOnly, SameSite=Lax) while letting `fetch-session` opts override."
+  {:path (get opts :path "/")
+   :http-only (get opts :http-only true)
+   :same-site (get opts :same-site "Lax")
+   :secure (get opts :secure false)
+   :max-age (get opts :max-age)})
+
+; ---- session accessors ----
+
+(defn get-session (conn key &optional (default nil))
+  "Read a session value by string `key`, or `default` if absent."
+  (get (get conn :session {}) key default))
+
+(defn put-session (conn key value)
+  "Set session `key` to `value` and mark the session dirty (so it's re-signed on send)."
+  (assoc conn
+    :session (assoc (get conn :session {}) key value)
+    :session-changed? true))
+
+(defn delete-session (conn key)
+  "Remove `key` from the session and mark it dirty."
+  (assoc conn
+    :session (dissoc (get conn :session {}) key)
+    :session-changed? true))
+
+(defn clear-session (conn)
+  "Drop the entire session (e.g. on logout) and mark it dirty — the next Set-Cookie writes
+  an empty session."
+  (assoc conn :session {} :session-changed? true))
+
+; ---- flash ----
+
+(defn fetch-flash (conn)
+  "A plug — run *after* fetch-session — giving flash its one-shot lifetime: it moves any
+  flash stashed in the session into `conn :flash` for this request, then clears it from the
+  session (marking it dirty). So a message put before a redirect shows on exactly the next
+  request, then is gone."
+  (let (sess (get conn :session {})
+        flash (get sess *flash-key* {}))
+    (if (empty? flash)
+      (assoc conn :flash {})
+      (assoc conn
+        :flash flash
+        :session (dissoc sess *flash-key*)
+        :session-changed? true))))
+
+(defn put-flash (conn key message)
+  "Stash a flash `message` under string `key` (e.g. \"info\", \"error\") to show on the
+  *next* request — set it just before a redirect (the POST→redirect→GET pattern)."
+  (let (sess (get conn :session {})
+        flash (get sess *flash-key* {}))
+    (assoc conn
+      :session (assoc sess *flash-key* (assoc flash key message))
+      :session-changed? true)))
+
+(defn get-flash (conn key &optional (default nil))
+  "Read a flash message by `key` for this request (placed there by fetch-flash)."
+  (get (get conn :flash {}) key default))

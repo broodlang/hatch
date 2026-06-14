@@ -119,6 +119,8 @@
   (test "unterminated interpolation reports line:col"
     (assert= (parse-error "<p>{x</p>") "bml:1:5: unterminated { interpolation"))
   (test "mismatched close tag reports line:col"
-    (assert= (parse-error "<div>\n  <p>hi</div>") "bml:2:8: </div> closes the wrong tag, expected </p>"))
+    (assert= (parse-error "<div>\n  <p>hi</div>")
+      "bml:2:8: </div> closes the wrong tag, expected </p>"))
   (test "a directive without a brace value reports line:col"
-    (assert= (parse-error "<p :if=\"x\">y</p>") "bml:1:8: directive :if needs a brace value, e.g. :if={…}")))
+    (assert= (parse-error "<p :if=\"x\">y</p>")
+      "bml:1:8: directive :if needs a brace value, e.g. :if={…}")))

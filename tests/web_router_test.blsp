@@ -164,3 +164,21 @@
         (get "/admin/ok" (fn (conn) (or (get-assign conn :tag) "no-tag"))))))
   (test "a plug inside live-session > through still runs"
     (assert= (get (nested-router (conn-for "GET" "/admin/ok")) :resp-body) "tagged")))
+
+(describe "defrouter through outside / wrapping live-session"
+  ; through composes in any order: a top-level through here also *wraps* a live-session,
+  ; and a plain through sits alongside it at the top level — the reverse nesting of the
+  ; block above, proving `through` works outside a live-session.
+  (defrouter wrap-router
+    (through [tag-plug]
+      (live-session "admin"
+        (get "/wrapped" (fn (conn) (or (get-assign conn :tag) "no-tag")))))
+    (through [deny-plug]
+      (get "/blocked" (fn (conn) (html-resp conn "secret"))))
+    (get "/plain" (fn (conn) (html-resp conn "plain"))))
+  (test "a through wrapping a live-session runs its plug"
+    (assert= (get (wrap-router (conn-for "GET" "/wrapped")) :resp-body) "tagged"))
+  (test "a top-level halting through still short-circuits"
+    (assert= (get (wrap-router (conn-for "GET" "/blocked")) :status) 403))
+  (test "a route outside every group is unaffected"
+    (assert= (get (wrap-router (conn-for "GET" "/plain")) :resp-body) "plain")))

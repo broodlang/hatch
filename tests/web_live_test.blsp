@@ -52,7 +52,24 @@
   (test "register, look up, and miss"
     (do
       (register-live "/reg-test" (fn () {:ok true}) :admin)
+      ; its live-session group
       (let (e (lookup-live "/reg-test"))
-        (assert= ((get e :spec)) {:ok true})  ; the registered spec thunk
-        (assert= (get e :session) :admin))  ; its live-session group
+        ; the registered spec thunk
+        (assert= ((get e :spec)) {:ok true})
+        (assert= (get e :session) :admin))
       (assert= (lookup-live "/never-registered-xyz") nil))))
+
+(describe "reload-css broadcast"
+  ; notify-reload-css fans a [:reload-css] out to every registered session via the
+  ; :hatch-live reload registry. Register this test process as a stand-in session, fire
+  ; the notify, and confirm the message arrives — the same path the asset watcher drives
+  ; on each CSS rebuild. Unregister after so we don't leak into other tests.
+  (test "notify-reload-css is a safe no-op before any session registers"
+    (assert= (notify-reload-css) nil))
+  (test "a registered session receives [:reload-css]"
+    (do
+      (web/live/live--register (self))
+      (notify-reload-css)
+      (let (got (receive ([:reload-css] :got) (after 1000 :timeout)))
+        (web/live/live--unregister (self))
+        (assert= got :got)))))

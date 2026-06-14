@@ -64,3 +64,30 @@
                 "GET /second HTTP/1.1\r\nHost: x\r\n\r\n")
           [_ _ rem] (try-parse raw))
       (assert= rem "GET /second HTTP/1.1\r\nHost: x\r\n\r\n"))))
+
+; Audit hardening — see docs/tcp-http-audit.md (#3 Content-Length, #6 Transfer-Encoding,
+; #10 header colon). Each malformed input must NOT crash the worker; it returns :error
+; (→ 400) or parses correctly.
+(describe "try-parse: hardening"
+  (test "rejects Transfer-Encoding (request-smuggling guard, #6)"
+    (assert= (first (try-parse "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"))
+      :error))
+  (test "rejects negative Content-Length (#3 — used to crash on substring)"
+    (assert= (first (try-parse "POST / HTTP/1.1\r\nContent-Length: -5\r\n\r\n")) :error))
+  (test "rejects non-integer Content-Length (#3)"
+    (assert= (first (try-parse "POST / HTTP/1.1\r\nContent-Length: 1.5\r\n\r\n")) :error))
+  (test "accepts a valid Content-Length and reads the body"
+    (let ([tag req _] (try-parse "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"))
+      (assert= tag :ok)
+      (assert= (get req :body) "hello")))
+  (test "header with no space after the colon is kept (#10)"
+    (let ([_ req _] (try-parse "GET / HTTP/1.1\r\nHost:localhost\r\n\r\n"))
+      (assert= (get (get req :headers) :host) "localhost")))
+  (test "rejects conflicting Content-Length (#12)"
+    (assert= (first (try-parse (str "POST / HTTP/1.1\r\nContent-Length: 5\r\n"
+                                 "Content-Length: 6\r\n\r\nhello")))
+      :error))
+  (test "duplicate identical Content-Length is accepted (#12)"
+    (let ([tag _ _] (try-parse (str "POST / HTTP/1.1\r\nContent-Length: 5\r\n"
+                                 "Content-Length: 5\r\n\r\nhello")))
+      (assert= tag :ok))))

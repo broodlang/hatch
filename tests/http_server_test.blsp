@@ -1,0 +1,85 @@
+(defmodule http-server-test
+  (:alias http/server)  ; server/start, server/stop
+  (:use http/websocket)  ; parse-frame, byte->char
+  (:use test))
+
+; Regression test for the WebSocket binary-mode race.
+;
+; The bug: `http/server`'s upgrade path sent the 101 and handed off to the ws-handler
+; while the socket was still in *text* mode. The ws-handler (a live session) only
+; flipped the socket to binary AFTER a registry lookup — so a client frame that arrived
+; in that window was decoded UTF-8-lossy, turning every non-UTF-8 frame byte (0x81, the
+; mask, the masked payload) into U+FFFD (codepoint 65533). `parse-frame` then read
+; garbage lengths and looped on `:incomplete` forever, and the session went deaf.
+;
+; The fix: set the socket to binary BEFORE sending the 101 (the client can't send a
+; frame until it sees the 101). This test pins that invariant: the ws-handler below
+; deliberately does NOT call `tcp-set-binary` itself, so a frame with a high byte is
+; delivered byte-faithfully ONLY because the upgrade path already switched to binary.
+; Revert the fix and `read-one-frame` sees U+FFFD → `:incomplete` → times out.
+
+(defn read-one-frame (sock buf)
+  "Block until one complete WebSocket frame is buffered; return its decoded payload,
+  or :timeout / :closed. Mirrors the live session's read loop, minus the dispatch."
+  (match (parse-frame buf)
+    ([:ok _opcode payload _rem] payload)
+    ([:incomplete] (receive
+                     ([:tcp ~sock chunk] (read-one-frame sock (str buf chunk)))
+                     ([:tcp-closed ~sock] :closed)
+                     (after 2000 :timeout)))
+    ([:error _m] :error)))
+
+(defn echo-one-frame (reporter)
+  "A ws-handler that reads one client frame and reports its payload to `reporter`.
+  Crucially it never calls tcp-set-binary — the upgrade path must have done so."
+  (fn (sock _request)
+    (send reporter [:got (read-one-frame sock "")])))
+
+(defn await-101 (sock buf)
+  "Read from `sock` until the 101 handshake response (its header terminator) arrives."
+  (if (includes? buf "\r\n\r\n")
+    buf
+    (receive
+      ([:tcp ~sock chunk] (await-101 sock (str buf chunk)))
+      (after 2000 :timeout))))
+
+(defn ws-client-connect (port)
+  "Open a raw client socket, send a WebSocket upgrade request, wait for the 101, then
+  switch the client side to binary so it can send raw frame bytes. Returns the socket."
+  (let (sock (tcp-connect "127.0.0.1" port)
+        _req (tcp-send sock (str "GET /ws HTTP/1.1\r\n"
+                              "Host: localhost\r\n"
+                              "Upgrade: websocket\r\n"
+                              "Connection: Upgrade\r\n"
+                              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                              "Sec-WebSocket-Version: 13\r\n\r\n"))
+        _ack (await-101 sock ""))
+    (tcp-set-binary sock true)
+    sock))
+
+(defn masked-byte-frame (b)
+  "A single-byte-payload masked client text frame carrying byte `b` (mask key all
+  zeros, so the masked payload byte equals `b`): 0x81, 0x80|1, 00 00 00 00, b."
+  (str (byte->char 129)
+    (byte->char 129)
+    (byte->char 0) (byte->char 0) (byte->char 0) (byte->char 0)
+    (byte->char b)))
+
+(describe "websocket upgrade sets binary mode before the handler reads"
+  ; One server, started and stopped within the test. Fixed obscure port; the handler
+  ; reports the decoded payload back to this (the test) process.
+  (test "a client frame's high byte arrives byte-faithful (not U+FFFD)"
+    (let (me (self)
+          port 54731
+          _sup (server/start port
+                 (fn (_req) {:status 200 :headers {} :body "ok"})
+                 (echo-one-frame me))
+          client (ws-client-connect port)
+          _send (tcp-send client (masked-byte-frame 255))
+          payload (receive ([:got p] p) (after 3000 :timeout)))
+      (tcp-close client)
+      (server/stop port)
+      ; Before the fix: payload would be :timeout (frame read as U+FFFD → :incomplete).
+      (assert= (string? payload) true)
+      (assert= (string-length payload) 1)
+      (assert= (byte-at payload 0) 255))))

@@ -1,0 +1,88 @@
+(defmodule web-session-test
+  (:use web/session)
+  ; build, get-cookie, conn->response — drive the plug end to end
+  (:use web/conn)
+  (:use test))
+
+(def *secret* "test-secret-key")
+
+(defn conn-with (cookie)
+  "A fresh GET conn carrying `_hatch_session=<cookie>` (or no cookie when nil)."
+  (build {:method "GET" :path "/" :query "" :params {}
+          :headers (if (nil? cookie) {} {:cookie (str "_hatch_session=" cookie)})
+          :body ""}))
+
+(defn session-cookie-value (r)
+  "The session cookie's value from a response's first Set-Cookie line (drops attributes)."
+  (let (sc (first (get (get r :headers) :set-cookie))
+        eq (index-of sc "=")
+        tail (substring sc (+ eq 1) (string-length sc))
+        semi (index-of tail ";"))
+    (substring tail 0 semi)))
+
+(describe "encode / decode round-trip"
+  (test "round-trips a string-keyed map"
+    (assert= (decode-session *secret* (encode-session *secret* {"user" "alice" "role" "admin"}))
+      {"user" "alice" "role" "admin"}))
+  (test "empty session round-trips to empty"
+    (assert= (decode-session *secret* (encode-session *secret* {})) {})))
+
+(describe "signature verification"
+  (test "tampered payload is rejected → empty session"
+    (let (cookie (encode-session *secret* {"user" "alice"})
+          tampered (str cookie "x"))
+      (assert= (decode-session *secret* tampered) {})))
+  (test "wrong secret is rejected → empty session"
+    (assert= (decode-session "other-secret" (encode-session *secret* {"user" "alice"})) {}))
+  (test "garbage cookie → empty session"
+    (assert= (decode-session *secret* "not-a-valid-cookie") {}))
+  (test "absent cookie → empty session"
+    (assert= (decode-session *secret* nil) {})))
+
+(describe "fetch-session plug"
+  (test "no cookie → empty :session"
+    (let (conn ((fetch-session *secret*) (conn-with nil)))
+      (assert= (get conn :session) {})))
+  (test "loads an existing signed session"
+    (let (cookie (encode-session *secret* {"user" "bob"})
+          conn ((fetch-session *secret*) (conn-with cookie)))
+      (assert= (get-session conn "user") "bob")))
+  (test "unchanged session writes no Set-Cookie"
+    (let (conn ((fetch-session *secret*) (conn-with nil))
+          r (conn->response conn))
+      (assert= (get (get r :headers) :set-cookie) nil)))
+  (test "changed session is re-signed and round-trips"
+    (let (conn (put-session ((fetch-session *secret*) (conn-with nil)) "user" "carol")
+          r (conn->response conn))
+      (assert= (decode-session *secret* (session-cookie-value r)) {"user" "carol"}))))
+
+(describe "session accessors"
+  (test "get-session default when absent"
+    (assert= (get-session ((fetch-session *secret*) (conn-with nil)) "x" "def") "def"))
+  (test "delete-session removes a key"
+    (let (conn (-> ((fetch-session *secret*) (conn-with nil))
+                 (put-session "a" "1")
+                 (put-session "b" "2")
+                 (delete-session "a")))
+      (assert= (get-session conn "a") nil)
+      (assert= (get-session conn "b") "2")))
+  (test "clear-session empties and writes an empty session"
+    (let (cookie (encode-session *secret* {"user" "z"})
+          conn (clear-session ((fetch-session *secret*) (conn-with cookie)))
+          r (conn->response conn))
+      (assert= (decode-session *secret* (session-cookie-value r)) {}))))
+
+(describe "flash one-shot lifetime"
+  (test "put-flash on request 1 → readable on request 2 → gone on request 3"
+    (let (; request 1: stash a flash, redirect (write session cookie)
+          c1 (put-flash ((fetch-session *secret*) (conn-with nil)) "info" "Saved!")
+          cookie1 (session-cookie-value (conn->response c1))
+          ; request 2: fetch-flash exposes it, then clears it from the session
+          c2 (fetch-flash ((fetch-session *secret*) (conn-with cookie1)))
+          cookie2 (session-cookie-value (conn->response c2))
+          ; request 3: the flash is gone
+          c3 (fetch-flash ((fetch-session *secret*) (conn-with cookie2))))
+      (assert= (get-flash c2 "info") "Saved!")
+      (assert= (get-flash c3 "info") nil)))
+  (test "get-flash default when no flash"
+    (assert= (get-flash (fetch-flash ((fetch-session *secret*) (conn-with nil))) "info" "—") "—")))

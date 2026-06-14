@@ -1,3 +1,4 @@
+; base64-decode — Authorization carries base64(user:pass)
 (defmodule web/auth
   "Authentication plugs for the router's `through` groups. A plug is a conn→conn
   function: it either passes the conn along (optionally enriched, e.g. with an assigned
@@ -5,9 +6,9 @@
   in — HTTP Basic credentials, enough to gate a dev/admin endpoint:
     (through [(auth/basic-auth \"admin\" \"admin\")]
       (get \"/dev\" dev-info))"
-  (:use web/conn)  ; header, put-resp-header, send-resp, halt, assign
-  (:use encoding))  ; base64-decode — Authorization carries base64(user:pass)
-
+  ; header, put-resp-header, send-resp, halt, assign
+  (:use web/conn)
+  (:use encoding))
 (defn basic-auth (username password &optional (realm "Restricted"))
   "A plug that requires HTTP Basic auth matching `username`:`password`. On a match it
   assigns `:current-user` (the username) and passes the conn through; otherwise it halts
