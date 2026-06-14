@@ -3,13 +3,29 @@
 // No dependencies. ~200 lines.
 
 const BroodLive = (() => {
+  // Connection status across every live session on the page. We reflect it as a
+  // class on <html> (brood-connected / brood-disconnected) and a `brood:status`
+  // CustomEvent, so a page can show a reconnect indicator with plain CSS — or hook
+  // the event for custom behaviour — without any per-view code.
+  const sessions = new Set();
+  function refreshStatus() {
+    const connected = [...sessions].every((s) => s.connected);
+    const root = document.documentElement;
+    root.classList.toggle("brood-disconnected", sessions.size > 0 && !connected);
+    root.classList.toggle("brood-connected", sessions.size > 0 && connected);
+    document.dispatchEvent(new CustomEvent("brood:status", { detail: { connected } }));
+  }
+
   class Session {
     constructor(path, container) {
       this.path = path;
       this.container = container;
       this.socket = null;
+      this.connected = false;
       this.reconnectDelay = 1000;
       this.reconnectTimer = null;
+      sessions.add(this);
+      refreshStatus();
       this._connect();
     }
 
@@ -20,6 +36,8 @@ const BroodLive = (() => {
 
       this.socket.onopen = () => {
         this.reconnectDelay = 1000;
+        this.connected = true;
+        refreshStatus();
         // Send join with current URL params
         const params = Object.fromEntries(new URLSearchParams(location.search));
         this._send({ event: "join", params });
@@ -31,7 +49,11 @@ const BroodLive = (() => {
         this._handle(msg);
       };
 
-      this.socket.onclose = () => this._scheduleReconnect();
+      this.socket.onclose = () => {
+        this.connected = false;
+        refreshStatus();
+        this._scheduleReconnect();
+      };
       this.socket.onerror = () => {};
     }
 
