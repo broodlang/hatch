@@ -1,6 +1,15 @@
 (defmodule main "hatch — HTTP server entry point."
   (:use http/server)
-  (:use http/response))
+  (:use http/response)
+  (:use web/template))
+
+(defn layout (title & children)
+  [:html {}
+   [:head {}
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title {} title]]
+   [:body {} children]])
 
 (defn handler (req)
   "Route incoming requests. Each arm returns a response map."
@@ -8,18 +17,17 @@
         path   (get req :path))
     (match [method path]
       (["GET" "/"]
-       (ok (str "<html><body>"
-                "<h1>Hello from Brood</h1>"
-                "<p>A web server written in pure Brood.</p>"
-                "<ul>"
-                "<li><a href=\"/hello\">Say hello</a></li>"
-                "<li><a href=\"/echo\">Echo request</a></li>"
-                "</ul>"
-                "</body></html>")))
+       (ok (html (layout "hatch"
+                   [:h1 {} "Hello from Brood"]
+                   [:p {} "A web server written in pure Brood."]
+                   [:ul {}
+                    [:li {} [:a {:href "/hello"} "Say hello"]]
+                    [:li {} [:a {:href "/echo"} "Echo request"]]]))))
 
       (["GET" "/hello"]
        (let (who (get (get req :params) "name" "world"))
-         (ok (str "<html><body><h1>Hello, " who "!</h1></body></html>"))))
+         (ok (html (layout (str "Hello, " who)
+                    [:h1 {} "Hello, " who "!"])))))
 
       ([_ "/echo"]
        (ok-text (str "Method:  " (get req :method) "\n"
@@ -30,8 +38,9 @@
                      "Body:    " (get req :body))))
 
       (_
-       (not-found (str "<html><body><h1>404</h1><p>No route for "
-                       method " " path "</p></body></html>"))))))
+       (not-found (html (layout "404"
+                          [:h1 {} "404 Not Found"]
+                          [:p {} "No route for " method " " path])))))))
 
 (defn main ()
   "Start the HTTP server and block until shutdown."
