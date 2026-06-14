@@ -1,30 +1,60 @@
 (defmodule http/server
-  "HTTP/1.1 TCP server: listener process and per-connection workers."
+  "HTTP/1.1 TCP server: a supervised listener process plus per-connection workers."
   (:use http/request)
   (:use http/response)
-  (:use http/websocket))
+  (:use http/websocket)
+  (:alias proc/supervisor))   ; the listener runs under a supervisor (auto-restart)
 
 (defn start (port handler &optional (ws-handler nil))
-  "Spawn an HTTP listener on `port`, dispatching requests to `handler`.
+  "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
   Optional `ws-handler` receives `(sock request)` on WebSocket upgrades.
-  Returns the listener pid."
-  ; tcp-listen must be called INSIDE the spawned process — accepts go to the
-  ; calling process's mailbox, so we can't call it here and hand off the socket.
-  (let (pid (spawn :http-listener (listen-and-serve port handler ws-handler)))
+
+  The listener runs under a one-for-one supervisor: if it crashes it is restarted
+  (re-binding the port — freed because a dead process's sockets are now closed on
+  exit) and re-registered as `:http-listener`, so a transient fault doesn't take the
+  whole server down. In-flight connections are unaffected — each is its own unlinked
+  worker process. Returns the supervisor pid; `(stop)` tears it down.
+
+  The listener is `:transient` (restarted only on an abnormal exit, never after a
+  clean stop), bounded to 5 restarts / 10s so a hard fault (e.g. the port is taken by
+  another program) eventually gives up instead of looping. tcp-listen runs INSIDE the
+  listener process — accepts go to the calling process's mailbox — so the child's
+  :start spawns `listen-and-serve` rather than binding the socket here."
+  (let (sup (supervisor/start-supervisor
+              [{:id :http-listener
+                :name :http-listener
+                :start (fn () (spawn (listen-and-serve port handler ws-handler)))
+                :restart :transient}]
+              {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
+    (register :http-supervisor sup)
     (sleep 50)
-    pid))
+    sup))
 
 (defn listen-and-serve (port handler ws-handler)
-  (let (lsock (tcp-listen "0.0.0.0" port))
+  (let (lsock (bind-retry port 25))
     (println (str "listening on http://localhost:" port))
     (listener--loop lsock handler ws-handler)))
 
+(defn bind-retry (port attempts)
+  "tcp-listen on `port`, retrying briefly while the address is still in use. On a
+  supervised restart the new listener can race the crashed one's socket teardown: the
+  runtime frees a dead process's sockets on exit, but the accept thread releases the
+  bound port a beat later. Rather than let the bind fail, retry for a short window
+  (the port frees within a couple ms). Gives up after `attempts` tries (~250ms),
+  re-raising the original error so a genuinely-taken port still surfaces."
+  (try
+    (tcp-listen "0.0.0.0" port)
+    (catch e
+      (if (and (> attempts 1) (includes? (error-message e) "in use"))
+        (do (sleep 10) (bind-retry port (- attempts 1)))
+        (error (error-message e))))))
+
 (defn stop ()
-  "Gracefully stop the HTTP listener."
-  (let (pid (whereis :http-listener))
-    (if pid
-      (send pid :stop)
-      (println "http/server: no listener running"))))
+  "Stop the HTTP server: tear down the supervisor and its listener."
+  (let (sup (whereis :http-supervisor))
+    (if sup
+      (supervisor/stop-supervisor sup)
+      (println "http/server: no server running"))))
 
 (defn listener--loop (lsock handler ws-handler)
   (receive

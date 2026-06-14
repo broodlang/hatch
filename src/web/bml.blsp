@@ -2,12 +2,23 @@
   "Compile-time parser for `.bml` templates — an HTML-flavoured surface that lowers
   to the Hiccup forms `web/template/render` already understands.
 
-  A `.bml` file is plain markup with three additions over HTML:
-  - `{expr}` interpolation in text and attribute values — the inner text is read as a
-    Brood expression and spliced in (so `{(get model :count)}` evaluates against the
-    render's `model`). Auto-escaped by `render`; use `{(raw …)}` to opt out.
-  - `:if=\"expr\"` — render the element only when `expr` is truthy.
-  - `:for=\"x <- coll\"` — render the element once per item of `coll`, binding `x`.
+  A `.bml` file is plain markup with a few additions over HTML — a small HEEx:
+  - `{expr}` interpolation in text and attribute values — the inner text is a Brood
+    expression spliced in. Auto-escaped by `render`; use `{(raw …)}` to opt out.
+  - `@name` — shorthand for `(get model :name)`, a field of the render's `model`. So
+    `{@count}` is `{(get model :count)}`; a bare name stays a local (e.g. a `:for`
+    binding). Works anywhere Brood is embedded: `{(inc @count)}`, `:if={(< @n 0)}`.
+  - attribute interpolation — a quoted value may embed `{…}`: `class=\"btn {@kind}\"`
+    lowers to `(str \"btn \" (get model :kind))`.
+  - `:if={expr}` — render the element only when `expr` is truthy.
+  - `:for={x <- coll}` — render once per item of `coll`, binding `x`. Combined with
+    `:if` on the same element, the test becomes a per-item `:when` filter (it sees the
+    loop binding), not an outer guard.
+
+  Two simplifications to know:
+  - Each `{…}` holds **one** expression (`read-string`); `{(a) (b)}` keeps only `(a)`.
+  - Whitespace-only text between tags is dropped, so significant spacing between
+    inline elements is lost — write it explicitly as `{\" \"}`.
 
   `parse` returns a Brood *form*: the structure the `deflive` `template` clause emits
   as the body of `render`, so a template runs as ordinary Brood — no separate runtime.
@@ -52,6 +63,57 @@
     (read-while (substring s 1 (string-length s)) pred (str acc (char-at s 0)))
     [acc s]))
 
+; ---- embedded Brood: read an expression, expanding the `@name` assign shorthand ----
+; `@count` reads as `(get model :count)` (HEEx-style) — a field of the render's `model`
+; — while a bare `count` stays a local (a `:for` binding, say). The rewrite is textual
+; and skips string literals, so `@` inside a string is left alone, as is `~@` splice.
+
+(def *ident-start* "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+(def *ident-rest* "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-?!")
+
+(defn ident-start? (c) (includes? *ident-start* c))
+(defn ident-rest? (c) (includes? *ident-rest* c))
+
+(defn ident-run (s i)
+  (if (and (< i (string-length s)) (ident-rest? (char-at s i)))
+    (ident-run s (+ i 1))
+    i))
+
+(defn string-lit-end (s i)
+  "Index of the closing `\"` of a string literal whose opening quote is just before `i`."
+  (cond
+    (>= i (string-length s)) i
+    (= (char-at s i) "\\")   (string-lit-end s (+ i 2))
+    (= (char-at s i) "\"")   i
+    else                     (string-lit-end s (+ i 1))))
+
+(defn expand-assigns (s)
+  "Rewrite `@name` to `(get model :name)` in embedded Brood text `s`, leaving string
+  literals (and `~@` splices) untouched."
+  (expand-assigns--at s 0 ""))
+
+(defn expand-assigns--at (s i acc)
+  (if (>= i (string-length s))
+    acc
+    (let (c (char-at s i))
+      (cond
+        (= c "\"")
+          (let (j (string-lit-end s (+ i 1)))
+            (expand-assigns--at s (+ j 1) (str acc (substring s i (+ j 1)))))
+        (and (= c "@")
+             (not (and (> i 0) (= (char-at s (- i 1)) "~")))
+             (< (+ i 1) (string-length s))
+             (ident-start? (char-at s (+ i 1))))
+          (let (end (ident-run s (+ i 1)))
+            (expand-assigns--at s end
+              (str acc "(get model :" (substring s (+ i 1) end) ")")))
+        else
+          (expand-assigns--at s (+ i 1) (str acc c))))))
+
+(defn read-expr (s)
+  "Read embedded Brood text into a form, expanding the `@name` assign shorthand first."
+  (read-string (expand-assigns s)))
+
 ; ---- {expr} interpolation ----
 ; Find the brace that closes the interpolation, balancing nested `{}` (Brood maps
 ; use braces too) and skipping string literals (a `}` inside `"…"` doesn't count).
@@ -70,20 +132,35 @@
         (= c "}") (if (= depth 0) i (interp-end s next (- depth 1) false false))
         else (interp-end s next depth false false)))))
 
-(defn parse-interp (s)
-  "`s` begins with `{`; returns `[form rest]`, the inner text read as a Brood form."
+(defn brace-inner (s)
+  "`s` begins with `{`; return `[inner-text rest]`, the raw text between the braces
+  (balanced, strings respected)."
   (let (body (substring s 1 (string-length s))
         end (interp-end body 0 0 false false)
         inner (substring body 0 end)
         rest (substring body (+ end 1) (string-length body)))
-    [(read-string inner) rest]))
+    [inner rest]))
+
+(defn parse-interp (s)
+  "`s` begins with `{`; returns `[form rest]`, the inner text read as a Brood form."
+  (let ([inner rest] (brace-inner s))
+    [(read-expr inner) rest]))
 
 ; ---- attribute values ----
+; A value is a `\"…\"` literal that may itself embed `{…}` interpolations
+; (`class=\"btn {@kind}\"` → `(str \"btn \" (get model :kind))`), a bare `{expr}`, or an
+; unquoted token.
 
 (defn quote-end (s i)
-  (if (>= i (string-length s))
-    (error "bml: unterminated attribute string")
-    (if (= (char-at s i) "\"") i (quote-end s (+ i 1)))))
+  "Index of the attribute string's closing `\"`, skipping over `{…}` interpolation
+  regions (a `\"` inside `{…}` belongs to an embedded Brood string, not the attribute)."
+  (cond
+    (>= i (string-length s)) (error "bml: unterminated attribute string")
+    (= (char-at s i) "\"")   i
+    (= (char-at s i) "{")    (let (body (substring s (+ i 1) (string-length s))
+                                   end (interp-end body 0 0 false false))
+                               (quote-end s (+ i end 2)))
+    else                     (quote-end s (+ i 1))))
 
 (defn read-quoted (s)
   "`s` begins with `\"`; returns `[text rest]` (text excludes the quotes)."
@@ -91,36 +168,67 @@
         end (quote-end body 0))
     [(substring body 0 end) (substring body (+ end 1) (string-length body))]))
 
-(defn parse-attr-value (s)
-  "An attribute value: a `\"…\"` literal (→ string), a `{expr}` (→ form), or a bare
-  token (→ string). Returns `[value rest]`."
+(defn attr-parts (s acc lit)
+  "Split an attribute string into literal-text and `{expr}` parts (forms), in order."
   (cond
-    (= (char-at s 0) "\"") (read-quoted s)
-    (= (char-at s 0) "{") (parse-interp s)
-    else (read-while s name-char? "")))
+    (= (string-length s) 0)
+      (reverse (if (= lit "") acc (cons lit acc)))
+    (= (char-at s 0) "{")
+      (let ([inner rest] (brace-inner s)
+            acc2 (if (= lit "") acc (cons lit acc)))
+        (attr-parts rest (cons (read-expr inner) acc2) ""))
+    else
+      (attr-parts (substring s 1 (string-length s)) acc (str lit (char-at s 0)))))
+
+(defn attr-string-value (inner)
+  "Compile a quoted attribute value (which may embed `{…}`) into a value form: a plain
+  string when there is no interpolation, the bare expression when the value is exactly
+  one `{…}`, else a `(str …)` of the literal and expression parts."
+  (let (parts (attr-parts inner nil ""))
+    (cond
+      (empty? parts)      ""
+      (and (= (count parts) 1) (string? (first parts))) (first parts)
+      (= (count parts) 1) (first parts)
+      else                (cons 'str parts))))
+
+(defn parse-attr-value (s)
+  "An attribute value. Returns `[value-form rest]`."
+  (cond
+    (= (char-at s 0) "\"") (let ([inner rest] (read-quoted s)) [(attr-string-value inner) rest])
+    (= (char-at s 0) "{")  (parse-interp s)
+    else                   (read-while s name-char? "")))
 
 ; ---- directives (:if / :for) ----
+; Directives take a brace expression like everything else: `:if={expr}`,
+; `:for={x <- coll}`. The raw inner text is captured at parse time and lowered here.
 
 (defn directive? (k) (or (= k ":if") (= k ":for")))
 
 (defn parse-for (spec)
-  "Parse a `:for` spec string `\"x <- coll\"` into `[binder-form coll-form]`."
+  "Parse a `:for` spec `\"x <- coll\"` into `[binder-form coll-form]`."
   (let (idx (index-of spec "<-"))
     (if (< idx 0)
       (error "bml: :for needs `x <- coll`, got: " spec)
-      [(read-string (trim (substring spec 0 idx))) (read-string (trim (substring spec
-                                                                        (+ idx 2)
-                                                                        (string-length spec))))])))
+      [(read-expr (trim (substring spec 0 idx)))
+       (read-expr (trim (substring spec (+ idx 2) (string-length spec))))])))
 
 (defn apply-directives (form directives)
-  "Wrap an element form in `for`/`if` per its collected directive strings."
-  (let (form (if (contains? directives ":for")
-               (let ([binder coll] (parse-for (get directives ":for")))
-                 (list 'for (list binder coll) form))
-               form))
-    (if (contains? directives ":if")
-      (list 'if (read-string (get directives ":if")) form nil)
-      form)))
+  "Wrap an element form per its directive attributes. `:for` becomes a `for`
+  comprehension and `:if` an `if` guard — but when both are present, `:if` becomes
+  a `:when` clause on the comprehension, so the test sees the loop binding (a
+  per-item filter) rather than guarding the whole loop from outside its scope."
+  (let (has-for (contains? directives ":for")
+        has-if (contains? directives ":if"))
+    (cond
+      (and has-for has-if)
+        (let ([binder coll] (parse-for (get directives ":for")))
+          (list 'for (list binder coll :when (read-expr (get directives ":if"))) form))
+      has-for
+        (let ([binder coll] (parse-for (get directives ":for")))
+          (list 'for (list binder coll) form))
+      has-if
+        (list 'if (read-expr (get directives ":if")) form nil)
+      else form)))
 
 ; ---- attributes ----
 
@@ -133,11 +241,14 @@
       (let ([k s1] (read-while s name-char? "")
             s1 (skip-ws s1))
         (if (and (> (string-length s1) 0) (= (char-at s1 0) "="))
-          (let (s2 (skip-ws (substring s1 1 (string-length s1)))
-                [v s3] (parse-attr-value s2))
+          (let (s2 (skip-ws (substring s1 1 (string-length s1))))
             (if (directive? k)
-              (parse-attrs s3 attrs (assoc directives k v))
-              (parse-attrs s3 (assoc attrs (keyword k) v) directives)))
+              (if (and (> (string-length s2) 0) (= (char-at s2 0) "{"))
+                (let ([raw s3] (brace-inner s2))
+                  (parse-attrs s3 attrs (assoc directives k raw)))
+                (error "bml: directive " k " needs a brace value, e.g. " k "={…}"))
+              (let ([v s3] (parse-attr-value s2))
+                (parse-attrs s3 (assoc attrs (keyword k) v) directives))))
           (parse-attrs s1 (assoc attrs (keyword k) true) directives))))))
 
 ; ---- elements ----
@@ -225,3 +336,32 @@
       (empty? nodes) nil
       (= (count nodes) 1) (first nodes)
       else (cons 'list nodes))))
+
+; ---- compile-time wiring: resolve a sibling .bml and turn it into a function body
+; ---- Shared by `deflive`'s `(template …)` clause and the `deftemplate` macro below.
+
+(defn template-path (filename)
+  "Resolve `filename` against the directory of the file currently being compiled (the
+  module that invoked a template macro). Call only at macro-expansion time, where
+  `(current-file)` is that module's source."
+  (let (parts (string-split (current-file) "/")
+        dir (join "/" (take (- (count parts) 1) parts)))
+    (str dir "/" filename)))
+
+(defn compile-template (filename)
+  "Compile the sibling `.bml` `filename` to a Hiccup form. If it can't be read or
+  parsed, return a form that *raises* that error when evaluated — so a bad template
+  fails loudly at render time, while the advisory checker (which never evaluates it)
+  still sees a well-formed body rather than a macro that threw mid-expansion."
+  (try (parse-file (template-path filename))
+    (catch e (list 'error (str "bml: cannot render template \"" filename "\": "
+                            (error-message e))))))
+
+(defmacro deftemplate (name args filename)
+  "Define `name` as a function of `args` returning the Hiccup compiled from the sibling
+  `.bml` file `filename`; its `{…}` interpolations see `args`. This is the plain-page
+  (`web/page`) counterpart to `deflive`'s `(template …)` clause:
+
+    (deftemplate body (items) \"about.bml\")
+    (defn index (conn) (page conn (layout \"About\" (body items))))"
+  (list 'defn name args (compile-template filename)))
