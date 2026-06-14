@@ -8,15 +8,25 @@ See `docs/web-framework-design.md` for the full design rationale.
 
 ---
 
+Hatch is a **library package**: `src/` holds only the framework (`http/` +
+`web/`). The demo app lives in a separate sibling project, `../hatch-demo`,
+which depends on Hatch via a local `:path` dep (`[hatch :path "../hatch"]`) —
+so the demo is also our proof that Hatch installs and loads as a real package.
+
 ## Running
 
 ```bash
-nest test          # run the test suite (194 tests)
-nest run           # start the demo server on http://localhost:4000
+# In hatch/ (the framework):
+nest test          # run the framework test suite (192 tests)
 nest format        # format all .blsp source
+
+# In ../hatch-demo/ (the demo app, consumes Hatch via :path):
+nest fetch         # resolve the :path dep → project.lock.blsp
+nest test          # loads `main`, exercising the dep end-to-end
+nest run           # start the demo server on http://localhost:4000
 ```
 
-The demo (`src/main.blsp`) serves:
+The demo (`../hatch-demo/src/main.blsp`) serves:
 - `GET /` — home page
 - `GET /counter` — live counter (WebSocket via `deflive`)
 - `ANY /echo` — echo request details
@@ -39,9 +49,8 @@ src/
     router.blsp     — defrouter macro, path-param matching
     live.blsp       — deflive macro, session actor, JSON codec
     pubsub.blsp     — topic broadcast across live sessions
-  main.blsp         — demo app entry point
 static/
-  brood_live.js     — vanilla JS client for live views
+  brood_live.js     — vanilla JS client for live views (apps serve a copy)
 tests/
   http_util_test.blsp
   http_request_test.blsp
