@@ -73,7 +73,8 @@
   (mount (params) {:count (string->number (get params "start" "0"))})
   (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
-  (tick 1000 (model) (assoc model :count (+ (get model :count) 10))))
+  (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))
+  (handle-info (msg model) (assoc model :count (+ (get model :count) msg))))
 
 (describe "live-view harness"
   (test "live-mount builds the initial model from params"
@@ -84,6 +85,9 @@
   (test "live-tick advances the model"
     (let (spec (live-spec))
       (assert= (live-tick spec 1000 {:count 5}) {:count 15})))
+  (test "live-info applies an out-of-band message"
+    (let (spec (live-spec))
+      (assert= (live-info spec 7 {:count 5}) {:count 12})))
   (test "live-render lowers the view to HTML"
     (assert= (includes? (live-render (live-spec) {:count 42}) "<span>42</span>") true))
   (test "live-html mounts then renders in one step"

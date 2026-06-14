@@ -161,7 +161,10 @@ insight is that only the dynamic slots need to change.
 - **Access logging** — structured log plug (method, path, status, ms)
 - **Rate limiting** — token-bucket plug backed by a `defprocess` counter
 - **PubSub** — topic-based broadcast across live sessions, then distributed across
-  Brood nodes (an earlier prototype existed; build it back when a view needs it)
+  Brood nodes (an earlier prototype existed; build it back when a view needs it).
+  Foundation in place: `deflive`'s `(handle-info (msg model) …)` clause + the
+  `web/live/send-info` delivery primitive let any process push an out-of-band message to a
+  live session and re-render. PubSub/Presence layer a topic registry + broadcast on top.
 
 ---
 

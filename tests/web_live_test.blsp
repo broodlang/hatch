@@ -73,3 +73,18 @@
       (let (got (receive ([:reload-css] :got) (after 1000 :timeout)))
         (web/live/live--unregister (self))
         (assert= got :got)))))
+
+(describe "send-info"
+  ; send-info is the delivery primitive PubSub/Presence build on: it posts an [:info
+  ; payload] envelope to a session pid, which the session loop routes to handle-info. Use
+  ; this test process as a stand-in session and confirm the envelope arrives intact.
+  (test "delivers an [:info payload] envelope to the session pid"
+    (do
+      (send-info (self) {:topic "room:1" :event "joined"})
+      (assert= (receive ([:info payload] payload) (after 1000 :timeout))
+        {:topic "room:1" :event "joined"})))
+  (test "returns nil and the payload can be any term"
+    (let (ret (send-info (self) :ping)
+          drained (receive ([:info p] p) (after 1000 :timeout)))
+      (assert= ret nil)
+      (assert= drained :ping))))
