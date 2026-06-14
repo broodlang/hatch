@@ -3,7 +3,7 @@
   (:use http/request)
   (:use http/response)
   (:use http/websocket)
-  (:alias proc/supervisor))   ; the listener runs under a supervisor (auto-restart)
+  (:alias proc/supervisor))  ; the listener runs under a supervisor (auto-restart)
 
 (defn start (port handler &optional (ws-handler nil))
   "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
@@ -20,11 +20,13 @@
   another program) eventually gives up instead of looping. tcp-listen runs INSIDE the
   listener process — accepts go to the calling process's mailbox — so the child's
   :start spawns `listen-and-serve` rather than binding the socket here."
-  (let (sup (supervisor/start-supervisor
-              [{:id :http-listener
-                :name :http-listener
-                :start (fn () (spawn (listen-and-serve port handler ws-handler)))
-                :restart :transient}]
+  (let (sup (supervisor/start-supervisor [{:id :http-listener
+                                           :name :http-listener
+                                           :start (fn ()
+                                                    (spawn (listen-and-serve port
+                                                             handler
+                                                             ws-handler)))
+                                           :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
     (register :http-supervisor sup)
     (sleep 50)
