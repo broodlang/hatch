@@ -1,13 +1,25 @@
 (defmodule http/server
-  "HTTP/1.1 TCP server: a supervised listener process plus per-connection workers."
+  "HTTP/1.1 TCP server: a supervised listener process plus per-connection workers.
+  Tier-1 hardening (read timeout, request-size cap, max connections) is configurable
+  via the config map passed to `start` — see docs/robustness.md."
   (:use http/request)
   (:use http/response)
   (:use http/websocket)
-  (:alias proc/supervisor))  ; the listener runs under a supervisor (auto-restart)
+  (:alias proc/supervisor))   ; the listener runs under a supervisor (auto-restart)
 
-(defn start (port handler &optional (ws-handler nil))
+; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
+;   :read-timeout-ms   — idle wait for request bytes before answering 408 and closing
+;   :max-request-bytes — accumulated request bytes before answering 413 and closing
+;   :max-connections   — concurrent connections; the listener refuses any over this
+(def default-config
+  {:read-timeout-ms 30000
+   :max-request-bytes 8388608
+   :max-connections 1024})
+
+(defn start (port handler &optional (ws-handler nil) (config {}))
   "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
-  Optional `ws-handler` receives `(sock request)` on WebSocket upgrades.
+  Optional `ws-handler` receives `(sock request)` on WebSocket upgrades. Optional
+  `config` overrides `default-config`'s limits (merged over it).
 
   The listener runs under a one-for-one supervisor: if it crashes it is restarted
   (re-binding the port — freed because a dead process's sockets are now closed on
@@ -15,27 +27,25 @@
   whole server down. In-flight connections are unaffected — each is its own unlinked
   worker process. Returns the supervisor pid; `(stop)` tears it down.
 
-  The listener is `:transient` (restarted only on an abnormal exit, never after a
-  clean stop), bounded to 5 restarts / 10s so a hard fault (e.g. the port is taken by
-  another program) eventually gives up instead of looping. tcp-listen runs INSIDE the
-  listener process — accepts go to the calling process's mailbox — so the child's
-  :start spawns `listen-and-serve` rather than binding the socket here."
-  (let (sup (supervisor/start-supervisor [{:id :http-listener
-                                           :name :http-listener
-                                           :start (fn ()
-                                                    (spawn (listen-and-serve port
-                                                             handler
-                                                             ws-handler)))
-                                           :restart :transient}]
+  The listener is `:transient` (restarted only on an abnormal exit), bounded to 5
+  restarts / 10s so a hard fault (e.g. the port is taken) eventually gives up. tcp-listen
+  runs INSIDE the listener process — accepts go to the calling process's mailbox — so
+  the child's :start spawns `listen-and-serve` rather than binding the socket here."
+  (let (cfg (merge default-config config)
+        sup (supervisor/start-supervisor
+              [{:id :http-listener
+                :name :http-listener
+                :start (fn () (spawn (listen-and-serve port handler ws-handler cfg)))
+                :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
     (register :http-supervisor sup)
     (sleep 50)
     sup))
 
-(defn listen-and-serve (port handler ws-handler)
+(defn listen-and-serve (port handler ws-handler config)
   (let (lsock (bind-retry port 25))
     (println (str "listening on http://localhost:" port))
-    (listener--loop lsock handler ws-handler)))
+    (listener--loop lsock handler ws-handler config 0)))
 
 (defn bind-retry (port attempts)
   "tcp-listen on `port`, retrying briefly while the address is still in use. On a
@@ -58,32 +68,54 @@
       (supervisor/stop-supervisor sup)
       (println "http/server: no server running"))))
 
-(defn listener--loop (lsock handler ws-handler)
+; The listener carries the live-connection count: it `monitor`s each worker and frees
+; the slot on the worker's `[:down …]`, and refuses (closes) a connection over
+; `:max-connections` rather than spawning an unbounded number of workers.
+(defn listener--loop (lsock handler ws-handler config conns)
   (receive
-    ([:tcp-accept ~lsock client] (let (worker (spawn (worker--run client handler ws-handler "")))
-                                   (tcp-controlling-process client worker)
-                                   (listener--loop lsock handler ws-handler)))
+    ([:tcp-accept ~lsock client]
+     (if (>= conns (get config :max-connections))
+       (do (tcp-close client)   ; over capacity — refuse without spawning a worker
+         (listener--loop lsock handler ws-handler config conns))
+       (let (worker (spawn (worker--run client handler ws-handler config "")))
+         (monitor worker)
+         (tcp-controlling-process client worker)
+         (listener--loop lsock handler ws-handler config (+ conns 1)))))
+    ([:down _ _ _]   ; a worker (connection) ended — free its slot
+     (listener--loop lsock handler ws-handler config (if (> conns 0) (- conns 1) 0)))
     (:stop (tcp-close lsock)
       (println "http/server: stopped"))))
 
-(defn worker--run (sock handler ws-handler buf)
-  (match (try-parse buf)
-    ([:ok request remainder] (if (and ws-handler (upgrade-request? request))
-                               (let (key (get (get request :headers) :sec-websocket-key ""))
-                                 (tcp-send sock (upgrade-response key))
-                                 (ws-handler sock request))
-                               (let (response (try
-                                                (handler request)
-                                                (catch e (error-resp (error-message e)))))
-                                 (tcp-send sock (format-response response))
-                                 (if (keep-alive? request response)
-                                   (worker--run sock handler ws-handler remainder)
-                                   (tcp-close sock)))))
-    ([:incomplete] (receive
-                     ([:tcp ~sock chunk] (worker--run sock handler ws-handler (str buf chunk)))
-                     ([:tcp-closed ~sock] nil)))
-    ([:error msg] (tcp-send sock (format-response {:status 400 :body msg}))
-      (tcp-close sock))))
+(defn worker--run (sock handler ws-handler config buf)
+  (cond
+    ; Request-size cap: a client streaming an unbounded request (or a huge body) would
+    ; otherwise grow `buf` until OOM. Reject once the accumulated bytes exceed the cap.
+    (> (string-length buf) (get config :max-request-bytes))
+    (do (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+      (tcp-close sock))
+    else
+    (match (try-parse buf)
+      ([:ok request remainder] (if (and ws-handler (upgrade-request? request))
+                                 (let (key (get (get request :headers) :sec-websocket-key ""))
+                                   (tcp-send sock (upgrade-response key))
+                                   (ws-handler sock request))
+                                 (let (response (try
+                                                  (handler request)
+                                                  (catch e (error-resp (error-message e)))))
+                                   (tcp-send sock (format-response response))
+                                   (if (keep-alive? request response)
+                                     (worker--run sock handler ws-handler config remainder)
+                                     (tcp-close sock)))))
+      ; Waiting for more request bytes: bound the wait so a client that connects and
+      ; then stalls (slow-loris) can't pin this worker forever — answer 408 and close.
+      ([:incomplete] (receive
+                       ([:tcp ~sock chunk] (worker--run sock handler ws-handler config (str buf chunk)))
+                       ([:tcp-closed ~sock] nil)
+                       (after (get config :read-timeout-ms)
+                         (do (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+                           (tcp-close sock)))))
+      ([:error msg] (tcp-send sock (format-response {:status 400 :body msg}))
+        (tcp-close sock)))))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request."
