@@ -1,5 +1,35 @@
 (defmodule http-util-test (:use http/util) (:use test))
 
+(describe "content-type-base"
+  (test "bare type" (assert= (content-type-base {:content-type "application/json"}) "application/json"))
+  (test "strips charset params"
+    (assert= (content-type-base {:content-type "application/json; charset=utf-8"}) "application/json"))
+  (test "lowercases and trims"
+    (assert= (content-type-base {:content-type "  Application/JSON ; q=1"}) "application/json"))
+  (test "absent → empty string" (assert= (content-type-base {}) "")))
+
+(describe "parse-body-params"
+  (test "urlencoded form body"
+    (assert= (parse-body-params {:content-type "application/x-www-form-urlencoded"} "a=1&b=two")
+      {"a" "1" "b" "two"}))
+  (test "urlencoded even with a charset on the content-type"
+    (assert= (parse-body-params {:content-type "application/x-www-form-urlencoded; charset=utf-8"} "a=1")
+      {"a" "1"}))
+  (test "json object body (charset tolerated)"
+    (assert= (parse-body-params {:content-type "application/json; charset=utf-8"} "{\"a\":1,\"b\":\"x\"}")
+      {"a" 1 "b" "x"}))
+  (test "nested json keys stringified deeply"
+    (assert= (parse-body-params {:content-type "application/json"} "{\"u\":{\"n\":\"ada\"}}")
+      {"u" {"n" "ada"}}))
+  (test "json array body (not an object) → no params"
+    (assert= (parse-body-params {:content-type "application/json"} "[1,2,3]") {}))
+  (test "malformed json → no params, not fatal"
+    (assert= (parse-body-params {:content-type "application/json"} "{nope") {}))
+  (test "unknown content-type → no params"
+    (assert= (parse-body-params {:content-type "text/plain"} "hello") {}))
+  (test "empty body → no params"
+    (assert= (parse-body-params {:content-type "application/json"} "") {})))
+
 (describe "hex-char->int"
   (test "digits" (assert= (hex-char->int "0") 0))
   (test "nine" (assert= (hex-char->int "9") 9))
