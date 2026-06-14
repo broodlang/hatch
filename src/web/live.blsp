@@ -1,11 +1,13 @@
+; defprotocol / defimpl
 (defmodule web/live
   "LiveBrood: per-session WebSocket actor + deflive macro."
   (:use http/websocket)
   (:use web/template)
-  (:use web/bml)  ; parse-file — the (template …) clause's BML→Hiccup compiler
-  (:use web/conn)  ; send-resp / put-resp-header (client-js-handler)
-  (:use protocol))  ; defprotocol / defimpl
-
+  ; parse-file — the (template …) clause's BML→Hiccup compiler
+  (:use web/bml)
+  ; send-resp / put-resp-header (client-js-handler)
+  (:use web/conn)
+  (:use protocol))
 ; ---- JSON encode via the Encode protocol -----------------------------------
 ; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
 ; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
@@ -34,8 +36,8 @@
 (defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
 (defimpl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
 (defimpl Encode :map (encode [m] (str "{" (join "," (map encode--entry (entries m))) "}")))
-(defimpl Encode :default (encode [v] (json-str (str v))))  ; keywords, symbols, …
-
+; keywords, symbols, …
+(defimpl Encode :default (encode [v] (json-str (str v))))
 (defn encode--entry (kv)
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (name k) (str k))) ":" (encode val))))
@@ -125,8 +127,10 @@
 ; ---- wire protocol messages ----
 
 (defn send-msg (sock msg-map)
-  "Encode `msg-map` as JSON and send as a WebSocket text frame."
-  (tcp-send sock (text-frame (encode msg-map))))
+  "Encode `msg-map` as JSON and send it as a WebSocket text frame. Returns true on
+  success, false if the write failed — a peer that vanished mid-write (broken pipe)
+  then ends the session cleanly instead of crashing the worker with an uncaught error."
+  (try (do (tcp-send sock (text-frame (encode msg-map))) true) (catch _ false)))
 
 (defn recv-frame--loop (sock buf)
   "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload
@@ -138,9 +142,12 @@
     ([:incomplete] (receive
                      ([:tcp ~sock chunk] (recv-frame--loop sock (str buf chunk)))
                      ([:tcp-closed ~sock] [:closed])
-                     ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))
+                     ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
+                                               (recv-frame--loop sock buf)
+                                               [:closed]))
                      ([:tick key] [:tick key buf])
-                     ([:reload] [:reload buf])))
+                     ([:reload] [:reload buf])
+                     ([:reload-css] [:reload-css buf])))
     ([:error msg] [:error msg])))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
@@ -156,8 +163,43 @@
 
 (defn ticker-loop--wait (target ms)
   (receive
-    ([:down _ _ _] nil)  ; the session ended — stop ticking
+    ; the session ended — stop ticking
+    ([:down _ _ _] nil)
     (after ms (do (send target [:tick ms]) (ticker-loop--wait target ms)))))
+
+; ---- idle watchdog: keepalive ping + reap dead/idle connections ----
+
+(def *ws-ping-ms*
+  ; How long with no client frame before the watchdog pings (and, after a couple of
+  ; unanswered pings, closes). A live browser auto-pongs a ping, which resets the timer,
+  ; so an open-but-idle tab stays connected; a dead/black-hole peer is reaped.
+  30000)
+
+(defn idle-watchdog (session sock misses)
+  "Per-session keepalive + idle reaper. Every `*ws-ping-ms*` with no client frame, ask the
+  session to send a ping (the session is the sole socket writer — we never write here);
+  browsers auto-pong, which resets us via `[:alive]`. After a couple of unanswered pings,
+  close the socket so a dead or silently-idle peer can't pin a reader thread + a parked
+  green process forever. Monitored, so it dies with the session."
+  (monitor session)
+  (receive
+    ([:alive] (idle-watchdog session sock 0))
+    ([:down _ _ _] nil)
+    (after *ws-ping-ms*
+      (if (>= misses 2)
+        ; two pings unanswered → peer is gone; closing wakes the session's reader
+        ; ([:tcp-closed] → clean session shutdown).
+        (try (tcp-close sock) (catch _ nil))
+        (do
+          (send session [:ws-send sock (ping-frame)])
+          (idle-watchdog session sock (+ misses 1)))))))
+
+(defn kick-watchdog (view)
+  "Tell this session's idle watchdog that a client frame arrived — resets its ping/idle
+  timer. A no-op if the session has no watchdog (e.g. in a unit test)."
+  (let (w (get view :watchdog))
+    (when w (send w [:alive])))
+  nil)
 
 ; ---- named singleton processes ----
 ; Both live registries below are "get-or-spawn a process registered under a name".
@@ -181,7 +223,8 @@
   (receive
     ([:register p] (live--registry-loop (cons p pids)))
     ([:unregister p] (live--registry-loop (filter (fn (q) (not (= q p))) pids)))
-    ([:reload] (dolist (p pids) (send p [:reload])) (live--registry-loop pids))))
+    ([:reload] (dolist (p pids) (send p [:reload])) (live--registry-loop pids))
+    ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live--registry-loop pids))))
 
 (defn live--registry ()
   "The reload-registry pid, spawned and named `:hatch-live` on first use."
@@ -198,6 +241,14 @@
   `deflive` sentinel calls this on each (re)load of the view module; a no-op when no
   registry/sessions are running (e.g. the first load at startup)."
   (let (r (whereis :hatch-live)) (when r (send r [:reload])))
+  nil)
+
+(defn notify-reload-css ()
+  "Signal every open live session to hot-swap its stylesheet — no re-render, so live
+  state is untouched (the client just re-stamps each <link rel=stylesheet> href). The
+  asset watcher (web/assets) calls this on each finished CSS rebuild; a no-op when no
+  registry/sessions are running."
+  (let (r (whereis :hatch-live)) (when r (send r [:reload-css])))
   nil)
 
 ; ---- session actor ----
@@ -217,16 +268,19 @@
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
   `view` is a map {:mount :render :handle-event :handle-tick :ticks :model :ticker-pids}."
-  ; WebSocket frames are binary (control bytes ≥ 0x80, masked client frames). Put
-  ; the socket in binary mode so reads/writes are byte-faithful (the 101 handshake
-  ; above was plain ASCII, so it was fine in text mode). The client only sends
-  ; frames after it sees the 101, so this is set before any frame arrives.
-  (tcp-set-binary sock true)
+  ; The socket is already in binary mode: http/server's upgrade path flips it
+  ; *before* it sends the 101 (and before this handler runs), so byte-faithful
+  ; reads/writes are guaranteed for the very first client frame. Setting it here
+  ; instead would be a race — the client can send a frame the moment it sees the
+  ; 101, before this handler (which may do a registry lookup first) reaches here.
   ; Register so a hot reload can push a fresh render here.
   (live--register (self))
   ; Start this view's tickers (ticks arrive as ordinary mailbox messages, interleaved
-  ; fairly with client frames); keep their pids so navigate can stop them.
-  (let (view (assoc view :ticker-pids (start-tickers (get view :ticks))))
+  ; fairly with client frames); keep their pids so navigate can stop them. Also start the
+  ; idle watchdog so a dead/idle peer is pinged and eventually reaped.
+  (let (view (assoc view
+               :ticker-pids (start-tickers (get view :ticks))
+               :watchdog (spawn (idle-watchdog (self) sock 0))))
     (push-update sock view buf "render" (get view :model))))
 
 ; The loop's one render-and-reply step: set the new model on the view, push a frame
@@ -234,25 +288,34 @@
 ; state transition below funnels through here.
 (defn push-update (sock view buf kind model)
   "Set `model` on the view, push a `kind` frame with the freshly-rendered HTML, and
-  keep listening on `buf`."
+  keep listening on `buf`. If the push fails (peer gone mid-write), end the session."
   (let (view (assoc view :model model))
-    (send-msg sock {:event kind :html (render view model)})
-    (session-recv sock view buf)))
+    (if (send-msg sock {:event kind :html (render view model)})
+      (session-recv sock view buf)
+      (close-session sock))))
 
 (defn close-session (sock)
-  "Drop out of the reload registry and close the socket cleanly."
+  "Drop out of the reload registry and close the socket. The close-frame send and the
+  close itself are best-effort — the peer may already be gone (a broken pipe)."
   (live--unregister (self))
-  (tcp-send sock (close-frame))
-  (tcp-close sock))
+  (try (tcp-send sock (close-frame)) (catch _ nil))
+  (try (tcp-close sock) (catch _ nil))
+  nil)
 
 (defn session-recv (sock view buf)
   (match (recv-frame--loop sock buf)
-    ([:ok 8 _ _] (close-session sock))  ; client close
-    ([:ok 9 payload _] (tcp-send sock (pong-frame payload))
-      ; ping → pong
-      (session-recv sock view buf))
-    ([:ok 1 payload rem] (session-dispatch sock view rem payload))  ; client message
-    ([:ok _ _ rem] (session-recv sock view rem))  ; ignore other opcodes
+    ; client close
+    ([:ok 8 _ _] (close-session sock))
+    ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
+    ; is best-effort: a failed write means the peer is gone, so end the session.
+    ([:ok 9 payload _] (kick-watchdog view)
+      (if (try (do (tcp-send sock (pong-frame payload)) true) (catch _ false))
+        (session-recv sock view buf)
+        (close-session sock)))
+    ; client message
+    ([:ok 1 payload rem] (kick-watchdog view) (session-dispatch sock view rem payload))
+    ; other opcodes (e.g. a pong, opcode 0xA) — ignored, but still client liveness
+    ([:ok _ _ rem] (kick-watchdog view) (session-recv sock view rem))
     ([:tick key buf2] (push-update sock
                         view
                         buf2
@@ -263,6 +326,11 @@
     ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
                           view (if spec (merge view spec) view))
                       (push-update sock view buf2 "render" (get view :model))))
+    ; CSS-only rebuild: tell the client to re-stamp its stylesheet links — no
+    ; re-render, so the live model (form state, scroll, focus) is preserved.
+    ([:reload-css buf2] (if (send-msg sock {:event "reload-css"})
+                          (session-recv sock view buf2)
+                          (close-session sock)))
     ([:closed] (live--unregister (self)) nil)
     ([:error _] (close-session sock))))
 
@@ -300,14 +368,16 @@
                               :session (get entry :session)
                               :params params
                               :model model
-                              :ticker-pids (start-tickers (get spec :ticks))}))
+                              :ticker-pids (start-tickers (get spec :ticks))
+                              ; carry the idle watchdog across the swap (same socket)
+                              :watchdog (get view :watchdog)}))
               (push-update sock new-view buf "render" model))
             ; unknown path, OR a different live-session group → full reload, which
             ; re-enters the HTTP pipeline (and that group's auth). The socket can't
             ; cross the boundary on its own.
-            (do
-              (send-msg sock {:event "redirect" :path path})
-              (session-recv sock view buf)))))
+            (if (send-msg sock {:event "redirect" :path path})
+              (session-recv sock view buf)
+              (close-session sock)))))
       (_ (session-recv sock view buf)))))
 
 (defn render (view model)

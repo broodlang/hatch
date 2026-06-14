@@ -98,3 +98,9 @@
 (defn html (node)
   "Render a Hiccup node and prepend the HTML5 doctype declaration."
   (str "<!DOCTYPE html>" (render node)))
+
+(defn stylesheet (href)
+  "A `<link rel=stylesheet>` Hiccup node for `href` — the conventional way to pull in a
+  bundled stylesheet (e.g. `(stylesheet \"/static/app.css\")` for a Tailwind build). The
+  live-view client hot-swaps these in place when the asset watcher reports a rebuild."
+  [:link {:rel "stylesheet" :href href}])

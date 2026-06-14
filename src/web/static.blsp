@@ -1,3 +1,4 @@
+; not-found-resp, send-resp, put-resp-header, param
 (defmodule web/static
   "Static file serving: a MIME table and a path-traversal-safe handler factory.
 
@@ -9,8 +10,7 @@
   Bodies are read with `slurp` (text), so this serves text assets — JS, CSS, HTML,
   SVG, JSON. Binary assets (images, fonts) need byte-faithful file reads + a binary
   socket and aren't supported yet."
-  (:use web/conn))  ; not-found-resp, send-resp, put-resp-header, param
-
+  (:use web/conn))
 ; ---- MIME types ----
 
 (def *mime-types*
@@ -24,8 +24,12 @@
    "txt" "text/plain; charset=utf-8"
    "xml" "application/xml"
    "svg" "image/svg+xml"
-   "ico" "image/x-icon"
    "webmanifest" "application/manifest+json"})
+; NB: only text types here. Bodies are read with `slurp` (UTF-8), so binary assets
+; (`.ico`, `.png`, fonts) would be corrupted — they're intentionally absent until there's
+; a byte-faithful file read (see docs/tcp-http-audit.md #7). An unlisted extension serves
+; as application/octet-stream, but its bytes are still slurp-mangled, so don't rely on it
+; for binary.
 
 (defn extension (path)
   "The lowercase file extension of `path` (after the last dot of the last segment),

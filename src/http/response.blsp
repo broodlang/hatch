@@ -28,10 +28,27 @@
       "\r\n"
       body)))
 
+(defn header-safe (v)
+  "Strip CR/LF from a header value so an attacker-influenced value (a redirect
+  `Location`, a reflected header) can't inject extra headers or split the response
+  — HTTP response splitting. Values are always strings here; coerce for safety."
+  (-> (str v)
+    (replace "\r" "")
+    (replace "\n" "")))
+
 (defn format-header (kv)
-  "Format a `[keyword value]` pair as an HTTP header line."
-  (let ([k v] kv)
-    (str (header-name k) ": " v "\r\n")))
+  "Format a `[keyword value]` pair as one or more HTTP header lines. A scalar value emits
+  a single line; a list/vector value emits one line per element — the way multiple
+  `Set-Cookie` headers (which can't share a map key) reach the wire."
+  (let (k (first kv)
+        v (first (rest kv)))
+    (if (or (list? v) (vector? v))
+      (join "" (map (fn (one) (format-header-line k one)) v))
+      (format-header-line k v))))
+
+(defn format-header-line (k v)
+  "One `Header-Name: value` line (CRLF-terminated), with CR/LF stripped from the value."
+  (str (header-name k) ": " (header-safe v) "\r\n"))
 
 (defn header-name (k)
   "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."

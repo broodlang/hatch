@@ -17,7 +17,7 @@ so the demo is also our proof that Hatch installs and loads as a real package.
 
 ```bash
 # In hatch/ (the framework):
-nest test          # run the framework test suite (247 tests)
+nest test          # run the framework test suite (326 tests)
 nest format        # format all .blsp source
 
 # In ../hatch-demo/ (the demo app, consumes Hatch via :path):
@@ -45,11 +45,15 @@ src/
     websocket.blsp  — RFC 6455 handshake + frame codec
   web/
     template.blsp   — Hiccup → HTML renderer
-    conn.blsp       — immutable Conn value + response pipeline (conn->response)
+    conn.blsp       — immutable Conn value + response pipeline (conn->response); cookies,
+                      body params, before-send hook
     page.blsp       — plain (non-live) page render helper: (page conn hiccup)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
+    session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro, session actor, live-route dispatch, JSON codec, page-chrome
+    assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
+    test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
 static/
   brood_live.js     — vanilla JS client for live views; apps can serve it straight
                       from hatch via (web/live/client-js-handler) — no vendored copy
@@ -62,10 +66,14 @@ tests/
   web_template_test.blsp
   web_conn_test.blsp
   web_router_test.blsp
+  web_session_test.blsp
   web_static_test.blsp
   web_live_test.blsp
+  web_assets_test.blsp
+  web_test_test.blsp
 docs/
   roadmap.md
+  assets.md
   web-framework-design.md
   brood-http.md
   brood-for-claude.md

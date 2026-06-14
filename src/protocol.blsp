@@ -14,9 +14,10 @@
 
 ; ---- registries -------------------------------------------------------------
 
-(def *protocols* {})  ; protocol-name → op specs (introspection / tooling)
-(def *impls* {})  ; [protocol op type-key] → impl fn (runtime dispatch)
-
+; protocol-name → op specs (introspection / tooling)
+(def *protocols* {})
+; [protocol op type-key] → impl fn (runtime dispatch)
+(def *impls* {})
 (defn register-protocol (pname specs)
   "Record protocol `pname`'s declared op specs (raw forms) for tooling."
   (def *protocols* (assoc *protocols* pname specs))
@@ -83,7 +84,8 @@
     (map
       (fn (m)
         (let (op-name (first m)
-              arg-syms (map (fn (s) s) (second m))  ; arg vector → list
+              ; arg vector → list
+              arg-syms (map (fn (s) s) (second m))
               body (rest (rest m)))
           (list 'protocol/register-impl
             (list 'quote pname)

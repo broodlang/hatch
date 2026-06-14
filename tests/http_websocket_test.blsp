@@ -37,6 +37,7 @@
   (test "round-trip 255"
     (assert= (byte-at (byte->char 255) 0) 255)))
 
+; lo byte: 300 mod 256 = 44
 (describe "text-frame"
   (test "small frame first byte is 0x81"
     (assert= (byte-at (text-frame "hello") 0) 129))
@@ -54,18 +55,21 @@
       (assert= (byte-at (text-frame payload) 1) 126)))
   (test "medium frame length bytes"
     (let (payload (string-repeat "x" 300))
+      ; hi byte: 300 / 256 = 1
       (assert= (* (byte-at (text-frame payload) 2) 256)
-        (* 1 256))  ; hi byte: 300 / 256 = 1
-      (assert= (byte-at (text-frame payload) 3) 44))))  ; lo byte: 300 mod 256 = 44
-
+        (* 1 256))
+      (assert= (byte-at (text-frame payload) 3) 44))))
 (describe "text-frame: multibyte uses UTF-8 byte length, not codepoint count"
   (test "− (U+2212) contributes 3 bytes to the length field"
     (assert= (byte-at (text-frame "−") 1) 3))
+  ; 0x92
   (test "payload bytes are the UTF-8 encoding of −"
     (let (f (text-frame "−"))
-      (assert= (byte-at f 2) 226)  ; 0xE2
-      (assert= (byte-at f 3) 136)  ; 0x88
-      (assert= (byte-at f 4) 146)))  ; 0x92
+      ; 0xE2
+      (assert= (byte-at f 2) 226)
+      ; 0x88
+      (assert= (byte-at f 3) 136)
+      (assert= (byte-at f 4) 146)))
   (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
     (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓")))
 
@@ -85,3 +89,42 @@
     (let (frame (str "\x81\x03abc\x81\x03def")
           [_ _ _ rem] (parse-frame frame))
       (assert= rem "\x81\x03def"))))
+
+; Audit #4 — a payload >64 KB must produce a valid 64-bit-length frame, not raise and
+; crash the live session.
+(describe "text-frame: 64-bit length for payloads > 64 KB"
+  (test "uses the 0x7f marker + 8-byte big-endian length"
+    (let (payload (string-repeat "x" 70000)
+          f (text-frame payload))
+      ; 0x81 FIN+text, 0x7f extended-64 marker
+      (assert= (byte-at f 0) 129)
+      (assert= (byte-at f 1) 127)
+      ; 70000 = 0x0000000000011170, big-endian over bytes 2..9
+      (assert= (byte-at f 2) 0)
+      (assert= (byte-at f 6) 0)
+      (assert= (byte-at f 7) 1)
+      (assert= (byte-at f 8) 17)
+      (assert= (byte-at f 9) 112)
+      ; 2 header + 8 length + 70000 payload
+      (assert= (string-length f) 70010))))
+
+; Audit #5 — control-frame limits.
+(describe "parse-frame: control-frame limits"
+  (test "rejects an oversized control frame (ping with extended length)"
+    ; 0x89 = FIN+ping(9); 0xFE = masked|126 (extended length) → protocol violation
+    (let (frame (str "\x89" (byte->char 254)))
+      (assert= (first (parse-frame frame)) :error)))
+  (test "accepts a normal small ping"
+    ; 0x89 ping, 0x80|2 masked len 2, mask 0000, payload 2 bytes
+    (let (frame (str "\x89" (byte->char 130) "\x00\x00\x00\x00\x01\x02")
+          [tag op _ _] (parse-frame frame))
+      (assert= tag :ok)
+      (assert= op 9))))
+
+(describe "pong-frame: control-frame size cap"
+  (test "truncates a payload over 125 bytes"
+    (let (f (pong-frame (string-repeat "x" 200)))
+      (assert= (byte-at f 1) 125)
+      (assert= (string-length f) 127)))
+  (test "small payload echoed verbatim"
+    (assert= (pong-frame "hi") (str "\x8a\x02hi"))))

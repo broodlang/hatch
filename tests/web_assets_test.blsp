@@ -1,0 +1,28 @@
+(defmodule web-assets-test (:use web/assets) (:use test))
+
+(describe "proc-opts"
+  (test "empty when no cwd/env"
+    (assert= (proc-opts {:cmd ["x"]}) {}))
+  (test "carries cwd"
+    (assert= (proc-opts {:cmd ["x"] :cwd "/tmp"}) {:cwd "/tmp"}))
+  (test "carries cwd and env"
+    (assert= (proc-opts {:cmd ["x"] :cwd "/tmp" :env {"A" "1"}})
+      {:cwd "/tmp" :env {"A" "1"}})))
+
+(describe "run-each / build"
+  (test "no commands is a no-op"
+    (assert= (build {}) nil))
+  (test "a zero-exit command succeeds"
+    (assert= (build {:build [["sh" "-c" "exit 0"]]}) nil))
+  (test "a non-zero exit raises"
+    (assert-error (build {:build [["sh" "-c" "exit 3"]]})))
+  (test "install runs its commands too"
+    (assert= (install {:install [["sh" "-c" "exit 0"]]}) nil)))
+
+(describe "on-output"
+  ; No live registry running in the test, so a CSS-reload signal is a safe no-op —
+  ; we're asserting it doesn't blow up whether or not the rebuild marker is present.
+  (test "marker present is a no-op without a registry"
+    (assert= (on-output "Done in 5ms\n" "Done in") nil))
+  (test "marker absent is a no-op"
+    (assert= (on-output "Rebuilding...\n" "Done in") nil)))

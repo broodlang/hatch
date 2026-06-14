@@ -91,6 +91,11 @@ const BroodLive = (() => {
       } else if (msg.event === "redirect") {
         // The navigate target isn't a live view — fall back to a full page load.
         window.location.href = msg.path;
+      } else if (msg.event === "reload-css") {
+        // A stylesheet rebuilt (asset watcher) — hot-swap every <link> in place,
+        // preserving live state. No full reload, no flash: we re-stamp the href with
+        // a fresh cache-buster so the browser refetches the updated CSS.
+        reloadStylesheets();
       }
     }
 
@@ -163,6 +168,25 @@ const BroodLive = (() => {
     morphChildren(cur, next);
   }
 
+  // Hot-swap every stylesheet by re-stamping its href with a fresh cache-buster.
+  // Cloning the <link> and removing the old one only after the new one loads avoids
+  // an unstyled flash. Skips cross-origin sheets (we can't reliably bust their cache
+  // and they're not what the dev watcher rebuilds anyway).
+  function reloadStylesheets() {
+    document.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+      const href = link.getAttribute("href");
+      if (!href) return;
+      const url = new URL(href, location.href);
+      if (url.origin !== location.origin) return;
+      url.searchParams.set("v", Date.now().toString());
+      const next = link.cloneNode();
+      next.setAttribute("href", url.pathname + url.search);
+      next.addEventListener("load", () => link.remove(), { once: true });
+      next.addEventListener("error", () => next.remove(), { once: true });
+      link.parentNode.insertBefore(next, link.nextSibling);
+    });
+  }
+
   // Wire up all [data-event] elements inside a container.
   function bindEvents(container, session) {
     container.addEventListener("click", (e) => {
@@ -175,6 +199,18 @@ const BroodLive = (() => {
     });
 
     container.addEventListener("change", (e) => {
+      const el = e.target;
+      if (!el.dataset.event) return;
+      const name = el.dataset.event;
+      const params = { value: el.value, ...(el.dataset.params ? JSON.parse(el.dataset.params) : {}) };
+      session.pushEvent(name, params);
+    });
+
+    // Fire on every keystroke (not just on blur, which is what "change" gives) so a
+    // [data-event] input drives live as-you-type feedback. The server re-render morphs
+    // in place, so the field keeps its focus and caret — as long as the view doesn't
+    // render a fighting `value` attribute (let the DOM own what the user typed).
+    container.addEventListener("input", (e) => {
       const el = e.target;
       if (!el.dataset.event) return;
       const name = el.dataset.event;

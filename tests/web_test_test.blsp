@@ -1,0 +1,90 @@
+(defmodule web-test-test
+  (:use web/test)
+  ; defrouter + the make-route/dispatch its expansion calls
+  (:use web/router)
+  ; html-resp, send-resp, halt, assign, get-assign
+  (:use web/conn)
+  ; deflive — an inline live view to drive
+  (:use web/live)
+  (:use test))
+
+; ---- a sample router to dispatch against -----------------------------------
+
+(defn home (conn) (html-resp conn "<h1>Home</h1>"))
+; bare-string return
+(defn shout (conn) "plain string body")
+; no status set → defaults to 200
+(defn raw (conn) conn)
+(defn tag-plug (conn) (assign conn :who "admin"))
+(defn whoami (conn) (html-resp conn (or (get-assign conn :who) "anon")))
+(defn deny (conn) (halt (send-resp conn 403 "nope")))
+
+(defrouter h-router
+  (get "/" home)
+  (get "/shout" shout)
+  (get "/raw" raw)
+  (through [tag-plug] (get "/me" whoami))
+  (through [deny] (get "/x" (fn (conn) (html-resp conn "secret")))))
+
+; ---- conn-for --------------------------------------------------------------
+
+(describe "conn-for"
+  (test "upcases the method"
+    (assert= (get (conn-for "get" "/") :method) "GET"))
+  (test "carries path, params, query, headers, body"
+    (let (c (conn-for "POST"
+              "/x"
+              {:params {"id" "7"} :query "a=1" :headers {:host "h"} :body "hi"}))
+      (assert= (get c :path) "/x")
+      (assert= (get c :params) {"id" "7"})
+      (assert= (get c :query) "a=1")
+      (assert= (get c :headers) {:host "h"})
+      (assert= (get c :body) "hi"))))
+
+; ---- request / call --------------------------------------------------------
+
+(describe "request"
+  (test "dispatches a route and exposes status + body"
+    (let (resp (request h-router "GET" "/"))
+      (assert= (status resp) 200)
+      (assert= (body-contains? resp "Home") true)))
+  (test "a bare-string handler return becomes a 200 body"
+    (assert= (body (request h-router "GET" "/shout")) "plain string body"))
+  (test "status defaults to 200 when the handler sets none"
+    (assert= (status (request h-router "GET" "/raw")) 200))
+  (test "an unknown path is a 404"
+    (assert= (status (request h-router "GET" "/nope")) 404))
+  (test "a non-halting through plug enriches the conn the handler sees"
+    (assert= (body (request h-router "GET" "/me")) "admin"))
+  (test "a halting through plug short-circuits with its own response"
+    (let (resp (request h-router "GET" "/x"))
+      (assert= (status resp) 403)
+      (assert= (body resp) "nope"))))
+
+(describe "call"
+  (test "invokes one handler without a router"
+    (assert= (body (call home (conn-for "GET" "/"))) "<h1>Home</h1>"))
+  (test "coerces a bare-string return"
+    (assert= (body (call shout (conn-for "GET" "/"))) "plain string body")))
+
+; ---- live views ------------------------------------------------------------
+
+(deflive
+  (mount (params) {:count (string->number (get params "start" "0"))})
+  (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
+  (on "inc" (params model) (assoc model :count (inc (get model :count))))
+  (tick 1000 (model) (assoc model :count (+ (get model :count) 10))))
+
+(describe "live-view harness"
+  (test "live-mount builds the initial model from params"
+    (assert= (live-mount (live-spec) {"start" "5"}) {:count 5}))
+  (test "live-event advances the model"
+    (let (spec (live-spec))
+      (assert= (live-event spec "inc" {} {:count 5}) {:count 6})))
+  (test "live-tick advances the model"
+    (let (spec (live-spec))
+      (assert= (live-tick spec 1000 {:count 5}) {:count 15})))
+  (test "live-render lowers the view to HTML"
+    (assert= (includes? (live-render (live-spec) {:count 42}) "<span>42</span>") true))
+  (test "live-html mounts then renders in one step"
+    (assert= (includes? (live-html (live-spec) {"start" "7"}) "<span>7</span>") true)))

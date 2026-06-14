@@ -1,8 +1,8 @@
+; escape-html (404 body)
 (defmodule web/router
   "HTTP router: pattern matching, path params, pipeline dispatch."
   (:use web/conn)
-  (:use web/template))  ; escape-html (404 body)
-
+  (:use web/template))
 ; ---- path matching ----
 
 (defn path-segments (path)
@@ -145,13 +145,12 @@
   (let (head (first clause))
     (cond
       ; (live-session name & clauses): tag the enclosed live views with the session.
-      (= head 'live-session)
-      (compile-routes (rest (rest clause)) (assoc ctx :session (first (rest clause))))
+      (= head 'live-session) (compile-routes (rest (rest clause))
+                               (assoc ctx :session (first (rest clause))))
       ; (through plugs & clauses): run the enclosed routes behind `plugs`. Composes
       ; with any outer `through` — outer plugs run first.
-      (= head 'through)
-      (compile-routes (rest (rest clause))
-        (assoc ctx :plugs (concat (get ctx :plugs) (list (first (rest clause))))))
+      (= head 'through) (compile-routes (rest (rest clause))
+                          (assoc ctx :plugs (concat (get ctx :plugs) (list (first (rest clause))))))
       ; leaves
       (= head 'live) (list (with-plugs (compile-live clause (get ctx :session)) ctx))
       else (list (with-plugs (compile-route clause) ctx)))))
@@ -177,8 +176,10 @@
         title (plist-get opts :title)
         spec (symbol (str (name module) "/live-spec"))
         body (vector :div {:data-live path} (vector :p {} "Connecting…"))
-        handler (list 'fn (list 'conn)
-                  (list 'web/conn/html-resp 'conn
+        handler (list 'fn
+                  (list 'conn)
+                  (list 'web/conn/html-resp
+                    'conn
                     (list 'web/template/html
                       (list 'layout
                         (list 'web/router/live-title path title)
@@ -195,9 +196,11 @@
     (if (empty? plugs)
       compiled
       (let (route (get compiled :route))
-        (assoc compiled :route
-          (list (nth route 0) (nth route 1) (nth route 2)
-            (list 'web/router/through-handler (cons 'concat plugs) (nth route 3))))))))
+        (assoc compiled
+          :route (list (nth route 0)
+                   (nth route 1)
+                   (nth route 2)
+                   (list 'web/router/through-handler (cons 'concat plugs) (nth route 3))))))))
 
 ; ---- defrouter macro ----
 

@@ -1,10 +1,11 @@
+; html-resp
 (defmodule web/page
   "Plain (non-live) server-rendered pages — the counterpart to web/live. A live view is
   stateful (deflive + the LiveModule behaviour + a session actor); a plain page is just
   a handler that renders Hiccup to a response, so this module is a single thin helper."
-  (:use web/template)  ; html
-  (:use web/conn))  ; html-resp
-
+  ; html
+  (:use web/template)
+  (:use web/conn))
 (defn page (conn node)
   "Render a Hiccup node to a full HTML-document response (doctype + markup) on `conn`.
   The non-live counterpart to a live view's render — `(page conn (layout title body))`."

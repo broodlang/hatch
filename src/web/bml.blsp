@@ -221,8 +221,13 @@
   `\\{`/`\\}` are literal braces."
   (cond
     (= (string-length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
-    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
-      (attr-parts (substring s 2 (string-length s)) acc (str lit (char-at s 1)))
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1))) (attr-parts (substring s
+                                                                                                   2
+                                                                                                   (string-length s))
+                                                                                       acc
+                                                                                       (str lit
+                                                                                         (char-at s
+                                                                                           1)))
     (= (char-at s 0) "{") (let ([inner rest] (brace-inner s)
                                 acc2 (if (= lit "") acc (cons lit acc)))
                             (attr-parts rest (cons (read-expr inner) acc2) ""))
@@ -340,8 +345,9 @@
         [name s2] (read-while s1 name-char? "")
         [attrs directives s3] (parse-attrs s2 {} {}))
     (cond
-      (starts-with? s3 "/>") [(apply-directives (build-component name attrs nil) directives)
-                              (substring s3 2 (string-length s3))]
+      (starts-with? s3 "/>") [(apply-directives (build-component name attrs nil) directives) (substring s3
+                                                                                               2
+                                                                                               (string-length s3))]
       (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3))
                                   [children s4] (parse-nodes after)
                                   s5 (expect-close-component s4 name))
@@ -356,7 +362,12 @@
           [nm s2] (read-while s1 name-char? "")
           s2 (skip-ws s2))
       (cond
-        (not (= nm name)) (bml-error s "</." nm "> closes the wrong component, expected </." name ">")
+        (not (= nm name)) (bml-error s
+                            "</."
+                            nm
+                            "> closes the wrong component, expected </."
+                            name
+                            ">")
         (starts-with? s2 ">") (substring s2 1 (string-length s2))
         else (bml-error s2 "malformed component close </." name)))))
 
@@ -369,15 +380,18 @@
           [tag s2] (read-while s1 name-char? "")
           [attrs directives s3] (parse-attrs s2 {} {}))
       (cond
-        (starts-with? s3 "/>") [(apply-directives (build-elem tag attrs nil) directives)
-                                (substring s3 2 (string-length s3))]
+        (starts-with? s3 "/>") [(apply-directives (build-elem tag attrs nil) directives) (substring s3
+                                                                                           2
+                                                                                           (string-length s3))]
         (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3)))
                                 (cond
-                                  (void-tag? tag) [(apply-directives (build-elem tag attrs nil) directives) after]
+                                  (void-tag? tag) [(apply-directives (build-elem tag attrs nil)
+                                                     directives) after]
                                   (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
                                   else (let ([children s4] (parse-nodes after)
                                              s5 (expect-close s4 tag))
-                                         [(apply-directives (build-elem tag attrs children) directives) s5])))
+                                         [(apply-directives (build-elem tag attrs children)
+                                            directives) s5])))
         else (bml-error s3 "malformed tag <" tag " …")))))
 
 (defn expect-close (s tag)
@@ -423,10 +437,14 @@
 (defn parse-text--at (s acc)
   (cond
     (= (string-length s) 0) [acc s]
-    (= (char-at s 0) "<")   [acc s]
-    (= (char-at s 0) "{")   [acc s]
-    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
-      (parse-text--at (substring s 2 (string-length s)) (str acc (char-at s 1)))
+    (= (char-at s 0) "<") [acc s]
+    (= (char-at s 0) "{") [acc s]
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1))) (parse-text--at (substring s
+                                                                                                       2
+                                                                                                       (string-length s))
+                                                                                       (str acc
+                                                                                         (char-at s
+                                                                                           1)))
     else (parse-text--at (substring s 1 (string-length s)) (str acc (char-at s 0)))))
 
 ; ---- entry point ----

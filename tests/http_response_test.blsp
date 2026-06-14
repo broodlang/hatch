@@ -6,6 +6,19 @@
   (test "empty string" (assert= (capitalize "") ""))
   (test "single char" (assert= (capitalize "x") "X")))
 
+(describe "format-header"
+  (test "scalar value → one line"
+    (assert= (format-header [:host "localhost"]) "Host: localhost\r\n"))
+  (test "list value → one line per element (multiple Set-Cookie)"
+    (assert= (format-header [:set-cookie (list "a=1; Path=/" "b=2; Path=/")])
+      "Set-Cookie: a=1; Path=/\r\nSet-Cookie: b=2; Path=/\r\n")))
+
+(describe "format-response with cookies"
+  (test "emits a Set-Cookie line per list element"
+    (let (out (format-response {:status 200 :body "" :headers {:set-cookie (list "a=1" "b=2")}}))
+      (assert= (includes? out "Set-Cookie: a=1\r\n") true)
+      (assert= (includes? out "Set-Cookie: b=2\r\n") true))))
+
 (describe "header-name"
   (test "single segment" (assert= (header-name :host) "Host"))
   (test "content-type" (assert= (header-name :content-type) "Content-Type"))
@@ -65,3 +78,16 @@
   (test "custom header included"
     (let (r (format-response (redirect "/new")))
       (assert= (includes? r "Location: /new") true))))
+
+; Audit #2 — HTTP response splitting. A header value carrying CR/LF must not inject a
+; new header line; format-header strips them.
+(describe "format-header: CRLF injection guard"
+  (test "strips CR and LF from the value"
+    (assert= (format-header [:location "/next\r\nSet-Cookie: evil=1"])
+      "Location: /nextSet-Cookie: evil=1\r\n"))
+  (test "a normal value is unchanged"
+    (assert= (format-header [:content-type "text/html"]) "Content-Type: text/html\r\n"))
+  (test "an injected redirect Location does not become its own header line"
+    (let (r (format-response (redirect "/ok\r\nSet-Cookie: x=1")))
+      ; the bytes survive inside the Location value, but never after a CRLF (a new header)
+      (assert= (includes? r "\r\nSet-Cookie:") false))))

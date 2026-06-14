@@ -1,4 +1,7 @@
-(defmodule http/util "HTTP utility functions: URL decoding, query-string parsing, status codes.")
+(defmodule http/util
+  "HTTP utility functions: URL decoding, query-string + body parsing, status codes."
+  ; json-parse — parsing application/json request bodies into params
+  (:use json))
 
 ;; ---- hex helpers ----
 
@@ -49,6 +52,41 @@
                                                                    (string-length pair)))))))
       {}
       (string-split s "&"))))
+
+;; ---- request body parser ----
+
+(defn content-type-base (headers)
+  "The request's media type, lowercased and without parameters — `application/json`
+  from `Application/JSON; charset=utf-8`. Empty string when no Content-Type is set."
+  (let (ct (get headers :content-type))
+    (if (nil? ct)
+      ""
+      (lower (trim (first (string-split ct ";")))))))
+
+(defn parse-body-params (headers body)
+  "Parse a request `body` into a string→value params map based on its Content-Type:
+  `application/x-www-form-urlencoded` is parsed like a query string, `application/json`
+  yields the top-level object's fields (keys stringified to match query/form params).
+  Any other type — or an empty/malformed body — yields `{}`; the raw bytes stay on the
+  conn as `:body`. multipart/form-data is not parsed yet (file uploads, Tier 2)."
+  (if (blank? body)
+    {}
+    (let (ct (content-type-base headers))
+      (cond
+        (= ct "application/x-www-form-urlencoded") (parse-query body)
+        (= ct "application/json") (json-body-params body)
+        else {}))))
+
+(defn json-body-params (body)
+  "Params from a JSON request `body`. Only a top-level JSON object contributes params;
+  its keyword keys are stringified so it reads like query/form params. A non-object body
+  or a parse error yields `{}` (a malformed body is ignored, not fatal)."
+  (try
+    (let (parsed (json-parse body))
+      (if (map? parsed)
+        (fold (fn (m kv) (assoc m (name (first kv)) (first (rest kv)))) {} (entries parsed))
+        {}))
+    (catch _e {})))
 
 ;; ---- status codes ----
 

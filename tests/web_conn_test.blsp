@@ -68,6 +68,76 @@
   (test "not-found-resp status 404"
     (assert= (get (not-found-resp (build *req*)) :status) 404)))
 
+(describe "body params merged into :params"
+  (test "urlencoded form body"
+    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+                       :headers {:content-type "application/x-www-form-urlencoded"}
+                       :body "name=alice&role=admin"}))
+      (assert= (param conn "name") "alice")
+      (assert= (param conn "role") "admin")))
+  (test "JSON object body (keys stringified)"
+    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+                       :headers {:content-type "application/json"}
+                       :body "{\"name\":\"bob\",\"n\":2}"}))
+      (assert= (param conn "name") "bob")
+      (assert= (param conn "n") 2)))
+  (test "body params override query params on a key clash"
+    (let (conn (build {:method "POST" :path "/x" :query "q=1" :params {"q" "1"}
+                       :headers {:content-type "application/x-www-form-urlencoded"}
+                       :body "q=2"}))
+      (assert= (param conn "q") "2")))
+  (test "unknown content-type leaves params untouched, body intact"
+    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+                       :headers {:content-type "text/plain"}
+                       :body "raw text"}))
+      (assert= (get conn :params) {})
+      (assert= (get conn :body) "raw text")))
+  (test "malformed JSON is ignored, not fatal"
+    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+                       :headers {:content-type "application/json"}
+                       :body "{not json"}))
+      (assert= (get conn :params) {}))))
+
+(describe "request cookies"
+  (test "parses the Cookie header into :cookies"
+    (let (conn (build {:method "GET" :path "/" :query "" :params {}
+                       :headers {:cookie "a=1; b=two"} :body ""}))
+      (assert= (get-cookie conn "a") "1")
+      (assert= (get-cookie conn "b") "two")))
+  (test "missing cookie returns the default"
+    (assert= (get-cookie (build *req*) "x" "none") "none")))
+
+(describe "response cookies"
+  (test "put-cookie emits a Set-Cookie with defaults"
+    (let (r (conn->response (put-cookie (build *req*) "sid" "abc")))
+      (assert= (get (get r :headers) :set-cookie)
+        (list "sid=abc; Path=/; SameSite=Lax; HttpOnly"))))
+  (test "multiple cookies → a list (one header line each)"
+    (let (conn (-> (build *req*) (put-cookie "a" "1") (put-cookie "b" "2"))
+          r (conn->response conn))
+      (assert= (get (get r :headers) :set-cookie)
+        (list "a=1; Path=/; SameSite=Lax; HttpOnly" "b=2; Path=/; SameSite=Lax; HttpOnly"))))
+  (test "opts: max-age + secure, http-only off"
+    (let (r (conn->response (put-cookie (build *req*) "t" "v"
+                              {:max-age 60 :secure true :http-only false})))
+      (assert= (get (get r :headers) :set-cookie)
+        (list "t=v; Path=/; Max-Age=60; SameSite=Lax; Secure"))))
+  (test "delete-cookie expires with Max-Age=0"
+    (let (r (conn->response (delete-cookie (build *req*) "sid")))
+      (assert= (get (get r :headers) :set-cookie)
+        (list "sid=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"))))
+  (test "no cookies → no Set-Cookie header"
+    (assert= (get (get (conn->response (build *req*)) :headers) :set-cookie) nil)))
+
+(describe "before-send"
+  (test "callbacks run in order at conn->response time"
+    (let (conn (-> (build *req*)
+                 (register-before-send (fn (c) (put-resp-header c :x-a "1")))
+                 (register-before-send (fn (c) (put-resp-header c :x-b "2"))))
+          r (conn->response conn))
+      (assert= (get (get r :headers) :x-a) "1")
+      (assert= (get (get r :headers) :x-b) "2"))))
+
 (describe "run-pipeline"
   (test "applies plugs in order"
     (let (p1 (fn (conn) (assign conn :step1 true))

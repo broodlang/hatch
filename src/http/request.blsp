@@ -16,27 +16,71 @@
           (nil [:error "empty request"])
           ((req-line & header-lines) (match (parse-request-line req-line)
                                        ([:error e] [:error e])
-                                       ([:ok method path query] (let (headers (parse-headers header-lines)
-                                                                      clen (string->number (get headers
-                                                                                             :content-length
-                                                                                             "0"))
-                                                                      clen (if (nil? clen) 0 clen)
-                                                                      body-end (+ body-start clen)
-                                                                      buflen (string-length buf))
-                                                                  (if (< buflen body-end)
-                                                                    [:incomplete]
-                                                                    [:ok {:method method
-                                                                          :path path
-                                                                          :query query
-                                                                          :params (parse-query query)
-                                                                          :version "1.1"
-                                                                          :headers headers
-                                                                          :body (substring buf
-                                                                                  body-start
-                                                                                  body-end)}
-                                                                      (substring buf
-                                                                        body-end
-                                                                        buflen)]))))))))))
+                                       ([:ok method path query] (let (headers (parse-headers header-lines))
+                                                                  (cond
+                                                                    ; We don't de-chunk: reject Transfer-Encoding rather than
+                                                                    ; mis-read a chunked body as a pipelined second request
+                                                                    ; (request smuggling). De-chunking is a future Tier-2 item.
+                                                                    (contains? headers :transfer-encoding)
+                                                                    [:error "transfer-encoding not supported"]
+                                                                    ; Conflicting Content-Length values → ambiguous framing.
+                                                                    (content-length-conflict? header-lines)
+                                                                    [:error "conflicting Content-Length"]
+                                                                    ; Content-Length, when present, must be a non-negative
+                                                                    ; integer. Without this a negative value made body-end <
+                                                                    ; body-start and `substring` threw, crashing the worker.
+                                                                    (not (valid-content-length? (get headers :content-length)))
+                                                                    [:error "invalid Content-Length"]
+                                                                    else
+                                                                    (let (clen (content-length-value (get headers :content-length))
+                                                                          body-end (+ body-start clen)
+                                                                          buflen (string-length buf))
+                                                                      (if (< buflen body-end)
+                                                                        [:incomplete]
+                                                                        [:ok {:method method
+                                                                              :path path
+                                                                              :query query
+                                                                              :params (parse-query query)
+                                                                              :version "1.1"
+                                                                              :headers headers
+                                                                              :body (substring buf
+                                                                                      body-start
+                                                                                      body-end)}
+                                                                          (substring buf
+                                                                            body-end
+                                                                            buflen)]))))))))))))
+
+(defn all-digits? (s)
+  "True if `s` is non-empty and every character is an ASCII digit 0–9."
+  (and (not (blank? s))
+    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57))))
+              (string->list s)))))
+
+(defn header-value-for (line lower-key)
+  "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
+  else nil. Splits on the first `:` (the space after it is optional)."
+  (let (ci (index-of line ":"))
+    (if (and (not (= ci -1)) (= (lower (trim (substring line 0 ci))) lower-key))
+      (trim (substring line (+ ci 1) (string-length line)))
+      nil)))
+
+(defn content-length-conflict? (header-lines)
+  "True if `Content-Length` appears more than once with differing values — ambiguous
+  framing (RFC 7230), a request-smuggling vector. Duplicate identical values are fine."
+  (let (vals (filter (fn (v) (not (nil? v)))
+               (map (fn (line) (header-value-for line "content-length")) header-lines)))
+    (and (> (count vals) 1)
+      (not (empty? (filter (fn (v) (not (= v (first vals)))) (rest vals)))))))
+
+(defn valid-content-length? (cl)
+  "True if the Content-Length header value `cl` is absent (nil), or present and a
+  non-negative integer. Rejects negatives, floats, hex, and empty — any of which would
+  otherwise mis-size or crash the body read."
+  (or (nil? cl) (all-digits? (trim cl))))
+
+(defn content-length-value (cl)
+  "The integer Content-Length, or 0 when absent. Assumes `valid-content-length?`."
+  (if (nil? cl) 0 (string->number (trim cl))))
 
 (defn parse-request-line (line)
   "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query]` or `[:error msg]`."
@@ -51,13 +95,15 @@
       (_ [:error (str "invalid request line: " line)]))))
 
 (defn parse-headers (lines)
-  "Parse a list of raw header lines into a keyword→string map."
+  "Parse a list of raw header lines into a keyword→string map. Splits on the first
+  `:` and trims the value, so the space after the colon is optional (`Host:localhost`
+  is valid HTTP and must not be dropped)."
   (fold (fn (m line)
-          (let (ci (index-of line ": "))
+          (let (ci (index-of line ":"))
             (if (= ci -1)
               m
-              (let (k (keyword (lower (substring line 0 ci)))
-                    v (trim (substring line (+ ci 2) (string-length line))))
+              (let (k (keyword (lower (trim (substring line 0 ci))))
+                    v (trim (substring line (+ ci 1) (string-length line))))
                 (assoc m k v)))))
     {}
     lines))

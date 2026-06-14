@@ -1,18 +1,47 @@
-(defmodule web/conn "Request/response context value — the Conn.")
+(defmodule web/conn
+  "Request/response context value — the Conn."
+  ; parse-body-params — merge form/JSON body fields into :params
+  (:use http/util))
 
 (defn build (request)
-  "Construct a Conn from a raw parsed request map."
-  {:method (get request :method)
-   :path (get request :path)
-   :query (get request :query)
-   :params (get request :params)
-   :headers (get request :headers)
-   :body (get request :body)
-   :assigns {}
-   :status nil
-   :resp-body ""
-   :resp-headers {}
-   :halted? false})
+  "Construct a Conn from a raw parsed request map. `:params` merges the request's query
+  params (already parsed by http/request) with any form/JSON body params, body winning on
+  a key clash; the router later merges path params on top. Request cookies are parsed from
+  the `Cookie` header into `:cookies`."
+  (let (headers (get request :headers {})
+        query-params (get request :params {})
+        body-params (parse-body-params headers (get request :body "")))
+    {:method (get request :method)
+     :path (get request :path)
+     :query (get request :query)
+     :params (into query-params body-params)
+     :headers headers
+     :body (get request :body)
+     :cookies (parse-cookies headers)
+     :assigns {}
+     :status nil
+     :resp-body ""
+     :resp-headers {}
+     :resp-cookies (list)
+     :before-send (list)
+     :halted? false}))
+
+(defn parse-cookies (headers)
+  "Parse the request `Cookie` header into a string→string map. Values are taken verbatim
+  (not URL-decoded): session/flash cookies are base64url, which is already cookie-safe, and
+  decoding opaque third-party cookies would only corrupt them."
+  (let (raw (get headers :cookie))
+    (if (or (nil? raw) (blank? raw))
+      {}
+      (fold (fn (m pair)
+              (let (eq (index-of pair "="))
+                (if (= eq -1)
+                  m
+                  (assoc m
+                    (trim (substring pair 0 eq))
+                    (trim (substring pair (+ eq 1) (string-length pair)))))))
+        {}
+        (string-split raw ";")))))
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."
@@ -50,6 +79,48 @@
   "Get a request header by keyword key."
   (get (get conn :headers) key))
 
+(defn get-cookie (conn name &optional (default nil))
+  "Get a request cookie value by string name, or `default` if absent."
+  (get (get conn :cookies {}) name default))
+
+(defn put-cookie (conn name value &optional (opts {}))
+  "Add a `Set-Cookie` to the response. `opts`: `:path` (default \"/\"), `:max-age` (in
+  seconds), `:domain`, `:same-site` (default \"Lax\"), `:http-only` (default true), and
+  `:secure` (default false). Multiple cookies accumulate — each becomes its own header
+  line (see http/response). The caller is responsible for any value encoding."
+  (assoc conn :resp-cookies
+    (concat (get conn :resp-cookies (list)) (list (format-set-cookie name value opts)))))
+
+(defn delete-cookie (conn name &optional (opts {}))
+  "Expire a cookie by name — a `Set-Cookie` with an empty value and `Max-Age=0`. Pass the
+  same `:path`/`:domain` the cookie was written with so the browser drops the right one."
+  (put-cookie conn name "" (assoc opts :max-age 0)))
+
+(defn format-set-cookie (name value opts)
+  "Format one `Set-Cookie` header value from `name`, `value`, and `opts` (see put-cookie)."
+  (let (path (get opts :path "/")
+        max-age (get opts :max-age)
+        domain (get opts :domain)
+        same-site (get opts :same-site "Lax"))
+    (str name "=" value
+      "; Path=" path
+      (if (nil? domain) "" (str "; Domain=" domain))
+      (if (nil? max-age) "" (str "; Max-Age=" max-age))
+      "; SameSite=" same-site
+      (if (get opts :http-only true) "; HttpOnly" "")
+      (if (get opts :secure false) "; Secure" ""))))
+
+(defn register-before-send (conn f)
+  "Register `f` (a conn→conn function) to run just before the conn is serialized by
+  `conn->response`. Callbacks run in registration order. This is how a plug writes a value
+  computed from the *finished* conn — e.g. the session/flash cookie, set after the handler
+  has mutated the session (mirrors Plug's `register_before_send`)."
+  (assoc conn :before-send (concat (get conn :before-send (list)) (list f))))
+
+(defn run-before-send (conn)
+  "Run the conn's registered before-send callbacks left-to-right, threading the conn."
+  (fold (fn (c f) (f c)) conn (get conn :before-send (list))))
+
 (defn send-resp (conn status body)
   "Set the response status and body on the conn, returning the conn. The web layer
   works in conns end to end; `conn->response` serializes the final conn for http/server."
@@ -57,10 +128,16 @@
 
 (defn conn->response (conn)
   "Serialize a finished conn into the `{:status :headers :body}` map http/server sends.
-  Status defaults to 200; headers and body come from the conn's accumulated resp fields."
-  {:status (or (get conn :status) 200)
-   :headers (get conn :resp-headers {})
-   :body (get conn :resp-body "")})
+  Runs any registered before-send callbacks first, then folds accumulated `:resp-cookies`
+  into a list-valued `:set-cookie` header (http/response emits one line per cookie). Status
+  defaults to 200; headers and body come from the conn's resp fields."
+  (let (conn (run-before-send conn)
+        cookies (get conn :resp-cookies (list))
+        headers (get conn :resp-headers {})
+        headers (if (empty? cookies) headers (assoc headers :set-cookie cookies)))
+    {:status (or (get conn :status) 200)
+     :headers headers
+     :body (get conn :resp-body "")}))
 
 (defn html-resp (conn body)
   "200 OK HTML response (conn)."
