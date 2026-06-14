@@ -124,42 +124,59 @@
   "Encode `msg-map` as JSON and send as a WebSocket text frame."
   (tcp-send sock (text-frame (json-encode msg-map))))
 
-(defn recv-frame--loop (sock buf tick-ms)
+(defn recv-frame--loop (sock buf)
   "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload
-  remainder]`, `[:closed]`, or `[:error msg]`. When `tick-ms` is set and no frame
-  arrives within it, returns `[:tick buf]` — a server tick, carrying the partial
-  frame read so far so the caller can resume reading after handling the tick."
+  remainder]`, `[:closed]`, `[:error msg]`, or `[:tick buf]` when the session's
+  ticker process posts a `[:tick]` (carrying the partial frame read so far, so the
+  caller can resume reading after handling the tick)."
   (match (parse-frame buf)
     ([:ok opcode payload rem] [:ok opcode payload rem])
     ([:incomplete]
-     (if tick-ms
-       (receive
-         ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk) tick-ms))
-         ([:tcp-closed ~sock]    [:closed])
-         ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf tick-ms))
-         (after tick-ms [:tick buf]))
-       (receive
-         ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk) tick-ms))
-         ([:tcp-closed ~sock]    [:closed])
-         ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf tick-ms)))))
+     (receive
+       ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk)))
+       ([:tcp-closed ~sock]    [:closed])
+       ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))
+       ([:tick]                [:tick buf])))
     ([:error msg] [:error msg])))
+
+; ---- ticker: a steady server-side tick, independent of client traffic ----
+
+(defn ticker-loop (target ms)
+  "Post `[:tick]` to `target` (a live session) every `ms` milliseconds, until
+  `target` dies. Running it as its own process — rather than a `receive` timeout in
+  the session — keeps ticks on a steady beat that incoming client frames can never
+  reset or starve. Monitored, so a closed or crashed session never leaks it."
+  (monitor target)
+  (ticker-loop--wait target ms))
+
+(defn ticker-loop--wait (target ms)
+  (receive
+    ([:down _ _ _] nil)   ; the session ended — stop ticking
+    (after ms (do (send target [:tick]) (ticker-loop--wait target ms)))))
 
 ; ---- session actor ----
 
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
-  `view` is a map {:mount fn :render fn :handle-event fn :model model}."
+  `view` is a map {:mount :render :handle-event :handle-tick :tick-ms :model}."
   ; WebSocket frames are binary (control bytes ≥ 0x80, masked client frames). Put
   ; the socket in binary mode so reads/writes are byte-faithful (the 101 handshake
   ; above was plain ASCII, so it was fine in text mode). The client only sends
   ; frames after it sees the 101, so this is set before any frame arrives.
   (tcp-set-binary sock true)
+  ; If the view ticks, run a ticker process posting [:tick] to us on a steady beat;
+  ; ticks then arrive as ordinary mailbox messages, interleaved fairly with client
+  ; frames (no starvation when the user is busy clicking).
+  (when (get view :tick-ms)
+    (let (me (self)
+          ms (get view :tick-ms))
+      (spawn (ticker-loop me ms))))
   (let (model (get view :model))
     (send-msg sock {:event "render" :html (render view model)})
     (session-recv sock view buf)))
 
 (defn session-recv (sock view buf)
-  (match (recv-frame--loop sock buf (get view :tick-ms))
+  (match (recv-frame--loop sock buf)
     ([:ok 8 _ _]
      ; client closed
      (tcp-send sock (close-frame))
