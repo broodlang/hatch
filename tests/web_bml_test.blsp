@@ -4,6 +4,17 @@
 (defn render-bml (src model)
   (render (eval (list 'let (list 'model model) (parse src)))))
 
+; A trivial component for the component tests: an assigns-map → Hiccup function.
+(defn card (assigns)
+  [:div {:class "card"} [:h2 {} (get assigns :title)] (get assigns :children)])
+
+; Render BML with `card` (and `model`) in scope, so components resolve.
+(defn render-bml* (src model)
+  (render (eval (list 'let (list 'model model 'card card) (parse src)))))
+
+(defn parse-error (src)
+  (try (do (parse src) nil) (catch e (error-message e))))
+
 (describe "parse — structure"
   (test "element with attr + text"
     (assert= (parse "<p class=\"a\">hi</p>") [:p {:class "a"} "hi"]))
@@ -78,3 +89,36 @@
     ; render-bml evals at root, so qualify raw; in a view module `(:use web/template)`
     ; lets a template write `{(raw …)}` bare.
     (assert= (render-bml "<p>{(web/template/raw @s)}</p>" {:s "<b>"}) "<p><b></p>")))
+
+(describe "raw-text elements + brace escapes"
+  (test "<style> content is verbatim and unescaped"
+    (assert= (render-bml "<style>.x { color: red }</style>" {})
+      "<style>.x { color: red }</style>"))
+  (test "<script> content is verbatim (no interpolation)"
+    (assert= (render-bml "<script>if (a > 1) { f() }</script>" {})
+      "<script>if (a > 1) { f() }</script>"))
+  (test "\\{ and \\} are literal braces in text"
+    (assert= (render-bml "<p>use \\{x\\} here</p>" {}) "<p>use {x} here</p>"))
+  (test "\\{ is a literal brace in an attribute value"
+    (assert= (parse "<a data-t=\"a\\{b\">x</a>") [:a {:data-t "a{b"} "x"])))
+
+(describe "components"
+  (test "self-closing component compiles to a call with an assigns map"
+    (assert= (parse "<.card title=\"Hi\"/>") (list 'card {:title "Hi"})))
+  (test "children are passed as the :children assign"
+    (assert= (parse "<.card title=\"Hi\"><p>body</p></.card>")
+      (list 'card {:title "Hi" :children (list 'list [:p {} "body"])})))
+  (test "a component renders by calling its function"
+    (assert= (render-bml* "<.card title=\"Pricing\"><p>body</p></.card>" {})
+      "<div class=\"card\"><h2>Pricing</h2><p>body</p></div>"))
+  (test "component attributes interpolate"
+    (assert= (render-bml* "<.card title={@t}/>" {:t "Dyn"})
+      "<div class=\"card\"><h2>Dyn</h2></div>")))
+
+(describe "error locations"
+  (test "unterminated interpolation reports line:col"
+    (assert= (parse-error "<p>{x</p>") "bml:1:5: unterminated { interpolation"))
+  (test "mismatched close tag reports line:col"
+    (assert= (parse-error "<div>\n  <p>hi</div>") "bml:2:8: </div> closes the wrong tag, expected </p>"))
+  (test "a directive without a brace value reports line:col"
+    (assert= (parse-error "<p :if=\"x\">y</p>") "bml:1:8: directive :if needs a brace value, e.g. :if={…}")))
