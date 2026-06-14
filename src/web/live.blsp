@@ -1,8 +1,12 @@
 (defmodule web/live "LiveBrood: per-session WebSocket actor + deflive macro."
   (:use http/websocket)
-  (:use web/template))
+  (:use web/template)
+  (:use protocol))   ; defprotocol / defimpl
 
-; ---- JSON encode (minimal subset needed for wire protocol) ----
+; ---- JSON encode via the Encode protocol -----------------------------------
+; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
+; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
+; own types without touching the framework. `encode` dispatches on the value's type.
 
 (defn json-str (s)
   "Encode a Brood string as a JSON string (with escaping)."
@@ -15,24 +19,23 @@
            (replace "\t" "\\t"))
        "\""))
 
-(defn json-encode (v)
-  "Encode a value to a JSON string (strings, ints, floats, bools, nil, maps, lists/vectors)."
-  (cond
-    (nil? v)     "null"
-    (bool? v)    (if v "true" "false")
-    (int? v)     (str v)
-    (float? v)   (str v)
-    (string? v)  (json-str v)
-    (map? v)     (str "{" (join ","
-                                (map (fn (kv)
-                                       (let ([k val] kv)
-                                         (str (json-str (if (keyword? k) (name k) (str k)))
-                                              ":" (json-encode val))))
-                                     (entries v)))
-                       "}")
-    (vector? v)  (str "[" (join "," (map json-encode v)) "]")
-    (pair? v)    (str "[" (join "," (map json-encode v)) "]")
-    else         (json-str (str v))))
+(defprotocol Encode
+  "JSON-encode a value to its wire string."
+  (encode [v] :-> string))
+
+(defimpl Encode :nil     (encode [_] "null"))
+(defimpl Encode :bool    (encode [b] (if b "true" "false")))
+(defimpl Encode :int     (encode [n] (str n)))
+(defimpl Encode :float   (encode [n] (str n)))
+(defimpl Encode :string  (encode [s] (json-str s)))
+(defimpl Encode :vector  (encode [v] (str "[" (join "," (map encode v)) "]")))
+(defimpl Encode :pair    (encode [v] (str "[" (join "," (map encode v)) "]")))
+(defimpl Encode :map     (encode [m] (str "{" (join "," (map encode--entry (entries m))) "}")))
+(defimpl Encode :default (encode [v] (json-str (str v))))   ; keywords, symbols, …
+
+(defn encode--entry (kv)
+  (let ([k val] kv)
+    (str (json-str (if (keyword? k) (name k) (str k))) ":" (encode val))))
 
 ; ---- JSON decode (minimal, for incoming WS messages) ----
 
@@ -122,7 +125,7 @@
 
 (defn send-msg (sock msg-map)
   "Encode `msg-map` as JSON and send as a WebSocket text frame."
-  (tcp-send sock (text-frame (json-encode msg-map))))
+  (tcp-send sock (text-frame (encode msg-map))))
 
 (defn recv-frame--loop (sock buf)
   "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload

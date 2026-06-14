@@ -1,0 +1,21 @@
+(defmodule protocol-test (:use protocol) (:use test))
+
+(defprotocol Shout
+  "Shout a value."
+  (shout [v] :-> string))
+
+(defimpl Shout :int     (shout [n] (str "INT:" n)))
+(defimpl Shout :string  (shout [s] (upper s)))
+(defimpl Shout :default (shout [v] "?"))
+
+(describe "protocol dispatch"
+  (test "dispatches on the first argument's runtime type"
+    (is (= (shout 7) "INT:7"))
+    (is (= (shout "hi") "HI")))
+  (test "falls back to the :default impl"
+    (is (= (shout :kw) "?")))
+  (test "is open — a new type can be added after the fact"
+    (defimpl Shout :vector (shout [v] (str "VEC:" (count v))))
+    (is (= (shout [1 2 3]) "VEC:3")))
+  (test "the protocol descriptor is introspectable (the type-checker / LSP hook)"
+    (is (= (first (first (protocol/protocol-ops 'Shout))) 'shout))))

@@ -1,0 +1,82 @@
+(defmodule protocol
+  "A small open-generic-function / protocol facility — prototype for std/protocol.
+
+  `defprotocol` declares typed ops; `defimpl` registers a per-type implementation;
+  each op dispatches on the runtime type (`type-of`) of its first argument. Open:
+  impls for any type, including built-ins, can be added from anywhere, and a missing
+  impl is a clear error rather than a silent fall-through.
+
+  Two registries back it:
+    *protocols* — name → its declared op specs, as DATA. This is the introspection
+      hook the advisory type-checker and the LSP read to verify conformance and to
+      offer autocomplete (`(protocol-ops 'Encode)` → the op specs).
+    *impls*     — [protocol op type-key] → fn. The runtime dispatch table.")
+
+; ---- registries -------------------------------------------------------------
+
+(def *protocols* {})   ; protocol-name → op specs (introspection / tooling)
+(def *impls* {})       ; [protocol op type-key] → impl fn (runtime dispatch)
+
+(defn register-protocol (pname specs)
+  "Record protocol `pname`'s declared op specs (raw forms) for tooling."
+  (def *protocols* (assoc *protocols* pname specs))
+  nil)
+
+(defn protocol-ops (pname)
+  "The op specs declared for protocol `pname` (or nil) — what the type-checker / LSP
+  read to know which ops a `defimpl` must provide, with what arities."
+  (get *protocols* pname))
+
+(defn register-impl (pname op key f)
+  "Register impl `f` of `pname`'s `op` for dispatch key `key` (a type-of keyword)."
+  (def *impls* (assoc *impls* [pname op key] f))
+  nil)
+
+(defn impl-for (pname op key)
+  "The impl of `pname`'s `op` for `key`, falling back to a `:default` impl, or nil."
+  (or (get *impls* [pname op key])
+    (get *impls* [pname op :default])))
+
+(defn dispatch (pname op args)
+  "Dispatch `pname`'s `op` on `(type-of (first args))`, calling the impl with all
+  args. A missing impl is a loud, located error."
+  (let (key (type-of (first args))
+        f   (impl-for pname op key))
+    (if f
+      (apply f args)
+      (error "protocol " pname ": no implementation of " op " for " key))))
+
+; ---- macros -----------------------------------------------------------------
+
+(defmacro defprotocol (pname & specs)
+  "Declare protocol `pname`. Each op spec `(op [args…] :-> ret)` becomes a generic
+  function dispatching on its first argument's type. An optional leading docstring
+  is allowed. Records the op specs in *protocols* for the type-checker / LSP.
+
+    (defprotocol Encode
+      \"JSON-encode a value.\"
+      (encode [v] :-> string))"
+  (cons 'do
+    (cons (list 'protocol/register-protocol (list 'quote pname) (list 'quote specs))
+      (map (fn (op)
+             (let (op-name  (first op)
+                   arg-syms (map (fn (s) s) (second op)))   ; arg vector → list
+               (list 'defn op-name arg-syms
+                 (list 'protocol/dispatch
+                   (list 'quote pname) (list 'quote op-name) (cons 'list arg-syms)))))
+        (filter (fn (s) (pair? s)) specs)))))
+
+(defmacro defimpl (pname key & methods)
+  "Register implementations of protocol `pname` for dispatch key `key` (a `type-of`
+  keyword like `:int`/`:map`, or `:default`). Each method is `(op [args…] body…)`.
+
+    (defimpl Encode :int (encode [n] (str n)))"
+  (cons 'do
+    (map (fn (m)
+           (let (op-name  (first m)
+                 arg-syms (map (fn (s) s) (second m))   ; arg vector → list
+                 body     (rest (rest m)))
+             (list 'protocol/register-impl
+               (list 'quote pname) (list 'quote op-name) key
+               (cons 'fn (cons arg-syms body)))))
+      methods)))
