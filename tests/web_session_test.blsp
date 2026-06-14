@@ -8,7 +8,10 @@
 
 (defn conn-with (cookie)
   "A fresh GET conn carrying `_hatch_session=<cookie>` (or no cookie when nil)."
-  (build {:method "GET" :path "/" :query "" :params {}
+  (build {:method "GET"
+          :path "/"
+          :query ""
+          :params {}
           :headers (if (nil? cookie) {} {:cookie (str "_hatch_session=" cookie)})
           :body ""}))
 
@@ -74,7 +77,8 @@
 
 (describe "flash one-shot lifetime"
   (test "put-flash on request 1 → readable on request 2 → gone on request 3"
-    (let (; request 1: stash a flash, redirect (write session cookie)
+    (let (
+          ; request 1: stash a flash, redirect (write session cookie)
           c1 (put-flash ((fetch-session *secret*) (conn-with nil)) "info" "Saved!")
           cookie1 (session-cookie-value (conn->response c1))
           ; request 2: fetch-flash exposes it, then clears it from the session

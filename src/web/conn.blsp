@@ -38,8 +38,9 @@
                 (if (= eq -1)
                   m
                   (assoc m
-                    (trim (substring pair 0 eq))
-                    (trim (substring pair (+ eq 1) (string-length pair)))))))
+                    (trim (substring pair 0 eq)) (trim (substring pair
+                                                         (+ eq 1)
+                                                         (string-length pair)))))))
         {}
         (string-split raw ";")))))
 
@@ -88,8 +89,9 @@
   seconds), `:domain`, `:same-site` (default \"Lax\"), `:http-only` (default true), and
   `:secure` (default false). Multiple cookies accumulate — each becomes its own header
   line (see http/response). The caller is responsible for any value encoding."
-  (assoc conn :resp-cookies
-    (concat (get conn :resp-cookies (list)) (list (format-set-cookie name value opts)))))
+  (assoc conn
+    :resp-cookies (concat (get conn :resp-cookies (list))
+                    (list (format-set-cookie name value opts)))))
 
 (defn delete-cookie (conn name &optional (opts {}))
   "Expire a cookie by name — a `Set-Cookie` with an empty value and `Max-Age=0`. Pass the
@@ -102,11 +104,15 @@
         max-age (get opts :max-age)
         domain (get opts :domain)
         same-site (get opts :same-site "Lax"))
-    (str name "=" value
-      "; Path=" path
+    (str name
+      "="
+      value
+      "; Path="
+      path
       (if (nil? domain) "" (str "; Domain=" domain))
       (if (nil? max-age) "" (str "; Max-Age=" max-age))
-      "; SameSite=" same-site
+      "; SameSite="
+      same-site
       (if (get opts :http-only true) "; HttpOnly" "")
       (if (get opts :secure false) "; Secure" ""))))
 

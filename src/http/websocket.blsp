@@ -76,8 +76,9 @@
 (defn u64-be (n)
   "Eight-byte big-endian byte string of a non-negative integer `n` (RFC 6455's 64-bit
   extended length; the high bit must be 0, which holds for any realistic payload)."
-  (join "" (map (fn (shift) (byte->char (bit-and (bit-shift-right n shift) 255)))
-             [56 48 40 32 24 16 8 0])))
+  (join ""
+    (map (fn (shift) (byte->char (bit-and (bit-shift-right n shift) 255)))
+      [56 48 40 32 24 16 8 0])))
 
 (defn text-frame (payload)
   "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a byte string.
@@ -133,22 +134,18 @@
   (cond
     ; Control frames (close/ping/pong) must be ≤125 bytes — reject an extended length
     ; rather than let an oversized ping drive a huge unmask / overflow `pong-frame`.
-    (and (control-opcode? opcode) (>= plen7 126))
-    [:error "websocket: control frame too large (must be <= 125 bytes)"]
+    (and (control-opcode? opcode) (>= plen7 126)) [:error "websocket: control frame too large (must be <= 125 bytes)"]
     ; 16-bit extended length
-    (= plen7 126)
-    (if (< buflen 4)
-      [:incomplete]
-      (let (plen (+ (* (byte-at buf 2) 256) (byte-at buf 3))
-            hlen (if (= masked 1) 8 4))
-        (parse-frame--payload buf buflen opcode masked plen hlen)))
+    (= plen7 126) (if (< buflen 4)
+                    [:incomplete]
+                    (let (plen (+ (* (byte-at buf 2) 256) (byte-at buf 3))
+                          hlen (if (= masked 1) 8 4))
+                      (parse-frame--payload buf buflen opcode masked plen hlen)))
     ; 64-bit extended length — not supported (caps inbound frames at ~64 KB)
-    (= plen7 127)
-    [:error "websocket: 64-bit frame length not supported"]
+    (= plen7 127) [:error "websocket: 64-bit frame length not supported"]
     ; 7-bit length
-    else
-    (let (hlen (if (= masked 1) 6 2))
-      (parse-frame--payload buf buflen opcode masked plen7 hlen))))
+    else (let (hlen (if (= masked 1) 6 2))
+           (parse-frame--payload buf buflen opcode masked plen7 hlen))))
 
 (defn parse-frame--payload (buf buflen opcode masked plen hlen)
   (let (total (+ hlen plen))

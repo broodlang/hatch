@@ -88,11 +88,10 @@
   (fn (conn)
     (let (cookie-name (get opts :cookie *default-cookie*)
           data (decode-session secret (get-cookie conn cookie-name)))
-      (register-before-send
-        (assoc conn
-          :session data
-          :session-config {:secret secret :opts opts :cookie cookie-name}
-          :session-changed? false)
+      (register-before-send (assoc conn
+                              :session data
+                              :session-config {:secret secret :opts opts :cookie cookie-name}
+                              :session-changed? false)
         write-session))))
 
 (defn write-session (conn)

@@ -29,12 +29,14 @@ Without these the server is trivially exhausted by a single bad client.
   Now the listener tracks live connections (one `monitor` per worker, decrement on
   `[:down …]`) and **refuses** (closes) a new connection over the cap.
 
-## Tier 2 — correctness / info-leak  ⬜ (planned)
+## Tier 2 — correctness / info-leak  🚧 (in progress)
 
-- **Don't leak internals in the default 500.** `http/server`'s fallback is
-  `(error-resp (error-message e))`, which puts the exception text in the response body
-  (`response.blsp`). It should answer a generic 500 and leave detail to a logging hook.
-  Knob: `:error-handler` (a `(fn [request err] → response)`), default generic 500.
+- **Don't leak internals in the default 500.** ✅ `http/server`'s fallback no longer
+  echoes the exception text. On a raising handler it emits a `[:hatch :request :exception]`
+  telemetry event (method/path/error — the logging hook) and answers whatever
+  `:error-handler` returns. Knob: `:error-handler` — a `(fn [request err-message] →
+  response)`, default `server-error-resp` (a generic 500 with no detail in the body). The
+  old `error-resp` (which embeds the message) remains as an opt-in debugging helper.
 - **Chunked `Transfer-Encoding`.** The parser only honors `Content-Length`; a
   `chunked` request is mis-parsed. Add request de-chunking.
 - **Graceful shutdown / drain.** `stop` brutal-kills the listener; active connections

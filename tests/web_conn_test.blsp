@@ -70,38 +70,57 @@
 
 (describe "body params merged into :params"
   (test "urlencoded form body"
-    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query ""
+                       :params {}
                        :headers {:content-type "application/x-www-form-urlencoded"}
                        :body "name=alice&role=admin"}))
       (assert= (param conn "name") "alice")
       (assert= (param conn "role") "admin")))
   (test "JSON object body (keys stringified)"
-    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query ""
+                       :params {}
                        :headers {:content-type "application/json"}
                        :body "{\"name\":\"bob\",\"n\":2}"}))
       (assert= (param conn "name") "bob")
       (assert= (param conn "n") 2)))
   (test "body params override query params on a key clash"
-    (let (conn (build {:method "POST" :path "/x" :query "q=1" :params {"q" "1"}
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query "q=1"
+                       :params {"q" "1"}
                        :headers {:content-type "application/x-www-form-urlencoded"}
                        :body "q=2"}))
       (assert= (param conn "q") "2")))
   (test "unknown content-type leaves params untouched, body intact"
-    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query ""
+                       :params {}
                        :headers {:content-type "text/plain"}
                        :body "raw text"}))
       (assert= (get conn :params) {})
       (assert= (get conn :body) "raw text")))
   (test "malformed JSON is ignored, not fatal"
-    (let (conn (build {:method "POST" :path "/x" :query "" :params {}
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query ""
+                       :params {}
                        :headers {:content-type "application/json"}
                        :body "{not json"}))
       (assert= (get conn :params) {}))))
 
 (describe "request cookies"
   (test "parses the Cookie header into :cookies"
-    (let (conn (build {:method "GET" :path "/" :query "" :params {}
-                       :headers {:cookie "a=1; b=two"} :body ""}))
+    (let (conn (build {:method "GET"
+                       :path "/"
+                       :query ""
+                       :params {}
+                       :headers {:cookie "a=1; b=two"}
+                       :body ""}))
       (assert= (get-cookie conn "a") "1")
       (assert= (get-cookie conn "b") "two")))
   (test "missing cookie returns the default"
@@ -118,7 +137,9 @@
       (assert= (get (get r :headers) :set-cookie)
         (list "a=1; Path=/; SameSite=Lax; HttpOnly" "b=2; Path=/; SameSite=Lax; HttpOnly"))))
   (test "opts: max-age + secure, http-only off"
-    (let (r (conn->response (put-cookie (build *req*) "t" "v"
+    (let (r (conn->response (put-cookie (build *req*)
+                              "t"
+                              "v"
                               {:max-age 60 :secure true :http-only false})))
       (assert= (get (get r :headers) :set-cookie)
         (list "t=v; Path=/; Max-Age=60; SameSite=Lax; Secure"))))

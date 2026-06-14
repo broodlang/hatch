@@ -62,6 +62,14 @@
     (let (body (get (error-resp "oops") :body))
       (assert= (includes? body "oops") true))))
 
+(describe "server-error-resp"
+  (test "status 500"
+    (assert= (get (server-error-resp) :status) 500))
+  (test "body is generic — leaks no exception detail"
+    (let (body (get (server-error-resp) :body))
+      (assert= (includes? body "500") true)
+      (assert= (includes? body "<pre>") false))))
+
 (describe "format-response"
   (test "starts with status line"
     (let (r (format-response (ok "hello")))

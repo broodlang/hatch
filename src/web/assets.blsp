@@ -117,12 +117,14 @@
     (do
       (when (and (get config :install-probe)
               (not (file-exists? (get config :install-probe))))
-        (log/log-info (str "[assets] toolchain missing (" (get config :install-probe)
+        (log/log-info (str "[assets] toolchain missing ("
+                        (get config :install-probe)
                         ") — running one-time install"))
         (install config))
       (build config))
     (catch e
-      (log/log-warn (str "[assets] could not prepare assets (" (error-message e)
+      (log/log-warn (str "[assets] could not prepare assets ("
+                      (error-message e)
                       "); serving without a fresh build — styles may be missing until the watcher rebuilds"))))
   (watch config))
 

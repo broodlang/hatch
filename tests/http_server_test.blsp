@@ -1,6 +1,8 @@
 (defmodule http-server-test
-  (:alias http/server)  ; server/start, server/stop
-  (:use http/websocket)  ; parse-frame, byte->char
+  ; server/start, server/stop
+  (:alias http/server)
+  ; parse-frame, byte->char
+  (:use http/websocket)
   (:use test))
 
 ; Regression test for the WebSocket binary-mode race.
@@ -47,12 +49,13 @@
   "Open a raw client socket, send a WebSocket upgrade request, wait for the 101, then
   switch the client side to binary so it can send raw frame bytes. Returns the socket."
   (let (sock (tcp-connect "127.0.0.1" port)
-        _req (tcp-send sock (str "GET /ws HTTP/1.1\r\n"
-                              "Host: localhost\r\n"
-                              "Upgrade: websocket\r\n"
-                              "Connection: Upgrade\r\n"
-                              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                              "Sec-WebSocket-Version: 13\r\n\r\n"))
+        _req (tcp-send sock
+               (str "GET /ws HTTP/1.1\r\n"
+                 "Host: localhost\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                 "Sec-WebSocket-Version: 13\r\n\r\n"))
         _ack (await-101 sock ""))
     (tcp-set-binary sock true)
     sock))
@@ -62,7 +65,10 @@
   zeros, so the masked payload byte equals `b`): 0x81, 0x80|1, 00 00 00 00, b."
   (str (byte->char 129)
     (byte->char 129)
-    (byte->char 0) (byte->char 0) (byte->char 0) (byte->char 0)
+    (byte->char 0)
+    (byte->char 0)
+    (byte->char 0)
+    (byte->char 0)
     (byte->char b)))
 
 (describe "websocket upgrade sets binary mode before the handler reads"
@@ -83,3 +89,42 @@
       (assert= (string? payload) true)
       (assert= (string-length payload) 1)
       (assert= (byte-at payload 0) 255))))
+
+(defn drain (sock buf)
+  "Collect everything `sock` sends until it goes idle (keep-alive leaves it open), so a
+  test can assert on the whole response — headers and body."
+  (receive
+    ([:tcp ~sock chunk] (drain sock (str buf chunk)))
+    ([:tcp-closed ~sock] buf)
+    (after 400 buf)))
+
+(defn get-response (port path)
+  "Open a client, send one GET, and return the full raw response string."
+  (let (sock (tcp-connect "127.0.0.1" port)
+        _req (tcp-send sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+        resp (drain sock ""))
+    (tcp-close sock)
+    resp))
+
+; Tier-2 (docs/robustness.md): a handler that raises must answer a generic 500 without
+; leaking internals; the detail is left to telemetry / the :error-handler knob.
+(describe "a raising handler doesn't leak internals (default :error-handler)"
+  (test "answers a generic 500 with the exception text NOT in the body"
+    (let (port 54741
+          _sup (server/start port (fn (_req) (error "SECRET-internal-detail")))
+          resp (get-response port "/"))
+      (server/stop port)
+      (assert= (includes? resp "500") true)
+      (assert= (includes? resp "SECRET-internal-detail") false))))
+
+(describe "a custom :error-handler overrides the 500 response"
+  (test "the configured handler's response is sent"
+    (let (port 54742
+          _sup (server/start port
+                 (fn (_req) (error "boom"))
+                 nil
+                 {:error-handler (fn (_req _err) {:status 503 :headers {} :body "maintenance"})})
+          resp (get-response port "/"))
+      (server/stop port)
+      (assert= (includes? resp "503") true)
+      (assert= (includes? resp "maintenance") true))))
