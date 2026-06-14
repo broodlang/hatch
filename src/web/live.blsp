@@ -417,6 +417,11 @@
           (if (and entry (= (get entry :session) (get view :session)))
             ; same live-session group → swap the view over this socket, no reload
             (let (spec-fn (get entry :spec)
+                  ; let the OLD view clean up (pubsub/unsubscribe, presence/untrack, …)
+                  ; before it's replaced — the session process lives on across a navigate,
+                  ; so the monitor-based cleanup never fires for it. Runs here in the session
+                  ; process, so (self) is the same pid that mount subscribed/tracked.
+                  _unmount (try ((get view :unmount) (get view :model)) (catch _ nil))
                   _ (stop-tickers (get view :ticker-pids))
                   spec (spec-fn)
                   model ((get spec :mount) params)
@@ -635,18 +640,26 @@
       (on \"event-name\" (params model) updated-model)
       (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
       (handle-info (msg model) updated-model) ; optional: out-of-band messages
+      (unmount (model) …)                     ; optional: cleanup on live-navigate away
       ...)
 
   An optional `(handle-info (msg model) …)` clause handles out-of-band messages delivered
   to the session with `web/live/send-info` — PubSub/Presence broadcasts and timers. `msg`
   is the delivered payload; return the new model (it re-renders, like an event). Omit it and
-  such messages are ignored."
+  such messages are ignored.
+
+  An optional `(unmount (model) …)` clause runs (in the session process) when the session
+  live-navigates away from this view, before the next view mounts — undo what `mount` did
+  (`pubsub/unsubscribe`, `presence/untrack`, …). It's not needed for socket close: a dropped
+  socket kills the session process and the registries clean up via their monitors; unmount
+  covers the navigate-without-death case the monitors can't see."
   (let (mount-clause (first (filter (fn (c) (= (first c) 'mount)) clauses))
         render-clause (first (filter (fn (c) (= (first c) 'render)) clauses))
         template-clause (first (filter (fn (c) (= (first c) 'template)) clauses))
         on-clauses (filter (fn (c) (= (first c) 'on)) clauses)
         tick-clauses (filter (fn (c) (= (first c) 'tick)) clauses)
         info-clause (first (filter (fn (c) (= (first c) 'handle-info)) clauses))
+        unmount-clause (first (filter (fn (c) (= (first c) 'unmount)) clauses))
         mount-args (first (rest mount-clause))
         mount-body (rest (rest mount-clause))
         render-args (first (rest render-clause))
@@ -721,7 +734,15 @@
                              'handle-info
                              (first (rest info-clause))
                              (cons 'do (rest (rest info-clause))))
-                           (list 'defn 'handle-info (list 'info--msg 'info--model) 'info--model)))
+                           (list 'defn 'handle-info (list 'info--msg 'info--model) 'info--model))
+        ; Optional `(unmount (model) …)` — runs (in the session process) when the session
+        ; leaves this view via live-navigation, before the next view mounts. The place to
+        ; undo what mount did: pubsub/unsubscribe, presence/untrack, a timer. On a dropped
+        ; socket the session process dies and registries clean up via their monitors, so
+        ; unmount is only needed for the navigate-without-death case. Absent → a no-op.
+        unmount-defn (if unmount-clause
+                       (list 'defn 'unmount (first (rest unmount-clause)) (cons 'do (rest (rest unmount-clause))))
+                       (list 'defn 'unmount (list 'unmount--model) nil)))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       render-defn
@@ -733,6 +754,7 @@
         handle-body)
       (list 'defn 'handle-tick (list 'tick--key 'tick--model) handle-tick-body)
       handle-info-defn
+      unmount-defn
       (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses)))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
@@ -746,6 +768,7 @@
          :handle-event 'handle-event
          :handle-tick 'handle-tick
          :handle-info 'handle-info
+         :unmount 'unmount
          :ticks 'live-ticks})
       ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
       ; top-level defs), so a save signals open sessions to re-render. No-op at first

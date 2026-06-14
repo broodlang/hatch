@@ -74,7 +74,8 @@
   (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
   (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))
-  (handle-info (msg model) (assoc model :count (+ (get model :count) msg))))
+  (handle-info (msg model) (assoc model :count (+ (get model :count) msg)))
+  (unmount (model) (send (self) [:unmounted (get model :count)])))
 
 (describe "live-view harness"
   (test "live-mount builds the initial model from params"
@@ -88,6 +89,10 @@
   (test "live-info applies an out-of-band message"
     (let (spec (live-spec))
       (assert= (live-info spec 7 {:count 5}) {:count 12})))
+  (test "live-unmount runs the view's cleanup (in the caller's process)"
+    (do
+      (live-unmount (live-spec) {:count 9})
+      (assert= (receive ([:unmounted n] n) (after 1000 :timeout)) 9)))
   (test "live-render lowers the view to HTML"
     (assert= (includes? (live-render (live-spec) {:count 42}) "<span>42</span>") true))
   (test "live-html mounts then renders in one step"
