@@ -136,41 +136,43 @@
        ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk)))
        ([:tcp-closed ~sock]    [:closed])
        ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))
-       ([:tick]                [:tick buf])))
+       ([:tick key]            [:tick key buf])))
     ([:error msg] [:error msg])))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 
 (defn ticker-loop (target ms)
-  "Post `[:tick]` to `target` (a live session) every `ms` milliseconds, until
-  `target` dies. Running it as its own process — rather than a `receive` timeout in
-  the session — keeps ticks on a steady beat that incoming client frames can never
-  reset or starve. Monitored, so a closed or crashed session never leaks it."
+  "Post `[:tick ms]` to `target` (a live session) every `ms` milliseconds, until
+  `target` dies. The interval ms is the message key, so a session running several
+  tickers can tell which fired. Running each as its own process — rather than a
+  `receive` timeout in the session — keeps every beat steady, regardless of client
+  traffic. Monitored, so a closed or crashed session never leaks it."
   (monitor target)
   (ticker-loop--wait target ms))
 
 (defn ticker-loop--wait (target ms)
   (receive
     ([:down _ _ _] nil)   ; the session ended — stop ticking
-    (after ms (do (send target [:tick]) (ticker-loop--wait target ms)))))
+    (after ms (do (send target [:tick ms]) (ticker-loop--wait target ms)))))
 
 ; ---- session actor ----
 
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
-  `view` is a map {:mount :render :handle-event :handle-tick :tick-ms :model}."
+  `view` is a map {:mount :render :handle-event :handle-tick :ticks :model}."
   ; WebSocket frames are binary (control bytes ≥ 0x80, masked client frames). Put
   ; the socket in binary mode so reads/writes are byte-faithful (the 101 handshake
   ; above was plain ASCII, so it was fine in text mode). The client only sends
   ; frames after it sees the 101, so this is set before any frame arrives.
   (tcp-set-binary sock true)
-  ; If the view ticks, run a ticker process posting [:tick] to us on a steady beat;
-  ; ticks then arrive as ordinary mailbox messages, interleaved fairly with client
-  ; frames (no starvation when the user is busy clicking).
-  (when (get view :tick-ms)
-    (let (me (self)
-          ms (get view :tick-ms))
-      (spawn (ticker-loop me ms))))
+  ; Run one ticker process per interval in :ticks, each posting [:tick ms] on a
+  ; steady beat; ticks arrive as ordinary mailbox messages, interleaved fairly with
+  ; client frames (no starvation when the user is busy clicking).
+  (let (ticks (get view :ticks))
+    (when (not (empty? ticks))
+      (let (me (self))
+        (dolist (ms ticks)
+          (spawn (ticker-loop me ms))))))
   (let (model (get view :model))
     (send-msg sock {:event "render" :html (render view model)})
     (session-recv sock view buf)))
@@ -191,10 +193,10 @@
     ([:ok _ _ rem]
      ; ignore other opcodes
      (session-recv sock view rem))
-    ([:tick buf2]
-     ; server tick — advance the model, push a diff, and keep listening (the timer
-     ; re-arms on the partial buffer we were mid-read on).
-     (let (model (try ((get view :handle-tick) (get view :model)) (catch _ (get view :model)))
+    ([:tick key buf2]
+     ; a server tick fired, keyed by its interval ms — advance the model via the
+     ; matching tick handler, push a diff, and keep listening.
+     (let (model (try ((get view :handle-tick) key (get view :model)) (catch _ (get view :model)))
            view  (assoc view :model model))
        (send-msg sock {:event "diff" :html (render view model)})
        (session-recv sock view buf2)))
@@ -231,18 +233,19 @@
 
 ; ---- ws-handler factory ----
 
-(defn ws-handler-for (mount-fn render-fn handle-event-fn &optional (tick-ms nil) (handle-tick-fn nil))
-  "Return a `(fn [sock request])` suitable as http/server's ws-handler. With
-  `tick-ms` set, the session also ticks every `tick-ms` ms while idle, calling
-  `handle-tick-fn` (model → model) and pushing a diff — server-driven updates."
+(defn ws-handler-for (mount-fn render-fn handle-event-fn &optional (ticks []) (handle-tick-fn nil))
+  "Return a `(fn [sock request])` suitable as http/server's ws-handler. `ticks` is a
+  vector of intervals in ms; the session runs one ticker per interval, and each beat
+  calls `handle-tick-fn` (interval-ms → model → model) and pushes a diff — so a view
+  can update at one or more frequencies."
   (fn (sock request)
     (let (params (get request :params {})
           model  (mount-fn params)
           view   {:mount        mount-fn
                   :render       render-fn
                   :handle-event handle-event-fn
-                  :handle-tick  (or handle-tick-fn (fn (m) m))
-                  :tick-ms      tick-ms
+                  :handle-tick  (or handle-tick-fn (fn (k m) m))
+                  :ticks        ticks
                   :model        model})
       (session-loop sock view ""))))
 
@@ -251,21 +254,24 @@
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
 
-  Expands to `mount`, `render`, `handle-event`, `handle-tick`, and `live-tick-ms`
+  Expands to `mount`, `render`, `handle-event`, `handle-tick`, and `live-ticks`
   definitions. Wire it up with `(ws-handler-for mount render handle-event
-  live-tick-ms handle-tick)`.
+  live-ticks handle-tick)`.
+
+  Multiple `(tick ms …)` clauses are allowed — each runs its own ticker at its own
+  interval (use distinct ms values), so a view can update at several frequencies.
 
   Syntax:
     (deflive
       (mount (params) initial-model)
       (render (model) hiccup-template)
       (on \"event-name\" (params model) updated-model)
-      (tick 1000 (model) updated-model)   ; optional: server pushes a diff every ms
+      (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
       ...)"
   (let (mount-clause   (first (filter (fn (c) (= (first c) 'mount))   clauses))
         render-clause  (first (filter (fn (c) (= (first c) 'render))  clauses))
         on-clauses     (filter (fn (c) (= (first c) 'on)) clauses)
-        tick-clause    (first (filter (fn (c) (= (first c) 'tick)) clauses))
+        tick-clauses   (filter (fn (c) (= (first c) 'tick)) clauses)
         mount-args     (first (rest mount-clause))
         mount-body     (rest (rest mount-clause))
         render-args    (first (rest render-clause))
@@ -290,15 +296,23 @@
                                                (cons 'do body)))))
                                    event-arms)
                               (list (list '_ 'event--model)))))
-        tick-def       (if tick-clause
-                         (list 'defn 'handle-tick (list 'tick--model)
-                           (list 'let (list (first (first (rest (rest tick-clause)))) 'tick--model)
-                             (cons 'do (rest (rest (rest tick-clause))))))
-                         (list 'defn 'handle-tick (list 'tick--model) 'tick--model)))
+        ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
+        ; tick--model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
+        tick-arms      (map (fn (c)
+                              (let (ms   (first (rest c))
+                                    msym (first (first (rest (rest c))))
+                                    body (rest (rest (rest c))))
+                                (list ms
+                                      (list 'let (list msym 'tick--model)
+                                            (cons 'do body)))))
+                            tick-clauses)
+        handle-tick-body (cons 'match
+                           (cons 'tick--key
+                             (concat tick-arms (list (list '_ 'tick--model))))))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       (list 'defn 'render render-args (cons 'do render-body))
       (list 'defn 'handle-event (list 'event--name 'event--params 'event--model)
             handle-body)
-      tick-def
-      (list 'def 'live-tick-ms (if tick-clause (first (rest tick-clause)) nil)))))
+      (list 'defn 'handle-tick (list 'tick--key 'tick--model) handle-tick-body)
+      (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses))))))
