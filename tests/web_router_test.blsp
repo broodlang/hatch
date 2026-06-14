@@ -1,0 +1,84 @@
+(defmodule web-router-test (:use web/router) (:use web/conn) (:use test))
+
+(defn conn-for (method path)
+  (build {:method method :path path :query "" :params {} :headers {} :body ""}))
+
+(describe "path-segments"
+  (test "root"         (assert= (path-segments "/") nil))
+  (test "single"       (assert= (path-segments "/foo") (list "foo")))
+  (test "nested"       (assert= (path-segments "/foo/bar") (list "foo" "bar")))
+  (test "no leading /" (assert= (path-segments "foo/bar") (list "foo" "bar"))))
+
+(describe "parse-pattern"
+  (test "literal segments"
+    (assert= (parse-pattern "/foo/bar") (list "foo" "bar")))
+  (test "captures"
+    (assert= (parse-pattern "/users/:id") (list "users" :id)))
+  (test "multi-capture"
+    (assert= (parse-pattern "/a/:b/c/:d") (list "a" :b "c" :d))))
+
+(describe "match-path"
+  (test "exact match"
+    (assert= (match-path ["foo" "bar"] ["foo" "bar"]) {}))
+  (test "mismatch"
+    (assert= (match-path ["foo"] ["bar"]) nil))
+  (test "too short"
+    (assert= (match-path ["foo" "bar"] ["foo"]) nil))
+  (test "too long"
+    (assert= (match-path ["foo"] ["foo" "bar"]) nil))
+  (test "capture"
+    (assert= (match-path ["users" :id] ["users" "42"]) {"id" "42"}))
+  (test "multi-capture"
+    (assert= (match-path ["a" :b "c" :d] ["a" "1" "c" "2"]) {"b" "1" "d" "2"}))
+  (test "root pattern"
+    (assert= (match-path nil nil) {})))
+
+(describe "dispatch"
+  (test "exact GET route"
+    (let (routes [(make-route "GET" "/" (fn (c) (html-resp c "<h1>home</h1>")))]
+          resp   (dispatch routes (conn-for "GET" "/")))
+      (assert= (get resp :status) 200)))
+
+  (test "path param captured into params"
+    (let (routes [(make-route "GET" "/users/:id"
+                    (fn (c) (html-resp c (param c "id"))))]
+          resp   (dispatch routes (conn-for "GET" "/users/42")))
+      (assert= (get resp :body) "42")))
+
+  (test "wrong method returns 404"
+    (let (routes [(make-route "GET" "/" (fn (c) (html-resp c "ok")))]
+          resp   (dispatch routes (conn-for "POST" "/")))
+      (assert= (get resp :status) 404)))
+
+  (test "no matching route returns 404"
+    (let (routes [(make-route "GET" "/foo" (fn (c) (html-resp c "foo")))]
+          resp   (dispatch routes (conn-for "GET" "/bar")))
+      (assert= (get resp :status) 404)))
+
+  (test "wildcard method matches any"
+    (let (routes [(make-route "*" "/any" (fn (c) (html-resp c "ok")))]
+          resp   (dispatch routes (conn-for "DELETE" "/any")))
+      (assert= (get resp :status) 200)))
+
+  (test "first matching route wins"
+    (let (routes [(make-route "GET" "/x" (fn (c) (html-resp c "first")))
+                  (make-route "GET" "/x" (fn (c) (html-resp c "second")))]
+          resp   (dispatch routes (conn-for "GET" "/x")))
+      (assert= (get resp :body) "first"))))
+
+(describe "defrouter macro"
+  (defrouter sample-router
+    (get "/"          (fn (c) (html-resp c "home")))
+    (get "/users/:id" (fn (c) (html-resp c (param c "id"))))
+    (post "/items"    (fn (c) (html-resp c "created"))))
+
+  (test "GET /"
+    (assert= (get (sample-router (conn-for "GET" "/")) :status) 200))
+  (test "GET / body"
+    (assert= (get (sample-router (conn-for "GET" "/")) :body) "home"))
+  (test "GET /users/:id captures id"
+    (assert= (get (sample-router (conn-for "GET" "/users/7")) :body) "7"))
+  (test "POST /items"
+    (assert= (get (sample-router (conn-for "POST" "/items")) :body) "created"))
+  (test "unknown route 404"
+    (assert= (get (sample-router (conn-for "GET" "/gone")) :status) 404)))

@@ -1,0 +1,97 @@
+(defmodule web/router "HTTP router: pattern matching, path params, pipeline dispatch."
+  (:use web/conn))
+
+; ---- path matching ----
+
+(defn path-segments (path)
+  "Split a path into segments, dropping empty strings from leading slash."
+  (filter (fn (s) (not (blank? s))) (string-split path "/")))
+
+(defn match-path (pattern segments)
+  "Match a pattern list against path segments.
+  Patterns may be literal strings or `:param-name` keywords (captured).
+  Returns `nil` on mismatch or a map of captured params on success."
+  (match-path--acc pattern segments {}))
+
+(defn match-path--acc (pattern segments acc)
+  (cond
+    (and (nil? pattern) (nil? segments)) acc
+    (or  (nil? pattern) (nil? segments)) nil
+    else
+    (let (p (first pattern)
+          s (first segments))
+      (cond
+        (keyword? p)
+        (match-path--acc (rest pattern) (rest segments)
+                         (assoc acc (name p) s))
+        (= p s)
+        (match-path--acc (rest pattern) (rest segments) acc)
+        else nil))))
+
+(defn parse-pattern (path)
+  "Parse a route pattern string like `\"/users/:id/edit\"` into a segment list."
+  (map (fn (seg)
+         (if (starts-with? seg ":")
+           (keyword (substring seg 1 (string-length seg)))
+           seg))
+       (path-segments path)))
+
+; ---- route table ----
+
+(defn make-route (method pattern handler)
+  "Build a route entry map."
+  {:method  method
+   :pattern (parse-pattern pattern)
+   :handler handler})
+
+(defn dispatch (routes conn)
+  "Find the first matching route and call its handler with the conn.
+  Path params are merged into conn :params.
+  Returns a response map, or a 404 if no route matches."
+  (let (method   (get conn :method)
+        segments (path-segments (get conn :path)))
+    (dispatch--find routes conn method segments)))
+
+(defn dispatch--find (routes conn method segments)
+  (if (nil? routes)
+    (not-found-resp conn
+      (str "<h1>404 Not Found</h1><p>No route for "
+           method " /" (join "/" segments) "</p>"))
+    (let (route      (first routes)
+          r-method   (get route :method)
+          r-pattern  (get route :pattern)
+          r-handler  (get route :handler)
+          matched    (and (or (= r-method method) (= r-method "*"))
+                         (match-path r-pattern segments)))
+      (if matched
+        (let (conn (assoc conn :params (into (get conn :params {}) matched)))
+          (r-handler conn))
+        (dispatch--find (rest routes) conn method segments)))))
+
+; ---- defrouter macro ----
+
+(defmacro defrouter (router-name & routes)
+  "Define a router function `router-name` that accepts a conn and dispatches it.
+
+  Syntax:
+    (defrouter my-router
+      (get \"/\"        home-handler)
+      (post \"/items\"  create-handler)
+      (get \"/items/:id\" show-handler))
+
+  Each clause is `(method path handler-fn)`. Method is a symbol: `get`,
+  `post`, `put`, `patch`, `delete`, or `any` (matches all)."
+  (let (route-forms
+        (map (fn (r)
+               (let (verb    (first r)
+                     path    (first (rest r))
+                     handler (first (rest (rest r)))
+                     method  (if (= verb 'any)
+                               "*"
+                               (upper (name verb))))
+                 (list 'make-route method path handler)))
+             routes))
+    (list 'defn router-name (list 'conn)
+          (list 'dispatch
+                (cons 'list route-forms)
+                'conn))))

@@ -1,0 +1,68 @@
+(defmodule web-conn-test (:use web/conn) (:use test))
+
+(def *req*
+  {:method "GET" :path "/hello" :query "name=world"
+   :params {"name" "world"} :headers {:host "localhost"}
+   :body ""})
+
+(describe "build"
+  (test "method"   (assert= (get (build *req*) :method) "GET"))
+  (test "path"     (assert= (get (build *req*) :path) "/hello"))
+  (test "params"   (assert= (get (build *req*) :params) {"name" "world"}))
+  (test "assigns"  (assert= (get (build *req*) :assigns) {}))
+  (test "not halted" (assert= (get (build *req*) :halted?) false)))
+
+(describe "assign / get-assign"
+  (test "round-trip"
+    (let (c (assign (build *req*) :user "alice"))
+      (assert= (get-assign c :user) "alice")))
+  (test "missing key is nil"
+    (assert= (get-assign (build *req*) :missing) nil)))
+
+(describe "halt"
+  (test "sets halted?"
+    (assert= (halted? (halt (build *req*))) true))
+  (test "fresh conn not halted"
+    (assert= (halted? (build *req*)) false)))
+
+(describe "param / header"
+  (test "param by string key"
+    (assert= (param (build *req*) "name") "world"))
+  (test "header by keyword"
+    (assert= (header (build *req*) :host) "localhost")))
+
+(describe "send-resp"
+  (test "status"
+    (assert= (get (send-resp (build *req*) 200 "ok") :status) 200))
+  (test "body"
+    (assert= (get (send-resp (build *req*) 200 "ok") :body) "ok")))
+
+(describe "convenience response fns"
+  (test "html-resp status 200"
+    (assert= (get (html-resp (build *req*) "<p>hi</p>") :status) 200))
+  (test "text-resp content-type"
+    (let (r (text-resp (build *req*) "hello"))
+      (assert= (get (get r :headers) :content-type) "text/plain; charset=utf-8")))
+  (test "json-resp content-type"
+    (let (r (json-resp (build *req*) "{}"))
+      (assert= (get (get r :headers) :content-type) "application/json")))
+  (test "redirect-resp status 302"
+    (assert= (get (redirect-resp (build *req*) "/new") :status) 302))
+  (test "redirect-resp location header"
+    (assert= (get (get (redirect-resp (build *req*) "/new") :headers) :location) "/new"))
+  (test "not-found-resp status 404"
+    (assert= (get (not-found-resp (build *req*)) :status) 404)))
+
+(describe "run-pipeline"
+  (test "applies plugs in order"
+    (let (p1 (fn (c) (assign c :step1 true))
+          p2 (fn (c) (assign c :step2 true))
+          c  (run-pipeline (build *req*) [p1 p2]))
+      (assert= (get-assign c :step1) true)
+      (assert= (get-assign c :step2) true)))
+  (test "stops at halt"
+    (let (p1 (fn (c) (halt (assign c :step1 true)))
+          p2 (fn (c) (assign c :step2 "should not run"))
+          c  (run-pipeline (build *req*) [p1 p2]))
+      (assert= (get-assign c :step1) true)
+      (assert= (get-assign c :step2) nil))))
