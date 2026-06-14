@@ -44,6 +44,12 @@
 
 (defn void-tag? (t) (contains? *void* t))
 
+; Raw-text elements: their content is verbatim text (CSS/JS), not markup — no tag or
+; `{…}` interpolation parsing, and emitted unescaped. Ended only by the close tag.
+(def *raw-text* {"script" true "style" true})
+
+(defn raw-text-tag? (t) (contains? *raw-text* t))
+
 ; ---- character helpers ----
 
 (defn ws? (c) (or (= c " ") (= c "\n") (= c "\t") (= c "\r")))
@@ -62,6 +68,29 @@
   (if (and (> (string-length s) 0) (pred (char-at s 0)))
     (read-while (substring s 1 (string-length s)) pred (str acc (char-at s 0)))
     [acc s]))
+
+; ---- source positions: report parse errors as bml:line:col ----
+; Every string the parser holds is a suffix of the original source (we only ever
+; consume from the front), so the offset of the current point is `full-len - suffix-len`.
+; `parse` binds *bml-source* to the whole source for the duration.
+
+(defdyn *bml-source* "")
+
+(defn line-col--at (i off line col)
+  (if (>= i off)
+    [line col]
+    (if (= (char-at *bml-source* i) "\n")
+      (line-col--at (+ i 1) off (+ line 1) 1)
+      (line-col--at (+ i 1) off line (+ col 1)))))
+
+(defn line-col (off)
+  "1-based `[line col]` of byte offset `off` in *bml-source*."
+  (line-col--at 0 off 1 1))
+
+(defn bml-error (s & parts)
+  "Raise a `bml:line:col: …` error located at the start of suffix `s` in the source."
+  (let ([line col] (line-col (- (string-length *bml-source*) (string-length s))))
+    (error (str "bml:" line ":" col ": " (apply str parts)))))
 
 ; ---- embedded Brood: read an expression, expanding the `@name` assign shorthand ----
 ; `@count` reads as `(get model :count)` (HEEx-style) — a field of the render's `model`
@@ -126,7 +155,7 @@
 
 (defn interp-end (s i depth in-str esc)
   (if (>= i (string-length s))
-    (error "bml: unterminated { in template")
+    (bml-error s "unterminated { interpolation")
     (let (c (char-at s i)
           next (+ i 1))
       (cond
@@ -159,9 +188,11 @@
 
 (defn quote-end (s i)
   "Index of the attribute string's closing `\"`, skipping over `{…}` interpolation
-  regions (a `\"` inside `{…}` belongs to an embedded Brood string, not the attribute)."
+  regions (a `\"` inside `{…}` belongs to an embedded Brood string, not the attribute)
+  and `\\`-escaped chars (so `\\{` doesn't open an interpolation)."
   (cond
-    (>= i (string-length s)) (error "bml: unterminated attribute string")
+    (>= i (string-length s)) (bml-error s "unterminated attribute string")
+    (= (char-at s i) "\\") (quote-end s (+ i 2))
     (= (char-at s i) "\"") i
     (= (char-at s i) "{") (let (body (substring s (+ i 1) (string-length s))
                                 end (interp-end body 0 0 false false))
@@ -174,10 +205,15 @@
         end (quote-end body 0))
     [(substring body 0 end) (substring body (+ end 1) (string-length body))]))
 
+(defn brace-char? (c) (or (= c "{") (= c "}")))
+
 (defn attr-parts (s acc lit)
-  "Split an attribute string into literal-text and `{expr}` parts (forms), in order."
+  "Split an attribute string into literal-text and `{expr}` parts (forms), in order.
+  `\\{`/`\\}` are literal braces."
   (cond
     (= (string-length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
+      (attr-parts (substring s 2 (string-length s)) acc (str lit (char-at s 1)))
     (= (char-at s 0) "{") (let ([inner rest] (brace-inner s)
                                 acc2 (if (= lit "") acc (cons lit acc)))
                             (attr-parts rest (cons (read-expr inner) acc2) ""))
@@ -249,7 +285,7 @@
               (if (and (> (string-length s2) 0) (= (char-at s2 0) "{"))
                 (let ([raw s3] (brace-inner s2))
                   (parse-attrs s3 attrs (assoc directives k raw)))
-                (error "bml: directive " k " needs a brace value, e.g. " k "={…}"))
+                (bml-error s2 "directive " k " needs a brace value, e.g. " k "={…}"))
               (let ([v s3] (parse-attr-value s2))
                 (parse-attrs s3 (assoc attrs (keyword k) v) directives))))
           (parse-attrs s1 (assoc attrs (keyword k) true) directives))))))
@@ -261,22 +297,79 @@
     (into [(keyword tag) attrs] children)
     [(keyword tag) attrs]))
 
-(defn parse-element (s)
-  "`s` begins with `<`; returns `[form rest]` for one element (directives applied)."
-  (let (s1 (substring s 1 (string-length s))
-        [tag s2] (read-while s1 name-char? "")
+(defn raw-children (content)
+  "The child list for a raw-text element: its content emitted verbatim (unescaped),
+  or nil when empty."
+  (if (= content "") nil (list {:__raw__ content})))
+
+(defn parse-raw-element (tag attrs directives after)
+  "Parse the body of a raw-text element (`<script>`/`<style>`): everything up to the
+  matching close tag is taken verbatim, with no interpolation or nested-tag parsing."
+  (let (close (str "</" tag)
+        idx (index-of after close))
+    (if (< idx 0)
+      (error "bml: unterminated <" tag "> (missing " close ">)")
+      (let (content (substring after 0 idx)
+            rest (expect-close (substring after idx (string-length after)) tag))
+        [(apply-directives (build-elem tag attrs (raw-children content)) directives) rest]))))
+
+; ---- components: <.name attrs>children</.name> → (name {attrs :children (list …)}) ----
+; A component is an ordinary function of one assigns map returning Hiccup. Attributes
+; become assigns (keyword keys); inner markup is passed as the `:children` assign, which
+; the component places with `(get assigns :children)`.
+
+(defn build-component (name attrs children)
+  (let (callee (read-string name)
+        assigns (if (and children (not (empty? children)))
+                  (assoc attrs :children (cons 'list children))
+                  attrs))
+    (list callee assigns)))
+
+(defn parse-component (s)
+  "`s` begins with `<.`; returns `[form rest]` for a component call."
+  (let (s1 (substring s 2 (string-length s))
+        [name s2] (read-while s1 name-char? "")
         [attrs directives s3] (parse-attrs s2 {} {}))
     (cond
-      (starts-with? s3 "/>") [(apply-directives (build-elem tag attrs nil) directives) (substring s3
-                                                                                         2
-                                                                                         (string-length s3))]
-      (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3)))
-                              (if (void-tag? tag)
-                                [(apply-directives (build-elem tag attrs nil) directives) after]
-                                (let ([children s4] (parse-nodes after)
-                                      s5 (expect-close s4 tag))
-                                  [(apply-directives (build-elem tag attrs children) directives) s5])))
-      else (error "bml: malformed tag <" tag " …"))))
+      (starts-with? s3 "/>") [(apply-directives (build-component name attrs nil) directives)
+                              (substring s3 2 (string-length s3))]
+      (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3))
+                                  [children s4] (parse-nodes after)
+                                  s5 (expect-close-component s4 name))
+                              [(apply-directives (build-component name attrs children) directives) s5])
+      else (error "bml: malformed component <." name " …"))))
+
+(defn expect-close-component (s name)
+  "Consume the `</.name>` closing a component; returns the rest. Errors on a mismatch."
+  (if (not (starts-with? s "</."))
+    (error "bml: expected </." name "> to close component <." name ">")
+    (let (s1 (substring s 3 (string-length s))
+          [nm s2] (read-while s1 name-char? "")
+          s2 (skip-ws s2))
+      (cond
+        (not (= nm name)) (error "bml: </." nm "> closes the wrong component, expected </." name ">")
+        (starts-with? s2 ">") (substring s2 1 (string-length s2))
+        else (error "bml: malformed component close </." name)))))
+
+(defn parse-element (s)
+  "`s` begins with `<`; returns `[form rest]` for one node — a component when the tag
+  starts with `.` (`<.name …>`), otherwise an ordinary element (directives applied)."
+  (if (starts-with? s "<.")
+    (parse-component s)
+    (let (s1 (substring s 1 (string-length s))
+          [tag s2] (read-while s1 name-char? "")
+          [attrs directives s3] (parse-attrs s2 {} {}))
+      (cond
+        (starts-with? s3 "/>") [(apply-directives (build-elem tag attrs nil) directives)
+                                (substring s3 2 (string-length s3))]
+        (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3)))
+                                (cond
+                                  (void-tag? tag) [(apply-directives (build-elem tag attrs nil) directives) after]
+                                  (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
+                                  else (let ([children s4] (parse-nodes after)
+                                             s5 (expect-close s4 tag))
+                                         [(apply-directives (build-elem tag attrs children) directives) s5])))
+        else (error "bml: malformed tag <" tag " …")))))
 
 (defn expect-close (s tag)
   "Consume the `</tag>` closing `tag`; returns the rest. Errors on a mismatch."
@@ -313,15 +406,19 @@
              (parse-nodes--acc rest acc)
              (parse-nodes--acc rest (cons txt acc))))))
 
-(defn text-end (s i)
-  (if (>= i (string-length s))
-    i
-    (let (c (char-at s i))
-      (if (or (= c "<") (= c "{")) i (text-end s (+ i 1))))))
-
 (defn parse-text (s)
-  (let (end (text-end s 0))
-    [(substring s 0 end) (substring s end (string-length s))]))
+  "Consume text up to the next `<` or `{`; returns `[text rest]`. `\\{`/`\\}` are
+  literal braces (so a `{` need not start an interpolation)."
+  (parse-text--at s ""))
+
+(defn parse-text--at (s acc)
+  (cond
+    (= (string-length s) 0) [acc s]
+    (= (char-at s 0) "<")   [acc s]
+    (= (char-at s 0) "{")   [acc s]
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
+      (parse-text--at (substring s 2 (string-length s)) (str acc (char-at s 1)))
+    else (parse-text--at (substring s 1 (string-length s)) (str acc (char-at s 0)))))
 
 ; ---- entry point ----
 
@@ -333,12 +430,13 @@
   "Parse BML source into a single Hiccup form — the body of a view's `render`.
   Multiple top-level nodes become a `(list …)`; one node is returned bare; an empty
   template is `nil`."
-  (let ([nodes rest] (parse-nodes (skip-ws src)))
-    (cond
-      (not (blank? rest)) (error "bml: unexpected trailing content: " rest)
-      (empty? nodes) nil
-      (= (count nodes) 1) (first nodes)
-      else (cons 'list nodes))))
+  (binding (*bml-source* src)
+    (let ([nodes rest] (parse-nodes (skip-ws src)))
+      (cond
+        (not (blank? rest)) (bml-error rest "unexpected trailing content: " rest)
+        (empty? nodes) nil
+        (= (count nodes) 1) (first nodes)
+        else (cons 'list nodes)))))
 
 ; ---- compile-time wiring: resolve a sibling .bml and turn it into a function body
 ; ---- Shared by `deflive`'s `(template …)` clause and the `deftemplate` macro below.
