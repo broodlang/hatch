@@ -1,8 +1,9 @@
 ; the listener runs under a supervisor (auto-restart)
 (defmodule http/server
   "HTTP/1.1 TCP server: a supervised listener process plus per-connection workers.
-  Tier-1 hardening (read timeout, request-size cap, max connections) is configurable
-  via the config map passed to `start` — see docs/robustness.md."
+  Hardening (read timeout, request-size cap, max connections, generic error pages,
+  graceful-shutdown drain) is configurable via the config map passed to `start` — see
+  docs/robustness.md. `stop` drains in-flight connections before tearing the server down."
   (:use http/request)
   (:use http/response)
   (:use http/websocket)
@@ -15,11 +16,14 @@
 ;   :error-handler     — (fn (request err-message) -> response) for a handler that raises;
 ;                        default `server-error-resp`, a generic 500 that leaks no internals
 ;                        (the detail goes to the [:hatch :request :exception] telemetry event)
+;   :shutdown-grace-ms — on `stop`, how long to let in-flight connections finish before
+;                        hard-killing stragglers (stop first stops accepting new ones)
 (def default-config
   {:read-timeout-ms 30000
    :max-request-bytes 8388608
    :max-connections 1024
-   :error-handler (fn (request err) (server-error-resp))})
+   :error-handler (fn (request err) (server-error-resp))
+   :shutdown-grace-ms 5000})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -62,7 +66,7 @@
 (defn listen-and-serve (port handler ws-handler config)
   (let (lsock (bind-retry port 25))
     (println (str "listening on http://localhost:" port))
-    (listener--loop lsock handler ws-handler config 0)))
+    (listener--loop lsock handler ws-handler config (list))))
 
 (defn bind-retry (port attempts)
   "tcp-listen on `port`, retrying briefly while the address is still in use. On a
@@ -78,29 +82,77 @@
         (do (sleep 10) (bind-retry port (- attempts 1)))
         (error (error-message e))))))
 
+(defn drain-and-wait (listener)
+  "Ask `listener` to drain (stop accepting, let in-flight connections finish up to
+  :shutdown-grace-ms, then kill stragglers) and block until it reports `:drained` — or
+  until it's already gone. Monitors so a dead listener can't hang us."
+  (let (m (monitor listener))
+    (send listener [:drain (self)])
+    (receive
+      (:drained nil)
+      ([:down ~m _ _] nil))
+    (demonitor m)
+    ; flush a late down
+    (receive ([:down ~m _ _] nil) (after 0 nil))
+    nil))
 (defn stop (port)
-  "Stop the HTTP server listening on `port`: tear down its supervisor and listener."
-  (let (sup (whereis (supervisor-name port)))
+  "Gracefully stop the HTTP server on `port`: the listener stops accepting, lets in-flight
+  connections finish (up to :shutdown-grace-ms, then hard-kills stragglers), and only then
+  is the supervisor torn down — so a clean `stop` doesn't cut off active requests."
+  (let (sup (whereis (supervisor-name port))
+        listener (whereis (listener-name port)))
     (if sup
-      (supervisor/stop-supervisor sup)
+      (do
+        (when listener (drain-and-wait listener))
+        (supervisor/stop-supervisor sup))
       (println (str "http/server: no server running on port " port)))))
 
-; The listener carries the live-connection count: it `monitor`s each worker and frees
-; the slot on the worker's `[:down …]`, and refuses (closes) a connection over
-; `:max-connections` rather than spawning an unbounded number of workers.
-(defn listener--loop (lsock handler ws-handler config conns)
+; The listener carries the live in-flight worker pids: it `monitor`s each worker and drops
+; it on the worker's `[:down …]`, refuses (closes) a connection over `:max-connections`
+; rather than spawning unboundedly, and on `:drain` (graceful `stop`) waits for those
+; workers to finish before letting the process exit.
+(defn listener--without (workers pid)
+  "`workers` minus `pid` — order is irrelevant, it's a bag of in-flight worker pids."
+  (fold (fn (acc w) (if (= w pid) acc (cons w acc))) (list) workers))
+
+(defn listener--kill-all (workers)
+  "Hard-kill every worker in `workers` (drain deadline reached). Returns nil."
+  (fold (fn (_ w) (exit w :kill) nil) nil workers))
+
+(defn listener--drain (workers deadline from)
+  "Wait for the in-flight `workers` to finish, up to `deadline` (ms epoch); past it, hard-
+  kill the stragglers. Either way reply `:drained` to `from` and let the listener exit.
+  Late `[:tcp-accept]`s (a connection that slipped in as we closed the socket) are refused."
+  (if (empty? workers)
+    (send from :drained)
+    (let (remaining (- deadline (now)))
+      (if (<= remaining 0)
+        (do (listener--kill-all workers) (send from :drained))
+        (receive
+          ([:down _ pid _] (listener--drain (listener--without workers pid) deadline from))
+          ([:tcp-accept _ client] (do (tcp-close client) (listener--drain workers deadline from)))
+          (after remaining (do (listener--kill-all workers) (send from :drained))))))))
+
+(defn listener--loop (lsock handler ws-handler config workers)
   (receive
     ([:tcp-accept ~lsock client]
-      (if (>= conns (get config :max-connections))
+      (if (>= (count workers) (get config :max-connections))
         (do
           ; over capacity — refuse without spawning a worker
           (tcp-close client)
-          (listener--loop lsock handler ws-handler config conns))
+          (listener--loop lsock handler ws-handler config workers))
         (let (worker (spawn (worker--run client handler ws-handler config "")))
           (monitor worker)
           (tcp-controlling-process client worker)
-          (listener--loop lsock handler ws-handler config (+ conns 1)))))
-    ([:down _ _ _] (listener--loop lsock handler ws-handler config (if (> conns 0) (- conns 1) 0)))
+          (listener--loop lsock handler ws-handler config (cons worker workers)))))
+    ([:down _ pid _] (listener--loop lsock
+                       handler
+                       ws-handler
+                       config
+                       (listener--without workers pid)))
+    ([:drain from] (do
+                     (tcp-close lsock)
+                     (listener--drain workers (+ (now) (get config :shutdown-grace-ms)) from)))
     (:stop (tcp-close lsock)
       (println "http/server: stopped"))))
 

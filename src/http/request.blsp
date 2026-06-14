@@ -18,12 +18,29 @@
             (match (parse-request-line req-line)
               ([:error e] [:error e])
               ([:ok method path query]
-                (let (headers (parse-headers header-lines))
+                (let (headers (parse-headers header-lines)
+                      buflen (string-length buf))
                   (cond
-                    ; We don't de-chunk: reject Transfer-Encoding rather than
-                    ; mis-read a chunked body as a pipelined second request
-                    ; (request smuggling). De-chunking is a future Tier-2 item.
-                    (contains? headers :transfer-encoding) [:error "transfer-encoding not supported"]
+                    ; Transfer-Encoding *and* Content-Length is ambiguous framing
+                    ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
+                    (and (contains? headers :transfer-encoding)
+                      (contains? headers :content-length)) [:error "Transfer-Encoding with Content-Length"]
+                    ; Chunked Transfer-Encoding: de-chunk the body. Any other TE coding
+                    ; (gzip, …) we don't decode, so reject rather than mis-frame it.
+                    (contains? headers :transfer-encoding) (if (chunked? (get headers
+                                                                           :transfer-encoding))
+                                                             (match (dechunk-body buf
+                                                                      body-start
+                                                                      buflen)
+                                                               ([:incomplete] [:incomplete])
+                                                               ([:error e] [:error e])
+                                                               ([:ok body remainder] [:ok (mk-request method
+                                                                                            path
+                                                                                            query
+                                                                                            headers
+                                                                                            body)
+                                                                                       remainder]))
+                                                             [:error "unsupported transfer-encoding"])
                     ; Conflicting Content-Length values → ambiguous framing.
                     (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
                     ; Content-Length, when present, must be a non-negative
@@ -31,22 +48,98 @@
                     ; body-start and `substring` threw, crashing the worker.
                     (not (valid-content-length? (get headers :content-length))) [:error "invalid Content-Length"]
                     else (let (clen (content-length-value (get headers :content-length))
-                               body-end (+ body-start clen)
-                               buflen (string-length buf))
+                               body-end (+ body-start clen))
                            (if (< buflen body-end)
                              [:incomplete]
-                             [:ok {:method method
-                                   :path path
-                                   :query query
-                                   :params (parse-query query)
-                                   :version "1.1"
-                                   :headers headers
-                                   :body (substring buf
-                                           body-start
-                                           body-end)}
-                               (substring buf
-                                 body-end
-                                 buflen)]))))))))))))
+                             [:ok (mk-request method
+                                    path
+                                    query
+                                    headers
+                                    (substring buf body-start body-end))
+                               (substring buf body-end buflen)]))))))))))))
+
+(defn mk-request (method path query headers body)
+  "Build the request map shared by the Content-Length and chunked paths."
+  {:method method
+   :path path
+   :query query
+   :params (parse-query query)
+   :version "1.1"
+   :headers headers
+   :body body})
+
+;; ---- chunked Transfer-Encoding (RFC 7230 §4.1) ------------------------------
+(defn chunked? (te)
+  "True if the Transfer-Encoding value is exactly `chunked` (the only coding we decode)."
+  (= (lower (trim te)) "chunked"))
+
+(defn idx-from (s needle from)
+  "Index of `needle` in `s` at or after `from`, or -1."
+  (let (i (index-of (substring s from (string-length s)) needle))
+    (if (= i -1) -1 (+ from i))))
+
+(defn hex-digit-val (c)
+  "The value 0–15 of hex digit char `c`, or nil if it isn't one."
+  (let (n (char->int c))
+    (cond
+      (and (>= n 48) (<= n 57)) (- n 48)
+      ; 0-9
+      (and (>= n 97) (<= n 102)) (- n 87)
+      ; a-f
+      (and (>= n 65) (<= n 70)) (- n 55)
+      ; A-F
+      else nil)))
+
+(defn parse-hex (s)
+  "Parse hex string `s` to a non-negative integer, or nil if empty/invalid."
+  (if (blank? s)
+    nil
+    (fold (fn (acc c)
+            (if (nil? acc)
+              nil
+              (let (d (hex-digit-val c)) (if (nil? d) nil (+ (* acc 16) d)))))
+      0
+      (string->list s))))
+
+(defn dechunk-body (buf pos buflen)
+  "De-chunk an HTTP/1.1 chunked body in `buf` from `pos`. Returns
+  `[:ok decoded remainder]`, `[:incomplete]` (need more bytes), or `[:error msg]`."
+  (dechunk--loop buf pos buflen ""))
+
+(defn dechunk--trailers (buf pos buflen)
+  "Skip any trailer headers after the last (0-size) chunk; return the index past the
+  terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
+  (let (eol (idx-from buf "\r\n" pos))
+    (cond
+      (= eol -1) -1
+      (= eol pos) (+ eol 2)
+      ; empty line → end of trailers
+      else (dechunk--trailers buf (+ eol 2) buflen))))
+
+(defn dechunk--loop (buf pos buflen acc)
+  "Decode one chunk at `pos` and recurse, accumulating decoded bytes in `acc`."
+  (let (eol (idx-from buf "\r\n" pos))
+    (if (= eol -1)
+      ; chunk-size line not fully buffered
+      [:incomplete]
+      (let (size-line (substring buf pos eol)
+            ; a chunk size may carry extensions: "1a;name=val" — take the part before ";"
+            semi (index-of size-line ";")
+            size-tok (if (= semi -1) size-line (substring size-line 0 semi))
+            size (parse-hex (trim size-tok)))
+        (cond
+          (nil? size) [:error "invalid chunk size"]
+          (= size 0) (let (end (dechunk--trailers buf (+ eol 2) buflen))
+                       (if (= end -1) [:incomplete] [:ok acc (substring buf end buflen)]))
+          else (let (data-start (+ eol 2)
+                     data-end (+ data-start size)
+                     after (+ data-end 2))
+                 ; chunk data is followed by a CRLF
+                 (if (< buflen after)
+                   [:incomplete]
+                   (if (= (substring buf data-end after) "\r\n")
+                     (dechunk--loop buf after buflen (str acc (substring buf data-start data-end)))
+                     [:error "malformed chunk"]))))))))
 
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."

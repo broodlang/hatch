@@ -1,0 +1,115 @@
+(defmodule web-presence-test
+  (:use web/presence)
+  (:use test))
+
+;; Presence is process-level: a registry tracks {topic -> members} and pushes the roster to
+;; present members via send-info ([:info {:presence …}]), auto-removing a member when its
+;; process dies. Roster assertions poll the synchronous `roster` (registry updates are async
+;; w.r.t. the caller). The test process stays untracked for the roster tests; the
+;; notification test uses relay helpers.
+;;
+;; Helpers idle with `(receive ([:never] _) (after …))` — a never-matching pattern that
+;; blocks until killed. A bare `(receive (after …))` with no pattern can return immediately
+;; when an unmatched message (e.g. this member's own roster push) is already in the mailbox,
+;; which would let the helper exit and be reaped before the test observes it.
+
+(defn snooze (ms)
+  "Block ~ms with no side effect (a never-matching receive)."
+  (receive ([:never] nil) (after ms nil)))
+
+(defn roster-keys (topic)
+  (map (fn (e) (get e :key)) (roster topic)))
+
+(defn wait-key (topic key tries)
+  (cond
+    (member? key (roster-keys topic)) true
+    (<= tries 0) false
+    else (do (snooze 50) (wait-key topic key (- tries 1)))))
+
+(defn wait-key-gone (topic key tries)
+  (cond
+    (not (member? key (roster-keys topic))) true
+    (<= tries 0) false
+    else (do (snooze 50) (wait-key-gone topic key (- tries 1)))))
+
+(defn tracked-member (topic key parent)
+  "Track on `topic` under `key`, barrier until the registry processed it, tell `parent`,
+  then block until killed."
+  (track topic key {})
+  (roster topic)
+  (send parent [:tracked])
+  (receive ([:never] nil) (after 15000 nil)))
+
+;; A relay helper: tracks, then forwards every roster it's pushed to `parent` as the list of
+;; keys [:roster keys]. Lets the test observe notifications without being tracked itself.
+(defn relay-member (topic key parent)
+  (track topic key {})
+  (roster topic)
+  (send parent [:tracked])
+  (relay-loop parent))
+
+(defn relay-loop (parent)
+  (receive
+    ([:info m] (do
+                 (send parent [:roster (map (fn (e) (get e :key)) (get m :presence))])
+                 (relay-loop parent)))
+    (after 15000 nil)))
+
+(defn drain-roster ()
+  (if (= (receive ([:roster _] :got) (after 100 :none)) :none) nil (drain-roster)))
+
+(defn wait-roster-without (key tries)
+  "Scan pushed rosters until one arrives that does NOT contain `key`."
+  (if (<= tries 0)
+    false
+    (let (r (receive ([:roster ks] ks) (after 300 :none)))
+      (cond
+        (= r :none) (wait-roster-without key (- tries 1))
+        (not (member? key r)) true
+        else (wait-roster-without key (- tries 1))))))
+
+(describe "track + roster"
+  (test "tracking adds a member to the topic"
+    (do
+      (track "pres:a" "alice" {})
+      (let (in? (wait-key "pres:a" "alice" 60))
+        (untrack "pres:a")
+        (assert= in? true))))
+  (test "untrack removes the member"
+    (do
+      (track "pres:b" "bob" {})
+      (wait-key "pres:b" "bob" 60)
+      (untrack "pres:b")
+      (assert= (wait-key-gone "pres:b" "bob" 60) true)))
+  (test "metadata is carried in the roster"
+    (do
+      (track "pres:m" "m1" {:color "blue"})
+      (wait-key "pres:m" "m1" 60)
+      (let (e (first (filter (fn (x) (= (get x :key) "m1")) (roster "pres:m"))))
+        (untrack "pres:m")
+        (assert= (get (get e :meta) :color) "blue")))))
+
+(describe "auto-leave on death"
+  (test "a member whose process dies is removed from the roster"
+    (let (me (self)
+          h (spawn (tracked-member "pres:d" "leaver" me)))
+      (receive ([:tracked] nil) (after 10000 nil))
+      (let (was-in? (wait-key "pres:d" "leaver" 60))
+        (exit h :kill)
+        (assert= was-in? true)
+        (assert= (wait-key-gone "pres:d" "leaver" 60) true)))))
+
+(describe "roster push notifications"
+  (test "present members are pushed an updated roster on join and leave"
+    (let (me (self)
+          a (spawn (relay-member "pres:n" "A" me))
+          _a (receive ([:tracked] nil) (after 10000 nil))
+          b (spawn (relay-member "pres:n" "B" me))
+          _b (receive ([:tracked] nil) (after 10000 nil)))
+      ; A was present when B joined, so the roster grows to include B
+      (assert= (wait-key "pres:n" "B" 60) true)
+      (drain-roster)
+      (exit b :kill)
+      ; after B dies, A is pushed a roster without B
+      (assert= (wait-roster-without "B" 60) true)
+      (exit a :kill))))

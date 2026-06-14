@@ -69,11 +69,13 @@
                  (delete-session "a")))
       (assert= (get-session conn "a") nil)
       (assert= (get-session conn "b") "2")))
-  (test "clear-session empties and writes an empty session"
+  (test "clear-session expires the cookie (Max-Age=0), not an empty signed session"
     (let (cookie (encode-session *secret* {"user" "z"})
           conn (clear-session ((fetch-session *secret*) (conn-with cookie)))
-          r (conn->response conn))
-      (assert= (decode-session *secret* (session-cookie-value r)) {}))))
+          sc (first (get (get (conn->response conn) :headers) :set-cookie)))
+      ; the browser is told to drop the cookie, and there's no decodable session left
+      (assert= (includes? sc "Max-Age=0") true)
+      (assert= (decode-session *secret* (session-cookie-value (conn->response conn))) {}))))
 
 (describe "flash one-shot lifetime"
   (test "put-flash on request 1 → readable on request 2 → gone on request 3"

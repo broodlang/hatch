@@ -87,6 +87,14 @@
                        :body "{\"name\":\"bob\",\"n\":2}"}))
       (assert= (param conn "name") "bob")
       (assert= (param conn "n") 2)))
+  (test "nested JSON object keys are stringified deeply (not left as keywords)"
+    (let (conn (build {:method "POST"
+                       :path "/x"
+                       :query ""
+                       :params {}
+                       :headers {:content-type "application/json"}
+                       :body "{\"user\":{\"name\":\"ada\"}}"}))
+      (assert= (param conn "user") {"name" "ada"})))
   (test "body params override query params on a key clash"
     (let (conn (build {:method "POST"
                        :path "/x"
@@ -148,7 +156,12 @@
       (assert= (get (get r :headers) :set-cookie)
         (list "sid=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"))))
   (test "no cookies → no Set-Cookie header"
-    (assert= (get (get (conn->response (build *req*)) :headers) :set-cookie) nil)))
+    (assert= (get (get (conn->response (build *req*)) :headers) :set-cookie) nil))
+  (test "cookie name/value are sanitized against attribute/header injection"
+    (let (r (conn->response (put-cookie (build *req*) "sid" "abc; Domain=evil.com\r\nX: y")))
+      ; the ';' and CR/LF are stripped, so no extra attribute or header can be smuggled
+      (assert= (get (get r :headers) :set-cookie)
+        (list "sid=abc Domain=evil.comX: y; Path=/; SameSite=Lax; HttpOnly")))))
 
 (describe "before-send"
   (test "callbacks run in order at conn->response time"

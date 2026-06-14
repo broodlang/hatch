@@ -29,7 +29,7 @@ Without these the server is trivially exhausted by a single bad client.
   Now the listener tracks live connections (one `monitor` per worker, decrement on
   `[:down …]`) and **refuses** (closes) a new connection over the cap.
 
-## Tier 2 — correctness / info-leak  🚧 (in progress)
+## Tier 2 — correctness / info-leak  ✅ (done)
 
 - **Don't leak internals in the default 500.** ✅ `http/server`'s fallback no longer
   echoes the exception text. On a raising handler it emits a `[:hatch :request :exception]`
@@ -37,20 +37,43 @@ Without these the server is trivially exhausted by a single bad client.
   `:error-handler` returns. Knob: `:error-handler` — a `(fn [request err-message] →
   response)`, default `server-error-resp` (a generic 500 with no detail in the body). The
   old `error-resp` (which embeds the message) remains as an opt-in debugging helper.
-- **Chunked `Transfer-Encoding`.** The parser only honors `Content-Length`; a
-  `chunked` request is mis-parsed. Add request de-chunking.
-- **Graceful shutdown / drain.** `stop` brutal-kills the listener; active connections
-  aren't drained. Add a drain phase (stop accepting, let in-flight finish, deadline).
-  Knob: `:shutdown-grace-ms`.
-- **WebSocket limits.** No max frame size and fragmented (continuation-frame) messages
-  aren't reassembled. Knobs: `:ws-max-frame-bytes`, `:ws-max-message-bytes`.
+- **Chunked `Transfer-Encoding`.** ✅ `http/request` now de-chunks a
+  `Transfer-Encoding: chunked` body (chunk sizes, extensions, trailers, pipelined
+  remainder). `Transfer-Encoding` + `Content-Length` together is rejected (smuggling),
+  and any non-`chunked` coding (gzip, …) is rejected rather than mis-framed.
+- **Graceful shutdown / drain.** ✅ `stop` now drains: the listener stops accepting
+  (closes the listen socket), waits for in-flight workers to finish up to
+  `:shutdown-grace-ms` (default 5000), hard-kills any stragglers past the deadline, and
+  only then tears down the supervisor. The listener tracks live worker pids (not just a
+  count) so it can wait on and kill them.
+- **WebSocket limits.** ✅ `http/websocket` now reassembles fragmented messages
+  (a non-FIN data frame + continuation frames) and caps both a single frame
+  (`*ws-max-frame-bytes*`, default 65535 — the 16-bit max, since 64-bit lengths are
+  rejected) and a reassembled message (`*ws-max-message-bytes*`, default 1 MiB — the
+  active guard against a fragment flood). An interleaved non-continuation frame
+  mid-message is rejected. The caps are **module-level defaults by design**, not server
+  `config` knobs: they're a protocol-security floor identical for every server, and
+  `parse-frame` is reached deep in the live read loop (`live-dispatcher` → session →
+  `recv-frame--loop`), so per-server plumbing would mean breaking the `(sock request)`
+  ws-handler contract for tuning nobody changes. `parse-message` takes the caps as
+  arguments if a caller ever needs to override them.
 
 ## Tier 3 — features / deeper hardening  ⬜ (planned)
 
 - **Server-side TLS** (HTTPS / WSS) — today TLS is client-only (`tls-request`).
-- **Supervise the live registries** — `:hatch-live` / `:hatch-live-routes` are
-  lazily spawned; a crash empties the route table until the next module load. Put them
-  under a supervisor (with state recovery / re-registration).
+- **Supervise the live registries** — ✅ `:hatch-live`, `:hatch-live-routes`, and a new
+  `:hatch-live-routes-vault` run under a `:one-for-one` supervisor (`:hatch-live-sup`),
+  started once at `web/live` load. The route registry mirrors every entry to the vault
+  and re-seeds from it on (re)start, and *monitors* the vault to re-mirror when the vault
+  restarts — so a registry crash no longer empties the route table. `live--ensure`
+  self-heals: it (re)starts the supervisor on demand if it isn't running.
+  (Note: the registry tests pass under the default and `-j2+` runners but fail under
+  `nest test --max-parallel 1`. That's a **brood runtime bug**, not this code: with a
+  single worker thread, a `nest test` body that makes a synchronous call to another
+  spawned process deadlocks (the callee never gets scheduled). Minimal repro — no hatch:
+  a test that `(spawn …)`s a server, `(send)`s it a ping and `(receive …)`s the reply
+  times out under `-j1`, passes under `-j2`. `nest run -j1` is unaffected. The committed
+  registry tests failed under `-j1` the same way before this change.)
 - **HTTP/2** — its own project (HPACK, framing, stream multiplexing, flow control);
   this is where genuine process-per-request (per stream) would live.
 

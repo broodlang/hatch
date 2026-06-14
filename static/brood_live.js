@@ -84,10 +84,19 @@ const BroodLive = (() => {
     }
 
     _handle(msg) {
-      if (msg.event === "render") {
-        this._patch(msg.html);
+      if (msg.event === "join") {
+        // Full render: the static skeleton plus every dynamic slot. We keep both, so a
+        // later "diff" only needs to carry the slots that changed.
+        this.statics = msg.s || [];
+        this.dynamics = msg.d || [];
+        this._patch(this._assemble());
       } else if (msg.event === "diff") {
-        this._patch(msg.html);
+        // Minimal update: a map of {slotIndex: newValue} for the dynamics that changed.
+        // Patch them into our dynamics array, re-interleave with the (unchanged) statics,
+        // and morph — so the wire only ever carries what actually changed.
+        const d = msg.d || {};
+        for (const k in d) this.dynamics[k] = d[k];
+        this._patch(this._assemble());
       } else if (msg.event === "redirect") {
         // The navigate target isn't a live view — fall back to a full page load.
         window.location.href = msg.path;
@@ -99,9 +108,22 @@ const BroodLive = (() => {
       }
     }
 
-    // Morph the container's content to the new HTML.
-    // For the MVP, this is an innerHTML swap. A future version
-    // will use a proper morphdom-style algorithm.
+    // Assemble the full HTML by interleaving statics with the current dynamics:
+    // s0 + d0 + s1 + d1 + ... + sn  (statics has one more entry than dynamics).
+    _assemble() {
+      const s = this.statics || [], d = this.dynamics || [];
+      let out = "";
+      for (let i = 0; i < s.length; i++) {
+        out += s[i];
+        if (i < d.length) out += d[i];
+      }
+      return out;
+    }
+
+    // Morph the container's content to the new HTML in place (so focus/caret survive
+    // a re-render). The morph below matches children by INDEX, not by key — a keyed
+    // morph (data-key/id) is a TODO; until then a reorder/insert above an interactive
+    // element rebuilds it and loses its transient state.
     _patch(html) {
       const next = document.createElement("div");
       next.innerHTML = html;
@@ -127,7 +149,9 @@ const BroodLive = (() => {
     }
   }
 
-  // Simple DOM morphing: diff children by key, update text/attrs in-place.
+  // Simple DOM morphing: walk children by INDEX, updating text/attrs in place and
+  // inserting/removing at the tail. Not keyed — a reorder re-clones from the change
+  // point on (TODO: match by data-key/id to preserve node identity across moves).
   function morphChildren(current, next) {
     const cur = Array.from(current.childNodes);
     const nxt = Array.from(next.childNodes);

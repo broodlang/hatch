@@ -59,6 +59,22 @@
         (assert= (get e :session) :admin))
       (assert= (lookup-live "/never-registered-xyz") nil))))
 
+; Tier-3 (docs/robustness.md): the route table survives the registry process crashing —
+; it mirrors to a supervised vault and re-seeds from it on restart.
+(describe "live-route registry survives a crash"
+  (test "a registered route is still there after the registry process is killed"
+    (do
+      (register-live "/crash-test" (fn () {:ok true}) :customer)
+      (assert= (get (lookup-live "/crash-test") :session) :customer)
+      ; hard-kill the route registry; the supervisor restarts it and it re-seeds from the vault
+      (exit (whereis :hatch-live-routes) :kill)
+      ; wait for the supervised restart + re-seed (lookup itself also waits out the window)
+      (sleep 80)
+      (let (e (lookup-live "/crash-test"))
+        (assert= (nil? e) false)
+        (assert= ((get e :spec)) {:ok true})
+        (assert= (get e :session) :customer)))))
+
 (describe "reload-css broadcast"
   ; notify-reload-css fans a [:reload-css] out to every registered session via the
   ; :hatch-live reload registry. Register this test process as a stand-in session, fire

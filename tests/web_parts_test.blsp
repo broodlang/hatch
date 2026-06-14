@@ -1,0 +1,49 @@
+(defmodule web-parts-test
+  (:use web/parts)
+  (:use web/template)
+  (:use test))
+
+;; compile-parts is a macro-time function but is a plain defn, so we can call it on quoted
+;; Hiccup forms here. We check the static skeleton (strings, easy to assert) and the hole
+;; count; the full round-trip (statics + rendered dynamics == direct render) is checked
+;; against real deflive views in web_test_test.
+
+(describe "compile-parts — statics"
+  (test "a fully literal element is one static, no dynamics"
+    (let (p (compile-parts '[:p {} "hi"]))
+      (assert= (get p :statics) ["<p>hi</p>"])
+      (assert= (count (get p :dynamics)) 0)))
+  (test "a literal attr folds into the static"
+    (let (p (compile-parts '[:div {:class "x"} "y"]))
+      (assert= (get p :statics) ["<div class=\"x\">y</div>"])
+      (assert= (count (get p :dynamics)) 0)))
+  (test "a dynamic child splits the statics around the hole"
+    (let (p (compile-parts '[:div {:class "x"} (get model :count)]))
+      (assert= (get p :statics) ["<div class=\"x\">" "</div>"])
+      (assert= (count (get p :dynamics)) 1)))
+  (test "a dynamic attr value becomes its own hole"
+    (let (p (compile-parts '[:div {:class (str "btn " (get model :kind))} "y"]))
+      (assert= (get p :statics) ["<div" ">y</div>"])
+      (assert= (count (get p :dynamics)) 1)))
+  (test "a void element has no closing tag"
+    (let (p (compile-parts '[:input {:value (get model :v)}]))
+      (assert= (get p :statics) ["<input" ">"])
+      (assert= (count (get p :dynamics)) 1)))
+  (test "nested literal elements stay fully static"
+    (assert= (get (compile-parts '[:ul {} [:li {} "a"] [:li {} "b"]]) :statics)
+      ["<ul><li>a</li><li>b</li></ul>"]))
+  (test "an ambiguous attrs-position form makes the whole element opaque"
+    (let (p (compile-parts '[:div attrs-var "y"]))
+      (assert= (get p :statics) ["" ""])
+      (assert= (count (get p :dynamics)) 1))))
+
+(describe "interleave"
+  (test "one hole" (assert= (interleave ["a" "b"] ["X"]) "aXb"))
+  (test "no holes" (assert= (interleave ["only"] []) "only"))
+  (test "two holes" (assert= (interleave ["a" "b" "c"] ["X" "Y"]) "aXbYc")))
+
+(describe "diff-dynamics"
+  (test "one slot changed" (assert= (diff-dynamics ["a" "b"] ["a" "c"]) {1 "c"}))
+  (test "nothing changed" (assert= (diff-dynamics ["a" "b"] ["a" "b"]) {}))
+  (test "all changed" (assert= (diff-dynamics ["a" "b"] ["x" "y"]) {0 "x" 1 "y"}))
+  (test "first only" (assert= (diff-dynamics ["a" "b"] ["x" "b"]) {0 "x"})))

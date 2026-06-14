@@ -1,0 +1,142 @@
+(defmodule web/parts
+  "Static/dynamic split for live views — the minimal-diff renderer (Phoenix HEEx-style).
+
+  `compile-parts` runs at macro-expansion time (called by `deflive`). It walks a Hiccup
+  *form* and splits it into:
+  - `:statics` — a vector of literal HTML string segments, baked at compile time.
+  - `:dynamics` — a list of forms, each of which renders one hole to an HTML string at
+    runtime (with `model` in scope).
+
+  Invariant: the live view's HTML equals `s0 + d0 + s1 + d1 + … + sn`, where the statics
+  interleave with the rendered dynamics and `(count statics) = (count dynamics) + 1`. The
+  statics never change, so on join the server sends statics + dynamics, and on every update
+  only the *changed* dynamic slots — the client re-interleaves and morphs.
+
+  Literal structure (tags, literal attrs, literal text) is folded into statics. A non-literal
+  hole — a value expression, a dynamic attribute value, an `(if …)`/`(for …)`/component call,
+  or anything else — becomes a dynamic. For correctness over granularity, an element whose
+  attrs-position is an ambiguous non-literal form (could be a dynamic attrs map or a child)
+  is emitted whole as one opaque dynamic. Idiomatic views (and all `.bml`-compiled ones) put
+  an attrs map on every element, so this fallback rarely fires.
+
+  `interleave` and `diff-dynamics` are the runtime helpers the session actor uses."
+  ; render / render-attr / escape-html / *void-tags* — reused at compile time and in the
+  ; emitted dynamic forms
+  (:use web/template))
+
+; ---- compile-time predicates ----
+
+(defn elem? (node)
+  "True if `node` is a Hiccup element form: a vector with a keyword head."
+  (and (vector? node) (> (count node) 0) (keyword? (first node))))
+
+(defn literal-attr? (v)
+  "True if an attribute value is a compile-time literal (rendered into a static segment)."
+  (or (string? v) (int? v) (float? v) (bool? v) (nil? v)))
+
+(defn child-or-literal? (v)
+  "True if `v` in the attrs position is really a child (a literal or an element), not a
+  possible attrs map — so the element has no attrs and `v` is its first child."
+  (or (string? v) (int? v) (float? v) (bool? v) (nil? v) (elem? v)))
+
+(defn list-form? (node)
+  "True for a literal `(list …)` form, whose items we can split individually."
+  (and (pair? node) (= (first node) 'list)))
+
+; ---- builder state: {:s reversed-completed-statics :d reversed-dynamic-forms :cur current} ----
+
+(defn emit-static (st s)
+  "Append literal HTML `s` to the segment under construction."
+  (assoc st :cur (str (get st :cur) s)))
+
+(defn emit-dynamic (st form)
+  "Close the current static segment and record `form` (which renders a hole to HTML)."
+  (assoc st
+    :s (cons (get st :cur) (get st :s))
+    :d (cons form (get st :d))
+    :cur ""))
+
+(defn elem-children (node start)
+  "The child forms of element `node`, from index `start` to the end."
+  (map (fn (i) (nth node i)) (range start (count node))))
+
+(defn emit-attr (st kv)
+  "Emit one attribute: a literal value folds into the static segment; a dynamic value
+  becomes a `render-attr` hole (so booleans/vectors/strings are all handled at runtime)."
+  (let (k (nth kv 0)
+        v (nth kv 1))
+    (if (literal-attr? v)
+      (emit-static st (render-attr kv))
+      (emit-dynamic st (list 'web/template/render-attr (list 'vector k v))))))
+
+(defn walk (st node)
+  "Walk one Hiccup `node`, threading the builder state."
+  (cond
+    (nil? node) st
+    (string? node) (emit-static st (escape-html node))
+    (int? node) (emit-static st (str node))
+    (float? node) (emit-static st (str node))
+    (bool? node) st
+    (elem? node) (walk-element st node)
+    (list-form? node) (fold walk st (rest node))
+    else (emit-dynamic st (list 'web/template/render node))))
+
+(defn walk-element (st node)
+  (let (tag (name (first node))
+        n (count node)
+        second (if (> n 1) (nth node 1) nil)
+        has-attrs (map? second)
+        ambiguous (and (> n 1) (not has-attrs) (not (child-or-literal? second))))
+    (if ambiguous
+      ; can't tell a dynamic attrs map from a child — render the whole element at runtime
+      (emit-dynamic st (list 'web/template/render node))
+      (let (attrs (if has-attrs second {})
+            cstart (if has-attrs 2 1)
+            st (emit-static st (str "<" tag))
+            st (fold emit-attr st (entries attrs))
+            st (emit-static st ">"))
+        (if (contains? *void-tags* (keyword tag))
+          st
+          (let (st (fold walk st (elem-children node cstart)))
+            (emit-static st (str "</" tag ">"))))))))
+
+(defn compile-parts (form)
+  "Split a Hiccup `form` into `{:statics <vector of strings> :dynamics <list of forms>}`.
+  Call at macro-expansion time with the form as data."
+  (let (st (walk {:s (list) :d (list) :cur ""} form)
+        statics (reverse (cons (get st :cur) (get st :s)))
+        dynamics (reverse (get st :d)))
+    {:statics (apply vector statics)
+     :dynamics dynamics}))
+
+; ---- runtime: assemble HTML and diff dynamic slots ----
+
+(defn interleave (statics dynamics)
+  "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn."
+  (interleave--at statics dynamics 0 (count statics) ""))
+
+(defn interleave--at (statics dynamics i n acc)
+  (if (>= i n)
+    acc
+    (let (acc (str acc (nth statics i))
+          acc (if (< i (count dynamics)) (str acc (nth dynamics i)) acc))
+      (interleave--at statics dynamics (+ i 1) n acc))))
+
+(defn diff-dynamics (old new)
+  "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole
+  count is fixed by the template, so the two are normally equal length; if they ever differ
+  (defensive), every new slot is reported."
+  (if (= (count old) (count new))
+    (diff--at old new 0 (count new) {})
+    (diff--at (list) new 0 (count new) {})))
+
+(defn diff--at (old new i n acc)
+  (if (>= i n)
+    acc
+    (diff--at old
+      new
+      (+ i 1)
+      n
+      (if (and (< i (count old)) (= (nth old i) (nth new i)))
+        acc
+        (assoc acc i (nth new i))))))

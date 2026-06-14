@@ -101,18 +101,22 @@ Rust — TLS is handled by a reverse proxy.*
 
 ## What's left
 
-### Phase 6 — Static/dynamic template split (diff optimisation)
+### Phase 6 — Static/dynamic template split (diff optimisation) ✅
 
-Currently every event re-sends the full rendered HTML. LiveView's key
-insight is that only the dynamic slots need to change.
+Live updates no longer re-send the full HTML — only the dynamic slots that changed.
 
-- **`web/template` slot compiler** — `deflive` templates compile to
-  `{:static [...] :dynamic fn :fingerprint hash}`. Static strings are
-  sent once on `join`; subsequent events only send changed dynamic slots.
-- **Wire protocol v2** — `{"event":"joined","static":[...],"dynamic":{...}}`
-  then `{"event":"diff","d":{"0":"42"}}` (changed slot indices only)
-- **`brood_live.js` slot patcher** — apply diffs by `data-slot` index
-  instead of full DOM replace
+- **`web/parts` slot compiler** ✅ — `compile-parts` runs at macro time (in `deflive`),
+  splitting a render form into `:statics` (literal HTML, baked once) and `:dynamics`
+  (per-hole forms). Granular for literal structure + value/attr holes; an `(if …)`,
+  `(for …)`, component call, or `(map …)` becomes one opaque dynamic — correct, just
+  coarser. `deflive` emits `render-static` + `render-dynamic` alongside the full `render`,
+  guarded by an invariant test (`interleave(static, dynamic) == render`).
+- **Wire protocol v2** ✅ — `{"event":"join","s":[…],"d":[…]}` on connect, then
+  `{"event":"diff","d":{"0":"42"}}` carrying only the changed slot indices.
+- **`brood_live.js` slot patcher** ✅ — keeps statics + dynamics, patches changed slots,
+  re-interleaves, and morphs (so focus/caret survive).
+- **Still possible later (Option A++):** per-item comprehension diffing (a `:for` is one
+  opaque slot today), and slot fingerprints to drop statics on reconnect.
 
 ### Phase 7 — Sessions, CSRF, and auth
 
@@ -160,11 +164,17 @@ insight is that only the dynamic slots need to change.
 - **Compression** — gzip response middleware plug
 - **Access logging** — structured log plug (method, path, status, ms)
 - **Rate limiting** — token-bucket plug backed by a `defprocess` counter
-- **PubSub** — topic-based broadcast across live sessions, then distributed across
-  Brood nodes (an earlier prototype existed; build it back when a view needs it).
-  Foundation in place: `deflive`'s `(handle-info (msg model) …)` clause + the
-  `web/live/send-info` delivery primitive let any process push an out-of-band message to a
-  live session and re-render. PubSub/Presence layer a topic registry + broadcast on top.
+- **PubSub** ✅ (node-local) — `web/pubsub`: `subscribe`/`unsubscribe`/`broadcast`/
+  `broadcast-from` over string topics, fanning out to subscribers via `send-info` (→ the
+  view's `handle-info`). A named registry process holds `topic → pids` and monitors each
+  subscriber, so a dropped session is auto-removed. Built on `deflive`'s `handle-info`
+  clause + `web/live/send-info`. Demo: `web/views/room`. **Still to do:** distribute
+  broadcasts across Brood nodes (the registry is currently single-node).
+- **Presence** ✅ (node-local) — `web/presence`: `track`/`untrack`/`roster` over string
+  topics. A registry holds `topic → [{:pid :key :meta}]`, monitors each tracked session
+  (auto-leave on death), and pushes the refreshed roster to present members via `send-info`.
+  Demo: `web/views/presence`. **Still to do:** a non-present-observer mode (pair with
+  PubSub) and cross-node/CRDT distribution.
 
 ---
 
