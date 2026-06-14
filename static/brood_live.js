@@ -65,13 +65,15 @@ const BroodLive = (() => {
 
     _scheduleReconnect() {
       clearTimeout(this.reconnectTimer);
-      // Retry at the current delay, then back off. Starting at 250ms keeps the common
-      // case fast — a dev server restarting (nest run --watch) or still booting is
-      // usually back within a beat, so the page reconnects almost immediately instead
-      // of sitting on "Connecting…". The cap stays modest so a truly-down server is
-      // still polled at a sane rate.
-      const delay = this.reconnectDelay;
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5000);
+      // Retry quickly with jitter, then back off only mildly. A dev server restarting
+      // (nest run --watch) or still booting is usually back within a beat, so the page
+      // should reconnect within ~a second of the server returning rather than sitting on
+      // "Connecting…" through a multi-second sleep. The gentle ×1.5 growth capped at
+      // 1000ms keeps a truly-down server from being hammered, while the jitter spreads
+      // many tabs' reconnects so they don't stampede the freshly-restarted server.
+      // `reconnectDelay` resets to the fast base on every successful open (onopen).
+      const delay = this.reconnectDelay * (1 + Math.random() * 0.5);
+      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 1000);
       this.reconnectTimer = setTimeout(() => this._connect(), delay);
     }
 
