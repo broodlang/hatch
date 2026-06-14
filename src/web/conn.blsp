@@ -2,15 +2,15 @@
 
 (defn build (request)
   "Construct a Conn from a raw parsed request map."
-  {:method  (get request :method)
-   :path    (get request :path)
-   :query   (get request :query)
-   :params  (get request :params)
+  {:method (get request :method)
+   :path (get request :path)
+   :query (get request :query)
+   :params (get request :params)
    :headers (get request :headers)
-   :body    (get request :body)
+   :body (get request :body)
    :assigns {}
-   :status  nil
-   :resp-body   ""
+   :status nil
+   :resp-body ""
    :resp-headers {}
    :halted? false})
 
@@ -51,29 +51,35 @@
   (get (get conn :headers) key))
 
 (defn send-resp (conn status body)
-  "Set status and body, returning an http/response-compatible map."
-  {:status  status
-   :body    body
-   :headers (get conn :resp-headers {})})
+  "Set the response status and body on the conn, returning the conn. The web layer
+  works in conns end to end; `conn->response` serializes the final conn for http/server."
+  (assoc conn :status status :resp-body body))
+
+(defn conn->response (conn)
+  "Serialize a finished conn into the `{:status :headers :body}` map http/server sends.
+  Status defaults to 200; headers and body come from the conn's accumulated resp fields."
+  {:status (or (get conn :status) 200)
+   :headers (get conn :resp-headers {})
+   :body (get conn :resp-body "")})
 
 (defn html-resp (conn body)
-  "200 OK HTML response."
+  "200 OK HTML response (conn)."
   (send-resp conn 200 body))
 
 (defn text-resp (conn body)
-  "200 OK plain-text response."
+  "200 OK plain-text response (conn)."
   (send-resp (put-resp-header conn :content-type "text/plain; charset=utf-8") 200 body))
 
 (defn json-resp (conn body)
-  "200 OK JSON response."
+  "200 OK JSON response (conn)."
   (send-resp (put-resp-header conn :content-type "application/json") 200 body))
 
 (defn redirect-resp (conn url &optional (status 302))
-  "Redirect response."
+  "Redirect response (conn)."
   (send-resp (put-resp-header conn :location url) status ""))
 
 (defn not-found-resp (conn &optional (body "<h1>404 Not Found</h1>"))
-  "404 Not Found response."
+  "404 Not Found response (conn)."
   (send-resp conn 404 body))
 
 (defn run-pipeline (conn plugs)

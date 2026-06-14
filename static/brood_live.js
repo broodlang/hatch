@@ -22,7 +22,7 @@ const BroodLive = (() => {
       this.container = container;
       this.socket = null;
       this.connected = false;
-      this.reconnectDelay = 1000;
+      this.reconnectDelay = 250;
       this.reconnectTimer = null;
       sessions.add(this);
       refreshStatus();
@@ -35,7 +35,7 @@ const BroodLive = (() => {
       this.socket = new WebSocket(url);
 
       this.socket.onopen = () => {
-        this.reconnectDelay = 1000;
+        this.reconnectDelay = 250;
         this.connected = true;
         refreshStatus();
         // Send join with current URL params
@@ -59,10 +59,14 @@ const BroodLive = (() => {
 
     _scheduleReconnect() {
       clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = setTimeout(() => {
-        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
-        this._connect();
-      }, this.reconnectDelay);
+      // Retry at the current delay, then back off. Starting at 250ms keeps the common
+      // case fast — a dev server restarting (nest run --watch) or still booting is
+      // usually back within a beat, so the page reconnects almost immediately instead
+      // of sitting on "Connecting…". The cap stays modest so a truly-down server is
+      // still polled at a sane rate.
+      const delay = this.reconnectDelay;
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5000);
+      this.reconnectTimer = setTimeout(() => this._connect(), delay);
     }
 
     _send(msg) {

@@ -47,15 +47,16 @@ Rust — TLS is handled by a reverse proxy.*
 ### Phase 4 — `web/conn` + `web/router` ✅
 - `web/conn` — immutable conn map, `assign`, `halt`, `run-pipeline`,
   `html-resp`, `text-resp`, `json-resp`, `redirect-resp`, `not-found-resp`
-- `web/router` — `parse-pattern` (`:param` capture), `dispatch`, `defrouter`
-  macro that compiles routes at load time
+- `web/router` — `parse-pattern` (`:param` capture, `*splat`), `dispatch`,
+  `defrouter` macro that compiles routes at load time, incl. the `(live …)` clause
+- `web/static` — MIME table + path-safe static file handler
 
 ### Phase 5 — `web/live` ✅
-- `deflive` macro — `mount`/`render`/`on` clauses expand to `defn`s
+- `deflive` macro — `mount`/`render`/`on`/`tick` clauses expand to `defn`s
 - Per-connection session actor loop — receives WS frames, handles events,
   re-renders, sends diffs
-- `ws-handler-for` — factory that bridges `http/server` to a live view module
-- `web/pubsub` — topic-based broadcast across live sessions
+- `(live path module)` router clause + `live-dispatcher` — wire live views in the
+  router; the dispatcher routes WebSocket connections to the right view by path
 - `static/brood_live.js` — vanilla JS client: WS connect, join, event push,
   render/diff handling, DOM morphing, auto-reconnect (~200 lines, no npm)
 
@@ -122,7 +123,8 @@ insight is that only the dynamic slots need to change.
 - **Compression** — gzip response middleware plug
 - **Access logging** — structured log plug (method, path, status, ms)
 - **Rate limiting** — token-bucket plug backed by a `defprocess` counter
-- **`web/pubsub` clustering** — distributed broadcast via Brood's node model
+- **PubSub** — topic-based broadcast across live sessions, then distributed across
+  Brood nodes (an earlier prototype existed; build it back when a view needs it)
 
 ---
 

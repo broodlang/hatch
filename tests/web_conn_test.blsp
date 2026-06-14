@@ -1,15 +1,18 @@
 (defmodule web-conn-test (:use web/conn) (:use test))
 
 (def *req*
-  {:method "GET" :path "/hello" :query "name=world"
-   :params {"name" "world"} :headers {:host "localhost"}
+  {:method "GET"
+   :path "/hello"
+   :query "name=world"
+   :params {"name" "world"}
+   :headers {:host "localhost"}
    :body ""})
 
 (describe "build"
-  (test "method"   (assert= (get (build *req*) :method) "GET"))
-  (test "path"     (assert= (get (build *req*) :path) "/hello"))
-  (test "params"   (assert= (get (build *req*) :params) {"name" "world"}))
-  (test "assigns"  (assert= (get (build *req*) :assigns) {}))
+  (test "method" (assert= (get (build *req*) :method) "GET"))
+  (test "path" (assert= (get (build *req*) :path) "/hello"))
+  (test "params" (assert= (get (build *req*) :params) {"name" "world"}))
+  (test "assigns" (assert= (get (build *req*) :assigns) {}))
   (test "not halted" (assert= (get (build *req*) :halted?) false)))
 
 (describe "assign / get-assign"
@@ -34,22 +37,34 @@
 (describe "send-resp"
   (test "status"
     (assert= (get (send-resp (build *req*) 200 "ok") :status) 200))
-  (test "body"
-    (assert= (get (send-resp (build *req*) 200 "ok") :body) "ok")))
+  (test "resp-body"
+    (assert= (get (send-resp (build *req*) 200 "ok") :resp-body) "ok"))
+  (test "returns a conn (keeps request fields)"
+    (assert= (get (send-resp (build *req*) 200 "ok") :method) "GET")))
+
+(describe "conn->response"
+  (test "serializes status / headers / body"
+    (let (c (text-resp (build *req*) "hi")
+          r (conn->response c))
+      (assert= (get r :status) 200)
+      (assert= (get r :body) "hi")
+      (assert= (get (get r :headers) :content-type) "text/plain; charset=utf-8")))
+  (test "defaults status to 200 when unset"
+    (assert= (get (conn->response (build *req*)) :status) 200)))
 
 (describe "convenience response fns"
   (test "html-resp status 200"
     (assert= (get (html-resp (build *req*) "<p>hi</p>") :status) 200))
   (test "text-resp content-type"
     (let (r (text-resp (build *req*) "hello"))
-      (assert= (get (get r :headers) :content-type) "text/plain; charset=utf-8")))
+      (assert= (get (get r :resp-headers) :content-type) "text/plain; charset=utf-8")))
   (test "json-resp content-type"
     (let (r (json-resp (build *req*) "{}"))
-      (assert= (get (get r :headers) :content-type) "application/json")))
+      (assert= (get (get r :resp-headers) :content-type) "application/json")))
   (test "redirect-resp status 302"
     (assert= (get (redirect-resp (build *req*) "/new") :status) 302))
   (test "redirect-resp location header"
-    (assert= (get (get (redirect-resp (build *req*) "/new") :headers) :location) "/new"))
+    (assert= (get (get (redirect-resp (build *req*) "/new") :resp-headers) :location) "/new"))
   (test "not-found-resp status 404"
     (assert= (get (not-found-resp (build *req*)) :status) 404)))
 
@@ -57,12 +72,12 @@
   (test "applies plugs in order"
     (let (p1 (fn (c) (assign c :step1 true))
           p2 (fn (c) (assign c :step2 true))
-          c  (run-pipeline (build *req*) [p1 p2]))
+          c (run-pipeline (build *req*) [p1 p2]))
       (assert= (get-assign c :step1) true)
       (assert= (get-assign c :step2) true)))
   (test "stops at halt"
     (let (p1 (fn (c) (halt (assign c :step1 true)))
           p2 (fn (c) (assign c :step2 "should not run"))
-          c  (run-pipeline (build *req*) [p1 p2]))
+          c (run-pipeline (build *req*) [p1 p2]))
       (assert= (get-assign c :step1) true)
       (assert= (get-assign c :step2) nil))))
