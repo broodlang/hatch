@@ -1,6 +1,13 @@
 (defmodule http/response "HTTP/1.1 response serialization."
   (:use http/util))
 
+(defn byte-length (s)
+  "The UTF-8 byte length of `s`. Content-Length must report bytes, not codepoints:
+  the body goes out as UTF-8, so a body with any multibyte char (− … ●, emoji)
+  has more bytes than `string-length`, and reporting the codepoint count truncates
+  the response in the client."
+  (count (string->utf8-bytes s)))
+
 (defn format-response (resp)
   "Serialize a response map to an HTTP/1.1 response string ready to send over TCP."
   (let (status  (get resp :status 200)
@@ -9,7 +16,7 @@
         headers (if (contains? headers :content-type)
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8"))
-        headers (assoc headers :content-length (str (string-length body)))
+        headers (assoc headers :content-length (str (byte-length body)))
         headers (assoc headers :connection "keep-alive"))
     (str "HTTP/1.1 " status " " (status-text status) "\r\n"
          (join "" (map format-header (entries headers)))
