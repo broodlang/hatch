@@ -32,6 +32,18 @@
     (<= tries 0) false
     else (do (snooze 50) (wait-key-gone topic key (- tries 1)))))
 
+(defn meta-status (topic key)
+  "The :status of `key`'s roster entry on `topic`, or nil if absent."
+  (let (e (first (filter (fn (x) (= (get x :key) key)) (roster topic))))
+    (if e (get (get e :meta) :status) nil)))
+
+(defn wait-meta (topic key val tries)
+  "Poll until `key`'s entry has `:status` = `val`."
+  (cond
+    (= (meta-status topic key) val) true
+    (<= tries 0) false
+    else (do (snooze 50) (wait-meta topic key val (- tries 1)))))
+
 (defn tracked-member (topic key parent)
   "Track on `topic` under `key`, barrier until the registry processed it, tell `parent`,
   then block until killed."
@@ -87,7 +99,17 @@
       (wait-key "pres:m" "m1" 60)
       (let (e (first (filter (fn (x) (= (get x :key) "m1")) (roster "pres:m"))))
         (untrack "pres:m")
-        (assert= (get (get e :meta) :color) "blue")))))
+        (assert= (get (get e :meta) :color) "blue"))))
+  (test "re-tracking the same process replaces its entry (updated meta, no duplicate)"
+    (do
+      (track "pres:r" "r1" {:status "away"})
+      (wait-key "pres:r" "r1" 60)
+      (track "pres:r" "r1" {:status "online"})
+      ; poll until the meta reflects the update
+      (assert= (wait-meta "pres:r" "r1" "online" 60) true)
+      ; exactly one entry for this pid (no duplicate from re-track)
+      (assert= (count (filter (fn (e) (= (get e :key) "r1")) (roster "pres:r"))) 1)
+      (untrack "pres:r"))))
 
 (describe "auto-leave on death"
   (test "a member whose process dies is removed from the roster"

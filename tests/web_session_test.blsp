@@ -28,7 +28,10 @@
     (assert= (decode-session *secret* (encode-session *secret* {"user" "alice" "role" "admin"}))
       {"user" "alice" "role" "admin"}))
   (test "empty session round-trips to empty"
-    (assert= (decode-session *secret* (encode-session *secret* {})) {})))
+    (assert= (decode-session *secret* (encode-session *secret* {})) {}))
+  (test "round-trips non-string values (int, bool, nested map)"
+    (assert= (decode-session *secret* (encode-session *secret* {"n" 42 "ok" true "u" {"name" "ada"}}))
+      {"n" 42 "ok" true "u" {"name" "ada"}})))
 
 (describe "signature verification"
   (test "tampered payload is rejected → empty session"
@@ -91,4 +94,12 @@
       (assert= (get-flash c2 "info") "Saved!")
       (assert= (get-flash c3 "info") nil)))
   (test "get-flash default when no flash"
-    (assert= (get-flash (fetch-flash ((fetch-session *secret*) (conn-with nil))) "info" "—") "—")))
+    (assert= (get-flash (fetch-flash ((fetch-session *secret*) (conn-with nil))) "info" "—") "—"))
+  (test "multiple flash keys both survive to the next request"
+    (let (c1 (-> ((fetch-session *secret*) (conn-with nil))
+               (put-flash "info" "saved")
+               (put-flash "error" "careful"))
+          cookie (session-cookie-value (conn->response c1))
+          c2 (fetch-flash ((fetch-session *secret*) (conn-with cookie))))
+      (assert= (get-flash c2 "info") "saved")
+      (assert= (get-flash c2 "error") "careful"))))
