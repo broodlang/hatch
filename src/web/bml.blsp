@@ -14,11 +14,20 @@
   - `:for={x <- coll}` — render once per item of `coll`, binding `x`. Combined with
     `:if` on the same element, the test becomes a per-item `:when` filter (it sees the
     loop binding), not an outer guard.
+  - components — `<.name attr=…>children</.name>` (or `<.name/>`) compiles to
+    `(name {attr… :children (list …)})`, a call to an ordinary function of one assigns
+    map that returns Hiccup. The inner markup is the `:children` assign; the component
+    places it with `(get assigns :children)`.
+  - `<script>` and `<style>` are raw-text: their content is taken verbatim (CSS/JS
+    braces and all) and emitted unescaped — no interpolation inside.
+  - `\\{` / `\\}` are literal braces in text and attribute values.
 
   Two simplifications to know:
   - Each `{…}` holds **one** expression (`read-string`); `{(a) (b)}` keeps only `(a)`.
   - Whitespace-only text between tags is dropped, so significant spacing between
     inline elements is lost — write it explicitly as `{\" \"}`.
+
+  Parse errors are raised as `bml:line:col: …`.
 
   `parse` returns a Brood *form*: the structure the `deflive` `template` clause emits
   as the body of `render`, so a template runs as ordinary Brood — no separate runtime.
@@ -308,7 +317,7 @@
   (let (close (str "</" tag)
         idx (index-of after close))
     (if (< idx 0)
-      (error "bml: unterminated <" tag "> (missing " close ">)")
+      (bml-error after "unterminated <" tag "> (missing " close ">)")
       (let (content (substring after 0 idx)
             rest (expect-close (substring after idx (string-length after)) tag))
         [(apply-directives (build-elem tag attrs (raw-children content)) directives) rest]))))
@@ -337,19 +346,19 @@
                                   [children s4] (parse-nodes after)
                                   s5 (expect-close-component s4 name))
                               [(apply-directives (build-component name attrs children) directives) s5])
-      else (error "bml: malformed component <." name " …"))))
+      else (bml-error s3 "malformed component <." name " …"))))
 
 (defn expect-close-component (s name)
   "Consume the `</.name>` closing a component; returns the rest. Errors on a mismatch."
   (if (not (starts-with? s "</."))
-    (error "bml: expected </." name "> to close component <." name ">")
+    (bml-error s "expected </." name "> to close component <." name ">")
     (let (s1 (substring s 3 (string-length s))
           [nm s2] (read-while s1 name-char? "")
           s2 (skip-ws s2))
       (cond
-        (not (= nm name)) (error "bml: </." nm "> closes the wrong component, expected </." name ">")
+        (not (= nm name)) (bml-error s "</." nm "> closes the wrong component, expected </." name ">")
         (starts-with? s2 ">") (substring s2 1 (string-length s2))
-        else (error "bml: malformed component close </." name)))))
+        else (bml-error s2 "malformed component close </." name)))))
 
 (defn parse-element (s)
   "`s` begins with `<`; returns `[form rest]` for one node — a component when the tag
@@ -369,7 +378,7 @@
                                   else (let ([children s4] (parse-nodes after)
                                              s5 (expect-close s4 tag))
                                          [(apply-directives (build-elem tag attrs children) directives) s5])))
-        else (error "bml: malformed tag <" tag " …")))))
+        else (bml-error s3 "malformed tag <" tag " …")))))
 
 (defn expect-close (s tag)
   "Consume the `</tag>` closing `tag`; returns the rest. Errors on a mismatch."
@@ -377,9 +386,9 @@
         [nm s2] (read-while s1 name-char? "")
         s2 (skip-ws s2))
     (cond
-      (not (= nm tag)) (error "bml: </" nm "> closes the wrong tag, expected </" tag ">")
+      (not (= nm tag)) (bml-error s "</" nm "> closes the wrong tag, expected </" tag ">")
       (starts-with? s2 ">") (substring s2 1 (string-length s2))
-      else (error "bml: malformed close tag </" tag))))
+      else (bml-error s2 "malformed close tag </" tag))))
 
 (defn skip-comment (s)
   (let (idx (index-of s "-->"))

@@ -202,9 +202,21 @@
 
 ; ---- session actor ----
 
+(defn start-tickers (ticks)
+  "Spawn one ticker process per interval in `ticks`, each posting [:tick ms] to this
+  (the calling) session on a steady beat. Returns their pids so they can be stopped
+  when the session navigates to another view (otherwise the old view's tickers would
+  linger and accumulate across navigations)."
+  (let (me (self))
+    (map (fn (ms) (spawn (ticker-loop me ms))) (or ticks (list)))))
+
+(defn stop-tickers (pids)
+  "Kill the given ticker processes — used when a session swaps to a different view."
+  (dolist (p pids) (exit p :kill)))
+
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
-  `view` is a map {:mount :render :handle-event :handle-tick :ticks :model}."
+  `view` is a map {:mount :render :handle-event :handle-tick :ticks :model :ticker-pids}."
   ; WebSocket frames are binary (control bytes ≥ 0x80, masked client frames). Put
   ; the socket in binary mode so reads/writes are byte-faithful (the 101 handshake
   ; above was plain ASCII, so it was fine in text mode). The client only sends
@@ -212,15 +224,10 @@
   (tcp-set-binary sock true)
   ; Register so a hot reload can push a fresh render here.
   (live--register (self))
-  ; Run one ticker process per interval in :ticks, each posting [:tick ms] on a
-  ; steady beat; ticks arrive as ordinary mailbox messages, interleaved fairly with
-  ; client frames (no starvation when the user is busy clicking).
-  (let (ticks (get view :ticks))
-    (when (not (empty? ticks))
-      (let (me (self))
-        (dolist (ms ticks)
-          (spawn (ticker-loop me ms))))))
-  (push-update sock view buf "render" (get view :model)))
+  ; Start this view's tickers (ticks arrive as ordinary mailbox messages, interleaved
+  ; fairly with client frames); keep their pids so navigate can stop them.
+  (let (view (assoc view :ticker-pids (start-tickers (get view :ticks))))
+    (push-update sock view buf "render" (get view :model))))
 
 ; The loop's one render-and-reply step: set the new model on the view, push a frame
 ; ("render" for a full page, "diff" for an update), and go back to listening. Every
@@ -274,6 +281,27 @@
                    buf
                    "diff"
                    (try ((get view :handle-event) name params model) (catch _ model)))))
+      ; Live navigation: switch this session to the live view registered at `path`
+      ; WITHOUT a page reload — stop the old view's tickers, mount the target, start
+      ; its tickers, and push a full render (the client swaps the live container and
+      ; updates the URL). A path with no registered live view → tell the client to do
+      ; a normal navigation (full load), the dead-view fallback.
+      ("navigate"
+       (let (path (get msg "path" "")
+             _dbg (println (str "NAV: navigate to " path))
+             spec-fn (lookup-live path)
+             _dbg2 (println (str "NAV: spec-fn? " (not (nil? spec-fn)))))
+         (if spec-fn
+           (let (_ (stop-tickers (get view :ticker-pids))
+                 spec (spec-fn)
+                 model ((get spec :mount) params)
+                 new-view (merge spec {:spec-fn spec-fn
+                                       :params params
+                                       :model model
+                                       :ticker-pids (start-tickers (get spec :ticks))}))
+             (push-update sock new-view buf "render" model))
+           (do (send-msg sock {:event "redirect" :path path})
+             (session-recv sock view buf)))))
       (_ (session-recv sock view buf)))))
 
 (defn render (view model)

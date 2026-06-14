@@ -1,6 +1,7 @@
 // brood_live.js — LiveBrood WebSocket client
-// Connects to /live/ws, handles render/diff messages, sends user events.
-// No dependencies. ~200 lines.
+// Connects to /live/ws, handles render/diff messages, sends user events, and does
+// live navigation between views over the one socket (no full page reload).
+// No dependencies. ~250 lines.
 
 const BroodLive = (() => {
   // Connection status across every live session on the page. We reflect it as a
@@ -8,6 +9,10 @@ const BroodLive = (() => {
   // CustomEvent, so a page can show a reconnect indicator with plain CSS — or hook
   // the event for custom behaviour — without any per-view code.
   const sessions = new Set();
+  // The session that handles live navigation for this page (the page's live view).
+  // One live view per page in the common case; the most recently mounted wins.
+  let navSession = null;
+
   function refreshStatus() {
     const connected = [...sessions].every((s) => s.connected);
     const root = document.documentElement;
@@ -25,6 +30,7 @@ const BroodLive = (() => {
       this.reconnectDelay = 250;
       this.reconnectTimer = null;
       sessions.add(this);
+      navSession = this; // this page's live view, for navigation
       refreshStatus();
       this._connect();
     }
@@ -80,6 +86,9 @@ const BroodLive = (() => {
         this._patch(msg.html);
       } else if (msg.event === "diff") {
         this._patch(msg.html);
+      } else if (msg.event === "redirect") {
+        // The navigate target isn't a live view — fall back to a full page load.
+        window.location.href = msg.path;
       }
     }
 
@@ -95,6 +104,19 @@ const BroodLive = (() => {
     // Called by event bindings to push a user event to the server.
     pushEvent(name, params = {}) {
       this._send({ event: "event", name, params });
+    }
+
+    // Live navigation: switch this session to another live view over the SAME socket,
+    // without a full page reload. The server mounts the target and pushes a render
+    // (which morphs the container); we update the address bar via the History API.
+    // `href` may be absolute or relative; only same-origin paths are live-navigated.
+    navigate(href, push = true) {
+      const url = new URL(href, location.origin);
+      const path = url.pathname;
+      const params = Object.fromEntries(url.searchParams);
+      if (push) history.pushState({ broodNav: true }, "", url.pathname + url.search);
+      this.path = path;
+      this._send({ event: "navigate", path, params });
     }
   }
 
@@ -168,6 +190,34 @@ const BroodLive = (() => {
     });
   }
 
+  // Live navigation wiring (set up once, document-wide):
+  //  - a click on an `<a data-nav href="…">` is live-navigated over the open socket
+  //    instead of reloading the page — but only if a live session exists and is
+  //    connected; otherwise the browser does its normal navigation (a plain page has
+  //    no socket, so its data-nav links just load).
+  //  - back/forward (popstate) re-navigates to the new address over the same socket.
+  function setupNavigation() {
+    document.addEventListener("click", (e) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = e.target.closest("a[data-nav]");
+      if (!a) return;
+      const href = a.getAttribute("href");
+      if (!href || a.target === "_blank") return;
+      // Only hijack same-origin links when we actually have a live socket to use.
+      const url = new URL(href, location.origin);
+      if (url.origin !== location.origin) return;
+      if (!navSession || !navSession.connected) return; // let the browser navigate
+      e.preventDefault();
+      navSession.navigate(url.pathname + url.search);
+    });
+
+    window.addEventListener("popstate", () => {
+      if (navSession && navSession.connected) {
+        navSession.navigate(location.pathname + location.search, false);
+      }
+    });
+  }
+
   // Public API: mount all [data-live] elements on the page.
   function mount() {
     document.querySelectorAll("[data-live]").forEach((el) => {
@@ -175,6 +225,7 @@ const BroodLive = (() => {
       const session = new Session(path, el);
       bindEvents(el, session);
     });
+    setupNavigation();
   }
 
   // Auto-mount on DOMContentLoaded.
