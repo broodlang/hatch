@@ -1,0 +1,50 @@
+(defmodule http/base64 "Base64 encoding (RFC 4648) for WebSocket handshakes."
+  (:use http/util))
+
+(def *b64-table*
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+(defn b64-char (n)
+  "Encode 6-bit value (0-63) as a base64 character."
+  (char-at *b64-table* n))
+
+(defn encode-bytes (bytes)
+  "Base64-encode a list or vector of byte integers (0-255)."
+  (encode-bytes--acc bytes ""))
+
+(defn encode-bytes--acc (bytes acc)
+  (let (n (count bytes))
+    (cond
+      (= n 0) acc
+      (= n 1)
+      (let (a (first bytes))
+        (str acc
+             (b64-char (bit-shift-right a 2))
+             (b64-char (bit-shift-left (bit-and a 3) 4))
+             "=="))
+      (= n 2)
+      (let (a (first bytes)
+            b (first (rest bytes)))
+        (str acc
+             (b64-char (bit-shift-right a 2))
+             (b64-char (bit-or (bit-shift-left (bit-and a 3) 4)
+                               (bit-shift-right b 4)))
+             (b64-char (bit-shift-left (bit-and b 15) 2))
+             "="))
+      else
+      (let (a    (first bytes)
+            b    (first (rest bytes))
+            c    (first (rest (rest bytes)))
+            tail (rest (rest (rest bytes))))
+        (encode-bytes--acc tail
+          (str acc
+               (b64-char (bit-shift-right a 2))
+               (b64-char (bit-or (bit-shift-left (bit-and a 3) 4)
+                                 (bit-shift-right b 4)))
+               (b64-char (bit-or (bit-shift-left (bit-and b 15) 2)
+                                 (bit-shift-right c 6)))
+               (b64-char (bit-and c 63))))))))
+
+(defn encode-sha1 (hex-sha1)
+  "Base64-encode a 40-char hex SHA1 digest (as returned by `%sha1`)."
+  (encode-bytes (hex-str->bytes hex-sha1)))

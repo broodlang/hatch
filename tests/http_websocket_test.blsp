@@ -1,0 +1,76 @@
+(defmodule http-websocket-test (:use http/websocket) (:use test))
+
+(describe "accept-key"
+  (test "rfc6455 test vector"
+    (assert= (accept-key "dGhlIHNhbXBsZSBub25jZQ==")
+             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")))
+
+(describe "upgrade-response"
+  (test "starts with 101"
+    (let (r (upgrade-response "dGhlIHNhbXBsZSBub25jZQ=="))
+      (assert= (starts-with? r "HTTP/1.1 101") true)))
+  (test "contains Upgrade header"
+    (let (r (upgrade-response "dGhlIHNhbXBsZSBub25jZQ=="))
+      (assert= (includes? r "Upgrade: websocket") true)))
+  (test "contains Accept header"
+    (let (r (upgrade-response "dGhlIHNhbXBsZSBub25jZQ=="))
+      (assert= (includes? r "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") true))))
+
+(describe "upgrade-request?"
+  (test "detects upgrade"
+    (let (req {:headers {:connection "Upgrade" :upgrade "websocket"}})
+      (assert= (upgrade-request? req) true)))
+  (test "normal request is not upgrade"
+    (let (req {:headers {:connection "keep-alive" :upgrade ""}})
+      (assert= (upgrade-request? req) false)))
+  (test "case insensitive"
+    (let (req {:headers {:connection "upgrade" :upgrade "WebSocket"}})
+      (assert= (upgrade-request? req) true))))
+
+(describe "byte->char / byte-at"
+  (test "round-trip 0"
+    (assert= (byte-at (byte->char 0) 0) 0))
+  (test "round-trip 65"
+    (assert= (byte-at (byte->char 65) 0) 65))
+  (test "round-trip 128"
+    (assert= (byte-at (byte->char 128) 0) 128))
+  (test "round-trip 255"
+    (assert= (byte-at (byte->char 255) 0) 255)))
+
+(describe "text-frame"
+  (test "small frame first byte is 0x81"
+    (assert= (byte-at (text-frame "hello") 0) 129))
+  (test "small frame second byte is payload length"
+    (assert= (byte-at (text-frame "hello") 1) 5))
+  (test "small frame payload"
+    (assert= (substring (text-frame "hello") 2 7) "hello"))
+  (test "empty payload"
+    (assert= (string-length (text-frame "")) 2))
+  (test "125-byte max small frame"
+    (let (payload (string-repeat "x" 125))
+      (assert= (byte-at (text-frame payload) 1) 125)))
+  (test "medium frame second byte is 0x7e"
+    (let (payload (string-repeat "x" 200))
+      (assert= (byte-at (text-frame payload) 1) 126)))
+  (test "medium frame length bytes"
+    (let (payload (string-repeat "x" 300))
+      (assert= (* (byte-at (text-frame payload) 2) 256)
+               (* 1 256))  ; hi byte: 300 / 256 = 1
+      (assert= (byte-at (text-frame payload) 3) 44))))  ; lo byte: 300 mod 256 = 44
+
+(describe "parse-frame: unmasked"
+  (test "incomplete on empty"
+    (assert= (parse-frame "") [:incomplete]))
+  (test "incomplete on 1 byte"
+    (assert= (parse-frame "\x81") [:incomplete]))
+  (test "parses small unmasked text frame"
+    (let (frame (str "\x81\x05hello")
+          [tag opcode payload rem] (parse-frame frame))
+      (assert= tag :ok)
+      (assert= opcode 1)
+      (assert= payload "hello")
+      (assert= rem "")))
+  (test "remainder extracted correctly"
+    (let (frame (str "\x81\x03abc\x81\x03def")
+          [_ _ _ rem] (parse-frame frame))
+      (assert= rem "\x81\x03def"))))

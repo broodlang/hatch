@@ -1,0 +1,32 @@
+(defmodule http-base64-test (:use http/base64) (:use test))
+
+(describe "encode-bytes"
+  (test "empty"
+    (assert= (encode-bytes nil) ""))
+  (test "one byte — padded =="
+    (assert= (encode-bytes [77]) "TQ=="))
+  (test "two bytes — padded ="
+    (assert= (encode-bytes [77 97]) "TWE="))
+  (test "three bytes — no padding"
+    (assert= (encode-bytes [77 97 110]) "TWFu"))
+  (test "rfc4648 test vector 1 — empty"
+    (assert= (encode-bytes []) ""))
+  (test "rfc4648 test vector — Man"
+    (assert= (encode-bytes [77 97 110]) "TWFu"))
+  (test "rfc4648 test vector — Ma"
+    (assert= (encode-bytes [77 97]) "TWE="))
+  (test "rfc4648 test vector — M"
+    (assert= (encode-bytes [77]) "TQ=="))
+  (test "all zeros"
+    (assert= (encode-bytes [0 0 0]) "AAAA"))
+  (test "all 255s"
+    (assert= (encode-bytes [255 255 255]) "////"))
+  (test "multi-group"
+    (assert= (encode-bytes [72 101 108 108 111]) "SGVsbG8=")))
+
+(describe "encode-sha1 (websocket accept key)"
+  ; RFC 6455 §1.3 example: key "dGhlIHNhbXBsZSBub25jZQ==" → "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+  (test "rfc6455 test vector"
+    (let (input  "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+          hex    (%sha1 input))
+      (assert= (encode-sha1 hex) "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))))
