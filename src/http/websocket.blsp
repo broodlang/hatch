@@ -55,17 +55,34 @@
 
 ; ---- frame building (server → client, unmasked) ----
 
+; A WebSocket frame is a byte sequence (control bytes ≥ 0x80, a length-prefixed
+; binary body). Brood strings are codepoint sequences, so we build the frame as a
+; *byte string* — every codepoint 0–255, one per wire byte — and send it over a
+; socket in binary mode (`tcp-set-binary`), which writes each codepoint as one raw
+; byte. The text payload is UTF-8-encoded into that byte form first, so multibyte
+; characters contribute their real byte length (not their codepoint count).
+
+(defn utf8-byte-string (s)
+  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte."
+  (join "" (map byte->char (string->utf8-bytes s))))
+
+(defn byte-string->utf8 (s)
+  "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text."
+  (utf8-bytes->string (into [] (map (fn (i) (byte-at s i)) (range (string-length s))))))
+
 (defn text-frame (payload)
-  "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask)."
-  (let (n (string-length payload))
+  "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a byte string.
+  Send it over a binary-mode socket so the bytes reach the wire verbatim."
+  (let (body (utf8-byte-string payload)
+        n    (string-length body))
     (cond
       (<= n 125)
-      (str "\x81" (byte->char n) payload)
+      (str "\x81" (byte->char n) body)
       (<= n 65535)
       (str "\x81\x7e"
            (byte->char (quot n 256))
            (byte->char (mod n 256))
-           payload)
+           body)
       else
       (error "websocket/text-frame: payload too large: " n))))
 

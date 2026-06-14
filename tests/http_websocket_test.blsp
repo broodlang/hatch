@@ -58,6 +58,17 @@
                (* 1 256))  ; hi byte: 300 / 256 = 1
       (assert= (byte-at (text-frame payload) 3) 44))))  ; lo byte: 300 mod 256 = 44
 
+(describe "text-frame: multibyte uses UTF-8 byte length, not codepoint count"
+  (test "− (U+2212) contributes 3 bytes to the length field"
+    (assert= (byte-at (text-frame "−") 1) 3))
+  (test "payload bytes are the UTF-8 encoding of −"
+    (let (f (text-frame "−"))
+      (assert= (byte-at f 2) 226)    ; 0xE2
+      (assert= (byte-at f 3) 136)    ; 0x88
+      (assert= (byte-at f 4) 146)))  ; 0x92
+  (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
+    (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓")))
+
 (describe "parse-frame: unmasked"
   (test "incomplete on empty"
     (assert= (parse-frame "") [:incomplete]))
