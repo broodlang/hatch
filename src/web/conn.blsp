@@ -1,0 +1,83 @@
+(defmodule web/conn "Request/response context value — the Conn.")
+
+(defn build (request)
+  "Construct a Conn from a raw parsed request map."
+  {:method  (get request :method)
+   :path    (get request :path)
+   :query   (get request :query)
+   :params  (get request :params)
+   :headers (get request :headers)
+   :body    (get request :body)
+   :assigns {}
+   :status  nil
+   :resp-body   ""
+   :resp-headers {}
+   :halted? false})
+
+(defn assign (conn key val)
+  "Put a value into the conn's assigns map."
+  (assoc-in conn [:assigns key] val))
+
+(defn get-assign (conn key)
+  "Get a value from the conn's assigns map."
+  (get (get conn :assigns) key))
+
+(defn put-status (conn status)
+  "Set the response status."
+  (assoc conn :status status))
+
+(defn put-resp-header (conn key val)
+  "Add a response header."
+  (assoc-in conn [:resp-headers key] val))
+
+(defn put-resp-body (conn body)
+  "Set the response body."
+  (assoc conn :resp-body body))
+
+(defn halt (conn)
+  "Mark the conn as halted — no further plugs will run."
+  (assoc conn :halted? true))
+
+(defn halted? (conn)
+  "True if the conn has been halted."
+  (get conn :halted? false))
+
+(defn param (conn key)
+  "Get a request param by string key."
+  (get (get conn :params) key))
+
+(defn header (conn key)
+  "Get a request header by keyword key."
+  (get (get conn :headers) key))
+
+(defn send-resp (conn status body)
+  "Set status and body, returning an http/response-compatible map."
+  {:status  status
+   :body    body
+   :headers (get conn :resp-headers {})})
+
+(defn html-resp (conn body)
+  "200 OK HTML response."
+  (send-resp conn 200 body))
+
+(defn text-resp (conn body)
+  "200 OK plain-text response."
+  (send-resp (put-resp-header conn :content-type "text/plain; charset=utf-8") 200 body))
+
+(defn json-resp (conn body)
+  "200 OK JSON response."
+  (send-resp (put-resp-header conn :content-type "application/json") 200 body))
+
+(defn redirect-resp (conn url &optional (status 302))
+  "Redirect response."
+  (send-resp (put-resp-header conn :location url) status ""))
+
+(defn not-found-resp (conn &optional (body "<h1>404 Not Found</h1>"))
+  "404 Not Found response."
+  (send-resp conn 404 body))
+
+(defn run-pipeline (conn plugs)
+  "Run a list of plug functions left-to-right, stopping on halt."
+  (if (or (nil? plugs) (halted? conn))
+    conn
+    (run-pipeline ((first plugs) conn) (rest plugs))))

@@ -1,7 +1,9 @@
-(defmodule main "hatch — HTTP server entry point."
+(defmodule main "hatch — entry point demonstrating the web stack."
   (:use http/server)
   (:use http/response)
-  (:use web/template))
+  (:use web/template)
+  (:use web/conn)
+  (:use web/router))
 
 (defn layout (title & children)
   [:html {}
@@ -11,38 +13,53 @@
     [:title {} title]]
    [:body {} children]])
 
-(defn handler (req)
-  "Route incoming requests. Each arm returns a response map."
-  (let (method (get req :method)
-        path   (get req :path))
-    (match [method path]
-      (["GET" "/"]
-       (ok (html (layout "hatch"
-                   [:h1 {} "Hello from Brood"]
-                   [:p {} "A web server written in pure Brood."]
-                   [:ul {}
-                    [:li {} [:a {:href "/hello"} "Say hello"]]
-                    [:li {} [:a {:href "/echo"} "Echo request"]]]))))
+(defn home (conn)
+  (html-resp conn
+    (html (layout "hatch"
+            [:h1 {} "Hello from Brood"]
+            [:p {} "A web server written in pure Brood."]
+            [:ul {}
+             [:li {} [:a {:href "/hello"} "Say hello"]]
+             [:li {} [:a {:href "/echo"} "Echo request"]]
+             [:li {} [:a {:href "/users/42"} "User #42"]]]))))
 
-      (["GET" "/hello"]
-       (let (who (get (get req :params) "name" "world"))
-         (ok (html (layout (str "Hello, " who)
-                    [:h1 {} "Hello, " who "!"])))))
+(defn hello (conn)
+  (let (who (param conn "name"))
+    (html-resp conn
+      (html (layout (str "Hello, " who)
+              [:h1 {} "Hello, " who "!"])))))
 
-      ([_ "/echo"]
-       (ok-text (str "Method:  " (get req :method) "\n"
-                     "Path:    " (get req :path) "\n"
-                     "Query:   " (get req :query) "\n"
-                     "Headers: " (pr-str (get req :headers)) "\n"
-                     "Params:  " (pr-str (get req :params)) "\n"
-                     "Body:    " (get req :body))))
+(defn show-user (conn)
+  (let (id (param conn "id"))
+    (html-resp conn
+      (html (layout (str "User " id)
+              [:h1 {} "User #" id]
+              [:p {} [:a {:href "/"} "← back"]])))))
 
-      (_
-       (not-found (html (layout "404"
-                          [:h1 {} "404 Not Found"]
-                          [:p {} "No route for " method " " path])))))))
+(defn echo (conn)
+  (text-resp conn
+    (str "Method:  " (get conn :method) "\n"
+         "Path:    " (get conn :path) "\n"
+         "Query:   " (get conn :query) "\n"
+         "Headers: " (pr-str (get conn :headers)) "\n"
+         "Params:  " (pr-str (get conn :params)) "\n"
+         "Body:    " (get conn :body))))
+
+(defrouter app-router
+  (get "/"            home)
+  (get "/hello"       hello)
+  (get "/users/:id"   show-user)
+  (any "/echo"        echo))
+
+(defn adapter (req)
+  "Bridge http/server's raw request map to the conn-based router."
+  (let (conn (build req)
+        resp (app-router conn))
+    {:status  (get resp :status 200)
+     :headers (get resp :headers {})
+     :body    (get resp :body "")}))
 
 (defn main ()
   "Start the HTTP server and block until shutdown."
-  (start 4000 handler)
+  (start 4000 adapter)
   (receive (:shutdown nil)))
