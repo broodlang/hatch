@@ -140,6 +140,11 @@
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
   `view` is a map {:mount fn :render fn :handle-event fn :model model}."
+  ; WebSocket frames are binary (control bytes ≥ 0x80, masked client frames). Put
+  ; the socket in binary mode so reads/writes are byte-faithful (the 101 handshake
+  ; above was plain ASCII, so it was fine in text mode). The client only sends
+  ; frames after it sees the 101, so this is set before any frame arrives.
+  (tcp-set-binary sock true)
   (let (model (get view :model))
     (send-msg sock {:event "render" :html (render view model)})
     (session-recv sock view buf)))
@@ -164,7 +169,9 @@
     ([:error _] (tcp-send sock (close-frame)) (tcp-close sock))))
 
 (defn session-dispatch (sock view buf payload)
-  (let (msg    (try (json-decode payload) (catch _ nil))
+  ; `payload` is a byte string (binary mode) holding the client's UTF-8 JSON —
+  ; decode the bytes back to text before parsing.
+  (let (msg    (try (json-decode (byte-string->utf8 payload)) (catch _ nil))
         event  (get msg "event" "")
         params (get msg "params" {}))
     (match event
