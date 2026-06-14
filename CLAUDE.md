@@ -1,40 +1,78 @@
-# hatch — guidance for Claude
+# Hatch — guidance for Claude
 
-This is a Brood (`.blsp`) project scaffolded by `nest new`. Replace this stub
-with project-specific guidance — commands, conventions, gotchas.
+**Hatch** is a Phoenix/LiveView-inspired web framework for the
+[Brood](https://broodlang.org) language. Pure Brood, no npm, no new Rust.
+
+See `docs/roadmap.md` for what's built and what's next.
+See `docs/web-framework-design.md` for the full design rationale.
+
+---
 
 ## Running
 
-- `nest test`   — run the test suite (each test runs in its own green process).
-- `nest run`    — invoke the entry point. Defaults to the `main` function in
-  the `main` module; override in `project.blsp` with `:main` (bare symbols,
-  the manifest is data — `:main app` runs `app/main`; `:main (app start)`
-  runs `app/start`; never quote them).
-  Each module is a namespace (ADR-065): a file's `defmodule name` makes its
-  `def`/`defn` define `name/foo`; a bare reference resolves in the current
-  namespace, then through `(:use …)` imports, then root/prelude. So the same
-  short name in two modules is fine (`a/parse` vs `b/parse`) — only earmuffed
-  `*foo*` vars are ambient/bare and must stay unique.
-- `nest run --for 2s` — run a loop / full-screen TUI for a bounded time, then
-  exit cleanly (`2s`, `500ms`, or a bare integer of ms). The way to exercise
-  a never-returning program end-to-end or in CI.
-- `nest format` — format Brood source.
+```bash
+nest test          # run the test suite (194 tests)
+nest run           # start the demo server on http://localhost:4000
+nest format        # format all .blsp source
+```
+
+The demo (`src/main.blsp`) serves:
+- `GET /` — home page
+- `GET /counter` — live counter (WebSocket via `deflive`)
+- `ANY /echo` — echo request details
+- `GET /static/*` — static file serving
+
+## Source layout
+
+```
+src/
+  http/
+    util.blsp       — URL decode, query parse, status codes
+    base64.blsp     — base64 encode (RFC 4648)
+    request.blsp    — HTTP/1.1 parser (pipelining-safe)
+    response.blsp   — response serializer + helpers
+    server.blsp     — TCP listener/worker; WS upgrade detection
+    websocket.blsp  — RFC 6455 handshake + frame codec
+  web/
+    template.blsp   — Hiccup → HTML renderer
+    conn.blsp       — immutable Conn value + plug pipeline
+    router.blsp     — defrouter macro, path-param matching
+    live.blsp       — deflive macro, session actor, JSON codec
+    pubsub.blsp     — topic broadcast across live sessions
+  main.blsp         — demo app entry point
+static/
+  brood_live.js     — vanilla JS client for live views
+tests/
+  http_util_test.blsp
+  http_request_test.blsp
+  http_response_test.blsp
+  http_base64_test.blsp
+  http_websocket_test.blsp
+  web_template_test.blsp
+  web_conn_test.blsp
+  web_router_test.blsp
+docs/
+  roadmap.md
+  web-framework-design.md
+  brood-http.md
+  brood-for-claude.md
+```
+
+## Key conventions
+
+- **No MCP tool calls** — use `grep` on `docs/brood-for-claude.md` for
+  stdlib discovery; use `nest test` to verify code.
+- **No vector patterns with `&`** — vectors are fixed-length; use
+  `first`/`rest` for dynamic-length sequences.
+- **No vector-destructure of list values** — `(let ([a b] some-list) ...)` 
+  fails; use `first`/`rest` or rewrite as `(let (a (first x) b (first (rest x))) ...)`.
+- **`map`/`filter`/`fold` return lists** — don't assert against `[...]` vectors.
+- **Macro params shadow builtins** — avoid naming macro params `name`,
+  `type`, `count`, etc.
+- **`tcp-listen` inside spawned process** — accept messages go to the
+  calling process mailbox; always call inside the listener green process.
 
 ## Writing Brood
 
-`docs/brood-for-claude.md` is the language reference geared for AI assistants
-— syntax, idioms, and the patterns that aren't shared with other Lisps. Read
-it before generating Brood code. The `.claude/skills/writing-brood` skill
-carries the short version and auto-loads when Claude Code edits `.blsp` files.
-
-Brood ships randomness (`rand-int`/`rand-float`/`shuffle`/`sample` — pure and
-seedable, thread the seed), bitwise ops (`bit-and`/`bit-or`/`bit-xor`/...),
-and discovery (`apropos`, `all-globals`, `doc-search`) — use the last three to
-find what exists instead of guessing names.
-
-## MCP integration
-
-`.mcp.json` points Claude Code at this project's `nest mcp` server, so `cd hatch && claude`
-auto-attaches an agent that can `eval`, `load`, `lookup`, `macroexpand`, `format`,
-and discover the image with `apropos` / `all-globals` / `doc-search`, against the
-live image (ADR-036, `docs/mcp.md` upstream).
+`docs/brood-for-claude.md` is the language reference. The
+`.claude/skills/writing-brood` skill auto-loads when editing `.blsp` files.
