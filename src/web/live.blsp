@@ -124,15 +124,24 @@
   "Encode `msg-map` as JSON and send as a WebSocket text frame."
   (tcp-send sock (text-frame (json-encode msg-map))))
 
-(defn recv-frame--loop (sock buf)
-  "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload remainder]`."
+(defn recv-frame--loop (sock buf tick-ms)
+  "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload
+  remainder]`, `[:closed]`, or `[:error msg]`. When `tick-ms` is set and no frame
+  arrives within it, returns `[:tick buf]` — a server tick, carrying the partial
+  frame read so far so the caller can resume reading after handling the tick."
   (match (parse-frame buf)
     ([:ok opcode payload rem] [:ok opcode payload rem])
     ([:incomplete]
-     (receive
-       ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk)))
-       ([:tcp-closed ~sock]    [:closed])
-       ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))))
+     (if tick-ms
+       (receive
+         ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk) tick-ms))
+         ([:tcp-closed ~sock]    [:closed])
+         ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf tick-ms))
+         (after tick-ms [:tick buf]))
+       (receive
+         ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk) tick-ms))
+         ([:tcp-closed ~sock]    [:closed])
+         ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf tick-ms)))))
     ([:error msg] [:error msg])))
 
 ; ---- session actor ----
@@ -150,7 +159,7 @@
     (session-recv sock view buf)))
 
 (defn session-recv (sock view buf)
-  (match (recv-frame--loop sock buf)
+  (match (recv-frame--loop sock buf (get view :tick-ms))
     ([:ok 8 _ _]
      ; client closed
      (tcp-send sock (close-frame))
@@ -165,6 +174,13 @@
     ([:ok _ _ rem]
      ; ignore other opcodes
      (session-recv sock view rem))
+    ([:tick buf2]
+     ; server tick — advance the model, push a diff, and keep listening (the timer
+     ; re-arms on the partial buffer we were mid-read on).
+     (let (model (try ((get view :handle-tick) (get view :model)) (catch _ (get view :model)))
+           view  (assoc view :model model))
+       (send-msg sock {:event "diff" :html (render view model)})
+       (session-recv sock view buf2)))
     ([:closed] nil)
     ([:error _] (tcp-send sock (close-frame)) (tcp-close sock))))
 
@@ -198,14 +214,18 @@
 
 ; ---- ws-handler factory ----
 
-(defn ws-handler-for (mount-fn render-fn handle-event-fn)
-  "Return a `(fn [sock request])` suitable as http/server's ws-handler."
+(defn ws-handler-for (mount-fn render-fn handle-event-fn &optional (tick-ms nil) (handle-tick-fn nil))
+  "Return a `(fn [sock request])` suitable as http/server's ws-handler. With
+  `tick-ms` set, the session also ticks every `tick-ms` ms while idle, calling
+  `handle-tick-fn` (model → model) and pushing a diff — server-driven updates."
   (fn (sock request)
     (let (params (get request :params {})
           model  (mount-fn params)
           view   {:mount        mount-fn
                   :render       render-fn
                   :handle-event handle-event-fn
+                  :handle-tick  (or handle-tick-fn (fn (m) m))
+                  :tick-ms      tick-ms
                   :model        model})
       (session-loop sock view ""))))
 
@@ -214,17 +234,21 @@
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
 
-  Expands to `mount`, `render`, and `handle-event` function definitions.
+  Expands to `mount`, `render`, `handle-event`, `handle-tick`, and `live-tick-ms`
+  definitions. Wire it up with `(ws-handler-for mount render handle-event
+  live-tick-ms handle-tick)`.
 
   Syntax:
     (deflive
       (mount (params) initial-model)
       (render (model) hiccup-template)
       (on \"event-name\" (params model) updated-model)
+      (tick 1000 (model) updated-model)   ; optional: server pushes a diff every ms
       ...)"
   (let (mount-clause   (first (filter (fn (c) (= (first c) 'mount))   clauses))
         render-clause  (first (filter (fn (c) (= (first c) 'render))  clauses))
         on-clauses     (filter (fn (c) (= (first c) 'on)) clauses)
+        tick-clause    (first (filter (fn (c) (= (first c) 'tick)) clauses))
         mount-args     (first (rest mount-clause))
         mount-body     (rest (rest mount-clause))
         render-args    (first (rest render-clause))
@@ -248,9 +272,16 @@
                                                      (first (rest args)) 'event--model)
                                                (cons 'do body)))))
                                    event-arms)
-                              (list (list '_ 'event--model))))))
+                              (list (list '_ 'event--model)))))
+        tick-def       (if tick-clause
+                         (list 'defn 'handle-tick (list 'tick--model)
+                           (list 'let (list (first (first (rest (rest tick-clause)))) 'tick--model)
+                             (cons 'do (rest (rest (rest tick-clause))))))
+                         (list 'defn 'handle-tick (list 'tick--model) 'tick--model)))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       (list 'defn 'render render-args (cons 'do render-body))
       (list 'defn 'handle-event (list 'event--name 'event--params 'event--model)
-            handle-body))))
+            handle-body)
+      tick-def
+      (list 'def 'live-tick-ms (if tick-clause (first (rest tick-clause)) nil)))))
