@@ -149,13 +149,73 @@ const BroodLive = (() => {
     }
   }
 
-  // Simple DOM morphing: walk children by INDEX, updating text/attrs in place and
-  // inserting/removing at the tail. Not keyed — a reorder re-clones from the change
-  // point on (TODO: match by data-key/id to preserve node identity across moves).
-  function morphChildren(current, next) {
-    const cur = Array.from(current.childNodes);
-    const nxt = Array.from(next.childNodes);
+  // The stable identity of a child for keyed morphing: its data-key, else its id, else null.
+  function keyOf(node) {
+    if (node.nodeType !== 1) return null;
+    const k = node.getAttribute("data-key");
+    if (k !== null) return k;
+    const id = node.getAttribute("id");
+    return id !== null ? id : null;
+  }
 
+  // Same node "shape" — same type, and for elements the same tag (so we morph in place
+  // rather than swap).
+  function sameNode(a, b) {
+    return a.nodeType === b.nodeType && (a.nodeType !== 1 || a.tagName === b.tagName);
+  }
+
+  // DOM morphing. If every new child carries a key (data-key/id), reconcile by key so a
+  // reorder MOVES the existing node (preserving its focus/caret/scroll) instead of
+  // rebuilding it. Otherwise fall back to the index walk — identical behaviour to before,
+  // so unkeyed views are unaffected.
+  function morphChildren(current, next) {
+    const nxt = Array.from(next.childNodes);
+    if (nxt.length > 0 && nxt.every((n) => keyOf(n) !== null)) {
+      morphKeyed(current, nxt);
+    } else {
+      morphIndexed(current, Array.from(current.childNodes), nxt);
+    }
+  }
+
+  // Keyed reconcile: match new children to existing ones by key, moving reused nodes into
+  // order and cloning genuinely new ones. A `placed` set drives removal, so it's robust to
+  // moves, inserts, deletes, and a same-key tag change.
+  function morphKeyed(parent, nxt) {
+    const keyed = new Map();
+    for (let n = parent.firstChild; n; n = n.nextSibling) {
+      const k = keyOf(n);
+      if (k !== null) keyed.set(k, n);
+    }
+    const placed = new Set();
+    let pos = parent.firstChild;
+    for (const nc of nxt) {
+      const match = keyed.get(keyOf(nc));
+      let node;
+      if (match && sameNode(match, nc)) {
+        keyed.delete(keyOf(nc));
+        morphElement(match, nc);   // update the existing node in place
+        node = match;
+      } else {
+        node = nc.cloneNode(true);  // new key, or key reused with a different tag
+      }
+      placed.add(node);
+      if (pos === node) {
+        pos = pos.nextSibling;      // already in the right spot
+      } else {
+        parent.insertBefore(node, pos);  // move/insert ahead of the current cursor
+      }
+    }
+    // Drop every original node we didn't reuse (leftover keys, removed items, tag swaps).
+    for (let n = parent.firstChild; n; ) {
+      const ns = n.nextSibling;
+      if (!placed.has(n)) parent.removeChild(n);
+      n = ns;
+    }
+  }
+
+  // Index morph: walk children by position, updating text/attrs in place and
+  // inserting/removing at the tail. The original (non-keyed) algorithm.
+  function morphIndexed(current, cur, nxt) {
     let ci = 0, ni = 0;
     while (ni < nxt.length) {
       const nc = nxt[ni];
