@@ -23,7 +23,7 @@ The exposure is at the edges — security gaps and silent failure under crash/ch
 | ~~H17~~ ✅ | Live-navigate kept the old view's subscriptions/presence | HIGH | **Done** — `deflive` `(unmount (model) …)` clause, run in the navigate arm before the next mount; room/presence demos unsubscribe/untrack |
 | ~~M19~~ ✅ | Monitors leaked/duplicated across unsubscribe→resubscribe | MED | **Done** — registries track `{pid → ref}` and `demonitor` when a pid's last subscription/presence drops |
 | ~~M20~~ ✅ | `subscribers`/`roster` sync calls had no correlation ref (a late reply could be mismatched) | MED | **Done** — each request carries a fresh `ref`, the reply is pinned to it. (`lookup-live` in web/live is the user's code — left as-is.) |
-| H18 | No CSRF protection on POST + signed-cookie session | HIGH | CSRF plug: per-session token, hidden field, constant-time compare |
+| ~~H18~~ ✅ | No CSRF protection on POST + signed-cookie session | HIGH | **Done** — `web/csrf`: synchronizer token in the session, `protect-from-forgery` plug, `csrf-input` form field, constant-time verify (+ `X-CSRF-Token` header). Demo `/account` wired. |
 | M21 | `morphChildren` matches by index, so a reorder/insert above an interactive element re-clones it and loses focus/caret | MED | keyed morph via `data-key`/`id` |
 | L | Session cookie defaults `Secure=false` | LOW | default on for HTTPS / require explicit dev opt-out |
 

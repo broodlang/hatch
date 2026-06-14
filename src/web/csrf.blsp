@@ -1,0 +1,80 @@
+(defmodule web/csrf
+  "CSRF protection for unsafe (state-changing) requests — a synchronizer-token scheme on top
+  of the signed session. A per-session token is minted on first request and kept in the
+  session (which is signed, so a client can read but not forge it). Forms embed the token in
+  a hidden `_csrf_token` field (or send it as an `X-CSRF-Token` header); the
+  `protect-from-forgery` plug rejects any POST/PUT/PATCH/DELETE whose submitted token doesn't
+  match the session's, with a 403. A cross-site attacker can't read the victim's token
+  (same-origin) nor forge the signed session, so their forged request fails the check.
+
+  Wire it after the session plug, and embed the token in every form:
+
+    (through [(session/fetch-session secret) session/fetch-flash csrf/protect-from-forgery]
+      (get  \"/account\" account/index)
+      (post \"/account\" account/save))
+
+    ; inside the form's Hiccup:
+    (csrf/csrf-input conn)        ; → a hidden <input name=\"_csrf_token\" value=…>
+
+  Safe methods (GET/HEAD/OPTIONS) are never blocked — the plug just ensures a token exists so
+  forms rendered on the way out can embed it. Requires a session: `fetch-session` must run
+  first."
+  ; get-session / put-session — the token lives in the signed session
+  (:alias web/session)
+  ; param / header / halt / send-resp — read the submitted token, reject on mismatch
+  (:use web/conn)
+  ; secure=? — constant-time token comparison
+  (:use crypto))
+
+; Module-scoped (not earmuffed → not global): the session key the token is stored under, the
+; form field, and the header clients may use instead.
+(def session-key "_csrf")
+(def field-name "_csrf_token")
+(def header-key :x-csrf-token)
+
+(defn token (conn)
+  "The session's CSRF token — `protect-from-forgery` guarantees one exists. nil if neither
+  the session plug nor this plug has run."
+  (session/get-session conn session-key))
+
+(defn ensure-token (conn)
+  "Make sure the session carries a CSRF token, minting a cryptographically strong one on
+  first request (only then is the session marked dirty, so there's no cookie churn). Returns
+  the possibly-updated conn."
+  (if (token conn)
+    conn
+    (session/put-session conn session-key (random-token 32))))
+
+(defn safe-method? (conn)
+  "True for methods that don't change state — never CSRF-checked."
+  (let (m (get conn :method))
+    (or (= m "GET") (= m "HEAD") (= m "OPTIONS"))))
+
+(defn submitted-token (conn)
+  "The token the client sent: the `_csrf_token` body/query param, or the `X-CSRF-Token`
+  header (for fetch/JSON clients)."
+  (or (param conn field-name) (header conn header-key)))
+
+(defn token-ok? (conn)
+  "True if the submitted token is present and matches the session token (constant-time)."
+  (let (want (token conn)
+        got (submitted-token conn))
+    (and want got (secure=? (string->utf8-bytes want) (string->utf8-bytes got)))))
+
+(defn reject (conn)
+  "A halted 403 for a missing/invalid CSRF token."
+  (halt (send-resp conn 403 "<h1>403 Forbidden</h1><p>Invalid or missing CSRF token.</p>")))
+
+(defn protect-from-forgery (conn)
+  "Plug: ensure the session carries a CSRF token, and on an unsafe method reject the request
+  (403, halted) unless the submitted token matches. Safe methods pass through. Run it after
+  `fetch-session`."
+  (let (conn (ensure-token conn))
+    (if (safe-method? conn)
+      conn
+      (if (token-ok? conn) conn (reject conn)))))
+
+(defn csrf-input (conn)
+  "A hidden form field carrying the session's CSRF token — drop it inside every POST form:
+  `(csrf-input conn)`."
+  [:input {:type "hidden" :name field-name :value (token conn)}])
