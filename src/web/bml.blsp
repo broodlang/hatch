@@ -83,9 +83,9 @@
   "Index of the closing `\"` of a string literal whose opening quote is just before `i`."
   (cond
     (>= i (string-length s)) i
-    (= (char-at s i) "\\")   (string-lit-end s (+ i 2))
-    (= (char-at s i) "\"")   i
-    else                     (string-lit-end s (+ i 1))))
+    (= (char-at s i) "\\") (string-lit-end s (+ i 2))
+    (= (char-at s i) "\"") i
+    else (string-lit-end s (+ i 1))))
 
 (defn expand-assigns (s)
   "Rewrite `@name` to `(get model :name)` in embedded Brood text `s`, leaving string
@@ -97,18 +97,24 @@
     acc
     (let (c (char-at s i))
       (cond
-        (= c "\"")
-          (let (j (string-lit-end s (+ i 1)))
-            (expand-assigns--at s (+ j 1) (str acc (substring s i (+ j 1)))))
+        (= c "\"") (let (j (string-lit-end s (+ i 1)))
+                     (expand-assigns--at s (+ j 1) (str acc (substring s i (+ j 1)))))
         (and (= c "@")
-             (not (and (> i 0) (= (char-at s (- i 1)) "~")))
-             (< (+ i 1) (string-length s))
-             (ident-start? (char-at s (+ i 1))))
-          (let (end (ident-run s (+ i 1)))
-            (expand-assigns--at s end
-              (str acc "(get model :" (substring s (+ i 1) end) ")")))
-        else
-          (expand-assigns--at s (+ i 1) (str acc c))))))
+          (not (and (> i 0) (= (char-at s (- i 1)) "~")))
+          (< (+ i 1) (string-length s))
+          (ident-start? (char-at s (+ i 1)))) (let (end (ident-run s
+                                                                                                                                                                                   (+ i
+                                                                                                                                                                                     1)))
+                                                                                                                                                                         (expand-assigns--at s
+                                                                                                                                                                           end
+                                                                                                                                                                           (str acc
+                                                                                                                                                                             "(get model :"
+                                                                                                                                                                             (substring s
+                                                                                                                                                                               (+ i
+                                                                                                                                                                                 1)
+                                                                                                                                                                               end)
+                                                                                                                                                                             ")")))
+        else (expand-assigns--at s (+ i 1) (str acc c))))))
 
 (defn read-expr (s)
   "Read embedded Brood text into a form, expanding the `@name` assign shorthand first."
@@ -156,11 +162,11 @@
   regions (a `\"` inside `{…}` belongs to an embedded Brood string, not the attribute)."
   (cond
     (>= i (string-length s)) (error "bml: unterminated attribute string")
-    (= (char-at s i) "\"")   i
-    (= (char-at s i) "{")    (let (body (substring s (+ i 1) (string-length s))
-                                   end (interp-end body 0 0 false false))
-                               (quote-end s (+ i end 2)))
-    else                     (quote-end s (+ i 1))))
+    (= (char-at s i) "\"") i
+    (= (char-at s i) "{") (let (body (substring s (+ i 1) (string-length s))
+                                end (interp-end body 0 0 false false))
+                            (quote-end s (+ i end 2)))
+    else (quote-end s (+ i 1))))
 
 (defn read-quoted (s)
   "`s` begins with `\"`; returns `[text rest]` (text excludes the quotes)."
@@ -171,14 +177,11 @@
 (defn attr-parts (s acc lit)
   "Split an attribute string into literal-text and `{expr}` parts (forms), in order."
   (cond
-    (= (string-length s) 0)
-      (reverse (if (= lit "") acc (cons lit acc)))
-    (= (char-at s 0) "{")
-      (let ([inner rest] (brace-inner s)
-            acc2 (if (= lit "") acc (cons lit acc)))
-        (attr-parts rest (cons (read-expr inner) acc2) ""))
-    else
-      (attr-parts (substring s 1 (string-length s)) acc (str lit (char-at s 0)))))
+    (= (string-length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
+    (= (char-at s 0) "{") (let ([inner rest] (brace-inner s)
+                                acc2 (if (= lit "") acc (cons lit acc)))
+                            (attr-parts rest (cons (read-expr inner) acc2) ""))
+    else (attr-parts (substring s 1 (string-length s)) acc (str lit (char-at s 0)))))
 
 (defn attr-string-value (inner)
   "Compile a quoted attribute value (which may embed `{…}`) into a value form: a plain
@@ -186,17 +189,17 @@
   one `{…}`, else a `(str …)` of the literal and expression parts."
   (let (parts (attr-parts inner nil ""))
     (cond
-      (empty? parts)      ""
+      (empty? parts) ""
       (and (= (count parts) 1) (string? (first parts))) (first parts)
       (= (count parts) 1) (first parts)
-      else                (cons 'str parts))))
+      else (cons 'str parts))))
 
 (defn parse-attr-value (s)
   "An attribute value. Returns `[value-form rest]`."
   (cond
     (= (char-at s 0) "\"") (let ([inner rest] (read-quoted s)) [(attr-string-value inner) rest])
-    (= (char-at s 0) "{")  (parse-interp s)
-    else                   (read-while s name-char? "")))
+    (= (char-at s 0) "{") (parse-interp s)
+    else (read-while s name-char? "")))
 
 ; ---- directives (:if / :for) ----
 ; Directives take a brace expression like everything else: `:if={expr}`,
@@ -209,8 +212,9 @@
   (let (idx (index-of spec "<-"))
     (if (< idx 0)
       (error "bml: :for needs `x <- coll`, got: " spec)
-      [(read-expr (trim (substring spec 0 idx)))
-       (read-expr (trim (substring spec (+ idx 2) (string-length spec))))])))
+      [(read-expr (trim (substring spec 0 idx))) (read-expr (trim (substring spec
+                                                                    (+ idx 2)
+                                                                    (string-length spec))))])))
 
 (defn apply-directives (form directives)
   "Wrap an element form per its directive attributes. `:for` becomes a `for`
@@ -220,14 +224,13 @@
   (let (has-for (contains? directives ":for")
         has-if (contains? directives ":if"))
     (cond
-      (and has-for has-if)
-        (let ([binder coll] (parse-for (get directives ":for")))
-          (list 'for (list binder coll :when (read-expr (get directives ":if"))) form))
-      has-for
-        (let ([binder coll] (parse-for (get directives ":for")))
-          (list 'for (list binder coll) form))
-      has-if
-        (list 'if (read-expr (get directives ":if")) form nil)
+      (and has-for has-if) (let ([binder coll] (parse-for (get directives ":for")))
+                             (list 'for
+                               (list binder coll :when (read-expr (get directives ":if")))
+                               form))
+      has-for (let ([binder coll] (parse-for (get directives ":for")))
+                (list 'for (list binder coll) form))
+      has-if (list 'if (read-expr (get directives ":if")) form nil)
       else form)))
 
 ; ---- attributes ----
@@ -353,9 +356,9 @@
   parsed, return a form that *raises* that error when evaluated — so a bad template
   fails loudly at render time, while the advisory checker (which never evaluates it)
   still sees a well-formed body rather than a macro that threw mid-expansion."
-  (try (parse-file (template-path filename))
-    (catch e (list 'error (str "bml: cannot render template \"" filename "\": "
-                            (error-message e))))))
+  (try
+    (parse-file (template-path filename))
+    (catch e (list 'error (str "bml: cannot render template \"" filename "\": " (error-message e))))))
 
 (defmacro deftemplate (name args filename)
   "Define `name` as a function of `args` returning the Hiccup compiled from the sibling
