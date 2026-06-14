@@ -1,0 +1,249 @@
+(defmodule web/live "LiveBrood: per-session WebSocket actor + deflive macro."
+  (:use http/websocket)
+  (:use web/template))
+
+; ---- JSON encode (minimal subset needed for wire protocol) ----
+
+(defn json-str (s)
+  "Encode a Brood string as a JSON string (with escaping)."
+  (str "\""
+       (-> s
+           (replace "\\" "\\\\")
+           (replace "\"" "\\\"")
+           (replace "\n" "\\n")
+           (replace "\r" "\\r")
+           (replace "\t" "\\t"))
+       "\""))
+
+(defn json-encode (v)
+  "Encode a value to a JSON string (strings, ints, floats, bools, nil, maps, lists/vectors)."
+  (cond
+    (nil? v)     "null"
+    (bool? v)    (if v "true" "false")
+    (int? v)     (str v)
+    (float? v)   (str v)
+    (string? v)  (json-str v)
+    (map? v)     (str "{" (join ","
+                                (map (fn (kv)
+                                       (let ([k val] kv)
+                                         (str (json-str (if (keyword? k) (name k) (str k)))
+                                              ":" (json-encode val))))
+                                     (entries v)))
+                       "}")
+    (vector? v)  (str "[" (join "," (map json-encode v)) "]")
+    (pair? v)    (str "[" (join "," (map json-encode v)) "]")
+    else         (json-str (str v))))
+
+; ---- JSON decode (minimal, for incoming WS messages) ----
+
+(defn json-decode (s)
+  "Parse a JSON string into a Brood value.
+  Handles objects, arrays, strings, numbers, true/false/null."
+  (let ([v _] (json-parse--value (trim s)))
+    v))
+
+(defn json-parse--value (s)
+  (cond
+    (blank? s)              [nil ""]
+    (starts-with? s "null") [nil (substring s 4 (string-length s))]
+    (starts-with? s "true") [true (substring s 4 (string-length s))]
+    (starts-with? s "false")[false (substring s 5 (string-length s))]
+    (starts-with? s "\"")   (json-parse--string s)
+    (starts-with? s "{")    (json-parse--object s)
+    (starts-with? s "[")    (json-parse--array s)
+    else                    (json-parse--number s)))
+
+(defn json-parse--string (s)
+  (json-parse--string--acc (substring s 1 (string-length s)) ""))
+
+(defn json-parse--string--acc (s acc)
+  (if (blank? s)
+    [acc ""]
+    (let (c (char-at s 0)
+          rest (substring s 1 (string-length s)))
+      (cond
+        (= c "\"") [acc rest]
+        (= c "\\")
+        (let (esc (char-at rest 0)
+              rest2 (substring rest 1 (string-length rest)))
+          (cond
+            (= esc "n")  (json-parse--string--acc rest2 (str acc "\n"))
+            (= esc "r")  (json-parse--string--acc rest2 (str acc "\r"))
+            (= esc "t")  (json-parse--string--acc rest2 (str acc "\t"))
+            (= esc "\\") (json-parse--string--acc rest2 (str acc "\\"))
+            (= esc "\"") (json-parse--string--acc rest2 (str acc "\""))
+            else         (json-parse--string--acc rest2 (str acc esc))))
+        else (json-parse--string--acc rest (str acc c))))))
+
+(defn json-parse--number (s)
+  (let (end (json-parse--num-end s 0))
+    [(string->number (substring s 0 end))
+     (substring s end (string-length s))]))
+
+(defn json-parse--num-end (s i)
+  (if (>= i (string-length s))
+    i
+    (let (c (char-at s i))
+      (if (includes? "0123456789.-+eE" c)
+        (json-parse--num-end s (+ i 1))
+        i))))
+
+(defn json-parse--object (s)
+  (json-parse--object--acc (substring s 1 (string-length s)) {}))
+
+(defn json-parse--object--acc (s acc)
+  (let (s (trim s))
+    (if (starts-with? s "}")
+      [acc (substring s 1 (string-length s))]
+      (let (s (if (starts-with? s ",") (substring s 1 (string-length s)) s)
+            s (trim s)
+            [k rest] (json-parse--string s)
+            rest     (trim rest)
+            rest     (if (starts-with? rest ":") (substring rest 1 (string-length rest)) rest)
+            rest     (trim rest)
+            [v rest] (json-parse--value rest)
+            rest     (trim rest))
+        (json-parse--object--acc rest (assoc acc k v))))))
+
+(defn json-parse--array (s)
+  (json-parse--array--acc (substring s 1 (string-length s)) []))
+
+(defn json-parse--array--acc (s acc)
+  (let (s (trim s))
+    (if (starts-with? s "]")
+      [acc (substring s 1 (string-length s))]
+      (let (s    (if (starts-with? s ",") (substring s 1 (string-length s)) s)
+            s    (trim s)
+            [v r] (json-parse--value s)
+            r    (trim r))
+        (json-parse--array--acc r (into acc [v]))))))
+
+; ---- wire protocol messages ----
+
+(defn send-msg (sock msg-map)
+  "Encode `msg-map` as JSON and send as a WebSocket text frame."
+  (tcp-send sock (text-frame (json-encode msg-map))))
+
+(defn recv-frame--loop (sock buf)
+  "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload remainder]`."
+  (match (parse-frame buf)
+    ([:ok opcode payload rem] [:ok opcode payload rem])
+    ([:incomplete]
+     (receive
+       ([:tcp ~sock chunk]     (recv-frame--loop sock (str buf chunk)))
+       ([:tcp-closed ~sock]    [:closed])
+       ([:ws-send ~sock frame] (tcp-send sock frame) (recv-frame--loop sock buf))))
+    ([:error msg] [:error msg])))
+
+; ---- session actor ----
+
+(defn session-loop (sock view buf)
+  "Per-connection WebSocket event loop.
+  `view` is a map {:mount fn :render fn :handle-event fn :model model}."
+  (let (model (get view :model))
+    (send-msg sock {:event "render" :html (render view model)})
+    (session-recv sock view buf)))
+
+(defn session-recv (sock view buf)
+  (match (recv-frame--loop sock buf)
+    ([:ok 8 _ _]
+     ; client closed
+     (tcp-send sock (close-frame))
+     (tcp-close sock))
+    ([:ok 9 payload _]
+     ; ping → pong
+     (tcp-send sock (pong-frame payload))
+     (session-recv sock view buf))
+    ([:ok 1 payload rem]
+     ; text frame — JSON message from client
+     (session-dispatch sock view rem payload))
+    ([:ok _ _ rem]
+     ; ignore other opcodes
+     (session-recv sock view rem))
+    ([:closed] nil)
+    ([:error _] (tcp-send sock (close-frame)) (tcp-close sock))))
+
+(defn session-dispatch (sock view buf payload)
+  (let (msg    (try (json-decode payload) (catch _ nil))
+        event  (get msg "event" "")
+        params (get msg "params" {}))
+    (match event
+      ("join"
+       (let (model  ((get view :mount) params)
+             view   (assoc view :model model))
+         (send-msg sock {:event "render" :html (render view model)})
+         (session-recv sock view buf)))
+      ("event"
+       (let (name   (get msg "name" "")
+             model  (get view :model)
+             model  (try ((get view :handle-event) name params model)
+                         (catch _ model))
+             view   (assoc view :model model))
+         (send-msg sock {:event "diff" :html (render view model)})
+         (session-recv sock view buf)))
+      (_
+       (session-recv sock view buf)))))
+
+(defn render (view model)
+  "Call the view's render fn and convert to an HTML string."
+  (let (node ((get view :render) model))
+    (web/template/render node)))
+
+; ---- ws-handler factory ----
+
+(defn ws-handler-for (mount-fn render-fn handle-event-fn)
+  "Return a `(fn [sock request])` suitable as http/server's ws-handler."
+  (fn (sock request)
+    (let (params (get request :params {})
+          model  (mount-fn params)
+          view   {:mount        mount-fn
+                  :render       render-fn
+                  :handle-event handle-event-fn
+                  :model        model})
+      (session-loop sock view ""))))
+
+; ---- deflive macro ----
+
+(defmacro deflive (& clauses)
+  "Define a live view in the current module.
+
+  Expands to `mount`, `render`, and `handle-event` function definitions.
+
+  Syntax:
+    (deflive
+      (mount (params) initial-model)
+      (render (model) hiccup-template)
+      (on \"event-name\" (params model) updated-model)
+      ...)"
+  (let (mount-clause   (first (filter (fn (c) (= (first c) 'mount))   clauses))
+        render-clause  (first (filter (fn (c) (= (first c) 'render))  clauses))
+        on-clauses     (filter (fn (c) (= (first c) 'on)) clauses)
+        mount-args     (first (rest mount-clause))
+        mount-body     (rest (rest mount-clause))
+        render-args    (first (rest render-clause))
+        render-body    (rest (rest render-clause))
+        event-arms     (map (fn (c)
+                              (let (ev-name (first (rest c))
+                                    args    (first (rest (rest c)))
+                                    body    (rest (rest (rest c))))
+                                (list ev-name args body)))
+                            on-clauses)
+        handle-body    (cons 'match
+                          (cons 'event--name
+                            (concat
+                              (map (fn (arm)
+                                     (let (ev-name (first arm)
+                                           args    (first (rest arm))
+                                           body    (first (rest (rest arm))))
+                                       (list ev-name
+                                             (list 'let
+                                               (list (first args) 'event--params
+                                                     (first (rest args)) 'event--model)
+                                               (cons 'do body)))))
+                                   event-arms)
+                              (list (list '_ 'event--model))))))
+    (list 'do
+      (list 'defn 'mount mount-args (cons 'do mount-body))
+      (list 'defn 'render render-args (cons 'do render-body))
+      (list 'defn 'handle-event (list 'event--name 'event--params 'event--model)
+            handle-body))))

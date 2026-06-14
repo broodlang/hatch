@@ -1,0 +1,137 @@
+(defmodule http/websocket "WebSocket (RFC 6455) handshake, frame encoder, and frame parser."
+  (:use http/util)
+  (:use http/base64))
+
+(def *ws-magic* "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+
+; Lookup table: position n holds the 1-char string for byte value n.
+; Brood \xHH literals are single bytes; this covers all 256 values.
+(def *byte-table*
+  (str "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+       "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+       "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f"
+       "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f"
+       "\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f"
+       "\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f"
+       "\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f"
+       "\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f"
+       "\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f"
+       "\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f"
+       "\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf"
+       "\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf"
+       "\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf"
+       "\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf"
+       "\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef"
+       "\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"))
+
+(defn byte->char (n)
+  "Convert byte value 0-255 to a 1-char string."
+  (char-at *byte-table* n))
+
+(defn byte-at (s i)
+  "Return the byte value at position `i` in string `s`."
+  (char->int (char-at s i)))
+
+; ---- handshake ----
+
+(defn accept-key (client-key)
+  "Compute the Sec-WebSocket-Accept header value for a given Sec-WebSocket-Key."
+  (encode-sha1 (%sha1 (str (trim client-key) *ws-magic*))))
+
+(defn upgrade-response (key)
+  "Build the 101 Switching Protocols response for a WebSocket upgrade request."
+  (str "HTTP/1.1 101 Switching Protocols\r\n"
+       "Upgrade: websocket\r\n"
+       "Connection: Upgrade\r\n"
+       "Sec-WebSocket-Accept: " (accept-key key) "\r\n"
+       "\r\n"))
+
+(defn upgrade-request? (request)
+  "True if the HTTP request is a WebSocket upgrade."
+  (let (conn (lower (get-in request [:headers :connection] ""))
+        upg  (lower (get-in request [:headers :upgrade] "")))
+    (and (string-contains? conn "upgrade")
+         (= upg "websocket"))))
+
+; ---- frame building (server → client, unmasked) ----
+
+(defn text-frame (payload)
+  "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask)."
+  (let (n (string-length payload))
+    (cond
+      (<= n 125)
+      (str "\x81" (byte->char n) payload)
+      (<= n 65535)
+      (str "\x81\x7e"
+           (byte->char (quot n 256))
+           (byte->char (mod n 256))
+           payload)
+      else
+      (error "websocket/text-frame: payload too large: " n))))
+
+(defn close-frame ()
+  "Build a WebSocket connection-close frame (opcode 0x8, FIN=1, no payload)."
+  "\x88\x00")
+
+(defn pong-frame (payload)
+  "Build a WebSocket pong frame (opcode 0xA, FIN=1)."
+  (str "\x8a" (byte->char (string-length payload)) payload))
+
+; ---- frame parsing (client → server, masked) ----
+
+(defn parse-frame (buf)
+  "Try to parse one WebSocket frame from `buf`.
+  Returns `[:ok opcode payload remainder]`, `[:incomplete]`, or `[:error msg]`."
+  (let (buflen (string-length buf))
+    (if (< buflen 2)
+      [:incomplete]
+      (let (byte0  (byte-at buf 0)
+            byte1  (byte-at buf 1)
+            opcode (bit-and byte0 15)
+            masked (bit-shift-right byte1 7)
+            plen7  (bit-and byte1 127))
+        (parse-frame--sized buf buflen opcode masked plen7)))))
+
+(defn parse-frame--sized (buf buflen opcode masked plen7)
+  (cond
+    (= plen7 126)
+    ; 16-bit extended length
+    (if (< buflen 4)
+      [:incomplete]
+      (let (plen (+ (* (byte-at buf 2) 256) (byte-at buf 3))
+            hlen (if (= masked 1) 8 4))
+        (parse-frame--payload buf buflen opcode masked plen hlen)))
+    (= plen7 127)
+    [:error "websocket: 64-bit frame length not supported"]
+    else
+    ; 7-bit length
+    (let (hlen (if (= masked 1) 6 2))
+      (parse-frame--payload buf buflen opcode masked plen7 hlen))))
+
+(defn parse-frame--payload (buf buflen opcode masked plen hlen)
+  (let (total (+ hlen plen))
+    (if (< buflen total)
+      [:incomplete]
+      (let (payload (if (= masked 1)
+                      (unmask buf (- hlen 4) plen)
+                      (substring buf hlen (+ hlen plen)))
+            remainder (substring buf total buflen))
+        [:ok opcode payload remainder]))))
+
+(defn unmask (buf key-offset plen)
+  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key."
+  (let (k0 (byte-at buf key-offset)
+        k1 (byte-at buf (+ key-offset 1))
+        k2 (byte-at buf (+ key-offset 2))
+        k3 (byte-at buf (+ key-offset 3))
+        key [k0 k1 k2 k3]
+        data-start (+ key-offset 4))
+    (unmask--acc buf data-start plen key 0 "")))
+
+(defn unmask--acc (buf data-start plen key i acc)
+  (if (= i plen)
+    acc
+    (let (raw  (byte-at buf (+ data-start i))
+          k    (get key (mod i 4))
+          b    (bit-xor raw k))
+      (unmask--acc buf data-start plen key (+ i 1) (str acc (byte->char b))))))
