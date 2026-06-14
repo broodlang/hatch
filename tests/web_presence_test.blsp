@@ -113,3 +113,7 @@
       ; after B dies, A is pushed a roster without B
       (assert= (wait-roster-without "B" 60) true)
       (exit a :kill))))
+
+; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
+; primitive) — hard-killing the shared :hatch-presence singleton would race any concurrent
+; test using it (a killed process drops its in-flight mailbox).

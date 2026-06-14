@@ -76,3 +76,7 @@
         (exit h :kill)
         (assert= was-in? true)
         (assert= (wait-gone "room:dead" h 60) true)))))
+
+; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
+; primitive) — a test that hard-kills the shared :hatch-pubsub singleton would race any
+; concurrent test using it (a killed process drops its in-flight mailbox).

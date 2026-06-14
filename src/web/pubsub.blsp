@@ -10,14 +10,33 @@
       (handle-info (msg model) (assoc model :messages (cons msg (get model :messages))))
       (render (model) …))
 
-  A single named registry process holds `topic → subscriber pids` and monitors each
-  subscriber, so a session that drops is removed automatically — no stale pids, no leaks.
+  The registry runs under a supervisor with a sibling vault (web/registry): every change is
+  mirrored to the vault, and on restart the registry recovers its subscriptions from the
+  vault and re-monitors the restored pids — so a crash doesn't silently drop every
+  subscription. It monitors each subscriber, so a dropped session is removed automatically.
   Delivery is fire-and-forget (no ordering or delivery guarantee across topics), which is
   what a live UI wants. This is node-local; cross-node fan-out is a later layer."
   ; send-info — deliver a payload to a subscribed session
-  (:use web/live))
+  (:use web/live)
+  ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
+  (:use web/registry))
+
+(def vault-name :hatch-pubsub-vault)
 
 ; ---- registry process: topic -> list of subscriber pids ----
+
+(defn pubsub--boot ()
+  "Start (or restart) the registry: recover subscriptions from the vault and re-establish a
+  monitor on each restored pid (one that died during the crash window re-fires [:down] at
+  once and is cleaned up), then enter the loop."
+  (let (subs (pull-snapshot vault-name {}))
+    (dolist (pid (pubsub--all-pids subs)) (monitor pid))
+    (pubsub--loop subs)))
+
+(defn pubsub--save (subs)
+  "Mirror the new subscriptions to the vault, then continue the loop."
+  (mirror vault-name subs)
+  (pubsub--loop subs))
 
 (defn pubsub--loop (subs)
   (receive
@@ -26,14 +45,15 @@
         ; monitor a pid only on its first subscription, so it's cleaned up on death
         ; without piling up redundant monitors when it joins several topics
         (when (not (pubsub--known? subs pid)) (monitor pid))
-        (pubsub--loop (pubsub--add subs topic pid))))
-    ([:unsubscribe topic pid] (pubsub--loop (pubsub--remove subs topic pid)))
+        (pubsub--save (pubsub--add subs topic pid))))
+    ([:unsubscribe topic pid] (pubsub--save (pubsub--remove subs topic pid)))
     ([:broadcast topic except payload] (do
                                          (dolist (p (get subs topic (list)))
                                            (when (not (= p except)) (send-info p payload)))
+                                         ; broadcast doesn't change state — no mirror
                                          (pubsub--loop subs)))
     ; a subscriber died — drop it from every topic ([:down ref pid reason])
-    ([:down _ pid _] (pubsub--loop (pubsub--remove-pid subs pid)))
+    ([:down _ pid _] (pubsub--save (pubsub--remove-pid subs pid)))
     ; introspection, mostly for tests: reply with a topic's current subscriber list
     ([:subscribers topic from] (do
                                  (send from [:subscribers (get subs topic (list))])
@@ -58,11 +78,26 @@
     {}
     (entries subs)))
 
+(defn pubsub--all-pids (subs)
+  "Every distinct subscriber pid across all topics — for re-monitoring on recovery."
+  (pubsub--dedupe (apply concat (map (fn (kv) (first (rest kv))) (entries subs)))))
+
+(defn pubsub--dedupe (xs)
+  (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) (list) xs)))
+
 (defn pubsub ()
-  "The PubSub registry pid. `(spawn :name expr)` is atomic get-or-spawn — idempotent on the
-  name — so concurrent first-touches all converge on the one registry (no whereis/register
-  race)."
-  (spawn :hatch-pubsub (pubsub--loop {})))
+  "The PubSub registry pid — a supervised, vault-backed singleton. Started on first use and
+  recovered from the vault on any crash (see web/registry)."
+  (ensure-supervised :hatch-pubsub-sup
+    [{:id :hatch-pubsub-vault
+      :name :hatch-pubsub-vault
+      :restart :permanent
+      :start (fn () (spawn (vault-loop {})))}
+     {:id :hatch-pubsub
+      :name :hatch-pubsub
+      :restart :permanent
+      :start (fn () (spawn (pubsub--boot)))}]
+    :hatch-pubsub))
 
 ; ---- public API ----
 

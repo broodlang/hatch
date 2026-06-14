@@ -1,0 +1,39 @@
+(defmodule web-registry-test
+  (:use web/registry)
+  (:use test))
+
+;; The durable-registry primitive behind web/pubsub and web/presence: a vault process holds
+;; a snapshot, the registry mirrors to it and pulls from it on restart. Tested here without
+;; touching the live singletons (which a destructive kill-test would race under the
+;; concurrent runner). Standalone vaults are spawned under unique names via the atomic
+;; named-spawn.
+
+(describe "vault snapshot mirror/pull"
+  (test "mirror then pull round-trips the snapshot"
+    (do
+      (spawn :rtest-vault-a (vault-loop {}))
+      (mirror :rtest-vault-a {"room:1" (list 1 2) "room:2" (list 3)})
+      (assert= (pull-snapshot :rtest-vault-a {}) {"room:1" (list 1 2) "room:2" (list 3)})))
+  (test "a later mirror overwrites the snapshot"
+    (do
+      (spawn :rtest-vault-b (vault-loop {}))
+      (mirror :rtest-vault-b {"a" (list 1)})
+      (mirror :rtest-vault-b {"b" (list 2)})
+      (assert= (pull-snapshot :rtest-vault-b {}) {"b" (list 2)})))
+  (test "pull from an absent vault returns the default"
+    (assert= (pull-snapshot :rtest-no-such-vault :default) :default)))
+
+(defn child-spec (nm)
+  {:id nm :name nm :restart :permanent :start (fn () (spawn (vault-loop {})))})
+
+(describe "ensure-supervised"
+  (test "starts a supervised named child and returns its pid"
+    (let (pid (ensure-supervised :rtest-sup-a [(child-spec :rtest-child-a)] :rtest-child-a))
+      (assert= (nil? pid) false)
+      (assert= (= pid (whereis :rtest-child-a)) true)))
+  (test "is idempotent — a second call returns the same pid"
+    (let (p1 (ensure-supervised :rtest-sup-b [(child-spec :rtest-child-b)] :rtest-child-b)
+          p2 (ensure-supervised :rtest-sup-b [(child-spec :rtest-child-b)] :rtest-child-b))
+      (assert= (= p1 p2) true))))
+; (Supervisor-driven restart-after-crash + vault recovery is proven end-to-end by the
+;  live-route registry crash test in web_live_test; web/registry reuses proc/supervisor.)

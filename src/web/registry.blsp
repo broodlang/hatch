@@ -1,0 +1,60 @@
+(defmodule web/registry
+  "Supervised, crash-durable named registries — the shared scaffolding behind web/pubsub
+  and web/presence (web/live's route table uses the same shape inline).
+
+  A registry is a process holding live state; a sibling *vault* process holds a snapshot of
+  it. Both run under one supervisor (`:strategy :one-for-one`, `:restart :permanent`), which
+  restarts either on crash and bounds a crash loop. When the registry restarts it recovers
+  its state by pulling the vault's snapshot; it then re-establishes anything derived from
+  that state (e.g. re-`monitor`ing restored pids). Recovery is one-directional — the registry
+  pulls from the vault, the vault never pulls — so the two can't deadlock at boot. The vault
+  starts before the registry, so the first pull sees an empty (or last-known) snapshot.
+
+  This covers the single-fault case (registry crash → recover from vault). The vault is also
+  supervised; if it crashes it restarts empty and is repopulated by the registry's next
+  `mirror` (registries mirror their full snapshot on every state change)."
+  (:alias proc/supervisor))
+
+(defn await (nm tries)
+  "Block until `nm` is registered (supervisor children start asynchronously). Gives up after
+  `tries` × 5ms — callers treat a miss as 'not up yet' rather than erroring."
+  (cond
+    (whereis nm) :ok
+    (<= tries 0) :ok
+    else (do (sleep 5) (await nm (- tries 1)))))
+
+(defn ensure-supervised (sup-name children wait-name)
+  "The pid registered as `wait-name`. On first use (or after a teardown) start the supervisor
+  for `children` — idempotent via its `:name`, so concurrent callers and hot reloads converge
+  on one — and wait through the brief async-start window."
+  (or (whereis wait-name)
+    (do
+      (supervisor/start-supervisor children {:name sup-name :strategy :one-for-one})
+      (await wait-name 60)
+      (whereis wait-name))))
+
+(defn vault-loop (snapshot)
+  "A durable mirror: holds the latest snapshot pushed via `[:set s]` and serves it on
+  `[:get-snapshot from]`. It never pulls, so registry and vault can't deadlock at boot."
+  (receive
+    ([:set s] (vault-loop s))
+    ([:get-snapshot from] (do (send from [:snapshot snapshot]) (vault-loop snapshot)))))
+
+(defn pull-snapshot (vault-name default)
+  "Pull the vault's snapshot — the registry calls this on boot to recover. `default` if the
+  vault isn't up yet (first boot) or doesn't answer in time."
+  (let (v (whereis vault-name))
+    (if (nil? v)
+      default
+      (do
+        (send v [:get-snapshot (self)])
+        (receive
+          ([:snapshot s] s)
+          (after 1000 default))))))
+
+(defn mirror (vault-name snapshot)
+  "Push the current snapshot to the vault (best-effort; the vault may be mid-restart, in
+  which case the next mirror repopulates it). Returns nil."
+  (let (v (whereis vault-name))
+    (when v (send v [:set snapshot])))
+  nil)
