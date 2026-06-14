@@ -5,9 +5,13 @@
   (:use web/template)
   ; parse-file — the (template …) clause's BML→Hiccup compiler
   (:use web/bml)
+  ; compile-parts — split a render form into statics + dynamic holes (minimal diffs)
+  (:use web/parts)
   ; send-resp / put-resp-header (client-js-handler)
   (:use web/conn)
-  (:use protocol))
+  (:use protocol)
+  ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
+  (:alias proc/supervisor))
 ; ---- JSON encode via the Encode protocol -----------------------------------
 ; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
 ; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
@@ -208,13 +212,13 @@
 ; ---- named singleton processes ----
 ; Both live registries below are "get-or-spawn a process registered under a name".
 
-(defn ensure-named (nm start)
-  "The pid registered as `nm`; on first use spawn `(start)` and register it under `nm`.
-  Safe under a spawn/register race: if registration loses, fall back to the winner."
+(defn live--ensure (nm)
+  "Resolve registry `nm` — the supervised child (started by the `defonce` below). If it's
+  absent (supervisor never started, or torn down), (re)start the supervisor — idempotent
+  via its `:name` — and wait through the brief async-start / restart window. In normal
+  operation the first `whereis` hits, so nothing competes with the supervisor's child."
   (or (whereis nm)
-    (try
-      (let (pid (spawn (start))) (register nm pid) pid)
-      (catch _ (whereis nm)))))
+    (do (start-live-registries) (live--await nm 60) (whereis nm))))
 
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
 ; Hot reload already rebinds the view's globals (docs/shared-code.md); we just need
@@ -231,8 +235,9 @@
     ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live--registry-loop pids))))
 
 (defn live--registry ()
-  "The reload-registry pid, spawned and named `:hatch-live` on first use."
-  (ensure-named :hatch-live (fn () (live--registry-loop nil))))
+  "The reload-registry pid — the supervised `:hatch-live` (see `start-live-registries`),
+  waiting through a restart window; lazily spawned only if no supervisor is running."
+  (live--ensure :hatch-live))
 
 (defn live--register (pid) (send (live--registry) [:register pid]) nil)
 
@@ -273,8 +278,11 @@
   "Deliver an out-of-band `payload` to a live `session` process; it arrives at the view's
   `handle-info`, which returns a new model and triggers a re-render. This is the delivery
   primitive PubSub/Presence (and one-off timers) build on. `session` is a live session pid
-  — the value `(self)` has inside a running session, e.g. captured in `mount` to subscribe."
-  (send session [:info payload])
+  — the value `(self)` has inside a running session, e.g. captured in `mount` to subscribe.
+  Sending to an already-dead session is swallowed: a fan-out caller (a PubSub/Presence
+  registry looping over subscribers) must not crash because one of them just vanished —
+  the registry's monitor cleans the stale pid up moments later anyway."
+  (try (send session [:info payload]) (catch _ nil))
   nil)
 
 (defn session-loop (sock view buf)
@@ -299,12 +307,38 @@
 ; ("render" for a full page, "diff" for an update), and go back to listening. Every
 ; state transition below funnels through here.
 (defn push-update (sock view buf kind model)
-  "Set `model` on the view, push a `kind` frame with the freshly-rendered HTML, and
-  keep listening on `buf`. If the push fails (peer gone mid-write), end the session."
+  "Set `model` on the view and push to the client: a full `join` (static skeleton + every
+  dynamic slot) for `kind` \"render\", else a minimal `diff` (only the changed slots). Keeps
+  listening on `buf`; a failed write (peer gone) ends the session."
   (let (view (assoc view :model model))
-    (if (send-msg sock {:event kind :html (render view model)})
+    (if (= kind "render")
+      (push-full sock view buf)
+      (push-diff sock view buf))))
+
+(defn push-full (sock view buf)
+  "Send the whole view — `{:event \"join\" :s statics :d dynamics}` — and record the dynamic
+  slots so later updates diff against them. The client assembles the HTML and morphs."
+  (let (statics (get view :render-static)
+        dynamics ((get view :render-dynamic) (get view :model))
+        view (assoc view :dynamics dynamics))
+    (if (send-msg sock {:event "join" :s statics :d dynamics})
       (session-recv sock view buf)
       (close-session sock))))
+
+(defn push-diff (sock view buf)
+  "Re-render the dynamic slots and send only those that changed — `{:event \"diff\" :d
+  {idx val}}`. No prior dynamics (no join yet) → a full push; nothing changed → send nothing."
+  (if (nil? (get view :dynamics))
+    (push-full sock view buf)
+    (let (old (get view :dynamics)
+          dynamics ((get view :render-dynamic) (get view :model))
+          changed (web/parts/diff-dynamics old dynamics)
+          view (assoc view :dynamics dynamics))
+      (if (= (count changed) 0)
+        (session-recv sock view buf)
+        (if (send-msg sock {:event "diff" :d changed})
+          (session-recv sock view buf)
+          (close-session sock))))))
 
 (defn close-session (sock)
   "Drop out of the reload registry and close the socket. The close-frame send and the
@@ -434,12 +468,100 @@
 
 (defn live--routes-loop (table)
   (receive
-    ([:put path entry] (live--routes-loop (assoc table path entry)))
-    ([:get path from] (send from [:entry (get table path)]) (live--routes-loop table))))
+    ; mirror every change to the vault, so the table survives this process crashing
+    ([:put path entry] (let (v (whereis :hatch-live-routes-vault))
+                         (when v (send v [:put path entry])))
+      (live--routes-loop (assoc table path entry)))
+    ([:get path from] (send from [:entry (get table path)]) (live--routes-loop table))
+    ; the vault we monitor died: once the supervisor restarts it, re-mirror our whole
+    ; table so the backup is whole again, and re-watch the fresh vault
+    ([:down _ _ _] (live--await :hatch-live-routes-vault 60)
+      (let (v (whereis :hatch-live-routes-vault))
+        (when v
+          (dolist (kv (entries table)) (send v [:put (first kv) (second kv)]))
+          (monitor v)))
+      (live--routes-loop table))))
 
 (defn live--routes ()
-  "The live-route registry pid, spawned and named `:hatch-live-routes` on first use."
-  (ensure-named :hatch-live-routes (fn () (live--routes-loop {}))))
+  "The live-route registry pid — the supervised `:hatch-live-routes` (see
+  `start-live-registries`), waiting through a restart window; lazily spawned only if no
+  supervisor is running."
+  (live--ensure :hatch-live-routes))
+
+; ---- crash recovery: a vault mirrors the route table (docs/robustness.md Tier 3) ----
+; The route table is registered once at load by `(live …)` clauses, so a registry crash
+; used to empty it until the next module load (live views 404). Now the registry mirrors
+; every entry to a tiny `:hatch-live-routes-vault`. Recovery is one-directional to avoid a
+; mutual boot deadlock: the registry pulls the table from the vault when it (re)starts, and
+; it *monitors* the vault so it can re-mirror the whole table when the vault restarts. Both
+; run under one supervisor (below), which also bounds a crash loop.
+
+(defn live--vault-loop (table)
+  "The durable mirror of the route table: it only stores `:put`s and serves `:get-snapshot`
+  (the registry's boot-time pull), so it's far simpler — and less crash-prone — than the
+  registry it backs. It never pulls, so registry and vault can't deadlock at boot."
+  (receive
+    ([:put path entry] (live--vault-loop (assoc table path entry)))
+    ([:get-snapshot from] (send from [:snapshot table]) (live--vault-loop table))))
+
+(defn live--pull (nm)
+  "Request a `{path -> entry}` snapshot from the process registered `nm`, or `{}` if it
+  isn't up or doesn't answer in time. Run in the new process at (re)start to recover."
+  (let (p (whereis nm))
+    (if (nil? p)
+      {}
+      (do
+        (send p [:get-snapshot (self)])
+        (receive ([:snapshot t] t) (after 300 {}))))))
+
+(defn live--watch-vault ()
+  "Monitor the route vault from the registry, so the registry is told (`[:down …]`) when
+  the vault dies and can re-mirror its table to the restarted vault."
+  (let (v (whereis :hatch-live-routes-vault)) (when v (monitor v))))
+
+(defn live--routes-boot ()
+  ; recover the table from the vault, then watch the vault for its own restarts
+  (let (table (live--pull :hatch-live-routes-vault))
+    (live--watch-vault)
+    (live--routes-loop table)))
+
+(defn live--vault-boot ()
+  ; the vault never pulls (it's repopulated by the registry's mirroring) — no deadlock
+  (live--vault-loop {}))
+
+(defn live--await (nm tries)
+  "Block until `nm` is registered (the supervisor starts children asynchronously), so the
+  caller can rely on the registries being up. Gives up after `tries` × 5ms."
+  (cond
+    (whereis nm) :ok
+    (<= tries 0) :ok
+    else (do (sleep 5) (live--await nm (- tries 1)))))
+
+(defn start-live-registries ()
+  "Start the live registries under a supervisor and block until they're up. Idempotent —
+  reload-stable via the supervisor's `:name`, so a hot reload returns the existing one.
+  Children (start order): the reload registry, the route-table vault, then the route
+  registry (which seeds from the vault). Called once at module load by the `defonce`."
+  (let (sup (supervisor/start-supervisor [{:id :hatch-live
+                                           :name :hatch-live
+                                           :restart :permanent
+                                           :start (fn () (spawn (live--registry-loop nil)))} {:id :hatch-live-routes-vault
+                                                                                                                                                                                                                                                                                     :name :hatch-live-routes-vault
+                                                                                                                                                                                                                                                                                     :restart :permanent
+                                                                                                                                                                                                                                                                                     :start (fn ()
+                                                                                                                                                                                                                                                                                              (spawn (live--vault-boot)))}
+                                           {:id :hatch-live-routes
+                                            :name :hatch-live-routes
+                                            :restart :permanent
+                                            :start (fn () (spawn (live--routes-boot)))}]
+              {:name :hatch-live-sup :strategy :one-for-one}))
+    (live--await :hatch-live-routes 60)
+    sup))
+
+; Start the supervised registries at module load — before any router `(live …)` clause
+; runs `register-live` (which loads this module), so the registry owns its name first and
+; nothing races it. `defonce` + the supervisor `:name` make this safe under hot reload.
+(defonce *live-registries* (start-live-registries))
 
 (defn register-live (path spec-fn session)
   "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`,
@@ -572,12 +694,25 @@
         ; unexpanded (an "unbound deflive" cascade in the advisory checker / LSP,
         ; which can't resolve the view's path). At real runtime the file compiles, so
         ; the error render is only reached on a genuine bad template, and loudly.
-        render-defn (if render-clause
-                      (list 'defn 'render render-args (cons 'do render-body))
-                      (list 'defn
-                        'render
-                        (list 'model)
-                        (compile-template (first (rest template-clause)))))
+        ; The single render expression — the inline `(render …)` body or the compiled
+        ; `.bml` form — computed once and reused for both the full `render` and the
+        ; static/dynamic split below.
+        render-expr (if render-clause
+                      (if (= (count render-body) 1) (first render-body) (cons 'do render-body))
+                      (compile-template (first (rest template-clause))))
+        render-dyn-args (if render-clause render-args (list 'model))
+        render-defn (list 'defn 'render render-dyn-args render-expr)
+        ; Static/dynamic split for minimal-diff rendering (web/parts). On a malformed form
+        ; the whole render falls back to one opaque dynamic — correct, just not granular.
+        parts (try
+                (web/parts/compile-parts render-expr)
+                (catch _e
+                  {:statics ["" ""] :dynamics (list (list 'web/template/render render-expr))}))
+        render-static-defn (list 'def 'render-static (get parts :statics))
+        render-dynamic-defn (list 'defn
+                              'render-dynamic
+                              render-dyn-args
+                              (cons 'vector (get parts :dynamics)))
         ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
         ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
         ; view that doesn't opt in just ignores such messages, keeping its model.
@@ -590,6 +725,8 @@
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       render-defn
+      render-static-defn
+      render-dynamic-defn
       (list 'defn
         'handle-event
         (list 'event--name 'event--params 'event--model)
@@ -604,6 +741,8 @@
         (list)
         {:mount 'mount
          :render 'render
+         :render-static 'render-static
+         :render-dynamic 'render-dynamic
          :handle-event 'handle-event
          :handle-tick 'handle-tick
          :handle-info 'handle-info

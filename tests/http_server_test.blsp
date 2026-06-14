@@ -99,12 +99,19 @@
     (after 400 buf)))
 
 (defn get-response (port path)
-  "Open a client, send one GET, and return the full raw response string."
+  "Open a client, send one GET (Connection: close, so the worker closes + exits once it
+  has answered), and return the full raw response string."
   (let (sock (tcp-connect "127.0.0.1" port)
-        _req (tcp-send sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+        _req (tcp-send sock
+               (str "GET " path " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
         resp (drain sock ""))
     (tcp-close sock)
     resp))
+
+(defn report-response (port me)
+  "Run `get-response` in this (spawned) process and report the result to `me` — lets a
+  test fire a request, then act (e.g. call `stop`) while it's in flight."
+  (send me [:resp (get-response port "/")]))
 
 ; Tier-2 (docs/robustness.md): a handler that raises must answer a generic 500 without
 ; leaking internals; the detail is left to telemetry / the :error-handler knob.
@@ -128,3 +135,59 @@
       (server/stop port)
       (assert= (includes? resp "503") true)
       (assert= (includes? resp "maintenance") true))))
+
+; Tier-2 (docs/robustness.md): graceful shutdown drains in-flight connections.
+(describe "graceful stop lets an in-flight request finish"
+  (test "a request already running when stop is called still gets its response"
+    (let (me (self)
+          port 54743
+          _sup (server/start port
+                 (fn (_req) (do (sleep 200) {:status 200 :headers {} :body "done"})))
+          _c (spawn (report-response port me))
+          ; let the request reach the (slow) handler
+          _wait (sleep 60)
+          ; drains: blocks until the in-flight worker finishes
+          _stop (server/stop port)
+          resp (receive ([:resp r] r) (after 3000 :timeout)))
+      ; the slow handler ran to completion despite stop being called mid-flight
+      (assert= (includes? resp "done") true))))
+
+(describe "graceful stop kills a straggler past :shutdown-grace-ms"
+  (test "a request still running after the grace window is cut off"
+    (let (me (self)
+          port 54744
+          _sup (server/start port
+                 (fn (_req) (do (sleep 1000) {:status 200 :headers {} :body "done"}))
+                 nil
+                 {:shutdown-grace-ms 100})
+          _c (spawn (report-response port me))
+          _wait (sleep 60)
+          ; grace 100ms < 1000ms handler → worker killed
+          _stop (server/stop port)
+          resp (receive ([:resp r] r) (after 3000 :timeout)))
+      (assert= (includes? resp "done") false))))
+
+; A masked client frame (zero mask key → payload bytes unchanged); fin 0/1, payload ≤125.
+(defn ws-frame (fin opcode payload)
+  (str (byte->char (+ (* fin 128) opcode))
+    (byte->char (+ 128 (string-length payload)))
+    "\x00\x00\x00\x00"
+    payload))
+
+; Tier-2 end-to-end: a fragmented client message is reassembled across the real socket.
+; Before reassembly, the server read loop saw only the first fragment ("Hel") and dropped
+; the continuations; now the ws-handler receives the whole message as one payload.
+(describe "websocket reassembles a fragmented message end-to-end"
+  (test "three frames (FIN=0 text, FIN=0 cont, FIN=1 cont) arrive as one payload"
+    (let (me (self)
+          port 54751
+          _sup (server/start port
+                 (fn (_req) {:status 200 :headers {} :body "ok"})
+                 (echo-one-frame me))
+          client (ws-client-connect port)
+          _send (tcp-send client
+                  (str (ws-frame 0 1 "Hel") (ws-frame 0 0 "lo ") (ws-frame 1 0 "world")))
+          payload (receive ([:got p] p) (after 3000 :timeout)))
+      (tcp-close client)
+      (server/stop port)
+      (assert= payload "Hello world"))))

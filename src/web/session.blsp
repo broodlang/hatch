@@ -95,14 +95,18 @@
         write-session))))
 
 (defn write-session (conn)
-  "Before-send callback: if the session was changed this request, re-sign it into a
-  Set-Cookie; otherwise leave the response untouched."
+  "Before-send callback: if the session changed this request, write it back. An empty
+  session (e.g. after clear-session/logout, or once a one-shot flash is consumed) is
+  *expired* with a Max-Age=0 cookie rather than re-signed as `{}`, so the browser actually
+  drops it. Unchanged sessions leave the response untouched (no cookie churn on plain GETs)."
   (if (get conn :session-changed? false)
     (let (cfg (get conn :session-config {})
           secret (get cfg :secret)
           opts (get cfg :opts {})
-          value (encode-session secret (get conn :session {})))
-      (put-cookie conn (get cfg :cookie) value (session-cookie-opts opts)))
+          sess (get conn :session {}))
+      (if (= (count sess) 0)
+        (delete-cookie conn (get cfg :cookie) (session-cookie-opts opts))
+        (put-cookie conn (get cfg :cookie) (encode-session secret sess) (session-cookie-opts opts))))
     conn))
 
 (defn session-cookie-opts (opts)

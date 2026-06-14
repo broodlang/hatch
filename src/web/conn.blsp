@@ -98,15 +98,26 @@
   same `:path`/`:domain` the cookie was written with so the browser drops the right one."
   (put-cookie conn name "" (assoc opts :max-age 0)))
 
+(defn cookie-safe (s)
+  "Strip characters that could break out of a cookie name or value — CR/LF (header
+  injection / response splitting) and `;` (forging extra attributes or a second pair).
+  Defense in depth for the public `put-cookie` API: a caller passing an unencoded,
+  user-controlled value can't smuggle attributes. (Signed session/flash cookies are
+  base64url+hex, so this is a no-op for them.)"
+  (-> (str s)
+    (replace "\r" "")
+    (replace "\n" "")
+    (replace ";" "")))
+
 (defn format-set-cookie (name value opts)
   "Format one `Set-Cookie` header value from `name`, `value`, and `opts` (see put-cookie)."
   (let (path (get opts :path "/")
         max-age (get opts :max-age)
         domain (get opts :domain)
         same-site (get opts :same-site "Lax"))
-    (str name
+    (str (cookie-safe name)
       "="
-      value
+      (cookie-safe value)
       "; Path="
       path
       (if (nil? domain) "" (str "; Domain=" domain))

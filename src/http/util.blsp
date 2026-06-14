@@ -78,15 +78,24 @@
         else {}))))
 
 (defn json-body-params (body)
-  "Params from a JSON request `body`. Only a top-level JSON object contributes params;
-  its keyword keys are stringified so it reads like query/form params. A non-object body
-  or a parse error yields `{}` (a malformed body is ignored, not fatal)."
+  "Params from a JSON request `body`. Only a top-level JSON object contributes params; its
+  keys are stringified — deeply, including nested objects — so the result reads like query/
+  form params throughout (json-parse yields keyword keys). A non-object body or a parse error
+  yields `{}` (a malformed body is ignored, not fatal)."
   (try
     (let (parsed (json-parse body))
-      (if (map? parsed)
-        (fold (fn (m kv) (assoc m (name (first kv)) (first (rest kv)))) {} (entries parsed))
-        {}))
+      (if (map? parsed) (stringify-keys parsed) {}))
     (catch _e {})))
+
+(defn stringify-keys (v)
+  "Recursively replace every map key with its string name, descending through map values
+  and vectors — so a parsed JSON body is string-keyed all the way down."
+  (cond
+    (map? v) (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
+               {}
+               (entries v))
+    (vector? v) (into [] (map stringify-keys v))
+    else v))
 
 ;; ---- status codes ----
 

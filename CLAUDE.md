@@ -17,20 +17,25 @@ so the demo is also our proof that Hatch installs and loads as a real package.
 
 ```bash
 # In hatch/ (the framework):
-nest test          # run the framework test suite (326 tests)
+nest test          # run the framework test suite
 nest format        # format all .blsp source
 
 # In ../hatch-demo/ (the demo app, consumes Hatch via :path):
 nest fetch         # resolve the :path dep → project.lock.blsp
 nest test          # loads `main`, exercising the dep end-to-end
-nest run           # start the demo server on http://localhost:4000
+nest run           # start the demo server ($HATCH_PORT, default 5000)
 ```
 
-The demo (`../hatch-demo/src/main.blsp`) serves:
-- `GET /` — home page
-- `GET /counter` — live counter (WebSocket via `deflive`)
-- `ANY /echo` — echo request details
-- `GET /static/*` — static file serving
+The demo (`../hatch-demo/src/web/routes.blsp`) serves:
+- `GET /` — home page (plain)
+- `GET /page-inline`, `GET /page-template` — plain pages (inline Hiccup vs `.bml`)
+- `GET /counter`, `GET /counter-inline` — live counter (events + tickers)
+- `GET /signup` — live form with as-you-type validation
+- `GET /room` — PubSub demo (real-time broadcast across clients)
+- `GET /presence` — Presence demo (live who's-here roster)
+- `GET`/`POST /account` — form body params + signed session + flash (PRG)
+- `GET /dev` — Basic-auth-gated diagnostics; `GET /slow` — slow-request logging demo
+- `GET /static/*` — static assets (+ `/static/brood_live.js`, the live client)
 
 ## Source layout
 
@@ -51,7 +56,12 @@ src/
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     static.blsp     — MIME table + path-safe static file handler
-    live.blsp       — deflive macro, session actor, live-route dispatch, JSON codec, page-chrome
+    live.blsp       — deflive macro (mount/render/on/tick/handle-info), session actor,
+                      live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
+                      page-chrome
+    parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
+    pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
+    presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
 static/
@@ -69,6 +79,9 @@ tests/
   web_session_test.blsp
   web_static_test.blsp
   web_live_test.blsp
+  web_parts_test.blsp
+  web_pubsub_test.blsp
+  web_presence_test.blsp
   web_assets_test.blsp
   web_test_test.blsp
 docs/

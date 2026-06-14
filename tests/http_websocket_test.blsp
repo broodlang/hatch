@@ -128,3 +128,30 @@
       (assert= (string-length f) 127)))
   (test "small payload echoed verbatim"
     (assert= (pong-frame "hi") (str "\x8a\x02hi"))))
+
+; A masked client frame with a zero mask key (so payload bytes pass through unchanged);
+; `payload` must be <= 125 bytes so the 7-bit length form applies. `fin` is 0 or 1.
+(defn cframe (fin opcode payload)
+  (str (byte->char (+ (* fin 128) opcode))
+    (byte->char (+ 128 (string-length payload)))
+    "\x00\x00\x00\x00"
+    payload))
+
+; Tier-2 (docs/robustness.md): reassemble fragmented messages; cap frame + message size.
+(describe "parse-frame: fragmentation + size caps"
+  (test "reassembles a fragmented text message into one"
+    (let (buf (str (cframe 0 1 "Hel") (cframe 0 0 "lo ") (cframe 1 0 "world"))
+          [tag opcode payload rem] (parse-frame buf))
+      (assert= tag :ok)
+      (assert= opcode 1)
+      (assert= payload "Hello world")
+      (assert= rem "")))
+  (test "incomplete until the final (FIN) fragment arrives"
+    (assert= (parse-frame (str (cframe 0 1 "Hel") (cframe 0 0 "lo "))) [:incomplete]))
+  (test "a non-continuation frame mid-message is rejected"
+    (assert= (first (parse-frame (str (cframe 0 1 "Hel") (cframe 1 1 "lo")))) :error))
+  (test "a single frame over the frame cap is rejected"
+    (assert= (first (parse-message (cframe 1 1 "toolong") 4 1000)) :error))
+  (test "a reassembled message over the message cap is rejected"
+    (assert= (first (parse-message (str (cframe 0 1 "aaaa") (cframe 1 0 "bbbb")) 65535 6))
+      :error)))

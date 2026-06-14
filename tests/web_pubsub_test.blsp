@@ -1,0 +1,78 @@
+(defmodule web-pubsub-test
+  (:use web/pubsub)
+  (:use test))
+
+;; PubSub is process-level: a registry process fans broadcasts out to subscriber pids via
+;; send-info ([:info payload]). The test process acts as a subscriber — since the registry
+;; is a *separate* process, "self subscribes, broadcast, self receives" already exercises
+;; cross-process delivery end to end. Registry-state checks poll (wait-member/wait-gone),
+;; because a subscribe/unsubscribe/DOWN is async w.r.t. the caller; asserting on a single
+;; snapshot under the concurrent test runner is racy.
+
+(defn hold-subscriber (topic parent)
+  "Subscribe to `topic`, barrier until the registry has processed it (a synchronous
+  `subscribers` round-trip — same-sender FIFO), tell `parent`, then idle so the test can
+  kill us and watch the registry clean up."
+  (subscribe topic)
+  (subscribers topic)
+  (send parent [:subscribed])
+  (receive (after 10000 nil)))
+
+(defn wait-member (topic pid tries)
+  "Poll until `pid` IS a subscriber of `topic`."
+  (cond
+    (member? pid (subscribers topic)) true
+    (<= tries 0) false
+    else (do (receive (after 50 nil)) (wait-member topic pid (- tries 1)))))
+
+(defn wait-gone (topic pid tries)
+  "Poll until `pid` is no longer a subscriber of `topic` (DOWN cleanup is async)."
+  (cond
+    (not (member? pid (subscribers topic))) true
+    (<= tries 0) false
+    else (do (receive (after 50 nil)) (wait-gone topic pid (- tries 1)))))
+
+(describe "subscribe + broadcast"
+  (test "a subscriber receives a broadcast via [:info payload]"
+    (do
+      (subscribe "room:a")
+      (broadcast "room:a" {:n 1})
+      (let (got (receive ([:info p] p) (after 5000 :timeout)))
+        (unsubscribe "room:a")
+        (assert= got {:n 1}))))
+  (test "subscribers reflects subscribe then unsubscribe"
+    (do
+      (subscribe "room:b")
+      (let (in? (wait-member "room:b" (self) 60))
+        (unsubscribe "room:b")
+        (assert= in? true)
+        (assert= (wait-gone "room:b" (self) 60) true)))))
+
+(describe "broadcast-from"
+  (test "does not deliver to the sender"
+    (do
+      ; self is the only subscriber; broadcast-from excludes self, so nothing arrives
+      (subscribe "room:bf")
+      (wait-member "room:bf" (self) 60)
+      (broadcast-from "room:bf" {:x 1})
+      (let (mine (receive ([:info _] :got) (after 400 :none)))
+        (unsubscribe "room:bf")
+        (assert= mine :none))))
+  (test "plain broadcast DOES deliver to the sender (contrast)"
+    (do
+      (subscribe "room:bf2")
+      (wait-member "room:bf2" (self) 60)
+      (broadcast "room:bf2" {:y 2})
+      (let (mine (receive ([:info p] p) (after 5000 :timeout)))
+        (unsubscribe "room:bf2")
+        (assert= mine {:y 2})))))
+
+(describe "dead-subscriber cleanup"
+  (test "a subscriber that dies is removed from its topics"
+    (let (me (self)
+          h (spawn (hold-subscriber "room:dead" me)))
+      (receive ([:subscribed] nil) (after 10000 nil))
+      (let (was-in? (wait-member "room:dead" h 60))
+        (exit h :kill)
+        (assert= was-in? true)
+        (assert= (wait-gone "room:dead" h 60) true)))))

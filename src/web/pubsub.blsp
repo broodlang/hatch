@@ -1,0 +1,99 @@
+(defmodule web/pubsub
+  "Topic-based publish/subscribe for live views — the real-time backbone (à la
+  Phoenix.PubSub). A process subscribes to a string topic; anyone can broadcast a payload
+  to that topic, and every subscriber receives it via `send-info` — i.e. at the view's
+  `handle-info`. A live view subscribes in its `mount` (where `(self)` is the session pid):
+
+    (deflive
+      (mount (params) (do (pubsub/subscribe \"room:lobby\") {:messages []}))
+      (on \"send\" (params model) (do (pubsub/broadcast \"room:lobby\" {:text (get params \"value\")}) model))
+      (handle-info (msg model) (assoc model :messages (cons msg (get model :messages))))
+      (render (model) …))
+
+  A single named registry process holds `topic → subscriber pids` and monitors each
+  subscriber, so a session that drops is removed automatically — no stale pids, no leaks.
+  Delivery is fire-and-forget (no ordering or delivery guarantee across topics), which is
+  what a live UI wants. This is node-local; cross-node fan-out is a later layer."
+  ; send-info — deliver a payload to a subscribed session
+  (:use web/live))
+
+; ---- registry process: topic -> list of subscriber pids ----
+
+(defn pubsub--loop (subs)
+  (receive
+    ([:subscribe topic pid]
+      (do
+        ; monitor a pid only on its first subscription, so it's cleaned up on death
+        ; without piling up redundant monitors when it joins several topics
+        (when (not (pubsub--known? subs pid)) (monitor pid))
+        (pubsub--loop (pubsub--add subs topic pid))))
+    ([:unsubscribe topic pid] (pubsub--loop (pubsub--remove subs topic pid)))
+    ([:broadcast topic except payload] (do
+                                         (dolist (p (get subs topic (list)))
+                                           (when (not (= p except)) (send-info p payload)))
+                                         (pubsub--loop subs)))
+    ; a subscriber died — drop it from every topic ([:down ref pid reason])
+    ([:down _ pid _] (pubsub--loop (pubsub--remove-pid subs pid)))
+    ; introspection, mostly for tests: reply with a topic's current subscriber list
+    ([:subscribers topic from] (do
+                                 (send from [:subscribers (get subs topic (list))])
+                                 (pubsub--loop subs)))))
+
+(defn pubsub--known? (subs pid)
+  "True if `pid` is subscribed to any topic — used to monitor each subscriber just once."
+  (not (empty? (filter (fn (kv) (member? pid (first (rest kv)))) (entries subs)))))
+
+(defn pubsub--add (subs topic pid)
+  "Add `pid` to `topic`'s subscriber list (idempotent — no duplicate entries)."
+  (let (cur (get subs topic (list)))
+    (if (member? pid cur) subs (assoc subs topic (cons pid cur)))))
+
+(defn pubsub--remove (subs topic pid)
+  "Remove `pid` from `topic`'s subscriber list."
+  (assoc subs topic (filter (fn (q) (not (= q pid))) (get subs topic (list)))))
+
+(defn pubsub--remove-pid (subs pid)
+  "Remove `pid` from every topic — the dead-subscriber cleanup."
+  (fold (fn (m kv) (assoc m (first kv) (filter (fn (q) (not (= q pid))) (first (rest kv)))))
+    {}
+    (entries subs)))
+
+(defn pubsub ()
+  "The PubSub registry pid. `(spawn :name expr)` is atomic get-or-spawn — idempotent on the
+  name — so concurrent first-touches all converge on the one registry (no whereis/register
+  race)."
+  (spawn :hatch-pubsub (pubsub--loop {})))
+
+; ---- public API ----
+
+(defn subscribe (topic)
+  "Subscribe the current process to `topic`. It then receives every broadcast to `topic`
+  via `send-info` (the view's `handle-info`). Call it from a live view's `mount`, where
+  `(self)` is the session pid. Returns nil."
+  (send (pubsub) [:subscribe topic (self)])
+  nil)
+
+(defn unsubscribe (topic)
+  "Unsubscribe the current process from `topic`. (Subscriptions are also dropped
+  automatically when the process dies.) Returns nil."
+  (send (pubsub) [:unsubscribe topic (self)])
+  nil)
+
+(defn broadcast (topic payload)
+  "Broadcast `payload` to every subscriber of `topic`, including the sender. Each receives
+  it at `handle-info`. Returns nil."
+  (send (pubsub) [:broadcast topic nil payload])
+  nil)
+
+(defn broadcast-from (topic payload)
+  "Like `broadcast`, but does not deliver to the calling process — use it when the sender
+  has already updated its own view and only the *other* subscribers need the message."
+  (send (pubsub) [:broadcast topic (self) payload])
+  nil)
+
+(defn subscribers (topic)
+  "The current subscriber pids for `topic` (a snapshot — mostly for tests/debugging)."
+  (send (pubsub) [:subscribers topic (self)])
+  (receive
+    ([:subscribers pids] pids)
+    (after 1000 (list))))

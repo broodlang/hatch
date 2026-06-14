@@ -1,0 +1,116 @@
+(defmodule web/presence
+  "Who-is-here tracking for live views (à la Phoenix.Presence). A session `track`s itself on
+  a topic with a key (e.g. a user/visitor id) and a metadata map; everyone present on that
+  topic is then pushed the updated roster via `send-info` (→ `handle-info`), so a join or
+  leave updates every open client live. A registry process monitors each tracked session, so
+  closing a tab (the socket dies) removes that presence automatically and notifies the rest.
+
+  A live view tracks in its mount and seeds its roster from the synchronous `roster` call:
+
+    (deflive
+      (mount (params)
+        (do (presence/track \"room:lobby\" (get params \"id\" \"anon\") {})
+            {:members (presence/roster \"room:lobby\")}))
+      (handle-info (msg model)
+        (if (contains? msg :presence) (assoc model :members (get msg :presence)) model))
+      (render (model) …))
+
+  Roster updates go to the present members themselves (they are the audience). A non-present
+  observer that also wants live updates can pair this with web/pubsub on the same topic; this
+  node-local registry is the foundation a distributed/CRDT version would layer onto."
+  ; send-info — push the roster to a tracked session
+  (:use web/live))
+
+; ---- registry process: topic -> list of {:pid :key :meta} ----
+
+(defn presence--loop (state)
+  (receive
+    ([:track topic pid key meta]
+      (do
+        ; monitor a pid once (across all its topics) so a dropped session auto-leaves
+        (when (not (presence--known? state pid)) (monitor pid))
+        (let (state2 (presence--put state topic pid key meta))
+          (presence--notify state2 topic)
+          (presence--loop state2))))
+    ([:untrack topic pid] (let (state2 (presence--remove state topic pid))
+                            (presence--notify state2 topic)
+                            (presence--loop state2)))
+    ; a tracked session died — drop it everywhere and refresh each affected topic
+    ([:down _ pid _] (let (affected (presence--topics-of state pid)
+                           state2 (presence--remove-pid state pid))
+                       (dolist (t affected) (presence--notify state2 t))
+                       (presence--loop state2)))
+    ([:list topic from] (do
+                          (send from [:list (presence--roster state topic)])
+                          (presence--loop state)))))
+
+(defn presence--entries (state topic)
+  "The raw {:pid :key :meta} entries tracked on `topic`."
+  (get state topic (list)))
+
+(defn presence--without (entries pid)
+  "`entries` with any entry for `pid` removed."
+  (filter (fn (e) (not (= (get e :pid) pid))) entries))
+
+(defn presence--put (state topic pid key meta)
+  "Track `pid` on `topic` under `key`/`meta`, replacing any prior entry for that pid."
+  (assoc state
+    topic (cons {:pid pid :key key :meta meta}
+            (presence--without (presence--entries state topic) pid))))
+
+(defn presence--remove (state topic pid)
+  "Untrack `pid` from `topic`."
+  (assoc state topic (presence--without (presence--entries state topic) pid)))
+
+(defn presence--remove-pid (state pid)
+  "Untrack `pid` from every topic."
+  (fold (fn (m kv) (assoc m (first kv) (presence--without (first (rest kv)) pid)))
+    {}
+    (entries state)))
+
+(defn presence--has-pid? (entries pid)
+  (not (empty? (filter (fn (e) (= (get e :pid) pid)) entries))))
+
+(defn presence--known? (state pid)
+  "True if `pid` is tracked on any topic — used to monitor each session just once."
+  (not (empty? (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (entries state)))))
+
+(defn presence--topics-of (state pid)
+  "The topics `pid` is tracked on (so a death only refreshes those)."
+  (map (fn (kv) (first kv))
+    (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (entries state))))
+
+(defn presence--roster (state topic)
+  "The public roster for `topic`: a list of {:key :meta} (pids dropped)."
+  (map (fn (e) {:key (get e :key) :meta (get e :meta)}) (presence--entries state topic)))
+
+(defn presence--notify (state topic)
+  "Push the current `topic` roster to every member present on it."
+  (let (roster (presence--roster state topic))
+    (dolist (e (presence--entries state topic)) (send-info (get e :pid) {:presence roster}))))
+
+(defn presence ()
+  "The presence registry pid — atomic get-or-spawn, idempotent on the name."
+  (spawn :hatch-presence (presence--loop {})))
+
+; ---- public API ----
+
+(defn track (topic key meta)
+  "Mark the current process present on `topic` under `key` with `meta` (a map). Call from a
+  live view's mount, where `(self)` is the session pid. Notifies all present members with the
+  refreshed roster and auto-removes this presence when the process dies. Returns nil."
+  (send (presence) [:track topic (self) key meta])
+  nil)
+
+(defn untrack (topic)
+  "Remove the current process's presence from `topic` (also happens automatically on death).
+  Returns nil."
+  (send (presence) [:untrack topic (self)])
+  nil)
+
+(defn roster (topic)
+  "A snapshot of the current presences on `topic` as a list of {:key :meta}."
+  (send (presence) [:list topic (self)])
+  (receive
+    ([:list r] r)
+    (after 1000 (list))))

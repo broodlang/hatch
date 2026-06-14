@@ -68,10 +68,36 @@
 ; Audit hardening — see docs/tcp-http-audit.md (#3 Content-Length, #6 Transfer-Encoding,
 ; #10 header colon). Each malformed input must NOT crash the worker; it returns :error
 ; (→ 400) or parses correctly.
-(describe "try-parse: hardening"
-  (test "rejects Transfer-Encoding (request-smuggling guard, #6)"
-    (assert= (first (try-parse "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"))
+(describe "try-parse: chunked Transfer-Encoding"
+  (test "decodes a chunked body"
+    (let ([tag req _] (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                   "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")))
+      (assert= tag :ok)
+      (assert= (get req :body) "Wikipedia")))
+  (test "a chunked body missing its terminator is incomplete"
+    (assert= (first (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                 "4\r\nWiki\r\n")))
+      :incomplete))
+  (test "chunk extensions on the size line are ignored"
+    (let ([tag req _] (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                   "4;name=val\r\nWiki\r\n0\r\n\r\n")))
+      (assert= tag :ok)
+      (assert= (get req :body) "Wiki")))
+  (test "trailers are consumed and the pipelined remainder preserved"
+    (let ([tag req rem] (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                     "4\r\nWiki\r\n0\r\nX-Trailer: y\r\n\r\nNEXT")))
+      (assert= tag :ok)
+      (assert= (get req :body) "Wiki")
+      (assert= rem "NEXT")))
+  (test "Transfer-Encoding + Content-Length is rejected (smuggling guard)"
+    (assert= (first (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n"
+                                 "Content-Length: 4\r\n\r\nWiki")))
       :error))
+  (test "a non-chunked Transfer-Encoding (gzip) is rejected, not mis-framed"
+    (assert= (first (try-parse "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
+      :error)))
+
+(describe "try-parse: hardening"
   (test "rejects negative Content-Length (#3 — used to crash on substring)"
     (assert= (first (try-parse "POST / HTTP/1.1\r\nContent-Length: -5\r\n\r\n")) :error))
   (test "rejects non-integer Content-Length (#3)"
