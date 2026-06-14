@@ -1,0 +1,44 @@
+(defmodule web-bml-test (:use web/bml) (:use web/template) (:use test))
+
+; Render a parsed BML form against `model` — the same lowering `deflive` uses.
+(defn render-bml (src model)
+  (render (eval (list 'let (list 'model model) (parse src)))))
+
+(describe "parse — structure"
+  (test "element with attr + text"
+    (assert= (parse "<p class=\"a\">hi</p>") [:p {:class "a"} "hi"]))
+  (test "bare attribute is boolean true"
+    (assert= (parse "<input disabled>") [:input {:disabled true}]))
+  (test "self-closing tag"
+    (assert= (parse "<br/>") [:br {}]))
+  (test "void tag needs no close"
+    (assert= (parse "<img src=\"x\">") [:img {:src "x"}]))
+  (test "whitespace-only text between tags is dropped"
+    (assert= (parse "<ul>\n  <li>x</li>\n</ul>") [:ul {} [:li {} "x"]]))
+  (test "interpolation becomes a form"
+    (assert= (parse "<p>{(get model :n)}</p>") [:p {} (list 'get 'model :n)]))
+  (test "braced attribute value becomes a form"
+    (assert= (parse "<a href={u}>x</a>") [:a {:href 'u} "x"])))
+
+(describe "parse — directives"
+  (test ":for wraps the element in a for"
+    (assert= (parse "<li :for=\"x <- xs\">{x}</li>")
+      (list 'for (list 'x 'xs) [:li {} 'x])))
+  (test ":if wraps the element in an if"
+    (assert= (parse "<p :if=\"flag\">y</p>")
+      (list 'if 'flag [:p {} "y"] nil))))
+
+(describe "render — end to end"
+  (test "interpolation renders the model value"
+    (assert= (render-bml "<p>{(get model :n)}</p>" {:n 42}) "<p>42</p>"))
+  (test ":for renders one node per item"
+    (assert= (render-bml "<ul><li :for=\"x <- (get model :xs)\">{x}</li></ul>" {:xs [1 2 3]})
+      "<ul><li>1</li><li>2</li><li>3</li></ul>"))
+  (test ":if false renders nothing"
+    (assert= (render-bml "<p :if=\"(get model :show)\">hi</p>" {:show false}) ""))
+  (test "text is HTML-escaped"
+    (assert= (render-bml "<p>{(get model :s)}</p>" {:s "<b>"}) "<p>&lt;b&gt;</p>"))
+  (test "raw opts out of escaping"
+    ; render-bml evals at root, so qualify raw; in a view module `(:use web/template)`
+    ; lets a template write `{(raw …)}` bare.
+    (assert= (render-bml "<p>{(web/template/raw (get model :s))}</p>" {:s "<b>"}) "<p><b></p>")))
