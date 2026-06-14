@@ -81,3 +81,16 @@
                (list 'quote pname) (list 'quote op-name) key
                (cons 'fn (cons arg-syms body)))))
       methods)))
+
+(defmacro defbehaviour (bname & specs)
+  "Declare a behaviour `bname` — a contract a *module* satisfies by defining its ops
+  as functions (unlike `defprotocol`, there's no value-dispatch; a module calls its
+  own functions directly). Records the ops so the checker can verify that a module
+  whose header says `(:implements bname)` defines each one at the right arity.
+
+    (defbehaviour LiveView
+      (mount [params])
+      (render [model])
+      (handle-event [name params model]))"
+  (let (ops (filter (fn (s) (pair? s)) specs))
+    (list 'protocol/register-protocol (list 'quote bname) (list 'quote ops))))

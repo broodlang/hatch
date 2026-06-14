@@ -291,6 +291,17 @@
           view   (merge spec {:spec-fn spec-fn :params params :model model}))
       (session-loop sock view ""))))
 
+; ---- the LiveView behaviour ----
+; The contract a live-view module satisfies — exactly what `deflive` generates.
+; A module that says `(:implements web/live/LiveView)` is checked (at edit time, by
+; the advisory type-checker) to define each of these at the right arity.
+
+(defbehaviour LiveView
+  "A live view: build a model from params, render it, and handle client events."
+  (mount [params])
+  (render [model])
+  (handle-event [name params model]))
+
 ; ---- deflive macro ----
 
 (defmacro deflive (& clauses)
