@@ -14,8 +14,8 @@
 
 ; ---- registries -------------------------------------------------------------
 
-(def *protocols* {})   ; protocol-name → op specs (introspection / tooling)
-(def *impls* {})       ; [protocol op type-key] → impl fn (runtime dispatch)
+(def *protocols* {})  ; protocol-name → op specs (introspection / tooling)
+(def *impls* {})  ; [protocol op type-key] → impl fn (runtime dispatch)
 
 (defn register-protocol (pname specs)
   "Record protocol `pname`'s declared op specs (raw forms) for tooling."
@@ -41,7 +41,7 @@
   "Dispatch `pname`'s `op` on `(type-of (first args))`, calling the impl with all
   args. A missing impl is a loud, located error."
   (let (key (type-of (first args))
-        f   (impl-for pname op key))
+        f (impl-for pname op key))
     (if f
       (apply f args)
       (error "protocol " pname ": no implementation of " op " for " key))))
@@ -56,15 +56,22 @@
     (defprotocol Encode
       \"JSON-encode a value.\"
       (encode [v] :-> string))"
-  (let (ops (filter (fn (s) (pair? s)) specs))   ; drop the optional leading docstring
+  (let (ops (filter (fn (s) (pair? s)) specs))
+    ; drop the optional leading docstring
     (cons 'do
       (cons (list 'protocol/register-protocol (list 'quote pname) (list 'quote ops))
-        (map (fn (op)
-               (let (op-name  (first op)
-                     arg-syms (map (fn (s) s) (second op)))   ; arg vector → list
-                 (list 'defn op-name arg-syms
-                   (list 'protocol/dispatch
-                     (list 'quote pname) (list 'quote op-name) (cons 'list arg-syms)))))
+        (map
+          (fn (op)
+            (let (op-name (first op)
+                  arg-syms (map (fn (s) s) (second op)))
+              ; arg vector → list
+              (list 'defn
+                op-name
+                arg-syms
+                (list 'protocol/dispatch
+                  (list 'quote pname)
+                  (list 'quote op-name)
+                  (cons 'list arg-syms)))))
           ops)))))
 
 (defmacro defimpl (pname key & methods)
@@ -73,13 +80,16 @@
 
     (defimpl Encode :int (encode [n] (str n)))"
   (cons 'do
-    (map (fn (m)
-           (let (op-name  (first m)
-                 arg-syms (map (fn (s) s) (second m))   ; arg vector → list
-                 body     (rest (rest m)))
-             (list 'protocol/register-impl
-               (list 'quote pname) (list 'quote op-name) key
-               (cons 'fn (cons arg-syms body)))))
+    (map
+      (fn (m)
+        (let (op-name (first m)
+              arg-syms (map (fn (s) s) (second m))  ; arg vector → list
+              body (rest (rest m)))
+          (list 'protocol/register-impl
+            (list 'quote pname)
+            (list 'quote op-name)
+            key
+            (cons 'fn (cons arg-syms body)))))
       methods)))
 
 (defmacro defbehaviour (bname & specs)
@@ -88,7 +98,7 @@
   own functions directly). Records the ops so the checker can verify that a module
   whose header says `(:implements bname)` defines each one at the right arity.
 
-    (defbehaviour LiveView
+    (defbehaviour LiveModule
       (mount [params])
       (render [model])
       (handle-event [name params model]))"

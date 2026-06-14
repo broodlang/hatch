@@ -34,7 +34,7 @@ imports (they existed only for the `show` page, which the router now generates):
 (defmodule web/views/counter
   "Click counter + fast/slow tickers."
   (:use web/live)            ; deflive — the one import a view needs
-  (:implements LiveView))
+  (:implements LiveModule))
 
 (defn init (start) {:count start :fast 0 :slow 0})
 (defn increment (model) (assoc model :count (inc (get model :count))))
@@ -84,11 +84,12 @@ the advisory type-checker / LSP — no macro-injected imports.
 
 ## Constraints worth remembering
 
-- `(:implements LiveView)` must stay a **literal** `defmodule` clause — the checker
+- `(:implements LiveModule)` must stay a **literal** `defmodule` clause — the checker
   reads it from the un-expanded source (`head_is "defmodule"` in
   `crates/lisp/src/types/check/protocol.rs`, `implements_claims`). Any wrapper macro
   around `defmodule` would silently disable the behaviour-conformance check. The
-  `LiveView` behaviour itself lives in `web/live` (`defbehaviour LiveView`).
+  `LiveModule` behaviour itself lives in `web/live` (`defbehaviour LiveModule`) — named
+  to avoid colliding with Phoenix's `LiveView`.
 - The `live` clause references `module/live-spec` and `layout` as bare/qualified
   symbols, never injected imports — so LSP and the type-checker see them.
 

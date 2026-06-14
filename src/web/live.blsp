@@ -2,6 +2,7 @@
   "LiveBrood: per-session WebSocket actor + deflive macro."
   (:use http/websocket)
   (:use web/template)
+  (:use web/bml)  ; parse-file — the (template …) clause's BML→Hiccup compiler
   (:use web/conn)  ; send-resp / put-resp-header (client-js-handler)
   (:use protocol))  ; defprotocol / defimpl
 
@@ -165,7 +166,8 @@
   "The pid registered as `nm`; on first use spawn `(start)` and register it under `nm`.
   Safe under a spawn/register race: if registration loses, fall back to the winner."
   (or (whereis nm)
-    (try (let (pid (spawn (start))) (register nm pid) pid)
+    (try
+      (let (pid (spawn (start))) (register nm pid) pid)
       (catch _ (whereis nm)))))
 
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
@@ -238,18 +240,22 @@
 
 (defn session-recv (sock view buf)
   (match (recv-frame--loop sock buf)
-    ([:ok 8 _ _] (close-session sock))                                  ; client close
-    ([:ok 9 payload _] (tcp-send sock (pong-frame payload))             ; ping → pong
+    ([:ok 8 _ _] (close-session sock))  ; client close
+    ([:ok 9 payload _] (tcp-send sock (pong-frame payload))
+      ; ping → pong
       (session-recv sock view buf))
-    ([:ok 1 payload rem] (session-dispatch sock view rem payload))      ; client message
-    ([:ok _ _ rem] (session-recv sock view rem))                        ; ignore other opcodes
-    ([:tick key buf2]                                                   ; server tick → diff
-     (push-update sock view buf2 "diff"
-       (try ((get view :handle-tick) key (get view :model)) (catch _ (get view :model)))))
-    ([:reload buf2]                                                     ; hot reload → re-render
-     (let (spec (try ((get view :spec-fn)) (catch _ nil))
-           view (if spec (merge view spec) view))
-       (push-update sock view buf2 "render" (get view :model))))
+    ([:ok 1 payload rem] (session-dispatch sock view rem payload))  ; client message
+    ([:ok _ _ rem] (session-recv sock view rem))  ; ignore other opcodes
+    ([:tick key buf2] (push-update sock
+                        view
+                        buf2
+                        "diff"
+                        (try
+                          ((get view :handle-tick) key (get view :model))
+                          (catch _ (get view :model)))))
+    ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
+                          view (if spec (merge view spec) view))
+                      (push-update sock view buf2 "render" (get view :model))))
     ([:closed] (live--unregister (self)) nil)
     ([:error _] (close-session sock))))
 
@@ -263,7 +269,10 @@
       ("join" (push-update sock view buf "render" ((get view :mount) params)))
       ("event" (let (name (get msg "name" "")
                      model (get view :model))
-                 (push-update sock view buf "diff"
+                 (push-update sock
+                   view
+                   buf
+                   "diff"
                    (try ((get view :handle-event) name params model) (catch _ model)))))
       (_ (session-recv sock view buf)))))
 
@@ -333,18 +342,26 @@
         (start-session sock request spec-fn)
         (tcp-close sock)))))
 
-; ---- the LiveView behaviour ----
+; ---- the LiveModule behaviour ----
 ; The contract a live-view module satisfies — exactly what `deflive` generates.
-; A module that says `(:implements web/live/LiveView)` is checked (at edit time, by
-; the advisory type-checker) to define each of these at the right arity.
+; A module that says `(:implements web/live/LiveModule)` is checked (at edit time, by
+; the advisory type-checker) to define each of these at the right arity. Named
+; LiveModule, not LiveView, to avoid colliding with Phoenix's `LiveView`.
 
-(defbehaviour LiveView
+(defbehaviour LiveModule
   "A live view: build a model from params, render it, and handle client events."
   (mount [params])
   (render [model])
   (handle-event [name params model]))
 
 ; ---- deflive macro ----
+
+(defn template--path (filename)
+  "Resolve a `(template …)` filename against the directory of the view module being
+  compiled. Called at macro-expansion time, so `(current-file)` is the view's source."
+  (let (parts (string-split (current-file) "/")
+        dir (join "/" (take (- (count parts) 1) parts)))
+    (str dir "/" filename)))
 
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
@@ -356,15 +373,21 @@
   Multiple `(tick ms …)` clauses are allowed — each runs its own ticker at its own
   interval (use distinct ms values), so a view can update at several frequencies.
 
+  The view's markup comes from either an inline `(render (model) …)` clause (Hiccup)
+  or a `(template \"file.bml\")` clause — a sibling `.bml` file compiled to the same
+  Hiccup here at expansion (its `{…}` interpolations see `model`). Give one or the
+  other; an inline `render` wins if both are present.
+
   Syntax:
     (deflive
       (mount (params) initial-model)
-      (render (model) hiccup-template)
+      (render (model) hiccup-template)    ; — or —  (template \"view.bml\")
       (on \"event-name\" (params model) updated-model)
       (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
       ...)"
   (let (mount-clause (first (filter (fn (c) (= (first c) 'mount)) clauses))
         render-clause (first (filter (fn (c) (= (first c) 'render)) clauses))
+        template-clause (first (filter (fn (c) (= (first c) 'template)) clauses))
         on-clauses (filter (fn (c) (= (first c) 'on)) clauses)
         tick-clauses (filter (fn (c) (= (first c) 'tick)) clauses)
         mount-args (first (rest mount-clause))
@@ -405,10 +428,24 @@
                     tick-clauses)
         handle-tick-body (cons 'match
                            (cons 'tick--key
-                             (concat tick-arms (list (list '_ 'tick--model))))))
+                             (concat tick-arms (list (list '_ 'tick--model)))))
+        ; render comes from an inline (render …) clause or, failing that, a
+        ; (template "file.bml") clause compiled to Hiccup here at expansion time.
+        ; The template is compiled here at expansion. Under the advisory checker /
+        ; LSP, `current-file`/`slurp` may not resolve the view's path — so fall back to
+        ; an empty render rather than letting the macro throw (which would leave the
+        ; whole `deflive` form unexpanded). The real runtime load reads the file fine.
+        render-defn (if render-clause
+                      (list 'defn 'render render-args (cons 'do render-body))
+                      (list 'defn
+                        'render
+                        (list 'model)
+                        (try
+                          (parse-file (template--path (first (rest template-clause))))
+                          (catch _ nil)))))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
-      (list 'defn 'render render-args (cons 'do render-body))
+      render-defn
       (list 'defn
         'handle-event
         (list 'event--name 'event--params 'event--model)

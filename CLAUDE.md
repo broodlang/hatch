@@ -17,7 +17,7 @@ so the demo is also our proof that Hatch installs and loads as a real package.
 
 ```bash
 # In hatch/ (the framework):
-nest test          # run the framework test suite (243 tests)
+nest test          # run the framework test suite (247 tests)
 nest format        # format all .blsp source
 
 # In ../hatch-demo/ (the demo app, consumes Hatch via :path):
@@ -46,6 +46,7 @@ src/
   web/
     template.blsp   — Hiccup → HTML renderer
     conn.blsp       — immutable Conn value + response pipeline (conn->response)
+    page.blsp       — plain (non-live) page render helper: (page conn hiccup)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro, session actor, live-route dispatch, JSON codec, page-chrome

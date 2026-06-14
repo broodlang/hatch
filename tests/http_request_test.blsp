@@ -14,7 +14,7 @@
       (assert= (first r) :error))))
 
 (describe "try-parse: incomplete"
-  (test "empty buffer"   (assert= (try-parse "") [:incomplete]))
+  (test "empty buffer" (assert= (try-parse "") [:incomplete]))
   (test "partial header" (assert= (try-parse "GET / HTTP/1.1\r\n") [:incomplete])))
 
 (describe "try-parse: errors"
@@ -61,6 +61,6 @@
 (describe "try-parse: pipelined requests"
   (test "remainder is second request"
     (let (raw (str "GET /first HTTP/1.1\r\nHost: x\r\n\r\n"
-                   "GET /second HTTP/1.1\r\nHost: x\r\n\r\n")
+                "GET /second HTTP/1.1\r\nHost: x\r\n\r\n")
           [_ _ rem] (try-parse raw))
       (assert= rem "GET /second HTTP/1.1\r\nHost: x\r\n\r\n"))))

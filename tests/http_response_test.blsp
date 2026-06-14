@@ -2,15 +2,15 @@
 
 (describe "capitalize"
   (test "lowercase word" (assert= (capitalize "content") "Content"))
-  (test "already upper"  (assert= (capitalize "Content") "Content"))
-  (test "empty string"   (assert= (capitalize "") ""))
-  (test "single char"    (assert= (capitalize "x") "X")))
+  (test "already upper" (assert= (capitalize "Content") "Content"))
+  (test "empty string" (assert= (capitalize "") ""))
+  (test "single char" (assert= (capitalize "x") "X")))
 
 (describe "header-name"
-  (test "single segment"  (assert= (header-name :host) "Host"))
-  (test "content-type"    (assert= (header-name :content-type) "Content-Type"))
-  (test "content-length"  (assert= (header-name :content-length) "Content-Length"))
-  (test "x-request-id"   (assert= (header-name :x-request-id) "X-Request-Id")))
+  (test "single segment" (assert= (header-name :host) "Host"))
+  (test "content-type" (assert= (header-name :content-type) "Content-Type"))
+  (test "content-length" (assert= (header-name :content-length) "Content-Length"))
+  (test "x-request-id" (assert= (header-name :x-request-id) "X-Request-Id")))
 
 (describe "ok"
   (test "status 200"

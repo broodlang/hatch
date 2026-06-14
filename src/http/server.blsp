@@ -1,4 +1,5 @@
-(defmodule http/server "HTTP/1.1 TCP server: listener process and per-connection workers."
+(defmodule http/server
+  "HTTP/1.1 TCP server: listener process and per-connection workers."
   (:use http/request)
   (:use http/response)
   (:use http/websocket))
@@ -27,40 +28,34 @@
 
 (defn listener--loop (lsock handler ws-handler)
   (receive
-    ([:tcp-accept ~lsock client]
-     (let (worker (spawn (worker--run client handler ws-handler "")))
-       (tcp-controlling-process client worker)
-       (listener--loop lsock handler ws-handler)))
-    (:stop
-     (tcp-close lsock)
-     (println "http/server: stopped"))))
+    ([:tcp-accept ~lsock client] (let (worker (spawn (worker--run client handler ws-handler "")))
+                                   (tcp-controlling-process client worker)
+                                   (listener--loop lsock handler ws-handler)))
+    (:stop (tcp-close lsock)
+      (println "http/server: stopped"))))
 
 (defn worker--run (sock handler ws-handler buf)
   (match (try-parse buf)
-    ([:ok request remainder]
-     (if (and ws-handler (upgrade-request? request))
-       (let (key (get (get request :headers) :sec-websocket-key ""))
-         (tcp-send sock (upgrade-response key))
-         (ws-handler sock request))
-       (let (response (try (handler request)
-                           (catch e (error-resp (error-message e)))))
-         (tcp-send sock (format-response response))
-         (if (keep-alive? request response)
-           (worker--run sock handler ws-handler remainder)
-           (tcp-close sock)))))
-    ([:incomplete]
-     (receive
-       ([:tcp ~sock chunk]
-        (worker--run sock handler ws-handler (str buf chunk)))
-       ([:tcp-closed ~sock]
-        nil)))
-    ([:error msg]
-     (tcp-send sock (format-response {:status 400 :body msg}))
-     (tcp-close sock))))
+    ([:ok request remainder] (if (and ws-handler (upgrade-request? request))
+                               (let (key (get (get request :headers) :sec-websocket-key ""))
+                                 (tcp-send sock (upgrade-response key))
+                                 (ws-handler sock request))
+                               (let (response (try
+                                                (handler request)
+                                                (catch e (error-resp (error-message e)))))
+                                 (tcp-send sock (format-response response))
+                                 (if (keep-alive? request response)
+                                   (worker--run sock handler ws-handler remainder)
+                                   (tcp-close sock)))))
+    ([:incomplete] (receive
+                     ([:tcp ~sock chunk] (worker--run sock handler ws-handler (str buf chunk)))
+                     ([:tcp-closed ~sock] nil)))
+    ([:error msg] (tcp-send sock (format-response {:status 400 :body msg}))
+      (tcp-close sock))))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request."
-  (let (req-conn  (lower (get-in request  [:headers :connection] ""))
+  (let (req-conn (lower (get-in request [:headers :connection] ""))
         resp-conn (lower (get-in response [:headers :connection] "")))
-    (and (not (= req-conn  "close"))
-         (not (= resp-conn "close")))))
+    (and (not (= req-conn "close"))
+      (not (= resp-conn "close")))))
