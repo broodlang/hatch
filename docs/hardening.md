@@ -24,7 +24,7 @@ The exposure is at the edges — security gaps and silent failure under crash/ch
 | ~~M19~~ ✅ | Monitors leaked/duplicated across unsubscribe→resubscribe | MED | **Done** — registries track `{pid → ref}` and `demonitor` when a pid's last subscription/presence drops |
 | ~~M20~~ ✅ | `subscribers`/`roster` sync calls had no correlation ref (a late reply could be mismatched) | MED | **Done** — each request carries a fresh `ref`, the reply is pinned to it. (`lookup-live` in web/live is the user's code — left as-is.) |
 | ~~H18~~ ✅ | No CSRF protection on POST + signed-cookie session | HIGH | **Done** — `web/csrf`: synchronizer token in the session, `protect-from-forgery` plug, `csrf-input` form field, constant-time verify (+ `X-CSRF-Token` header). Demo `/account` wired. |
-| M21 | `morphChildren` matches by index, so a reorder/insert above an interactive element re-clones it and loses focus/caret | MED | keyed morph via `data-key`/`id` |
+| ~~M21~~ ✅ | `morphChildren` matched by index, so a reorder re-cloned interactive nodes and lost focus/caret | MED | **Done** — keyed morph in `brood_live.js`: when all children carry `data-key`/`id`, reconcile by key (move existing nodes) instead of by index; unkeyed views unchanged. Test page: demo `/reorder`. |
 | L | Session cookie defaults `Secure=false` | LOW | default on for HTTPS / require explicit dev opt-out |
 
 Renderer note: the morph defects (M21) produce **correct HTML** — the issue is DOM node
