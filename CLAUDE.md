@@ -60,6 +60,7 @@ src/
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
                       page-chrome
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
+    registry.blsp   — supervised, vault-backed named registries (shared by pubsub/presence)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
     presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
@@ -80,6 +81,7 @@ tests/
   web_static_test.blsp
   web_live_test.blsp
   web_parts_test.blsp
+  web_registry_test.blsp
   web_pubsub_test.blsp
   web_presence_test.blsp
   web_assets_test.blsp

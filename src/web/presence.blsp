@@ -19,9 +19,28 @@
   observer that also wants live updates can pair this with web/pubsub on the same topic; this
   node-local registry is the foundation a distributed/CRDT version would layer onto."
   ; send-info — push the roster to a tracked session
-  (:use web/live))
+  (:use web/live)
+  ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
+  (:use web/registry))
+
+(def vault-name :hatch-presence-vault)
 
 ; ---- registry process: topic -> list of {:pid :key :meta} ----
+; Supervised + vault-backed (web/registry): every change is mirrored to the vault; on
+; restart the registry recovers its state from the vault and re-monitors the restored pids,
+; so a crash doesn't silently empty every roster.
+
+(defn presence--boot ()
+  "Start (or restart) the registry: recover state from the vault, re-monitor each restored
+  pid (a dead one re-fires [:down] at once and is removed), then enter the loop."
+  (let (state (pull-snapshot vault-name {}))
+    (dolist (pid (presence--all-pids state)) (monitor pid))
+    (presence--loop state)))
+
+(defn presence--save (state)
+  "Mirror the new state to the vault, then continue the loop."
+  (mirror vault-name state)
+  (presence--loop state))
 
 (defn presence--loop (state)
   (receive
@@ -31,15 +50,15 @@
         (when (not (presence--known? state pid)) (monitor pid))
         (let (state2 (presence--put state topic pid key meta))
           (presence--notify state2 topic)
-          (presence--loop state2))))
+          (presence--save state2))))
     ([:untrack topic pid] (let (state2 (presence--remove state topic pid))
                             (presence--notify state2 topic)
-                            (presence--loop state2)))
+                            (presence--save state2)))
     ; a tracked session died — drop it everywhere and refresh each affected topic
     ([:down _ pid _] (let (affected (presence--topics-of state pid)
                            state2 (presence--remove-pid state pid))
                        (dolist (t affected) (presence--notify state2 t))
-                       (presence--loop state2)))
+                       (presence--save state2)))
     ([:list topic from] (do
                           (send from [:list (presence--roster state topic)])
                           (presence--loop state)))))
@@ -89,9 +108,27 @@
   (let (roster (presence--roster state topic))
     (dolist (e (presence--entries state topic)) (send-info (get e :pid) {:presence roster}))))
 
+(defn presence--all-pids (state)
+  "Every distinct tracked pid across all topics — for re-monitoring on recovery."
+  (presence--dedupe
+    (apply concat (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
+
+(defn presence--dedupe (xs)
+  (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) (list) xs)))
+
 (defn presence ()
-  "The presence registry pid — atomic get-or-spawn, idempotent on the name."
-  (spawn :hatch-presence (presence--loop {})))
+  "The presence registry pid — a supervised, vault-backed singleton. Started on first use
+  and recovered from the vault on any crash (see web/registry)."
+  (ensure-supervised :hatch-presence-sup
+    [{:id :hatch-presence-vault
+      :name :hatch-presence-vault
+      :restart :permanent
+      :start (fn () (spawn (vault-loop {})))}
+     {:id :hatch-presence
+      :name :hatch-presence
+      :restart :permanent
+      :start (fn () (spawn (presence--boot)))}]
+    :hatch-presence))
 
 ; ---- public API ----
 
