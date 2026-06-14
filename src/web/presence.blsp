@@ -30,38 +30,56 @@
 ; restart the registry recovers its state from the vault and re-monitors the restored pids,
 ; so a crash doesn't silently empty every roster.
 
+; The loop carries `state` (topic → entries, durable, mirrored to the vault) and `refs`
+; (pid → monitor ref, local — to demonitor a pid once its last presence drops, so monitors
+; don't pile up across a session's live-navigations).
+
 (defn presence--boot ()
   "Start (or restart) the registry: recover state from the vault, re-monitor each restored
   pid (a dead one re-fires [:down] at once and is removed), then enter the loop."
-  (let (state (pull-snapshot vault-name {}))
-    (dolist (pid (presence--all-pids state)) (monitor pid))
-    (presence--loop state)))
+  (let (state (pull-snapshot vault-name {})
+        refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (presence--all-pids state)))
+    (presence--loop state refs)))
 
-(defn presence--save (state)
+(defn presence--save (state refs)
   "Mirror the new state to the vault, then continue the loop."
   (mirror vault-name state)
-  (presence--loop state))
+  (presence--loop state refs))
 
-(defn presence--loop (state)
+(defn presence--loop (state refs)
   (receive
     ([:track topic pid key meta]
-      (do
-        ; monitor a pid once (across all its topics) so a dropped session auto-leaves
-        (when (not (presence--known? state pid)) (monitor pid))
-        (let (state2 (presence--put state topic pid key meta))
-          (presence--notify state2 topic)
-          (presence--save state2))))
-    ([:untrack topic pid] (let (state2 (presence--remove state topic pid))
+      ; monitor a pid only on its first presence (refs has an entry iff monitored)
+      (let (refs2 (if (contains? refs pid) refs (assoc refs pid (monitor pid)))
+            state2 (presence--put state topic pid key meta))
+        (presence--notify state2 topic)
+        (presence--save state2 refs2)))
+    ([:untrack topic pid] (let (state2 (presence--remove state topic pid)
+                                ; demonitor on the last untrack so monitors don't leak
+                                refs2 (if (presence--tracked? state2 pid) refs (presence--drop-ref refs pid)))
                             (presence--notify state2 topic)
-                            (presence--save state2)))
-    ; a tracked session died — drop it everywhere and refresh each affected topic
+                            (presence--save state2 refs2)))
+    ; a tracked session died — drop it everywhere and refresh each affected topic; its
+    ; monitor already fired, so just drop the ref ([:down ref pid reason])
     ([:down _ pid _] (let (affected (presence--topics-of state pid)
                            state2 (presence--remove-pid state pid))
                        (dolist (t affected) (presence--notify state2 t))
-                       (presence--save state2)))
-    ([:list topic from] (do
-                          (send from [:list (presence--roster state topic)])
-                          (presence--loop state)))))
+                       (presence--save state2 (dissoc refs pid))))
+    ; reply with the roster, keyed by the caller's ref `r` so a late reply can't be
+    ; mismatched to another call
+    ([:list topic from r] (do
+                            (send from [:list r (presence--roster state topic)])
+                            (presence--loop state refs)))))
+
+(defn presence--tracked? (state pid)
+  "True if `pid` is still tracked on any topic."
+  (presence--known? state pid))
+
+(defn presence--drop-ref (refs pid)
+  "Demonitor `pid` (its last presence is gone) and drop its ref."
+  (let (ref (get refs pid))
+    (when ref (demonitor ref)))
+  (dissoc refs pid))
 
 (defn presence--entries (state topic)
   "The raw {:pid :key :meta} entries tracked on `topic`."
@@ -146,8 +164,11 @@
   nil)
 
 (defn roster (topic)
-  "A snapshot of the current presences on `topic` as a list of {:key :meta}."
-  (send (presence) [:list topic (self)])
-  (receive
-    ([:list r] r)
-    (after 1000 (list))))
+  "A snapshot of the current presences on `topic` as a list of {:key :meta}. The request
+  carries a fresh `ref` and the reply is pinned to it, so a late reply from a prior
+  (timed-out) call can't be mismatched here."
+  (let (rf (ref))
+    (send (presence) [:list topic (self) rf])
+    (receive
+      ([:list ~rf roster] roster)
+      (after 1000 (list)))))
