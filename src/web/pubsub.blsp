@@ -25,43 +25,58 @@
 
 ; ---- registry process: topic -> list of subscriber pids ----
 
+; The loop carries two maps: `subs` (topic → pids, the durable state mirrored to the vault)
+; and `refs` (pid → monitor ref, local — used to demonitor a pid once its *last* subscription
+; drops, so monitors don't pile up as a long-lived session subscribes/unsubscribes across
+; live-navigations).
+
 (defn pubsub--boot ()
   "Start (or restart) the registry: recover subscriptions from the vault and re-establish a
   monitor on each restored pid (one that died during the crash window re-fires [:down] at
   once and is cleaned up), then enter the loop."
-  (let (subs (pull-snapshot vault-name {}))
-    (dolist (pid (pubsub--all-pids subs)) (monitor pid))
-    (pubsub--loop subs)))
+  (let (subs (pull-snapshot vault-name {})
+        refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (pubsub--all-pids subs)))
+    (pubsub--loop subs refs)))
 
-(defn pubsub--save (subs)
+(defn pubsub--save (subs refs)
   "Mirror the new subscriptions to the vault, then continue the loop."
   (mirror vault-name subs)
-  (pubsub--loop subs))
+  (pubsub--loop subs refs))
 
-(defn pubsub--loop (subs)
+(defn pubsub--loop (subs refs)
   (receive
     ([:subscribe topic pid]
-      (do
-        ; monitor a pid only on its first subscription, so it's cleaned up on death
-        ; without piling up redundant monitors when it joins several topics
-        (when (not (pubsub--known? subs pid)) (monitor pid))
-        (pubsub--save (pubsub--add subs topic pid))))
-    ([:unsubscribe topic pid] (pubsub--save (pubsub--remove subs topic pid)))
+      ; monitor a pid only on its first subscription (refs has an entry iff monitored)
+      (let (refs2 (if (contains? refs pid) refs (assoc refs pid (monitor pid))))
+        (pubsub--save (pubsub--add subs topic pid) refs2)))
+    ([:unsubscribe topic pid]
+      ; on its last unsubscribe, demonitor and drop the ref so monitors don't leak
+      (let (subs2 (pubsub--remove subs topic pid)
+            refs2 (if (pubsub--subscribed? subs2 pid) refs (pubsub--drop-ref refs pid)))
+        (pubsub--save subs2 refs2)))
     ([:broadcast topic except payload] (do
                                          (dolist (p (get subs topic (list)))
                                            (when (not (= p except)) (send-info p payload)))
                                          ; broadcast doesn't change state — no mirror
-                                         (pubsub--loop subs)))
-    ; a subscriber died — drop it from every topic ([:down ref pid reason])
-    ([:down _ pid _] (pubsub--save (pubsub--remove-pid subs pid)))
-    ; introspection, mostly for tests: reply with a topic's current subscriber list
-    ([:subscribers topic from] (do
-                                 (send from [:subscribers (get subs topic (list))])
-                                 (pubsub--loop subs)))))
+                                         (pubsub--loop subs refs)))
+    ; a subscriber died — drop it from every topic; its monitor already fired, so just drop
+    ; the ref ([:down ref pid reason])
+    ([:down _ pid _] (pubsub--save (pubsub--remove-pid subs pid) (dissoc refs pid)))
+    ; introspection, mostly for tests: reply with a topic's current subscriber list, keyed
+    ; by the caller's ref `r` so a late reply can't be mismatched to another call
+    ([:subscribers topic from r] (do
+                                   (send from [:subscribers r (get subs topic (list))])
+                                   (pubsub--loop subs refs)))))
 
-(defn pubsub--known? (subs pid)
-  "True if `pid` is subscribed to any topic — used to monitor each subscriber just once."
+(defn pubsub--subscribed? (subs pid)
+  "True if `pid` is still subscribed to any topic."
   (not (empty? (filter (fn (kv) (member? pid (first (rest kv)))) (entries subs)))))
+
+(defn pubsub--drop-ref (refs pid)
+  "Demonitor `pid` (its last subscription is gone) and drop its ref."
+  (let (ref (get refs pid))
+    (when ref (demonitor ref)))
+  (dissoc refs pid))
 
 (defn pubsub--add (subs topic pid)
   "Add `pid` to `topic`'s subscriber list (idempotent — no duplicate entries)."
@@ -127,8 +142,11 @@
   nil)
 
 (defn subscribers (topic)
-  "The current subscriber pids for `topic` (a snapshot — mostly for tests/debugging)."
-  (send (pubsub) [:subscribers topic (self)])
-  (receive
-    ([:subscribers pids] pids)
-    (after 1000 (list))))
+  "The current subscriber pids for `topic` (a snapshot — mostly for tests/debugging). The
+  request carries a fresh `ref` and the reply is pinned to it, so a late reply from a prior
+  (timed-out) call can't be mismatched here."
+  (let (r (ref))
+    (send (pubsub) [:subscribers topic (self) r])
+    (receive
+      ([:subscribers ~r pids] pids)
+      (after 1000 (list)))))

@@ -21,8 +21,8 @@ The exposure is at the edges — security gaps and silent failure under crash/ch
 |---|---------|-----|------|
 | ~~H16~~ ✅ | PubSub/Presence registries were unsupervised/undurable | HIGH | **Done** — `web/registry` (supervised + snapshot-vault); registries mirror on change, recover state + re-monitor pids on restart |
 | ~~H17~~ ✅ | Live-navigate kept the old view's subscriptions/presence | HIGH | **Done** — `deflive` `(unmount (model) …)` clause, run in the navigate arm before the next mount; room/presence demos unsubscribe/untrack |
-| M19 | Monitors leak/duplicate — added on first subscribe, never removed on full unsubscribe | MED | demonitor when a pid's last subscription/presence drops |
-| M20 | Sync registry calls (`subscribers`/`roster`/`lookup-live`) have no correlation ref; an `after`-timeout silently returns empty, masking a dead registry | MED | per-call ref token; distinguish timeout from empty |
+| ~~M19~~ ✅ | Monitors leaked/duplicated across unsubscribe→resubscribe | MED | **Done** — registries track `{pid → ref}` and `demonitor` when a pid's last subscription/presence drops |
+| ~~M20~~ ✅ | `subscribers`/`roster` sync calls had no correlation ref (a late reply could be mismatched) | MED | **Done** — each request carries a fresh `ref`, the reply is pinned to it. (`lookup-live` in web/live is the user's code — left as-is.) |
 | H18 | No CSRF protection on POST + signed-cookie session | HIGH | CSRF plug: per-session token, hidden field, constant-time compare |
 | M21 | `morphChildren` matches by index, so a reorder/insert above an interactive element re-clones it and loses focus/caret | MED | keyed morph via `data-key`/`id` |
 | L | Session cookie defaults `Secure=false` | LOW | default on for HTTPS / require explicit dev opt-out |
