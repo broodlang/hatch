@@ -18,12 +18,16 @@
 ;                        (the detail goes to the [:hatch :request :exception] telemetry event)
 ;   :shutdown-grace-ms — on `stop`, how long to let in-flight connections finish before
 ;                        hard-killing stragglers (stop first stops accepting new ones)
+;   :tls               — nil (plaintext, default) or `{:cert <pem> :key <pem>}` to serve
+;                        HTTPS/WSS: the listener terminates TLS (tls-listen) and accepted
+;                        sockets are transparent, so handlers/`worker--run` are unchanged
 (def default-config
   {:read-timeout-ms 30000
    :max-request-bytes 8388608
    :max-connections 1024
    :error-handler (fn (request err) (server-error-resp))
-   :shutdown-grace-ms 5000})
+   :shutdown-grace-ms 5000
+   :tls nil})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -64,22 +68,27 @@
     sup))
 
 (defn listen-and-serve (port handler ws-handler config)
-  (let (lsock (bind-retry port 25))
-    (println (str "listening on http://localhost:" port))
+  (let (tls (get config :tls)
+        lsock (bind-retry port 25 tls)
+        scheme (if tls "https" "http"))
+    (println (str "listening on " scheme "://localhost:" port))
     (listener--loop lsock handler ws-handler config (list))))
 
-(defn bind-retry (port attempts)
-  "tcp-listen on `port`, retrying briefly while the address is still in use. On a
-  supervised restart the new listener can race the crashed one's socket teardown: the
-  runtime frees a dead process's sockets on exit, but the accept thread releases the
-  bound port a beat later. Rather than let the bind fail, retry for a short window
-  (the port frees within a couple ms). Gives up after `attempts` tries (~250ms),
-  re-raising the original error so a genuinely-taken port still surfaces."
+(defn bind-retry (port attempts tls)
+  "Bind a listening socket on `port`, retrying briefly while the address is still in use.
+  Uses `tls-listen` (terminating TLS with `tls`'s `:cert`/`:key` PEM) when `tls` is set,
+  else plaintext `tcp-listen`. On a supervised restart the new listener can race the
+  crashed one's socket teardown: the runtime frees a dead process's sockets on exit, but
+  the accept thread releases the bound port a beat later. Rather than let the bind fail,
+  retry for a short window (the port frees within a couple ms). Gives up after `attempts`
+  tries (~250ms), re-raising the original error so a genuinely-taken port still surfaces."
   (try
-    (tcp-listen "0.0.0.0" port)
+    (if tls
+      (tls-listen "0.0.0.0" port (get tls :cert) (get tls :key))
+      (tcp-listen "0.0.0.0" port))
     (catch e
       (if (and (> attempts 1) (includes? (error-message e) "in use"))
-        (do (sleep 10) (bind-retry port (- attempts 1)))
+        (do (sleep 10) (bind-retry port (- attempts 1) tls))
         (error (error-message e))))))
 
 (defn drain-and-wait (listener)

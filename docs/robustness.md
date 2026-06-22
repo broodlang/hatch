@@ -58,9 +58,17 @@ Without these the server is trivially exhausted by a single bad client.
   ws-handler contract for tuning nobody changes. `parse-message` takes the caps as
   arguments if a caller ever needs to override them.
 
-## Tier 3 — features / deeper hardening  ⬜ (planned)
+## Tier 3 — features / deeper hardening  🚧 (in progress)
 
-- **Server-side TLS** (HTTPS / WSS) — today TLS is client-only (`tls-request`).
+- **Server-side TLS** (HTTPS / WSS) — ✅ The brood runtime gained `tls-listen host port
+  cert-pem key-pem` (a TLS listener that terminates TLS per connection — a per-connection
+  actor owns the rustls `ServerConnection`, decrypting inbound to `[:tcp …]` and encrypting
+  `tcp-send`, so accepted sockets are transparent and `worker--run` is unchanged) and
+  `tls-self-signed host` (rcgen, for zero-config dev). `http/server`'s `:tls {:cert :key}`
+  config routes the bind through `tls-listen`; `web/endpoint` reads `TLS_CERT_FILE` /
+  `TLS_KEY_FILE` (production) or generates a self-signed localhost cert in dev when
+  `HATCH_TLS` is set. WSS comes for free (the WebSocket upgrade rides the same transport).
+  Verified end-to-end (`curl -k` → 200, live mounts, themed errors).
 - **Supervise the live registries** — ✅ `:hatch-live`, `:hatch-live-routes`, and a new
   `:hatch-live-routes-vault` run under a `:one-for-one` supervisor (`:hatch-live-sup`),
   started once at `web/live` load. The route registry mirrors every entry to the vault

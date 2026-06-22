@@ -191,3 +191,19 @@
       (tcp-close client)
       (server/stop port)
       (assert= payload "Hello world"))))
+
+; Tier-3 (docs/robustness.md): server-side TLS. A full handshake needs a verification-
+; skipping client (the runtime's tls-request validates against real roots), so the
+; end-to-end handshake is verified out-of-band with `curl -k`; here we smoke-test that
+; the TLS bind path (tls-self-signed → :tls config → tls-listen) starts and stops cleanly.
+(describe "server/start serves TLS with a self-signed cert"
+  (test "a :tls config binds (tls-listen) and stops without error"
+    (let ([cert key] (tls-self-signed "localhost")
+          port 54761
+          sup (server/start port
+                (fn (_req) {:status 200 :headers {} :body "ok"})
+                nil
+                {:tls {:cert cert :key key}}))
+      (sleep 100)
+      (server/stop port)
+      (assert= (nil? sup) false))))
