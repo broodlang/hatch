@@ -9,34 +9,41 @@
 (defn fresh (method opts)
   "A conn that has run fetch-session (empty session) for `method`. `opts` may carry :params
   (string-keyed) and :headers (keyword-keyed)."
-  ((session/fetch-session secret)
-    (build {:method method
-            :path "/x"
-            :query ""
-            :params (get opts :params {})
-            :headers (get opts :headers {})
-            :body ""})))
+  ((session/fetch-session secret) (build {:method method
+                                          :path "/x"
+                                          :query ""
+                                          :params (get opts :params {})
+                                          :headers (get opts :headers {})
+                                          :body ""})))
 
 (describe "protect-from-forgery"
   (test "GET is never blocked and mints a session token"
     (let (conn (protect-from-forgery (fresh "GET" {})))
       (assert= (halted? conn) false)
       (assert= (nil? (token conn)) false)))
-  (test "POST without a token is rejected — 403, halted"
+  (test "POST without a token is rejected — 403, halted, and mints no token (no cookie churn)"
     (let (conn (protect-from-forgery (fresh "POST" {})))
       (assert= (halted? conn) true)
-      (assert= (get conn :status) 403)))
+      (assert= (get conn :status) 403)
+      ; a rejected unsafe request must not mint a token / dirty the session
+      (assert= (nil? (token conn)) true)))
   (test "POST with the matching token passes"
-    (let (conn (session/put-session (fresh "POST" {:params {"_csrf_token" "tok-123"}}) "_csrf" "tok-123")
+    (let (conn (session/put-session (fresh "POST" {:params {"_csrf_token" "tok-123"}})
+                 "_csrf"
+                 "tok-123")
           out (protect-from-forgery conn))
       (assert= (halted? out) false)))
   (test "POST with a wrong token is rejected"
-    (let (conn (session/put-session (fresh "POST" {:params {"_csrf_token" "wrong"}}) "_csrf" "right")
+    (let (conn (session/put-session (fresh "POST" {:params {"_csrf_token" "wrong"}})
+                 "_csrf"
+                 "right")
           out (protect-from-forgery conn))
       (assert= (halted? out) true)
       (assert= (get out :status) 403)))
   (test "the token may be supplied via the X-CSRF-Token header"
-    (let (conn (session/put-session (fresh "POST" {:headers {:x-csrf-token "h-tok"}}) "_csrf" "h-tok")
+    (let (conn (session/put-session (fresh "POST" {:headers {:x-csrf-token "h-tok"}})
+                 "_csrf"
+                 "h-tok")
           out (protect-from-forgery conn))
       (assert= (halted? out) false)))
   (test "PUT/PATCH/DELETE are also protected"
@@ -48,7 +55,8 @@
     (let (g (protect-from-forgery (fresh "GET" {}))
           tok (token g))
       ; a conn whose session already has the token is left unchanged
-      (assert= (token (protect-from-forgery (session/put-session (fresh "GET" {}) "_csrf" tok))) tok))))
+      (assert= (token (protect-from-forgery (session/put-session (fresh "GET" {}) "_csrf" tok)))
+        tok))))
 
 (describe "csrf-input"
   (test "renders a hidden field with the session token"

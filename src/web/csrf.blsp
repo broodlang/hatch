@@ -69,10 +69,12 @@
   "Plug: ensure the session carries a CSRF token, and on an unsafe method reject the request
   (403, halted) unless the submitted token matches. Safe methods pass through. Run it after
   `fetch-session`."
-  (let (conn (ensure-token conn))
-    (if (safe-method? conn)
-      conn
-      (if (token-ok? conn) conn (reject conn)))))
+  (if (safe-method? conn)
+    ; mint a token (if absent) so forms rendered downstream can embed it
+    (ensure-token conn)
+    ; unsafe method: validate only — a passing request already carries the token, and a
+    ; failing one is rejected without minting, so a 403 never sets a fresh session cookie
+    (if (token-ok? conn) conn (reject conn))))
 
 (defn csrf-input (conn)
   "A hidden form field carrying the session's CSRF token — drop it inside every POST form:

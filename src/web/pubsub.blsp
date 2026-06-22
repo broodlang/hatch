@@ -45,20 +45,21 @@
 
 (defn pubsub--loop (subs refs)
   (receive
-    ([:subscribe topic pid]
-      ; monitor a pid only on its first subscription (refs has an entry iff monitored)
-      (let (refs2 (if (contains? refs pid) refs (assoc refs pid (monitor pid))))
-        (pubsub--save (pubsub--add subs topic pid) refs2)))
-    ([:unsubscribe topic pid]
-      ; on its last unsubscribe, demonitor and drop the ref so monitors don't leak
-      (let (subs2 (pubsub--remove subs topic pid)
-            refs2 (if (pubsub--subscribed? subs2 pid) refs (pubsub--drop-ref refs pid)))
-        (pubsub--save subs2 refs2)))
-    ([:broadcast topic except payload] (do
-                                         (dolist (p (get subs topic (list)))
-                                           (when (not (= p except)) (send-info p payload)))
-                                         ; broadcast doesn't change state — no mirror
-                                         (pubsub--loop subs refs)))
+    ([:subscribe topic pid] (let (refs2 (if (contains? refs pid)
+                                          refs
+                                          (assoc refs pid (monitor pid))))
+                              (pubsub--save (pubsub--add subs topic pid) refs2)))
+    ([:unsubscribe topic pid] (let (subs2 (pubsub--remove subs topic pid)
+                                    refs2 (if (pubsub--subscribed? subs2 pid)
+                                            refs
+                                            (pubsub--drop-ref refs pid)))
+                                (pubsub--save subs2 refs2)))
+    ([:broadcast topic except payload]
+      (do
+        (dolist (p (get subs topic (list)))
+          (when (not (= p except)) (send-info p payload)))
+        ; broadcast doesn't change state — no mirror
+        (pubsub--loop subs refs)))
     ; a subscriber died — drop it from every topic; its monitor already fired, so just drop
     ; the ref ([:down ref pid reason])
     ([:down _ pid _] (pubsub--save (pubsub--remove-pid subs pid) (dissoc refs pid)))
@@ -84,12 +85,17 @@
     (if (member? pid cur) subs (assoc subs topic (cons pid cur)))))
 
 (defn pubsub--remove (subs topic pid)
-  "Remove `pid` from `topic`'s subscriber list."
-  (assoc subs topic (filter (fn (q) (not (= q pid))) (get subs topic (list)))))
+  "Remove `pid` from `topic`'s subscriber list, dropping the topic key entirely once it has
+  no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
+  (let (remaining (filter (fn (q) (not (= q pid))) (get subs topic (list))))
+    (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 
 (defn pubsub--remove-pid (subs pid)
-  "Remove `pid` from every topic — the dead-subscriber cleanup."
-  (fold (fn (m kv) (assoc m (first kv) (filter (fn (q) (not (= q pid))) (first (rest kv)))))
+  "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are
+  dropped (not left as dead keys)."
+  (fold (fn (m kv)
+          (let (remaining (filter (fn (q) (not (= q pid))) (first (rest kv))))
+            (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
     (entries subs)))
 
@@ -103,16 +109,15 @@
 (defn pubsub ()
   "The PubSub registry pid — a supervised, vault-backed singleton. Started on first use and
   recovered from the vault on any crash (see web/registry)."
-  (ensure-supervised :hatch-pubsub-sup
-    [{:id :hatch-pubsub-vault
-      :name :hatch-pubsub-vault
-      :restart :permanent
-      :start (fn () (spawn (vault-loop {})))}
-     {:id :hatch-pubsub
-      :name :hatch-pubsub
-      :restart :permanent
-      :start (fn () (spawn (pubsub--boot)))}]
-    :hatch-pubsub))
+  (let (vault {:id :hatch-pubsub-vault
+               :name :hatch-pubsub-vault
+               :restart :permanent
+               :start (fn () (spawn (vault-loop {})))}
+        registry {:id :hatch-pubsub
+                  :name :hatch-pubsub
+                  :restart :permanent
+                  :start (fn () (spawn (pubsub--boot)))})
+    (ensure-supervised :hatch-pubsub-sup [vault registry] :hatch-pubsub)))
 
 ; ---- public API ----
 

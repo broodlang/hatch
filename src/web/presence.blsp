@@ -48,17 +48,18 @@
 
 (defn presence--loop (state refs)
   (receive
-    ([:track topic pid key meta]
-      ; monitor a pid only on its first presence (refs has an entry iff monitored)
-      (let (refs2 (if (contains? refs pid) refs (assoc refs pid (monitor pid)))
-            state2 (presence--put state topic pid key meta))
+    ([:track topic pid key meta] (let (refs2 (if (contains? refs pid)
+                                               refs
+                                               (assoc refs pid (monitor pid)))
+                                       state2 (presence--put state topic pid key meta))
+                                   (presence--notify state2 topic)
+                                   (presence--save state2 refs2)))
+    ([:untrack topic pid]
+      (let (state2 (presence--remove state topic pid)
+            ; demonitor on the last untrack so monitors don't leak
+            refs2 (if (presence--tracked? state2 pid) refs (presence--drop-ref refs pid)))
         (presence--notify state2 topic)
         (presence--save state2 refs2)))
-    ([:untrack topic pid] (let (state2 (presence--remove state topic pid)
-                                ; demonitor on the last untrack so monitors don't leak
-                                refs2 (if (presence--tracked? state2 pid) refs (presence--drop-ref refs pid)))
-                            (presence--notify state2 topic)
-                            (presence--save state2 refs2)))
     ; a tracked session died — drop it everywhere and refresh each affected topic; its
     ; monitor already fired, so just drop the ref ([:down ref pid reason])
     ([:down _ pid _] (let (affected (presence--topics-of state pid)
@@ -96,12 +97,16 @@
             (presence--without (presence--entries state topic) pid))))
 
 (defn presence--remove (state topic pid)
-  "Untrack `pid` from `topic`."
-  (assoc state topic (presence--without (presence--entries state topic) pid)))
+  "Untrack `pid` from `topic`, dropping the topic key entirely once it has no members left
+  so ephemeral topics don't accumulate in the registry (and its vault)."
+  (let (remaining (presence--without (presence--entries state topic) pid))
+    (if (empty? remaining) (dissoc state topic) (assoc state topic remaining))))
 
 (defn presence--remove-pid (state pid)
-  "Untrack `pid` from every topic."
-  (fold (fn (m kv) (assoc m (first kv) (presence--without (first (rest kv)) pid)))
+  "Untrack `pid` from every topic. Topics it emptied are dropped (not left as dead keys)."
+  (fold (fn (m kv)
+          (let (remaining (presence--without (first (rest kv)) pid))
+            (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
     (entries state)))
 
@@ -128,8 +133,8 @@
 
 (defn presence--all-pids (state)
   "Every distinct tracked pid across all topics — for re-monitoring on recovery."
-  (presence--dedupe
-    (apply concat (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
+  (presence--dedupe (apply concat
+                      (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
 
 (defn presence--dedupe (xs)
   (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) (list) xs)))
@@ -137,16 +142,15 @@
 (defn presence ()
   "The presence registry pid — a supervised, vault-backed singleton. Started on first use
   and recovered from the vault on any crash (see web/registry)."
-  (ensure-supervised :hatch-presence-sup
-    [{:id :hatch-presence-vault
-      :name :hatch-presence-vault
-      :restart :permanent
-      :start (fn () (spawn (vault-loop {})))}
-     {:id :hatch-presence
-      :name :hatch-presence
-      :restart :permanent
-      :start (fn () (spawn (presence--boot)))}]
-    :hatch-presence))
+  (let (vault {:id :hatch-presence-vault
+               :name :hatch-presence-vault
+               :restart :permanent
+               :start (fn () (spawn (vault-loop {})))}
+        registry {:id :hatch-presence
+                  :name :hatch-presence
+                  :restart :permanent
+                  :start (fn () (spawn (presence--boot)))})
+    (ensure-supervised :hatch-presence-sup [vault registry] :hatch-presence)))
 
 ; ---- public API ----
 

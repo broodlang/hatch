@@ -121,9 +121,9 @@ const BroodLive = (() => {
     }
 
     // Morph the container's content to the new HTML in place (so focus/caret survive
-    // a re-render). The morph below matches children by INDEX, not by key — a keyed
-    // morph (data-key/id) is a TODO; until then a reorder/insert above an interactive
-    // element rebuilds it and loses its transient state.
+    // a re-render). morphChildren reconciles by key (data-key/id) when every child
+    // carries one — so a reorder/insert above an interactive element keeps its
+    // identity and transient state — and falls back to index matching otherwise.
     _patch(html) {
       const next = document.createElement("div");
       next.innerHTML = html;

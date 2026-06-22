@@ -139,3 +139,28 @@
 ; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
 ; primitive) — hard-killing the shared :hatch-presence singleton would race any concurrent
 ; test using it (a killed process drops its in-flight mailbox).
+
+; Empty topics are dropped, not left as dead keys (an ephemeral-topic memory leak). These
+; exercise the pure state helpers directly — the public `roster` API can't observe the
+; difference (a missing topic and an empty one both read as the empty roster).
+(describe "presence--remove / presence--remove-pid drop emptied topics"
+  (test "untracking the last member drops the topic key"
+    (let (state (web/presence/presence--put {} "t" 1 "k" {}))
+      (assert= (contains? (web/presence/presence--remove state "t" 1) "t") false)))
+  (test "remove-pid drops the topics it empties and keeps the rest"
+    (let (state (web/presence/presence--put (web/presence/presence--put (web/presence/presence--put {}
+                                                                          "a"
+                                                                          1
+                                                                          "k"
+                                                                          {})
+                                              "b"
+                                              1
+                                              "k"
+                                              {})
+                  "b"
+                  2
+                  "k"
+                  {})
+          out (web/presence/presence--remove-pid state 1))
+      (assert= (contains? out "a") false)
+      (assert= (count (get out "b")) 1))))

@@ -81,10 +81,43 @@
                        (= esc "n") (json-parse--string--acc rest2 (str acc "\n"))
                        (= esc "r") (json-parse--string--acc rest2 (str acc "\r"))
                        (= esc "t") (json-parse--string--acc rest2 (str acc "\t"))
+                       (= esc "b") (json-parse--string--acc rest2 (str acc (int->char 8)))
+                       (= esc "f") (json-parse--string--acc rest2 (str acc (int->char 12)))
                        (= esc "\\") (json-parse--string--acc rest2 (str acc "\\"))
                        (= esc "\"") (json-parse--string--acc rest2 (str acc "\""))
+                       ; \uXXXX — JSON.stringify emits these for control chars (and a non-
+                       ; browser client could send any codepoint), so decode the hex escape
+                       (= esc "u") (json-parse--unicode rest2 acc)
+                       ; \/ and any stray escape: keep the escaped char verbatim
                        else (json-parse--string--acc rest2 (str acc esc))))
         else (json-parse--string--acc rest (str acc c))))))
+
+; U+FFFD, substituted for a \uXXXX escape we can't represent (see json-parse--unicode).
+(def json--replacement-char (int->char 65533))
+
+(defn json--hex-val (c)
+  "Hex digit (0-9, a-f, case-insensitive) → its value 0-15, or -1 for a non-hex char."
+  (index-of "0123456789abcdef" (lower c)))
+
+(defn json-parse--unicode (s acc)
+  "Continue `json-parse--string--acc` after a `\\u` escape: decode the next 4 hex digits of
+  `s` into a character, append it to `acc`, and resume on the remainder. Falls back to U+FFFD
+  for a malformed or unrepresentable escape — truncated, non-hex, or a lone surrogate, which
+  `int->char` rejects — so a hand-crafted frame from a non-browser client can't crash the
+  session. (BMP only: a surrogate pair decodes to two replacement chars, which is all
+  JSON.stringify ever needs since it escapes only control chars.)"
+  (if (< (string-length s) 4)
+    [(str acc json--replacement-char) ""]
+    (let (h0 (json--hex-val (char-at s 0))
+          h1 (json--hex-val (char-at s 1))
+          h2 (json--hex-val (char-at s 2))
+          h3 (json--hex-val (char-at s 3))
+          rest (substring s 4 (string-length s)))
+      (if (or (< h0 0) (< h1 0) (< h2 0) (< h3 0))
+        (json-parse--string--acc rest (str acc json--replacement-char))
+        (let (cp (+ (* 4096 h0) (* 256 h1) (* 16 h2) h3)
+              ch (try (int->char cp) (catch e json--replacement-char)))
+          (json-parse--string--acc rest (str acc ch)))))))
 
 (defn json-parse--number (s)
   (let (end (json-parse--num-end s 0))
@@ -477,7 +510,9 @@
     ([:put path entry] (let (v (whereis :hatch-live-routes-vault))
                          (when v (send v [:put path entry])))
       (live--routes-loop (assoc table path entry)))
-    ([:get path from] (send from [:entry (get table path)]) (live--routes-loop table))
+    ; reply keyed by the caller's ref `r` so a late reply from a timed-out :get can't be
+    ; mismatched to a later lookup in the same process
+    ([:get path from r] (send from [:entry r (get table path)]) (live--routes-loop table))
     ; the vault we monitor died: once the supervisor restarts it, re-mirror our whole
     ; table so the backup is whole again, and re-watch the fresh vault
     ([:down _ _ _] (live--await :hatch-live-routes-vault 60)
@@ -547,18 +582,19 @@
   reload-stable via the supervisor's `:name`, so a hot reload returns the existing one.
   Children (start order): the reload registry, the route-table vault, then the route
   registry (which seeds from the vault). Called once at module load by the `defonce`."
-  (let (sup (supervisor/start-supervisor [{:id :hatch-live
-                                           :name :hatch-live
-                                           :restart :permanent
-                                           :start (fn () (spawn (live--registry-loop nil)))} {:id :hatch-live-routes-vault
-                                                                                                                                                                                                                                                                                     :name :hatch-live-routes-vault
-                                                                                                                                                                                                                                                                                     :restart :permanent
-                                                                                                                                                                                                                                                                                     :start (fn ()
-                                                                                                                                                                                                                                                                                              (spawn (live--vault-boot)))}
-                                           {:id :hatch-live-routes
-                                            :name :hatch-live-routes
-                                            :restart :permanent
-                                            :start (fn () (spawn (live--routes-boot)))}]
+  (let (reload {:id :hatch-live
+                :name :hatch-live
+                :restart :permanent
+                :start (fn () (spawn (live--registry-loop nil)))}
+        routes-vault {:id :hatch-live-routes-vault
+                      :name :hatch-live-routes-vault
+                      :restart :permanent
+                      :start (fn () (spawn (live--vault-boot)))}
+        routes {:id :hatch-live-routes
+                :name :hatch-live-routes
+                :restart :permanent
+                :start (fn () (spawn (live--routes-boot)))}
+        sup (supervisor/start-supervisor [reload routes-vault routes]
               {:name :hatch-live-sup :strategy :one-for-one}))
     (live--await :hatch-live-routes 60)
     sup))
@@ -579,10 +615,11 @@
 
 (defn lookup-live (path)
   "The registry entry `{:spec :session}` for `path`, or nil if no live view is there."
-  (let (r (live--routes))
-    (send r [:get path (self)])
+  (let (registry (live--routes)
+        r (ref))
+    (send registry [:get path (self) r])
     (receive
-      ([:entry e] e)
+      ([:entry ~r e] e)
       (after 1000 nil))))
 
 (defn live--ws-path (req-path)
@@ -741,7 +778,10 @@
         ; socket the session process dies and registries clean up via their monitors, so
         ; unmount is only needed for the navigate-without-death case. Absent → a no-op.
         unmount-defn (if unmount-clause
-                       (list 'defn 'unmount (first (rest unmount-clause)) (cons 'do (rest (rest unmount-clause))))
+                       (list 'defn
+                         'unmount
+                         (first (rest unmount-clause))
+                         (cons 'do (rest (rest unmount-clause))))
                        (list 'defn 'unmount (list 'unmount--model) nil)))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
