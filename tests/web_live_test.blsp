@@ -104,3 +104,20 @@
           drained (receive ([:info p] p) (after 1000 :timeout)))
       (assert= ret nil)
       (assert= drained :ping))))
+
+; Inbound WS event params arrive as JSON; the decoder must handle every escape JSON.stringify
+; can emit — including \uXXXX (control chars) and the named \b/\f — and must never crash the
+; session process on a hostile escape (a lone surrogate, bad hex), falling back to U+FFFD.
+(describe "json-decode string escapes"
+  (test "named escapes n/r/t/b/f and backslash/quote/slash"
+    (assert= (json-decode "\"a\\nb\\tc\\\\d\\\"e\\/f\"") "a\nb\tc\\d\"e/f"))
+  (test "\\uXXXX decodes to the codepoint (lowercase and uppercase hex)"
+    (assert= (json-decode "\"\\u0041\\u00e9\\u00C9\"") (str "A" (int->char 233) (int->char 201))))
+  (test "\\u of a control char round-trips (e.g. tab via \\u0009)"
+    (assert= (json-decode "\"x\\u0009y\"") "x\ty"))
+  (test "a lone surrogate falls back to U+FFFD instead of crashing"
+    (assert= (json-decode "\"\\uD83D\"") (int->char 65533)))
+  (test "malformed hex falls back to U+FFFD"
+    (assert= (json-decode "\"\\uZZZZ\"") (int->char 65533)))
+  (test "\\u inside an object value"
+    (assert= (json-decode "{\"k\":\"\\u0041\"}") {"k" "A"})))

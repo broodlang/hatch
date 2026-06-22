@@ -80,3 +80,14 @@
 ; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
 ; primitive) — a test that hard-kills the shared :hatch-pubsub singleton would race any
 ; concurrent test using it (a killed process drops its in-flight mailbox).
+
+; Empty topics are dropped, not left as dead keys (an ephemeral-topic memory leak). These
+; exercise the pure state helpers directly — the public `subscribers` API can't observe the
+; difference (a missing topic and an empty one both read as the empty list).
+(describe "pubsub--remove / pubsub--remove-pid drop emptied topics"
+  (test "removing the last subscriber drops the topic key"
+    (assert= (contains? (web/pubsub/pubsub--remove {"t" (list 1)} "t" 1) "t") false))
+  (test "removing one of several keeps the topic"
+    (assert= (web/pubsub/pubsub--remove {"t" (list 1 2)} "t" 1) {"t" (list 2)}))
+  (test "remove-pid drops the topics it empties and keeps the rest"
+    (assert= (web/pubsub/pubsub--remove-pid {"a" (list 1) "b" (list 1 2)} 1) {"b" (list 2)})))
