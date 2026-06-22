@@ -30,7 +30,8 @@
   (test "empty session round-trips to empty"
     (assert= (decode-session *secret* (encode-session *secret* {})) {}))
   (test "round-trips non-string values (int, bool, nested map)"
-    (assert= (decode-session *secret* (encode-session *secret* {"n" 42 "ok" true "u" {"name" "ada"}}))
+    (assert= (decode-session *secret*
+               (encode-session *secret* {"n" 42 "ok" true "u" {"name" "ada"}}))
       {"n" 42 "ok" true "u" {"name" "ada"}})))
 
 (describe "signature verification"
