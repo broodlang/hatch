@@ -76,6 +76,26 @@
   replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
   (str "\"" (substring (%sha256 body) 0 16) "\""))
 
+; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
+; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
+; registry process would funnel every read through one mailbox).
+(def *etag-cache* (table))
+
+(defn cached-etag (path body)
+  "The ETag for the file at `path` (whose contents are `body`), reusing the cached hash while
+  the file's mtime+size are unchanged and recomputing it (one `%sha256`) only after an edit.
+  One `file-stat` (a cheap syscall) replaces hashing the whole body on every hit. Falls back
+  to a direct hash if `path` can't be stat'd."
+  (let (st (file-stat path))
+    (if (nil? st)
+      (etag body)
+      (let (hit (table-get *etag-cache* path))
+        (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
+          (get hit :etag)
+          (let (tag (etag body))
+            (table-put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
+            tag))))))
+
 (defn fingerprint-shaped? (path)
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
   `asset-path`/`web/assets/fingerprint` emit. A cheap, no-IO pre-check: it gates the manifest
@@ -199,12 +219,13 @@
                  206
                  (substring body start (+ end 1))))))))
 
-(defn serve-body (conn content-type body path &optional (dir "static"))
+(defn serve-body (conn content-type body path &optional (dir "static") (tag nil))
   "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
   an env- and fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and best-effort
   byte ranges (`Range` → 206/416, else a full 200). `path`/`dir` only steer the cache policy
-  (fingerprinted? consults `dir`'s manifest); `path` may be a bare filename."
-  (let (tag (etag body)
+  (fingerprinted? consults `dir`'s manifest); `path` may be a bare filename. `tag` lets a
+  caller pass a precomputed (e.g. cached) ETag; nil computes one from `body`."
+  (let (tag (or tag (etag body))
         cc (cache-control path dir))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
@@ -229,7 +250,7 @@
             body (try (slurp path) (catch _ nil)))
         (if (nil? body)
           (not-found-resp conn)
-          (serve-body conn (mime-type path) body path root))))))
+          (serve-body conn (mime-type path) body path root (cached-etag path body)))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the
@@ -266,12 +287,29 @@
     {}
     (filter (fn (l) (not (blank? l))) (string-split text "\n"))))
 
+; Process-shared cache (ETS) of `dir → parsed manifest`. The manifest is immutable for a
+; deployment's lifetime (a new build means a new process), so this is read once per dir and
+; never invalidated — removing per-render disk IO in prod. `clear-manifest-cache` exists for
+; tests / a dev rebuild.
+(def *manifest-cache* (table))
+
 (defn load-manifest (&optional (dir "static"))
   "The fingerprint manifest under `dir` as a `logical → fingerprinted` map, or `{}` when
-  there's none (dev, or a build that didn't fingerprint). Read on demand; for a hot path,
-  cache the result in the caller."
-  (let (text (try (slurp (manifest-path dir)) (catch _ nil)))
-    (if (nil? text) {} (parse-manifest text))))
+  there's none (dev, or a build that didn't fingerprint). Memoized per `dir` (including the
+  empty/miss result), so a hot path reads the file at most once."
+  (if (table-has? *manifest-cache* dir)
+    (table-get *manifest-cache* dir)
+    (let (text (try (slurp (manifest-path dir)) (catch _ nil))
+          m (if (nil? text) {} (parse-manifest text)))
+      (table-put *manifest-cache* dir m)
+      m)))
+
+(defn clear-manifest-cache ()
+  "Drop every memoized manifest, so the next `load-manifest` re-reads from disk. For tests
+  and a dev rebuild that rewrote the manifest within a running process."
+  (dolist (dir (keys (table-snapshot *manifest-cache*)))
+    (table-delete *manifest-cache* dir))
+  nil)
 
 (defn asset-path (logical &optional (dir "static"))
   "The URL for a logical asset name (e.g. \"app.css\"). In prod, the content-fingerprinted

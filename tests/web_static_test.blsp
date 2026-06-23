@@ -50,6 +50,23 @@
     (assert= (starts-with? (etag "hello") "\"") true)
     (assert= (not (= (etag "hello") (etag "world"))) true)))
 
+(describe "cached-etag"
+  (test "matches a direct hash, reuses it, and re-tags after the file changes"
+    (let (dir "/tmp/hatch-etag-test"
+          _ (try (make-dir dir) (catch _ nil))
+          f (str dir "/a.txt")
+          _ (spit f "hello")
+          t1 (cached-etag f "hello"))
+      (assert= t1 (etag "hello"))
+      ; unchanged file → same tag (served from the cache)
+      (assert= (cached-etag f "hello") t1)
+      ; content changes (size differs → stat differs) → recomputed tag
+      (spit f "different content, longer")
+      (let (t2 (cached-etag f "different content, longer"))
+        (assert= (= t2 t1) false)
+        (assert= t2 (etag "different content, longer")))
+      (delete-file f))))
+
 (describe "prod?"
   (test "false by default (dev is the zero-config default)"
     (assert= (prod?) false)))
@@ -156,3 +173,17 @@
       (assert= (parse-manifest (render-manifest m)) m)))
   (test "parse ignores blank lines"
     (assert= (parse-manifest "\napp.css\tapp.abcd1234.css\n\n") {"app.css" "app.abcd1234.css"})))
+
+(describe "load-manifest (memoized)"
+  (test "reads once, serves from cache even after the file is removed; clear re-reads"
+    (let (dir "/tmp/hatch-manifest-memo-test"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/cache-manifest") "app.css\tapp.abcd1234.css\n")
+          loaded (load-manifest dir))
+      (assert= loaded {"app.css" "app.abcd1234.css"})
+      ; remove the file — a memoized read still returns the cached map
+      (delete-file (str dir "/cache-manifest"))
+      (assert= (load-manifest dir) {"app.css" "app.abcd1234.css"})
+      ; clearing forces a fresh (now-empty) read
+      (clear-manifest-cache)
+      (assert= (load-manifest dir) {}))))
