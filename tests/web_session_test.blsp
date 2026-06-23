@@ -113,3 +113,18 @@
     (assert= (get (session-cookie-opts {}) :secure) false))
   (test "an explicit :secure opt overrides the default"
     (assert= (get (session-cookie-opts {:secure true}) :secure) true)))
+
+(describe "session expiry (__exp__)"
+  (test "an expired cookie decodes to an empty session"
+    (let (cookie (encode-session *secret* {"user" "x" "__exp__" 1})) ; exp = 1ms past epoch
+      (assert= (decode-session *secret* cookie) {})))
+  (test "a live cookie decodes to the data with __exp__ stripped"
+    (let (cookie (encode-session *secret* {"user" "x" "__exp__" (+ (now) 100000)}))
+      (assert= (decode-session *secret* cookie) {"user" "x"})))
+  (test "with-expiry stamps __exp__ only when :max-age is set"
+    (assert= (with-expiry {"a" "1"} {}) {"a" "1"})
+    (let (stamped (with-expiry {"a" "1"} {:max-age 60}))
+      (assert= (get stamped "a") "1")
+      (assert= (> (get stamped "__exp__") (now)) true)))
+  (test "no __exp__ (no max-age) → never expires"
+    (assert= (decode-session *secret* (encode-session *secret* {"user" "y"})) {"user" "y"})))

@@ -20,7 +20,15 @@
 (describe "try-parse: errors"
   (test "bad request line"
     (let (r (try-parse "GARBAGE\r\n\r\n"))
-      (assert= (first r) :error))))
+      (assert= (first r) :error)))
+  ; Smuggling primitives (RFC 7230): reject obs-fold continuation lines and duplicate
+  ; Transfer-Encoding, which a fronting proxy might resolve differently than we do.
+  (test "obs-fold continuation line is rejected"
+    (assert= (first (try-parse "GET / HTTP/1.1\r\nHost: x\r\n\tfolded: y\r\n\r\n")) :error))
+  (test "duplicate Transfer-Encoding is rejected"
+    (assert= (first (try-parse
+                      "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n"))
+      :error)))
 
 (describe "try-parse: successful GET"
   (test "returns :ok"

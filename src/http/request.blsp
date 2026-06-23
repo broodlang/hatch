@@ -21,6 +21,16 @@
                 (let (headers (parse-headers header-lines)
                       buflen (string-length buf))
                   (cond
+                    ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
+                    ; server must reject it in a request; folding disagreements are a header-
+                    ; desync / smuggling primitive. `parse-headers` would otherwise promote a
+                    ; continuation line to a standalone header.
+                    (obs-fold? header-lines) [:error "obs-fold header line"]
+                    ; More than one Transfer-Encoding header line is ambiguous framing: a
+                    ; proxy honoring a different occurrence than we do (we keep the last) is a
+                    ; smuggling vector. (A list value like "x, chunked" is already rejected
+                    ; below, since `chunked?` requires the value to be exactly "chunked".)
+                    (duplicate-transfer-encoding? header-lines) [:error "multiple Transfer-Encoding"]
                     ; Transfer-Encoding *and* Content-Length is ambiguous framing
                     ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
                     (and (contains? headers :transfer-encoding)
@@ -153,6 +163,21 @@
     (if (and (not (= ci -1)) (= (lower (trim (substring line 0 ci))) lower-key))
       (trim (substring line (+ ci 1) (string-length line)))
       nil)))
+
+(defn obs-fold? (header-lines)
+  "True if any header line begins with a space or tab — an obs-fold continuation line, which
+  RFC 7230 §3.2.4 says a server must reject in a request (it's a header-desync primitive)."
+  (not (empty? (filter (fn (line)
+                         (and (> (string-length line) 0)
+                           (let (c (substring line 0 1)) (or (= c " ") (= c "\t")))))
+                 header-lines))))
+
+(defn duplicate-transfer-encoding? (header-lines)
+  "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
+  (a proxy may honor a different occurrence than our last-wins map), a smuggling vector."
+  (> (count (filter (fn (line) (not (nil? (header-value-for line "transfer-encoding"))))
+              header-lines))
+    1))
 
 (defn content-length-conflict? (header-lines)
   "True if `Content-Length` appears more than once with differing values — ambiguous

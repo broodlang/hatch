@@ -30,11 +30,13 @@ The exposure is at the edges — security gaps and silent failure under crash/ch
 | ~~H18~~ ✅ | No CSRF protection on POST + signed-cookie session | HIGH | **Done** — `web/csrf`: synchronizer token in the session, `protect-from-forgery` plug, `csrf-input` form field, constant-time verify (+ `X-CSRF-Token` header). Demo `/account` wired. |
 | ~~M21~~ ✅ | `morphChildren` matched by index, so a reorder re-cloned interactive nodes and lost focus/caret | MED | **Done** — keyed morph in `brood_live.js`: when all children carry `data-key`/`id`, reconcile by key (move existing nodes) instead of by index; unkeyed views unchanged. Test page: demo `/reorder`. |
 | ~~L~~ ✅ | Session cookie defaulted `Secure=false` | LOW→HIGH | **Done** — see S2 above (Secure outside dev) |
-| S5 | Duplicate/list `Transfer-Encoding` and obs-fold (leading-WS) header lines aren't rejected — a desync primitive behind a proxy that resolves them differently | MED | reject duplicate/list TE and obs-fold lines, decided from the raw header lines (as `content-length-conflict?` already does for CL) |
-| S6 | Signed session carries no `exp`/nonce — a stolen cookie is valid until `HATCH_SECRET_KEY_BASE` rotates, and there's no per-session revoke | MED | sign + verify an `exp` (and optional session version) in the payload |
-| S7 | WebSocket accepts unmasked client frames (RFC 6455: MUST reject); RSV bits, reserved/invalid opcodes, and control-frame `FIN=0` are unvalidated | LOW | reject unmasked frames, non-zero RSV, and out-of-set opcodes |
-| S8 | `cookie-safe` sanitizes the value but not the `Path`/`Domain`/`SameSite` option values | LOW | sanitize attribute values too (only exploitable if an app feeds user input into those opts) |
-| S9 | 400 responses echo the attacker's request line in the body | LOW | generic 400 body; log the detail to telemetry |
+| ~~S5~~ ✅ | Duplicate/list `Transfer-Encoding` and obs-fold (leading-WS) header lines aren't rejected — a desync primitive behind a proxy that resolves them differently | MED | **Done** — `obs-fold?` + `duplicate-transfer-encoding?` reject from the raw header lines; a list TE was already rejected (exact-match `chunked?`) (+tests) |
+| ~~S6~~ ✅ | Signed session carries no `exp`/nonce — a stolen cookie is valid until `HATCH_SECRET_KEY_BASE` rotates | MED | **Done** — a `__exp__` (epoch-ms) is stamped into the signed payload when `:max-age` is set, verified + stripped on decode (`with-expiry`/`check-expiry`); sliding on each write (+tests) |
+| ~~S7~~ ✅ | WebSocket accepts unmasked client frames (RFC 6455: MUST reject); RSV bits, reserved/invalid opcodes, and control-frame `FIN=0` are unvalidated | LOW | **Done** — `parse-one-frame` rejects unmasked frames, non-zero RSV, reserved opcodes (`valid-opcode?`), and fragmented control frames (+tests) |
+| ~~S8~~ ✅ | `cookie-safe` sanitizes the value but not the `Path`/`Domain`/`SameSite` option values | LOW | **Done** — `format-set-cookie` now `cookie-safe`s the Path/Domain/SameSite attributes too (+test) |
+| ~~S9~~ ✅ | 400 responses echo the attacker's request line in the body | LOW | **Done** — generic `400 Bad Request` body; the parser detail goes to the `[:hatch :request :bad-request]` telemetry event (+test) |
+
+All findings from the security review are now addressed.
 
 Ruled out during the review (reported but not real, given the runtime): chunk-size / Content-Length
 **integer-overflow crashes** — Brood integers are bignums (no overflow/throw), so an over-large

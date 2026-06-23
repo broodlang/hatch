@@ -246,8 +246,13 @@
                                   (format-response {:status 408
                                                     :body "<h1>408 Request Timeout</h1>"}))
                                 (tcp-close sock)))))
-           ([:error msg] (tcp-send sock (format-response {:status 400 :body msg}))
-             (tcp-close sock)))))
+           ; A malformed request: answer a generic 400 (don't reflect the parser message,
+           ; which echoes attacker-controlled bytes — the detail goes to telemetry instead).
+           ([:error msg] (do
+                           (telemetry/emit [:hatch :request :bad-request] {} {:error msg})
+                           (tcp-send sock (format-response {:status 400
+                                                            :body "<h1>400 Bad Request</h1>"}))
+                           (tcp-close sock))))))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request."
