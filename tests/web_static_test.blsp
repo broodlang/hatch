@@ -1,7 +1,7 @@
 (defmodule web-static-test (:use web/static) (:use web/conn) (:use test))
 
-(defn conn-with (params)
-  (build {:method "GET" :path "/static" :query "" :params params :headers {} :body ""}))
+(defn conn-with (params &optional (headers {}))
+  (build {:method "GET" :path "/static" :query "" :params params :headers headers :body ""}))
 
 (describe "extension"
   (test "js" (assert= (extension "app.js") "js"))
@@ -43,3 +43,92 @@
     (let (h (handler "static")
           conn (conn-with {"path" "nope.css"}))
       (assert= (get (h conn) :status) 404))))
+
+(describe "etag"
+  (test "quoted, stable, content-addressed"
+    (assert= (= (etag "hello") (etag "hello")) true)
+    (assert= (starts-with? (etag "hello") "\"") true)
+    (assert= (not (= (etag "hello") (etag "world"))) true)))
+
+(describe "prod?"
+  (test "false by default (dev is the zero-config default)"
+    (assert= (prod?) false)))
+
+(describe "fingerprinted?"
+  (test "name.<hash>.ext is fingerprinted"
+    (assert= (fingerprinted? "/static/app.1a2b3c4d.css") true))
+  (test "longer hash too"
+    (assert= (fingerprinted? "app.deadbeefcafe.js") true))
+  (test "plain name is not"
+    (assert= (fingerprinted? "/static/app.css") false))
+  (test "short/non-hex middle segment is not"
+    (assert= (fingerprinted? "app.v2.css") false)
+    (assert= (fingerprinted? "app.zzzzzzzz.css") false)))
+
+(describe "cache-control"
+  (test "dev revalidates everything (no stale assets)"
+    (assert= (cache-control "app.css") "no-cache")
+    (assert= (cache-control "app.1a2b3c4d.css") "no-cache")))
+
+(describe "parse-range"
+  (test "bytes=a-b" (let ([s e] (parse-range "bytes=0-3" 10)) (assert= s 0) (assert= e 3)))
+  (test "bytes=a- runs to end" (let ([s e] (parse-range "bytes=5-" 10)) (assert= s 5) (assert= e 9)))
+  (test "bytes=-n suffix" (let ([s e] (parse-range "bytes=-3" 10)) (assert= s 7) (assert= e 9)))
+  (test "end clamped to last byte" (let ([s e] (parse-range "bytes=0-100" 10)) (assert= s 0) (assert= e 9)))
+  (test "start past end is unsatisfiable" (assert= (parse-range "bytes=20-" 10) :unsatisfiable))
+  (test "absent → nil" (assert= (parse-range nil 10) nil))
+  (test "multi-range → nil (ignored)" (assert= (parse-range "bytes=0-1,5-7" 10) nil))
+  (test "non-bytes unit → nil" (assert= (parse-range "items=0-3" 10) nil)))
+
+(describe "serve-body"
+  (test "200 carries etag, cache-control, nosniff, accept-ranges"
+    (let (resp (serve-body (conn-with {}) "text/css; charset=utf-8" "body{}" "app.css")
+          h (get resp :resp-headers))
+      (assert= (get resp :status) 200)
+      (assert= (get h :cache-control) "no-cache")
+      (assert= (get h :x-content-type-options) "nosniff")
+      (assert= (get h :accept-ranges) "bytes")
+      (assert= (blank? (get h :etag)) false)))
+  (test "matching If-None-Match → bodyless 304"
+    (let (tag (etag "body{}")
+          resp (serve-body (conn-with {} {:if-none-match tag}) "text/css" "body{}" "app.css"))
+      (assert= (get resp :status) 304)
+      (assert= (get resp :resp-body) "")
+      (assert= (get (get resp :resp-headers) :etag) tag)))
+  (test "If-None-Match * → 304"
+    (assert= (get (serve-body (conn-with {} {:if-none-match "*"}) "text/css" "x" "app.css") :status)
+      304))
+  (test "Range on an ASCII body → 206 with Content-Range"
+    (let (resp (serve-body (conn-with {} {:range "bytes=0-3"}) "text/plain" "0123456789" "f.txt")
+          h (get resp :resp-headers))
+      (assert= (get resp :status) 206)
+      (assert= (get resp :resp-body) "0123")
+      (assert= (get h :content-range) "bytes 0-3/10")))
+  (test "suffix Range → final bytes"
+    (let (resp (serve-body (conn-with {} {:range "bytes=-3"}) "text/plain" "0123456789" "f.txt"))
+      (assert= (get resp :status) 206)
+      (assert= (get resp :resp-body) "789")))
+  (test "unsatisfiable Range → 416"
+    (let (resp (serve-body (conn-with {} {:range "bytes=99-"}) "text/plain" "0123456789" "f.txt"))
+      (assert= (get resp :status) 416)
+      (assert= (get (get resp :resp-headers) :content-range) "bytes */10")))
+  (test "Range on a multibyte body falls back to a full 200"
+    (let (
+          ; em-dash: 3 bytes, 1 char
+          body (str "ab" (int->char 8212) "cd")
+          resp (serve-body (conn-with {} {:range "bytes=0-2"}) "text/plain" body "f.txt"))
+      (assert= (get resp :status) 200)
+      (assert= (get resp :resp-body) body))))
+
+(describe "asset-path"
+  (test "dev returns the plain logical path"
+    (assert= (asset-path "app.css") "/static/app.css"))
+  (test "honours a custom dir"
+    (assert= (asset-path "app.css" "assets") "/assets/app.css")))
+
+(describe "manifest"
+  (test "render/parse round-trips a logical→fingerprinted map"
+    (let (m {"app.css" "app.1a2b3c4d.css" "app.js" "app.deadbeef.js"})
+      (assert= (parse-manifest (render-manifest m)) m)))
+  (test "parse ignores blank lines"
+    (assert= (parse-manifest "\napp.css\tapp.abcd1234.css\n\n") {"app.css" "app.abcd1234.css"})))

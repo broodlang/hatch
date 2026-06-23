@@ -10,6 +10,8 @@
   ; send-resp / put-resp-header (client-js-handler)
   (:use web/conn)
   (:use protocol)
+  ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
+  (:alias web/static)
   ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
   (:alias proc/supervisor))
 ; ---- JSON encode via the Encode protocol -----------------------------------
@@ -839,14 +841,11 @@
     (get \"/static/brood_live.js\" (live/client-js-handler))
   instead of copying the file into its own static/ dir."
   (fn (conn)
-    ; `no-cache` (revalidate every load) so a browser never clings to a stale client —
-    ; e.g. a copy fetched under an old Content-Length bug, which truncates the file and
-    ; breaks parsing until the cache is cleared. The file is tiny, so refetching is cheap.
-    (send-resp (put-resp-header (put-resp-header conn :content-type "text/javascript; charset=utf-8")
-                 :cache-control
-                 "no-cache")
-      200
-      (or (client-js) ""))))
+    ; Reuse the static cache pipeline: a content ETag (→ a bodyless 304 once the browser
+    ; holds it), nosniff, and `no-cache`. brood_live.js is served at a fixed, non-fingerprinted
+    ; path, so it always revalidates — cheap, and never stale (a stale copy fetched under the
+    ; old codepoint Content-Length bug is what broke parsing until the cache was cleared).
+    (static/serve-body conn "text/javascript; charset=utf-8" (or (client-js) "") "brood_live.js")))
 
 (def *status-css*
   (str ".brood-status{position:fixed;top:.75rem;right:.75rem;z-index:9999;"

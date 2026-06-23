@@ -9,7 +9,13 @@
 
   Bodies are read with `slurp` (text), so this serves text assets — JS, CSS, HTML,
   SVG, JSON. Binary assets (images, fonts) need byte-faithful file reads + a binary
-  socket and aren't supported yet."
+  socket and aren't supported yet.
+
+  Every response goes through `serve-body`: a strong content ETag (so an unchanged asset
+  revalidates to a bodyless 304), `X-Content-Type-Options: nosniff`, `Accept-Ranges` with
+  best-effort byte ranges (206/416), and an env-aware `Cache-Control` — `no-cache` in dev
+  and for un-fingerprinted URLs, `immutable`/one-year for content-fingerprinted ones. Pair
+  with `web/assets/fingerprint` (build) + `asset-path` (link) for cache-busting in prod."
   (:use web/conn))
 ; ---- MIME types ----
 
@@ -54,11 +60,148 @@
   (let (segs (filter (fn (s) (not (blank? s))) (string-split rel "/")))
     (if (empty? (filter unsafe-segment? segs)) segs nil)))
 
+; ---- environment ----
+
+(defn prod? ()
+  "True unless $HATCH_ENV names the dev environment (the zero-config default). Mirrors the
+  endpoint's `dev?`; it lives here too so the static layer can pick its cache policy without
+  the app threading an env flag through every call."
+  (not (= (or (getenv "HATCH_ENV") "dev") "dev")))
+
+; ---- caching ----
+
+(defn etag (body)
+  "A strong ETag for `body`: a quoted SHA-256 prefix. Content-addressed, so it changes iff
+  the bytes change — no filesystem mtime needed, and identical across server restarts and
+  replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
+  (str "\"" (substring (%sha256 body) 0 16) "\""))
+
+(defn fingerprinted? (path)
+  "True if `path`'s basename looks content-fingerprinted — `name.<8+ hex>.ext`, the shape
+  `asset-path`/`web/assets/fingerprint` emit. Such a URL is safe to cache forever, because a
+  content change yields a new name."
+  (let (seg (lower (last (string-split path "/")))
+        parts (string-split seg "."))
+    (and (>= (count parts) 3)
+      (let (h (first (rest (reverse parts))))
+        (and (>= (string-length h) 8)
+          (= (string-span h 0 "0123456789abcdef") (string-length h)))))))
+
+(defn cache-control (path)
+  "The Cache-Control for a static asset at `path`. In prod a content-fingerprinted URL is
+  `immutable` and cached for a year (a content change means a new URL); everything else
+  `no-cache`, i.e. revalidate every load — cheap, since the ETag turns an unchanged asset
+  into a bodyless 304. In dev, always `no-cache`, so an edited asset is never masked by a
+  stale copy."
+  (if (and (prod?) (fingerprinted? path))
+    "public, max-age=31536000, immutable"
+    "no-cache"))
+
 ; ---- serving ----
 
+(defn with-resp-headers (conn hmap)
+  "Add every `keyword → value` in `hmap` as a response header."
+  (fold (fn (c kv) (put-resp-header c (first kv) (first (rest kv)))) conn (entries hmap)))
+
+(defn not-modified (conn tag cc)
+  "A 304 Not Modified — no body, but it still carries the validators a cache needs to keep
+  trusting (and re-using) its stored copy: the ETag and the Cache-Control."
+  (send-resp (with-resp-headers conn {:etag tag :cache-control cc}) 304 ""))
+
+(defn if-none-match? (conn tag)
+  "True if the request's `If-None-Match` matches `tag` (or is the `*` wildcard) — i.e. the
+  client already holds this exact version, so we can answer 304 instead of resending it."
+  (let (inm (get (get conn :headers) :if-none-match))
+    (and inm (or (= (trim inm) "*") (includes? inm tag)))))
+
+(defn parse-range (spec len)
+  "Parse a single-range `Range: bytes=…` spec against a body of `len` bytes, returning
+  `[start end]` (inclusive, satisfiable), `:unsatisfiable` (a syntactically valid range
+  wholly past the end), or nil (absent/garbled/multi-range — ignore it and serve the whole
+  body). Forms: `bytes=a-b`, `bytes=a-` (a..end), `bytes=-n` (final n bytes)."
+  (if (or (nil? spec) (not (starts-with? (trim spec) "bytes=")))
+    nil
+    (let (r (substring (trim spec) 6 (string-length (trim spec))))
+      (if (includes? r ",")
+        ; multi-range: not worth it for text assets — fall back to a full 200
+        nil
+        (let (dash (index-of r "-"))
+          (if (= dash -1)
+            nil
+            (let (lo (trim (substring r 0 dash))
+                  hi (trim (substring r (+ dash 1) (string-length r))))
+              (cond
+                ; suffix: bytes=-n → final n bytes
+                (blank? lo) (let (n (string->number hi))
+                              (if (or (nil? n) (<= n 0))
+                                nil
+                                [(max 0 (- len n)) (- len 1)]))
+                ; bytes=a- → a..end
+                (blank? hi) (let (a (string->number lo))
+                              (cond
+                                (nil? a) nil
+                                (>= a len) :unsatisfiable
+                                else [a (- len 1)]))
+                ; bytes=a-b
+                else (let (a (string->number lo)
+                           b (string->number hi))
+                       (cond
+                         (or (nil? a) (nil? b) (> a b)) nil
+                         (>= a len) :unsatisfiable
+                         else [a (min b (- len 1))]))))))))))
+
+(defn serve-range (conn content-type body tag cc len)
+  "Honour a `Range` request when we safely can. Byte ranges are byte offsets, but the body
+  is a string and a slice that splits a multibyte char can't be re-formed — so we only range
+  ASCII-clean bodies (byte length == char length), where a codepoint substring IS the byte
+  slice. Otherwise (and for multi-range) we ignore the Range and the caller sends a full 200,
+  which the spec explicitly allows. Returns a 206/416 conn, or nil to mean 'serve the whole
+  body'."
+  (if (not (= (string-length body) len))
+    ; multibyte body — can't slice by byte safely; let the caller send 200
+    nil
+    (let (r (parse-range (get (get conn :headers) :range) len))
+      (cond
+        (nil? r) nil
+        (= r :unsatisfiable) (send-resp (with-resp-headers conn
+                                          {:content-type content-type
+                                           :content-range (str "bytes */" len)})
+                               416
+                               "")
+        else (let ([start end] r)
+               (send-resp (with-resp-headers conn
+                            {:content-type content-type
+                             :etag tag
+                             :cache-control cc
+                             :accept-ranges "bytes"
+                             :x-content-type-options "nosniff"
+                             :content-range (str "bytes " start "-" end "/" len)})
+                 206
+                 (substring body start (+ end 1))))))))
+
+(defn serve-body (conn content-type body path)
+  "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
+  an env- and fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and best-effort
+  byte ranges (`Range` → 206/416, else a full 200). `path` only steers the cache policy and
+  may be a bare filename."
+  (let (tag (etag body)
+        cc (cache-control path))
+    (cond
+      (if-none-match? conn tag) (not-modified conn tag cc)
+      else (or (serve-range conn content-type body tag cc (count (string->utf8-bytes body)))
+             (send-resp (with-resp-headers conn
+                          {:content-type content-type
+                           :etag tag
+                           :cache-control cc
+                           :accept-ranges "bytes"
+                           :x-content-type-options "nosniff"})
+               200
+               body)))))
+
 (defn serve (conn root rel)
-  "Serve `rel` under `root` into `conn`: 200 with the file's MIME type on success,
-  404 on a traversal attempt or a missing/unreadable file."
+  "Serve `rel` under `root` into `conn`: 200 with the file's MIME type on success, a bodyless
+  304 when the client's `If-None-Match` already matches, 404 on a traversal attempt or a
+  missing/unreadable file. See `serve-body` for the cache/conditional/range headers."
   (let (segs (safe-segments rel))
     (if (or (nil? segs) (empty? segs))
       (not-found-resp conn)
@@ -66,16 +209,54 @@
             body (try (slurp path) (catch _ nil)))
         (if (nil? body)
           (not-found-resp conn)
-          ; `no-cache` (revalidate every load) so an edited asset is never masked by a
-          ; stale cached copy — the dev default; assets here are small and local.
-          (send-resp (put-resp-header (put-resp-header conn :content-type (mime-type path))
-                       :cache-control
-                       "no-cache")
-            200
-            body))))))
+          (serve-body conn (mime-type path) body path))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the
   splat param name (the `*name` in the route pattern; defaults to `path`)."
   (fn (conn)
     (serve conn root (or (param conn capture) ""))))
+
+; ---- content-fingerprinted asset URLs ----
+; A build step (`web/assets/fingerprint`) rewrites built files to content-addressed names
+; (`app.<sha>.css`) and records a manifest mapping each logical name to its fingerprinted
+; one. `asset-path` turns a logical name into the URL to emit — the cache-forever
+; fingerprinted name in prod, the plain name (revalidated each load) in dev — so templates
+; link by logical name and pick up long-lived prod caching for free.
+
+(def *manifest-name* "cache-manifest")
+
+(defn manifest-path (dir)
+  "Path to the fingerprint manifest under `dir`."
+  (str dir "/" *manifest-name*))
+
+(defn render-manifest (manifest)
+  "Serialize a `logical → fingerprinted` map to the manifest line format — one
+  `logical<TAB>fingerprinted` line per asset. The inverse of `parse-manifest`; written by
+  `web/assets/fingerprint`."
+  (join "" (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (entries manifest))))
+
+(defn parse-manifest (text)
+  "Parse a manifest (one `logical<TAB>fingerprinted` line per asset) into a map."
+  (fold (fn (m line)
+          (let (tab (index-of line "\t"))
+            (if (= tab -1)
+              m
+              (assoc m (substring line 0 tab) (substring line (+ tab 1) (string-length line))))))
+    {}
+    (filter (fn (l) (not (blank? l))) (string-split text "\n"))))
+
+(defn load-manifest (&optional (dir "static"))
+  "The fingerprint manifest under `dir` as a `logical → fingerprinted` map, or `{}` when
+  there's none (dev, or a build that didn't fingerprint). Read on demand; for a hot path,
+  cache the result in the caller."
+  (let (text (try (slurp (manifest-path dir)) (catch _ nil)))
+    (if (nil? text) {} (parse-manifest text))))
+
+(defn asset-path (logical &optional (dir "static"))
+  "The URL for a logical asset name (e.g. \"app.css\"). In prod, the content-fingerprinted
+  name from the build manifest — immutable, so the client caches it forever; in dev (or on a
+  manifest miss), the plain name, which `serve` revalidates each load. Link assets by logical
+  name and get the right caching in both environments."
+  (let (name (if (prod?) (get (load-manifest dir) logical logical) logical))
+    (str "/" dir "/" name)))

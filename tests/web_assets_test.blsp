@@ -1,4 +1,4 @@
-(defmodule web-assets-test (:use web/assets) (:use test))
+(defmodule web-assets-test (:use web/assets) (:alias web/static) (:use test))
 
 (describe "proc-opts"
   (test "empty when no cwd/env"
@@ -26,3 +26,27 @@
     (assert= (on-output "Done in 5ms\n" "Done in") nil))
   (test "marker absent is a no-op"
     (assert= (on-output "Rebuilding...\n" "Done in") nil)))
+
+(describe "fingerprint-name"
+  (test "inserts the digest before the extension"
+    (assert= (fingerprint-name "app.css" "deadbeef") "app.deadbeef.css"))
+  (test "keeps subdirectories"
+    (assert= (fingerprint-name "css/app.css" "deadbeef") "css/app.deadbeef.css"))
+  (test "no extension → append the digest"
+    (assert= (fingerprint-name "robots" "deadbeef") "robots.deadbeef")))
+
+(describe "fingerprint"
+  (test "writes content-addressed copies and a manifest"
+    (let (dir "/tmp/hatch-assets-fp-test"
+          _ (try (make-dir dir) (catch _ nil))
+          content "body{color:red}"
+          _ (spit (str dir "/app.css") content)
+          manifest (fingerprint {:dir dir :files ["app.css"]})
+          fp (get manifest "app.css"))
+      (assert= fp (fingerprint-name "app.css" (substring (%sha256 content) 0 8)))
+      (assert= (file-exists? (str dir "/" fp)) true)
+      (assert= (slurp (str dir "/" fp)) content)
+      (assert= (static/parse-manifest (slurp (str dir "/cache-manifest"))) manifest)
+      (delete-file (str dir "/app.css"))
+      (delete-file (str dir "/" fp))
+      (delete-file (str dir "/cache-manifest")))))

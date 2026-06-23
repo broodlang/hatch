@@ -27,6 +27,8 @@
   `:install` entries are plain argv vectors run one-shot, in order."
   ; notify-reload-css — the hot CSS swap over open sockets
   (:use web/live)
+  ; render-manifest — the fingerprint manifest codec lives in web/static
+  (:alias web/static)
   (:alias log))
 (def *default-reload-marker* "Done in")
 
@@ -88,8 +90,51 @@
 (defn build (config)
   "Run `config`'s `:build` commands one-shot, in order (a release step). Each inherits
   stdio so its output goes straight to the console; a non-zero exit raises, so a broken
-  build fails the boot/release loudly rather than shipping stale assets."
-  (run-each (or (get config :build) (list)) "build"))
+  build fails the boot/release loudly rather than shipping stale assets. Then, if
+  `:fingerprint` is set, content-fingerprint the built files (see `fingerprint`) so prod
+  serves them under immutable, cache-forever URLs."
+  (run-each (or (get config :build) (list)) "build")
+  (when (get config :fingerprint)
+    (log/log-info "[assets] fingerprinting built assets")
+    (fingerprint (get config :fingerprint)))
+  nil)
+
+; ---- content fingerprinting (prod cache-busting) ---------------------------
+; A release rewrites built assets to content-addressed names (`app.<sha>.css`) and records a
+; `logical → fingerprinted` manifest under the static dir. `web/static/asset-path` reads that
+; manifest to emit the fingerprinted URL in prod (which `web/static/serve` then marks
+; `immutable`), so a content change ships a new URL and the old one stays cached. Dev skips
+; all of this — no manifest, plain names, revalidate-each-load.
+
+(defn fingerprint (spec)
+  "Content-fingerprint built assets. `spec` is `{:dir <static-dir> :files [<logical-name> …]}`:
+  for each file, read it, hash it, write a copy named `base.<sha8>.ext`, and record
+  `logical → fingerprinted`. Writes the manifest to `<dir>/cache-manifest` (read by
+  `web/static/asset-path`) and returns the manifest map. Text assets only — `slurp` is UTF-8
+  (see web/static)."
+  (let (dir (get spec :dir "static")
+        files (or (get spec :files) (list))
+        manifest (fold (fn (m file) (assoc m file (fingerprint-file dir file))) {} files))
+    (spit (str dir "/cache-manifest") (static/render-manifest manifest))
+    manifest))
+
+(defn fingerprint-file (dir file)
+  "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name."
+  (let (body (slurp (str dir "/" file))
+        fp (fingerprint-name file (substring (%sha256 body) 0 8)))
+    (spit (str dir "/" fp) body)
+    (log/log-info (str "[assets] fingerprint: " file " -> " fp))
+    fp))
+
+(defn fingerprint-name (file digest)
+  "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →
+  append `.<digest>`)."
+  (let (parts (string-split file "."))
+    (if (< (count parts) 2)
+      (str file "." digest)
+      (let (ext (first (reverse parts))
+            base (join "." (reverse (rest (reverse parts)))))
+        (str base "." digest "." ext)))))
 
 (defn install (config)
   "Run `config`'s `:install` commands one-shot, in order — first-time setup, e.g.
