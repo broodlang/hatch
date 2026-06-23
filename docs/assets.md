@@ -116,6 +116,65 @@ templates get picked up.
 
 ---
 
+## Caching & conditional requests
+
+Every static response (and `brood_live.js`) goes through one pipeline in `web/static`, so
+caching is correct without per-asset config:
+
+- **ETag** — a strong, content-addressed validator (`"<sha256-prefix>"`). It's the same
+  across restarts and replicas (unlike an inode/mtime tag), so a client's cached copy keeps
+  validating everywhere.
+- **`304 Not Modified`** — a request whose `If-None-Match` matches gets a bodyless 304
+  (carrying the ETag + `Cache-Control`), so an unchanged asset costs a round-trip but no
+  bytes.
+- **`Cache-Control`** — environment- and fingerprint-aware:
+
+  | Environment | URL | `Cache-Control` |
+  |-------------|-----|-----------------|
+  | dev | anything | `no-cache` (revalidate every load — an edit is never masked) |
+  | prod | content-fingerprinted (`app.<hash>.css`) | `public, max-age=31536000, immutable` |
+  | prod | plain (`app.css`, `brood_live.js`) | `no-cache` (cheap — the ETag turns it into a 304) |
+
+  `prod?` is just `$HATCH_ENV` ≠ `dev` (the zero-config default), mirroring the endpoint.
+- **`X-Content-Type-Options: nosniff`** on every asset, so a browser won't MIME-sniff a
+  response into something executable.
+- **Ranges** — `Accept-Ranges: bytes` is advertised, and a single `Range` is honoured with a
+  `206` (`Content-Range`) for ASCII-clean bodies; an unsatisfiable range gets a `416`. A
+  multibyte body (a byte range could split a codepoint) or a multi-range request falls back
+  to a full `200`, which the spec allows. (Range mostly matters for large/media files, which
+  need binary serving — see the roadmap.)
+
+---
+
+## Content fingerprinting (prod cache-busting)
+
+Long-lived caching is only safe when the URL changes whenever the bytes do. The build step
+content-fingerprints assets and records a manifest; `asset-path` emits the right URL.
+
+**1. Build** — add `:fingerprint` to the assets config and call `build` (release):
+
+```clojure
+(def *assets*
+  {:build       [["bin/tailwindcss" "-i" "assets/app.css" "-o" "static/app.css" "--minify"]]
+   :fingerprint {:dir "static" :files ["app.css"]}})   ; after :build
+```
+
+`(assets/build *assets*)` then writes `static/app.<sha8>.css` and a `static/cache-manifest`
+mapping `app.css → app.<sha8>.css`. (Text assets only — `slurp` is UTF-8.)
+
+**2. Link** — reference assets by their *logical* name via `asset-path`, not a hard-coded
+path:
+
+```clojure
+[:head {} (stylesheet (static/asset-path "app.css"))]
+```
+
+In prod that resolves to `/static/app.<sha8>.css` (served `immutable`); in dev (or with no
+manifest) it stays `/static/app.css` (revalidated each load). Link once, get the right
+caching in both. The manifest is read on demand — cache it in the caller for a hot path.
+
+---
+
 ## Switching tools
 
 Because Hatch only serves `static/`, swapping bundlers touches just your app:

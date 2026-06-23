@@ -96,6 +96,16 @@ Rust — TLS is handled by a reverse proxy.*
   or handler, `status`/`body`/`body-contains?`/`resp-header`, and live-view drivers
   `live-mount`/`live-event`/`live-tick`/`live-render`/`live-html`. (Supersedes the
   Phase 10 `web/conn/test` sketch.)
+- **Asset caching & conditional requests** ✅ — every static response (and `brood_live.js`)
+  flows through `web/static/serve-body`: a strong content **ETag** (→ bodyless **304** on
+  `If-None-Match`), **`X-Content-Type-Options: nosniff`**, **`Accept-Ranges`** with
+  best-effort byte ranges (**206**/**416**, full-200 fallback for multibyte/multi-range), and
+  an env- + fingerprint-aware **`Cache-Control`** (`no-cache` in dev / for plain URLs;
+  `immutable`, one-year for fingerprinted ones).
+- **Content fingerprinting** ✅ — `web/assets/fingerprint` (opt-in `:fingerprint` build step)
+  rewrites built assets to content-addressed names (`app.<sha>.css`) + a `cache-manifest`;
+  `web/static/asset-path` emits the fingerprinted, cache-forever URL in prod and the plain
+  (revalidated) name in dev. See `docs/assets.md`.
 
 ---
 
@@ -162,8 +172,18 @@ Live updates no longer re-send the full HTML — only the dynamic slots that cha
   restart strategies; max-connections back-pressure
 - **Request timeout** — idle worker timeout; slow-read protection
 - **Chunked Transfer-Encoding** — for streaming responses (SSE, large file
-  downloads)
-- **Compression** — gzip response middleware plug
+  downloads). ⛔ **needs a runtime builtin:** responses serialize as one string today; a
+  streaming/binary socket write is the prerequisite (pairs with binary serving below).
+- **Binary asset serving** — images, fonts, `.ico`, `.gz`. ⛔ **needs a runtime builtin:**
+  `slurp` is UTF-8 and lossy, so there's no byte-faithful file read — a `slurp-bytes`
+  (file → byte vector) in `brood` (`crates/lisp/src/builtins.rs`) is the prerequisite, then
+  send over a binary-mode socket. The MIME table (`web/static/*mime-types*`) and a
+  `byte-range`-correct `serve-body` slot in behind it. *Cache/ETag/nosniff/range scaffolding
+  already shipped (Assets & dev tooling) — only the byte I/O is missing.*
+- **Compression** — gzip response middleware plug + `Content-Encoding`/`Accept-Encoding`
+  negotiation (and pre-compressed `.gz` static variants). ⛔ **needs a runtime builtin:** no
+  gzip/deflate/brotli exists in `brood` (no `flate2`/`brotli` dep) — add a `gzip`/`gunzip`
+  builtin first. Until then, terminate compression at a reverse proxy.
 - **Access logging** — structured log plug (method, path, status, ms)
 - **Rate limiting** — token-bucket plug backed by a `defprocess` counter
 - **PubSub** ✅ (node-local) — `web/pubsub`: `subscribe`/`unsubscribe`/`broadcast`/
