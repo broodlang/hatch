@@ -30,6 +30,10 @@
 
 (def *default-cookie* "_hatch_session")
 (def *flash-key* "__flash__")
+; Reserved key carrying the session's absolute expiry (epoch-ms). Stamped into the signed
+; payload when `:max-age` is configured, verified on decode, and stripped before the session
+; reaches handlers — so a stolen cookie stops verifying as live past its deadline.
+(def *exp-key* "__exp__")
 
 ; ---- signing / verification ----
 
@@ -54,8 +58,27 @@
               sig (substring cookie (+ dot 1) (string-length cookie))
               expected (hmac-sha256 secret payload))
           (if (secure=? (string->utf8-bytes sig) (string->utf8-bytes expected))
-            (decode-payload payload)
+            (check-expiry (decode-payload payload))
             {}))))))
+
+(defn check-expiry (data)
+  "Enforce the `__exp__` (epoch-ms) reserved key if present: an expired session reads as `{}`,
+  otherwise the key is stripped and the user data returned. A session written without
+  `:max-age` carries no `__exp__` and passes through unchanged."
+  (let (exp (get data *exp-key*))
+    (cond
+      (nil? exp) data
+      (> (now) exp) {}
+      else (dissoc data *exp-key*))))
+
+(defn with-expiry (data opts)
+  "Stamp an absolute `__exp__` (now + `:max-age` seconds, in epoch-ms) into `data` when
+  `:max-age` is configured, so the signature itself carries the deadline; no `:max-age`
+  leaves `data` unchanged (no expiry)."
+  (let (max-age (get opts :max-age))
+    (if (nil? max-age)
+      data
+      (assoc data *exp-key* (+ (now) (* max-age 1000))))))
 
 (defn decode-payload (payload)
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
@@ -106,7 +129,10 @@
           sess (get conn :session {}))
       (if (= (count sess) 0)
         (delete-cookie conn (get cfg :cookie) (session-cookie-opts opts))
-        (put-cookie conn (get cfg :cookie) (encode-session secret sess) (session-cookie-opts opts))))
+        (put-cookie conn
+          (get cfg :cookie)
+          (encode-session secret (with-expiry sess opts))
+          (session-cookie-opts opts))))
     conn))
 
 (defn secure-cookie-default? ()

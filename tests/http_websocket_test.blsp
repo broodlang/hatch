@@ -73,22 +73,38 @@
   (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
     (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓")))
 
-(describe "parse-frame: unmasked"
+(describe "parse-frame: masked client frames"
   (test "incomplete on empty"
     (assert= (parse-frame "") [:incomplete]))
   (test "incomplete on 1 byte"
     (assert= (parse-frame "\x81") [:incomplete]))
-  (test "parses small unmasked text frame"
-    (let (frame (str "\x81\x05hello")
+  (test "parses a small masked text frame"
+    (let (frame (cframe 1 1 "hello")
           [tag opcode payload rem] (parse-frame frame))
       (assert= tag :ok)
       (assert= opcode 1)
       (assert= payload "hello")
       (assert= rem "")))
   (test "remainder extracted correctly"
-    (let (frame (str "\x81\x03abc\x81\x03def")
+    (let (frame (str (cframe 1 1 "abc") (cframe 1 1 "def"))
           [_ _ _ rem] (parse-frame frame))
-      (assert= rem "\x81\x03def"))))
+      (assert= rem (cframe 1 1 "def")))))
+
+(describe "parse-frame: RFC 6455 framing is enforced"
+  (test "an unmasked client frame is rejected (MUST)"
+    (assert= (first (parse-frame "\x81\x05hello")) :error))
+  (test "a set RSV bit is rejected"
+    ; 0xC1 = FIN + RSV1 + text; byte1 0x80 = masked, len 0
+    (assert= (first (parse-frame (str (byte->char 193) (byte->char 128) "\x00\x00\x00\x00")))
+      :error))
+  (test "a reserved opcode is rejected"
+    ; 0x83 = FIN + opcode 3 (reserved); masked, len 0
+    (assert= (first (parse-frame (str (byte->char 131) (byte->char 128) "\x00\x00\x00\x00")))
+      :error))
+  (test "a fragmented control frame (FIN=0 ping) is rejected"
+    ; 0x09 = ping with FIN=0; masked, len 0
+    (assert= (first (parse-frame (str (byte->char 9) (byte->char 128) "\x00\x00\x00\x00")))
+      :error)))
 
 ; Audit #4 — a payload >64 KB must produce a valid 64-bit-length frame, not raise and
 ; crash the live session.

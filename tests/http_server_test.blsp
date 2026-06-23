@@ -113,6 +113,14 @@
   test fire a request, then act (e.g. call `stop`) while it's in flight."
   (send me [:resp (get-response port "/")]))
 
+(defn raw-response (port raw)
+  "Send an arbitrary (possibly malformed) request string and return the full raw response."
+  (let (sock (tcp-connect "127.0.0.1" port)
+        _req (tcp-send sock raw)
+        resp (drain sock ""))
+    (tcp-close sock)
+    resp))
+
 ; Tier-2 (docs/robustness.md): a handler that raises must answer a generic 500 without
 ; leaking internals; the detail is left to telemetry / the :error-handler knob.
 (describe "a raising handler doesn't leak internals (default :error-handler)"
@@ -135,6 +143,17 @@
       (server/stop port)
       (assert= (includes? resp "503") true)
       (assert= (includes? resp "maintenance") true))))
+
+; A malformed request must answer a generic 400 without echoing the (attacker-controlled)
+; request line back into the body.
+(describe "a malformed request doesn't reflect attacker bytes"
+  (test "answers a generic 400 with the request line NOT in the body"
+    (let (port 54743
+          _sup (server/start port (fn (_req) {:status 200 :headers {} :body "ok"}))
+          resp (raw-response port "ZZ-REFLECT-TOKEN\r\nConnection: close\r\n\r\n"))
+      (server/stop port)
+      (assert= (includes? resp "400") true)
+      (assert= (includes? resp "ZZ-REFLECT-TOKEN") false))))
 
 ; Tier-2 (docs/robustness.md): graceful shutdown drains in-flight connections.
 (describe "graceful stop lets an in-flight request finish"

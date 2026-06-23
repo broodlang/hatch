@@ -182,22 +182,39 @@
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload
   remainder]`, `[:incomplete]`, or `[:error msg]`. `fin` is the FIN bit (1 on the final
-  frame of a message). Rejects a declared payload over `maxf` bytes."
+  frame of a message). Enforces the RFC 6455 framing rules a server must (masked client
+  frames, zero RSV bits, defined opcodes, unfragmented control frames) and rejects a declared
+  payload over `maxf` bytes."
   (let (buflen (string-length buf))
     (if (< buflen 2)
       [:incomplete]
       (let (byte0 (byte-at buf 0)
             byte1 (byte-at buf 1)
             fin (bit-shift-right byte0 7)
+            rsv (bit-and (bit-shift-right byte0 4) 7)
             opcode (bit-and byte0 15)
             masked (bit-shift-right byte1 7)
             plen7 (bit-and byte1 127))
-        (one-frame--sized buf buflen fin opcode masked plen7 maxf)))))
+        (cond
+          ; §5.2: RSV1-3 must be 0 unless an extension negotiated them (none here).
+          (not (= rsv 0)) [:error "websocket: reserved bits set"]
+          ; §5.1: the server MUST fail the connection on an unmasked client frame.
+          (not (= masked 1)) [:error "websocket: client frame not masked"]
+          ; §5.2: opcodes outside {0,1,2,8,9,10} are reserved.
+          (not (valid-opcode? opcode)) [:error "websocket: reserved opcode"]
+          ; §5.5: control frames must not be fragmented (FIN must be 1).
+          (and (control-opcode? opcode) (= fin 0)) [:error "websocket: fragmented control frame"]
+          else (one-frame--sized buf buflen fin opcode masked plen7 maxf))))))
 
 (defn control-opcode? (opcode)
   "True for a WebSocket control opcode (close 0x8, ping 0x9, pong 0xA). Control frames
   must carry ≤125 bytes and may not use extended length (RFC 6455 §5.5)."
   (>= opcode 8))
+
+(defn valid-opcode? (opcode)
+  "True for a defined RFC 6455 opcode: continuation 0x0, text 0x1, binary 0x2, and the
+  control opcodes close 0x8 / ping 0x9 / pong 0xA. Everything else is reserved."
+  (includes? [0 1 2 8 9 10] opcode))
 
 (defn one-frame--sized (buf buflen fin opcode masked plen7 maxf)
   (cond

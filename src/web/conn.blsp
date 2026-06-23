@@ -119,11 +119,11 @@
       "="
       (cookie-safe value)
       "; Path="
-      path
-      (if (nil? domain) "" (str "; Domain=" domain))
+      (cookie-safe path)
+      (if (nil? domain) "" (str "; Domain=" (cookie-safe domain)))
       (if (nil? max-age) "" (str "; Max-Age=" max-age))
       "; SameSite="
-      same-site
+      (cookie-safe same-site)
       (if (get opts :http-only true) "; HttpOnly" "")
       (if (get opts :secure false) "; Secure" ""))))
 

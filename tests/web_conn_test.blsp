@@ -139,6 +139,10 @@
     (let (r (conn->response (put-cookie (build *req*) "sid" "abc")))
       (assert= (get (get r :headers) :set-cookie)
         (list "sid=abc; Path=/; SameSite=Lax; HttpOnly"))))
+  (test "CRLF in the Path attribute is stripped (no response splitting)"
+    (let (sc (format-set-cookie "sid" "abc" {:path "/a\r\nSet-Cookie: evil=1" :same-site "Lax\r\nX: y"}))
+      (assert= (includes? sc "\r") false)
+      (assert= (includes? sc "\n") false)))
   (test "multiple cookies → a list (one header line each)"
     (let (conn (-> (build *req*) (put-cookie "a" "1") (put-cookie "b" "2"))
           r (conn->response conn))
