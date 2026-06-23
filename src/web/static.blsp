@@ -76,10 +76,10 @@
   replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
   (str "\"" (substring (%sha256 body) 0 16) "\""))
 
-(defn fingerprinted? (path)
-  "True if `path`'s basename looks content-fingerprinted — `name.<8+ hex>.ext`, the shape
-  `asset-path`/`web/assets/fingerprint` emit. Such a URL is safe to cache forever, because a
-  content change yields a new name."
+(defn fingerprint-shaped? (path)
+  "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
+  `asset-path`/`web/assets/fingerprint` emit. A cheap, no-IO pre-check: it gates the manifest
+  lookup in `fingerprinted?` so a normal request never touches disk."
   (let (seg (lower (last (string-split path "/")))
         parts (string-split seg "."))
     (and (>= (count parts) 3)
@@ -87,13 +87,23 @@
         (and (>= (string-length h) 8)
           (= (string-span h 0 "0123456789abcdef") (string-length h)))))))
 
-(defn cache-control (path)
-  "The Cache-Control for a static asset at `path`. In prod a content-fingerprinted URL is
-  `immutable` and cached for a year (a content change means a new URL); everything else
-  `no-cache`, i.e. revalidate every load — cheap, since the ETag turns an unchanged asset
-  into a bodyless 304. In dev, always `no-cache`, so an edited asset is never masked by a
-  stale copy."
-  (if (and (prod?) (fingerprinted? path))
+(defn fingerprinted? (path dir)
+  "True if `path` is an asset hatch actually content-fingerprinted — its basename appears as
+  a value in `dir`'s manifest. Authoritative, not a guess: a fingerprint-*shaped* look-alike
+  that hatch didn't produce (a vendored `chunk.a1b2c3d4.js` you hashed yourself) is NOT
+  treated as immutable, so it can't get stuck in caches for a year if its bytes later change.
+  The structural pre-check means only a fingerprint-shaped URL ever reads the manifest."
+  (and (fingerprint-shaped? path)
+    (includes? (vals (load-manifest dir)) (last (string-split path "/")))))
+
+(defn cache-control (path dir)
+  "The Cache-Control for a static asset at `path` (served from `dir`). In prod a
+  hatch-fingerprinted URL (in `dir`'s manifest) is `immutable` and cached for a year — a
+  content change means a new URL; everything else is `no-cache`, i.e. revalidate every load,
+  cheap because the ETag turns an unchanged asset into a bodyless 304. In dev, always
+  `no-cache`, so an edited asset is never masked by a stale copy (and the manifest is never
+  read — `prod?` short-circuits)."
+  (if (and (prod?) (fingerprinted? path dir))
     "public, max-age=31536000, immutable"
     "no-cache"))
 
@@ -189,13 +199,13 @@
                  206
                  (substring body start (+ end 1))))))))
 
-(defn serve-body (conn content-type body path)
+(defn serve-body (conn content-type body path &optional (dir "static"))
   "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
   an env- and fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and best-effort
-  byte ranges (`Range` → 206/416, else a full 200). `path` only steers the cache policy and
-  may be a bare filename."
+  byte ranges (`Range` → 206/416, else a full 200). `path`/`dir` only steer the cache policy
+  (fingerprinted? consults `dir`'s manifest); `path` may be a bare filename."
   (let (tag (etag body)
-        cc (cache-control path))
+        cc (cache-control path dir))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
       else (or (serve-range conn content-type body tag cc (count (string->utf8-bytes body)))
@@ -219,7 +229,7 @@
             body (try (slurp path) (catch _ nil)))
         (if (nil? body)
           (not-found-resp conn)
-          (serve-body conn (mime-type path) body path))))))
+          (serve-body conn (mime-type path) body path root))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the

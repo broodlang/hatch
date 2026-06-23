@@ -54,21 +54,35 @@
   (test "false by default (dev is the zero-config default)"
     (assert= (prod?) false)))
 
-(describe "fingerprinted?"
-  (test "name.<hash>.ext is fingerprinted"
-    (assert= (fingerprinted? "/static/app.1a2b3c4d.css") true))
+(describe "fingerprint-shaped?"
+  (test "name.<hash>.ext is shaped"
+    (assert= (fingerprint-shaped? "/static/app.1a2b3c4d.css") true))
   (test "longer hash too"
-    (assert= (fingerprinted? "app.deadbeefcafe.js") true))
+    (assert= (fingerprint-shaped? "app.deadbeefcafe.js") true))
   (test "plain name is not"
-    (assert= (fingerprinted? "/static/app.css") false))
+    (assert= (fingerprint-shaped? "/static/app.css") false))
   (test "short/non-hex middle segment is not"
-    (assert= (fingerprinted? "app.v2.css") false)
-    (assert= (fingerprinted? "app.zzzzzzzz.css") false)))
+    (assert= (fingerprint-shaped? "app.v2.css") false)
+    (assert= (fingerprint-shaped? "app.zzzzzzzz.css") false)))
+
+(describe "fingerprinted? (manifest-backed)"
+  ; Only a name hatch actually produced (a manifest value) is immutable — a fingerprint-
+  ; shaped look-alike that isn't in the manifest must NOT be cached forever.
+  (test "manifest value → yes; shaped look-alike & plain name → no"
+    (let (dir "/tmp/hatch-fp2-test"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/cache-manifest") "app.css\tapp.1a2b3c4d.css\n"))
+      (assert= (fingerprinted? (str dir "/app.1a2b3c4d.css") dir) true)
+      (assert= (fingerprinted? (str dir "/chunk.deadbeef.js") dir) false)
+      (assert= (fingerprinted? (str dir "/app.css") dir) false)
+      (delete-file (str dir "/cache-manifest"))))
+  (test "no manifest → nothing is fingerprinted"
+    (assert= (fingerprinted? "/tmp/hatch-fp2-test/app.1a2b3c4d.css" "/tmp/hatch-fp2-empty") false)))
 
 (describe "cache-control"
-  (test "dev revalidates everything (no stale assets)"
-    (assert= (cache-control "app.css") "no-cache")
-    (assert= (cache-control "app.1a2b3c4d.css") "no-cache")))
+  (test "dev revalidates everything (no stale assets, no manifest read)"
+    (assert= (cache-control "app.css" "static") "no-cache")
+    (assert= (cache-control "app.1a2b3c4d.css" "static") "no-cache")))
 
 (describe "parse-range"
   (test "bytes=a-b" (let ([s e] (parse-range "bytes=0-3" 10)) (assert= s 0) (assert= e 3)))

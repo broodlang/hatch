@@ -57,13 +57,19 @@ vectors run in order.
 (defn dev? () (= (or (getenv "HATCH_ENV") "dev") "dev"))
 
 (defn serve ()
-  (when (dev?) (assets/watch *assets*))     ; dev: server + bundler together
+  (if (dev?)
+    (assets/ensure *assets*)                              ; dev: build once + watch
+    (when (get *assets* :fingerprint)                     ; prod: fingerprint the built files
+      (assets/fingerprint (get *assets* :fingerprint))))  ;       (no bundler needed at boot)
   (server/start (port) adapter (live/live-dispatcher)))
 ```
 
-`nest run` (dev) starts the watcher; a release sets `HATCH_ENV=prod` and runs
-`(assets/build *assets*)` once before serving. A missing binary just logs an error and
-the server still boots — assets are degraded, not fatal.
+`nest run` (dev) builds once and starts the watcher. The actual bundler run for prod is a
+**release/CI step** — `(assets/build *assets*)`, fail-loud — that produces `static/app.css`
+*and* (via the `:fingerprint` key) the fingerprinted copies + manifest. At prod boot the
+endpoint only needs to `fingerprint` the already-built file: that just hashes it (no
+`bin/tailwindcss` required at runtime, so a slim image boots), and asset URLs resolve to the
+immutable, content-addressed names. Keep the bundler out of the boot path.
 
 ---
 
@@ -132,10 +138,15 @@ caching is correct without per-asset config:
   | Environment | URL | `Cache-Control` |
   |-------------|-----|-----------------|
   | dev | anything | `no-cache` (revalidate every load — an edit is never masked) |
-  | prod | content-fingerprinted (`app.<hash>.css`) | `public, max-age=31536000, immutable` |
+  | prod | content-fingerprinted (`app.<hash>.css`, **in the manifest**) | `public, max-age=31536000, immutable` |
   | prod | plain (`app.css`, `brood_live.js`) | `no-cache` (cheap — the ETag turns it into a 304) |
 
   `prod?` is just `$HATCH_ENV` ≠ `dev` (the zero-config default), mirroring the endpoint.
+  "Fingerprinted" is **manifest-backed, not a guess**: only a name hatch actually produced
+  (a value in `<dir>/cache-manifest`) gets the immutable header, so a hex-shaped look-alike
+  you didn't fingerprint (a vendored `chunk.a1b2c3d4.js`) stays revalidated rather than stuck
+  in caches for a year. A cheap structural pre-check gates the manifest read, so a plain
+  request never touches disk.
 - **`X-Content-Type-Options: nosniff`** on every asset, so a browser won't MIME-sniff a
   response into something executable.
 - **Ranges** — `Accept-Ranges: bytes` is advertised, and a single `Range` is honoured with a
