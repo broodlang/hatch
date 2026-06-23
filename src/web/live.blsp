@@ -839,7 +839,12 @@
     (get \"/static/brood_live.js\" (live/client-js-handler))
   instead of copying the file into its own static/ dir."
   (fn (conn)
-    (send-resp (put-resp-header conn :content-type "text/javascript; charset=utf-8")
+    ; `no-cache` (revalidate every load) so a browser never clings to a stale client —
+    ; e.g. a copy fetched under an old Content-Length bug, which truncates the file and
+    ; breaks parsing until the cache is cleared. The file is tiny, so refetching is cheap.
+    (send-resp (put-resp-header (put-resp-header conn :content-type "text/javascript; charset=utf-8")
+                 :cache-control
+                 "no-cache")
       200
       (or (client-js) ""))))
 

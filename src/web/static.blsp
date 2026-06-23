@@ -66,7 +66,13 @@
             body (try (slurp path) (catch _ nil)))
         (if (nil? body)
           (not-found-resp conn)
-          (send-resp (put-resp-header conn :content-type (mime-type path)) 200 body))))))
+          ; `no-cache` (revalidate every load) so an edited asset is never masked by a
+          ; stale cached copy — the dev default; assets here are small and local.
+          (send-resp (put-resp-header (put-resp-header conn :content-type (mime-type path))
+                       :cache-control
+                       "no-cache")
+            200
+            body))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the

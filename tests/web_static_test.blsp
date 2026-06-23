@@ -29,7 +29,10 @@
     (assert= (get (serve (conn-with {}) "static" "brood_live.js") :status) 200))
   (test "existing file sets MIME"
     (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers) :content-type)
-      "text/javascript; charset=utf-8")))
+      "text/javascript; charset=utf-8"))
+  (test "existing file revalidates (no stale cached copy)"
+    (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers) :cache-control)
+      "no-cache")))
 
 (describe "handler"
   (test "reads the splat param"
