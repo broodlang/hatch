@@ -182,7 +182,10 @@ path:
 
 In prod that resolves to `/static/app.<sha8>.css` (served `immutable`); in dev (or with no
 manifest) it stays `/static/app.css` (revalidated each load). Link once, get the right
-caching in both. The manifest is read on demand — cache it in the caller for a hot path.
+caching in both. The manifest is memoized (read once per dir into a shared table), and ETags
+are cached per file and only recomputed when the file's mtime/size changes — so neither the
+manifest lookup nor the content hash is paid per request on the hot path. `clear-manifest-cache`
+forces a re-read (tests, or a dev rebuild that rewrote the manifest in a running process).
 
 ---
 
