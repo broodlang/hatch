@@ -78,7 +78,13 @@
   (test "start past end is unsatisfiable" (assert= (parse-range "bytes=20-" 10) :unsatisfiable))
   (test "absent → nil" (assert= (parse-range nil 10) nil))
   (test "multi-range → nil (ignored)" (assert= (parse-range "bytes=0-1,5-7" 10) nil))
-  (test "non-bytes unit → nil" (assert= (parse-range "items=0-3" 10) nil)))
+  (test "non-bytes unit → nil" (assert= (parse-range "items=0-3" 10) nil))
+  ; A float/hex/signed offset must be rejected, not coerced — a float index would throw in
+  ; `substring` and turn a crafted Range header into a 500.
+  (test "float offset → nil" (assert= (parse-range "bytes=0-1.5" 10) nil))
+  (test "float suffix → nil" (assert= (parse-range "bytes=-1.5" 10) nil))
+  (test "hex offset → nil" (assert= (parse-range "bytes=0x1-2" 10) nil))
+  (test "signed offset → nil" (assert= (parse-range "bytes=+1-2" 10) nil)))
 
 (describe "serve-body"
   (test "200 carries etag, cache-control, nosniff, accept-ranges"
@@ -118,7 +124,11 @@
           body (str "ab" (int->char 8212) "cd")
           resp (serve-body (conn-with {} {:range "bytes=0-2"}) "text/plain" body "f.txt"))
       (assert= (get resp :status) 200)
-      (assert= (get resp :resp-body) body))))
+      (assert= (get resp :resp-body) body)))
+  (test "a crafted (float) Range serves a full 200 — never a 500"
+    (let (resp (serve-body (conn-with {} {:range "bytes=0-1.5"}) "text/plain" "0123456789" "f.txt"))
+      (assert= (get resp :status) 200)
+      (assert= (get resp :resp-body) "0123456789"))))
 
 (describe "asset-path"
   (test "dev returns the plain logical path"
