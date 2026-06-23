@@ -114,6 +114,16 @@
   (let (inm (get (get conn :headers) :if-none-match))
     (and inm (or (= (trim inm) "*") (includes? inm tag)))))
 
+(defn range-int (s)
+  "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
+  validate the digits ourselves rather than trust `string->number`, which also parses floats
+  (`\"1.5\"` → 1.5) — and a float offset would later blow up `substring` (int-only), turning a
+  crafted `Range` header into a 500. So anything non-integer (floats, signs, hex, spaces) is
+  rejected here and the range is ignored."
+  (if (and (not (blank? s)) (= (string-span s 0 "0123456789") (string-length s)))
+    (string->number s)
+    nil))
+
 (defn parse-range (spec len)
   "Parse a single-range `Range: bytes=…` spec against a body of `len` bytes, returning
   `[start end]` (inclusive, satisfiable), `:unsatisfiable` (a syntactically valid range
@@ -132,19 +142,19 @@
                   hi (trim (substring r (+ dash 1) (string-length r))))
               (cond
                 ; suffix: bytes=-n → final n bytes
-                (blank? lo) (let (n (string->number hi))
+                (blank? lo) (let (n (range-int hi))
                               (if (or (nil? n) (<= n 0))
                                 nil
                                 [(max 0 (- len n)) (- len 1)]))
                 ; bytes=a- → a..end
-                (blank? hi) (let (a (string->number lo))
+                (blank? hi) (let (a (range-int lo))
                               (cond
                                 (nil? a) nil
                                 (>= a len) :unsatisfiable
                                 else [a (- len 1)]))
                 ; bytes=a-b
-                else (let (a (string->number lo)
-                           b (string->number hi))
+                else (let (a (range-int lo)
+                           b (range-int hi))
                        (cond
                          (or (nil? a) (nil? b) (> a b)) nil
                          (>= a len) :unsatisfiable
