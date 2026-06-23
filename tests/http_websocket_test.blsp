@@ -155,3 +155,40 @@
   (test "a reassembled message over the message cap is rejected"
     (assert= (first (parse-message (str (cframe 0 1 "aaaa") (cframe 1 0 "bbbb")) 65535 6))
       :error)))
+
+; A masked frame with a NON-zero key, so the XOR unmask is actually exercised (cframe uses a
+; zero key, which is identity). Each payload byte is XORed with key[i % 4] on the wire.
+(defn masked-frame (opcode payload key)
+  (let (n (string-length payload)
+        masked (join "" (map (fn (i) (byte->char (bit-xor (byte-at payload i) (get key (mod i 4)))))
+                          (range n))))
+    (str (byte->char (+ 128 opcode))
+      (byte->char (+ 128 n))
+      (join "" (map byte->char key))
+      masked)))
+
+(describe "parse-frame: unmask (non-zero key)"
+  (test "recovers the original payload"
+    (let (frame (masked-frame 1 "Hello, mask!" [17 34 51 68])
+          [tag opcode payload _] (parse-frame frame))
+      (assert= tag :ok)
+      (assert= opcode 1)
+      (assert= payload "Hello, mask!"))))
+
+(describe "origin-host"
+  (test "strips the scheme" (assert= (origin-host "https://example.com:443") "example.com:443"))
+  (test "no scheme → unchanged" (assert= (origin-host "example.com") "example.com")))
+
+(describe "origin-allowed? (CSWSH guard)"
+  (test "same-origin is allowed"
+    (assert= (origin-allowed? {:headers {:origin "https://app.test" :host "app.test"}} true) true))
+  (test "cross-origin is rejected"
+    (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}} true) false))
+  (test "missing Origin is allowed under same-origin (non-browser client)"
+    (assert= (origin-allowed? {:headers {:host "app.test"}} true) true))
+  (test "policy false allows any origin"
+    (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}} false) true))
+  (test "allowlist permits listed, rejects unlisted and missing"
+    (assert= (origin-allowed? {:headers {:origin "https://ok.test" :host "app.test"}} (list "https://ok.test")) true)
+    (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}} (list "https://ok.test")) false)
+    (assert= (origin-allowed? {:headers {:host "app.test"}} (list "https://ok.test")) false)))

@@ -56,6 +56,30 @@
     (and (string-contains? conn "upgrade")
       (= upg "websocket"))))
 
+(defn origin-host (origin)
+  "The `host[:port]` of an `Origin` header value (scheme stripped), for comparison with the
+  request's `Host`. `Origin` is `scheme://host[:port]` with no path."
+  (let (i (index-of origin "://"))
+    (if (= i -1) origin (substring origin (+ i 3) (string-length origin)))))
+
+(defn origin-allowed? (request policy)
+  "Whether a WebSocket upgrade's `Origin` is permitted — the cross-site-WebSocket-hijacking
+  (CSWSH) guard. WebSockets aren't bound by the same-origin policy and the browser still
+  attaches the user's cookies, so without this a page on another origin could open an
+  authenticated live session. `policy`:
+    true  — same-origin only (default): the Origin's host must equal the request Host. A
+            missing Origin is allowed, since CSWSH is a browser attack and browsers always
+            send Origin on a WS handshake (non-browser clients/tools have no ambient cookie).
+    false — disable the check (allow any origin).
+    list  — an explicit allowlist of permitted `Origin` header values (strict: a missing or
+            unlisted Origin is rejected)."
+  (cond
+    (= policy false) true
+    (or (list? policy) (vector? policy)) (let (o (get-in request [:headers :origin]))
+                                           (if (nil? o) false (includes? policy o)))
+    else (let (o (get-in request [:headers :origin]))
+           (or (nil? o) (= (origin-host o) (get-in request [:headers :host]))))))
+
 ; ---- frame building (server → client, unmasked) ----
 
 ; A WebSocket frame is a byte sequence (control bytes ≥ 0x80, a length-prefixed
@@ -205,19 +229,15 @@
           [:ok fin opcode payload remainder])))))
 
 (defn unmask (buf key-offset plen)
-  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key."
-  (let (k0 (byte-at buf key-offset)
-        k1 (byte-at buf (+ key-offset 1))
-        k2 (byte-at buf (+ key-offset 2))
-        k3 (byte-at buf (+ key-offset 3))
-        key [k0 k1 k2 k3]
+  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key. Built with a
+  single `join` over a mapped range — O(n). (A per-byte `(str acc …)` accumulator is O(n²):
+  a max-size masked frame would force ~plen² bytes of copying, a cheap-to-send CPU/memory
+  DoS.)"
+  (let (key [(byte-at buf key-offset)
+             (byte-at buf (+ key-offset 1))
+             (byte-at buf (+ key-offset 2))
+             (byte-at buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (unmask--acc buf data-start plen key 0 "")))
-
-(defn unmask--acc (buf data-start plen key i acc)
-  (if (= i plen)
-    acc
-    (let (raw (byte-at buf (+ data-start i))
-          k (get key (mod i 4))
-          b (bit-xor raw k))
-      (unmask--acc buf data-start plen key (+ i 1) (str acc (byte->char b))))))
+    (join ""
+      (map (fn (i) (byte->char (bit-xor (byte-at buf (+ data-start i)) (get key (mod i 4)))))
+        (range plen)))))

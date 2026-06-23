@@ -21,13 +21,17 @@
 ;   :tls               — nil (plaintext, default) or `{:cert <pem> :key <pem>}` to serve
 ;                        HTTPS/WSS: the listener terminates TLS (tls-listen) and accepted
 ;                        sockets are transparent, so handlers/`worker--run` are unchanged
+;   :check-origin      — WebSocket upgrade Origin policy (CSWSH guard): true = same-origin
+;                        only (default), false = allow any, or a list of allowed Origin
+;                        header values (see websocket/origin-allowed?)
 (def default-config
   {:read-timeout-ms 30000
    :max-request-bytes 8388608
    :max-connections 1024
    :error-handler (fn (request err) (server-error-resp))
    :shutdown-grace-ms 5000
-   :tls nil})
+   :tls nil
+   :check-origin true})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -177,17 +181,26 @@
     else (match (try-parse buf)
            ([:ok request remainder]
              (if (and ws-handler (upgrade-request? request))
-               (let (key (get (get request :headers) :sec-websocket-key ""))
-                 ; WebSocket framing is binary (control bytes ≥ 0x80, masked
-                 ; payloads). Switch the socket to binary mode BEFORE the 101 —
-                 ; the client only sends frames after it sees the 101, so this
-                 ; closes the race where the reader would otherwise decode the
-                 ; first frame(s) as UTF-8-lossy text and corrupt them (the
-                 ; ws-handler may do a slow registry lookup before its own
-                 ; tcp-set-binary, leaving a window the client beats).
-                 (tcp-set-binary sock true)
-                 (tcp-send sock (upgrade-response key))
-                 (ws-handler sock request))
+               ; CSWSH guard: a WebSocket upgrade isn't bound by the same-origin policy, yet
+               ; the browser still sends the user's cookies — so a cross-origin Origin must be
+               ; refused before the 101, or another site could open an authenticated session.
+               ; Policy is `:check-origin` (default: same-origin); see websocket/origin-allowed?.
+               (if (origin-allowed? request (get config :check-origin))
+                 (let (key (get (get request :headers) :sec-websocket-key ""))
+                   ; WebSocket framing is binary (control bytes ≥ 0x80, masked
+                   ; payloads). Switch the socket to binary mode BEFORE the 101 —
+                   ; the client only sends frames after it sees the 101, so this
+                   ; closes the race where the reader would otherwise decode the
+                   ; first frame(s) as UTF-8-lossy text and corrupt them (the
+                   ; ws-handler may do a slow registry lookup before its own
+                   ; tcp-set-binary, leaving a window the client beats).
+                   (tcp-set-binary sock true)
+                   (tcp-send sock (upgrade-response key))
+                   (ws-handler sock request))
+                 (do
+                   (tcp-send sock (format-response {:status 403
+                                                    :body "<h1>403 Forbidden</h1>"}))
+                   (tcp-close sock)))
                (let (t0 (now)
                      response (try
                                 (handler request)
