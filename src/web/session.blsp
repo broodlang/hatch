@@ -109,13 +109,21 @@
         (put-cookie conn (get cfg :cookie) (encode-session secret sess) (session-cookie-opts opts))))
     conn))
 
+(defn secure-cookie-default? ()
+  "Default for the session cookie's `Secure` flag: on outside dev ($HATCH_ENV ≠ \"dev\"), so
+  in prod the auth cookie is sent only over HTTPS (a network attacker can't read it off a
+  plaintext request and replay it) while local HTTP dev still works. An explicit `:secure`
+  opt overrides."
+  (not (= (or (getenv "HATCH_ENV") "dev") "dev")))
+
 (defn session-cookie-opts (opts)
   "The put-cookie options for the session cookie, defaulting to a secure-by-default shape
-  (HttpOnly, SameSite=Lax) while letting `fetch-session` opts override."
+  (HttpOnly, SameSite=Lax, and Secure outside dev) while letting `fetch-session` opts
+  override."
   {:path (get opts :path "/")
    :http-only (get opts :http-only true)
    :same-site (get opts :same-site "Lax")
-   :secure (get opts :secure false)
+   :secure (get opts :secure (secure-cookie-default?))
    :max-age (get opts :max-age)})
 
 ; ---- session accessors ----

@@ -104,3 +104,12 @@
           c2 (fetch-flash ((fetch-session *secret*) (conn-with cookie))))
       (assert= (get-flash c2 "info") "saved")
       (assert= (get-flash c2 "error") "careful"))))
+
+(describe "session cookie Secure flag"
+  ; Default tracks the environment: not Secure in dev (so local HTTP works), Secure outside
+  ; dev. The test env has no $HATCH_ENV, so it reads as dev.
+  (test "dev default is not Secure"
+    (assert= (secure-cookie-default?) false)
+    (assert= (get (session-cookie-opts {}) :secure) false))
+  (test "an explicit :secure opt overrides the default"
+    (assert= (get (session-cookie-opts {:secure true}) :secure) true)))
