@@ -1,4 +1,7 @@
-(defmodule web-live-test (:use web/live) (:use web/template) (:use test))
+(defmodule web-live-test (:use web/live) (:use web/template) (:use web/conn) (:use test))
+
+(defn client-js-conn ()
+  (build {:method "GET" :path "/static/brood_live.js" :query "" :params {} :headers {} :body ""}))
 
 (describe "client-script"
   (test "default src + defer"
@@ -37,6 +40,15 @@
     (let (js (client-js))
       (assert= (string? js) true)
       (assert= (includes? js "BroodLive") true))))
+
+(describe "client-js-handler"
+  (test "serves the client as JS"
+    (let (resp ((client-js-handler) (client-js-conn)))
+      (assert= (get resp :status) 200)
+      (assert= (get (get resp :resp-headers) :content-type) "text/javascript; charset=utf-8")))
+  (test "revalidates (no stale cached client)"
+    (let (resp ((client-js-handler) (client-js-conn)))
+      (assert= (get (get resp :resp-headers) :cache-control) "no-cache"))))
 
 (describe "live--ws-path"
   (test "strips the /live/ws prefix"
