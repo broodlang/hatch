@@ -64,6 +64,7 @@ src/
     registry.blsp   — supervised, vault-backed named registries (shared by pubsub/presence)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
     presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
+    application.blsp — canonical app entry point: default-logger-opts + start (logger + children + park)
     repo.blsp       — open a store repo, migrate schemas, warm up the pool (web/repo/start)
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
