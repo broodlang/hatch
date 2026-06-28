@@ -1,0 +1,27 @@
+(defmodule web/repo
+  "Framework helper: open a store repo, run schema migrations, and warm up the pool.
+
+  Intended to be called once at startup from your app's `main`:
+
+    (def *repo* (web/repo/start (pg/adaptor) opts [user-schema post-schema]))
+
+  `start` returns the repo handle; store it as a module global and pass it (or
+  a thin wrapper around it) to your route handlers."
+  (:alias repo))
+
+(defn start (adaptor opts schemas)
+  "Open a repo over `adaptor` with `opts`, migrate every schema in `schemas`,
+  then fire a warmup query on every pool connection in parallel so the first
+  HTTP request pays no cold-start cost. Returns the repo handle."
+  (let (r (repo/open adaptor opts)
+        size (get opts :size 5)
+        parent (self))
+    (dolist (s schemas)
+      (repo/migrate r s))
+    (dolist (_ (range size))
+      (spawn (fn ()
+        (try (repo/exec r "SELECT 1" []) (catch _ nil))
+        (send parent [:warmed]))))
+    (dolist (_ (range size))
+      (receive ([:warmed] nil)))
+    r))
