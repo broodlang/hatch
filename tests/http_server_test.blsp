@@ -26,7 +26,9 @@
   (match (parse-frame buf)
     ([:ok _opcode payload _rem] payload)
     ([:incomplete] (receive
-                     ([:tcp ~sock chunk] (read-one-frame sock (str buf chunk)))
+                     ; binary-mode socket: `chunk` is a `bytes` value — convert to the
+                     ; Latin-1 carrier before feeding the string-based parser
+                     ([:tcp ~sock chunk] (read-one-frame sock (str buf (bytes->carrier chunk))))
                      ([:tcp-closed ~sock] :closed)
                      (after 2000 :timeout)))
     ([:error _m] :error)))

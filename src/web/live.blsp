@@ -180,7 +180,10 @@
     ([:ok opcode payload rem] [:ok opcode payload rem])
     ([:incomplete]
       (receive
-        ([:tcp ~sock chunk] (recv-frame--loop sock (str buf chunk)))
+        ; The socket is in binary mode (see http/server's pre-101 tcp-set-binary), so
+        ; `chunk` arrives as a `bytes` value — convert it to the Latin-1 carrier string
+        ; before it flows into the string-based frame accumulator/parser.
+        ([:tcp ~sock chunk] (recv-frame--loop sock (str buf (bytes->carrier chunk))))
         ([:tcp-closed ~sock] [:closed])
         ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
                                   (recv-frame--loop sock buf)

@@ -29,6 +29,14 @@
   "Convert byte value 0-255 to a 1-char string."
   (char-at *byte-table* n))
 
+(defn bytes->carrier (b)
+  "A `bytes` value → the Latin-1 byte-string carrier (one codepoint 0–255 per byte).
+  A binary-mode socket/subprocess now delivers inbound data as a first-class `bytes`
+  value; convert it here at the receive boundary so the existing string-based readers
+  (frame parser, request reader) keep working unchanged. Built with `join` rather than
+  `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
+  (join "" (map byte->char (bytes->list b))))
+
 (defn byte-at (s i)
   "Return the byte value at position `i` in string `s`."
   (char->int (char-at s i)))
