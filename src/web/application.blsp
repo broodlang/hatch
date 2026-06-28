@@ -1,0 +1,78 @@
+(defmodule web/application
+  "Application startup helper for Hatch web apps.
+
+  Provides two things every Hatch `main` needs:
+
+  - `default-logger-opts` — builds a logger config from the standard
+    `$LOG_LEVEL` / `$LOG_FORMAT` / `$NO_COLOR` env vars so apps don't
+    have to write that boilerplate themselves.
+  - `start config` — the canonical entry point: starts the logger, runs
+    each child thunk in order, then parks the main process.
+
+  Typical main:
+
+    (defn main ()
+      (web/application/start
+        {:logger   (web/application/default-logger-opts)
+         :children [(fn () (db/start (pg/opts-from-env \"my_app\")))
+                    (fn () (serve))]}))"
+  (:use log :only [start-logger fn-backend])
+  (:use json :only [json-encode]))
+
+;; ---- log formatters ---------------------------------------------------------
+
+(def application--labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
+(def application--lower  {:debug "debug" :info "info"  :warn "warn"  :error "error"})
+(def application--colors {:debug "\x1b[90m" :info "\x1b[36m" :warn "\x1b[33m" :error "\x1b[31m"})
+(def application--reset  "\x1b[0m")
+
+(defn application--line-body (rec)
+  (str "[" (or (get application--labels (get rec :level)) "?") "] " (get rec :msg)))
+
+(defn application--text-line (rec)
+  (str (application--line-body rec) "\n"))
+
+(defn application--color-line (rec)
+  (str (or (get application--colors (get rec :level)) "")
+       (application--line-body rec)
+       application--reset "\n"))
+
+(defn application--json-line (rec)
+  "One NDJSON object per record — compatible with Grafana Loki, Datadog, AppSignal."
+  (str (json-encode (merge (get rec :meta)
+                      {:timestamp (get rec :ts)
+                       :level     (or (get application--lower (get rec :level)) "info")
+                       :message   (get rec :msg)}))
+       "\n"))
+
+;; ---- public API -------------------------------------------------------------
+
+(defn default-logger-opts ()
+  "Logger opts derived from env vars:
+  - `$LOG_LEVEL`  — `:debug` / `:info` / `:warn` / `:error` (default `:debug`)
+  - `$LOG_FORMAT` — `\"json\"` for NDJSON (log shippers), else colored text
+  - `$NO_COLOR`   — set to disable ANSI colors (the no-color.org convention)"
+  (let (fmt (cond
+              (= (getenv "LOG_FORMAT") "json") application--json-line
+              (nil? (getenv "NO_COLOR"))       application--color-line
+              else                             application--text-line))
+    {:level    (keyword (or (getenv "LOG_LEVEL") "debug"))
+     :backends [(fn-backend (fn (line) (print line)) {:format fmt})]}))
+
+(defn start (config)
+  "Boot a Hatch application from `config` and park the main process.
+
+  `:logger`   — opts map passed directly to `start-logger`; use
+                `default-logger-opts` for env-driven defaults. Omit to
+                skip logger startup (e.g. when using a custom logger).
+  `:children` — list of zero-arg fns called in order at startup (open DB,
+                boot endpoint, start background workers, …).
+
+  Parks with `(receive (:shutdown nil))` after all children have started."
+  (let (logger-opts (get config :logger nil)
+        children    (get config :children []))
+    (when logger-opts
+      (start-logger logger-opts))
+    (dolist (child children)
+      (child))
+    (receive (:shutdown nil))))
