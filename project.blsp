@@ -2,6 +2,7 @@
 (project
   :name "hatch"
   :version "0.1.0"
+  :dependencies [[store :path "../store"]]
   ;; Formatter rules for Hatch's macros. A depending project opts in with
   ;; `:format-plugins [hatch]` (see hatch-demo) and the formatter then indents these
   ;; macros correctly. Each entry is head-symbol → how many args ride the head line
