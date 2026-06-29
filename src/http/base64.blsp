@@ -44,5 +44,5 @@
                acc)))))
 
 (defn encode-sha1 (hex-sha1)
-  "Base64-encode a 40-char hex SHA1 digest (as returned by `%sha1`)."
+  "Base64-encode a 40-char hex SHA1 digest (as returned by `hash/sha1`)."
   (encode-bytes (hex-str->bytes hex-sha1)))

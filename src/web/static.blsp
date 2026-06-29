@@ -17,6 +17,9 @@
   and for un-fingerprinted URLs, `immutable`/one-year for content-fingerprinted ones. Pair
   with `web/assets/fingerprint` (build) + `asset-path` (link) for cache-busting in prod."
   (:use web/conn))
+
+(require 'hash)   ; strong ETags are a SHA-256 prefix of the body
+
 ; ---- MIME types ----
 
 (def *mime-types*
@@ -74,7 +77,7 @@
   "A strong ETag for `body`: a quoted SHA-256 prefix. Content-addressed, so it changes iff
   the bytes change — no filesystem mtime needed, and identical across server restarts and
   replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
-  (str "\"" (substring (%sha256 body) 0 16) "\""))
+  (str "\"" (substring (hash/sha256 body) 0 16) "\""))
 
 ; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
 ; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
@@ -83,7 +86,7 @@
 
 (defn cached-etag (path body)
   "The ETag for the file at `path` (whose contents are `body`), reusing the cached hash while
-  the file's mtime+size are unchanged and recomputing it (one `%sha256`) only after an edit.
+  the file's mtime+size are unchanged and recomputing it (one `hash/sha256`) only after an edit.
   One `file-stat` (a cheap syscall) replaces hashing the whole body on every hit. Falls back
   to a direct hash if `path` can't be stat'd."
   (let (st (file-stat path))

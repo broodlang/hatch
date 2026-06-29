@@ -1,4 +1,5 @@
 (defmodule web-assets-test (:use web/assets) (:alias web/static) (:use test))
+(require 'hash)
 
 (describe "proc-opts"
   (test "empty when no cwd/env"
@@ -43,7 +44,7 @@
           _ (spit (str dir "/app.css") content)
           manifest (fingerprint {:dir dir :files ["app.css"]})
           fp (get manifest "app.css"))
-      (assert= fp (fingerprint-name "app.css" (substring (%sha256 content) 0 8)))
+      (assert= fp (fingerprint-name "app.css" (substring (hash/sha256 content) 0 8)))
       (assert= (file-exists? (str dir "/" fp)) true)
       (assert= (slurp (str dir "/" fp)) content)
       (assert= (static/parse-manifest (slurp (str dir "/cache-manifest"))) manifest)
