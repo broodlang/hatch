@@ -30,6 +30,9 @@
   ; render-manifest — the fingerprint manifest codec lives in web/static
   (:alias web/static)
   (:alias log))
+
+(require 'hash)   ; content-addressed asset fingerprints are a SHA-256 prefix
+
 (def *default-reload-marker* "Done in")
 
 ; ---- dev watchers ----------------------------------------------------------
@@ -121,7 +124,7 @@
 (defn fingerprint-file (dir file)
   "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name."
   (let (body (slurp (str dir "/" file))
-        fp (fingerprint-name file (substring (%sha256 body) 0 8)))
+        fp (fingerprint-name file (substring (hash/sha256 body) 0 8)))
     (spit (str dir "/" fp) body)
     (log/log-info (str "[assets] fingerprint: " file " -> " fp))
     fp))
