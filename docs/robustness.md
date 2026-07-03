@@ -24,6 +24,18 @@ Without these the server is trivially exhausted by a single bad client.
   `Content-Length` body into memory. A large/streamed request was an OOM. Now the
   worker rejects with **413 Payload Too Large** once the accumulated bytes exceed the
   cap.
+- **Large-body streaming to disk** — `:spool-threshold` (default `nil`, off) and
+  `:spool-dir` (default `"/tmp"`). A file upload otherwise sits whole in the worker's
+  `buf` (plus a decoded copy) — memory scales with body size up to the cap. When
+  `:spool-threshold` is set, a non-chunked body-bearing request whose `Content-Length`
+  exceeds it is streamed straight to a temp file chunk-by-chunk (`append-bytes`, never
+  held whole in memory), and the handler receives a `:body-file` path instead of an
+  in-memory `:body` — persist it zero-copy with `web/conn/save-body` (a rename) or parse
+  it on demand with `parse-upload-file`. Two-phase parse (`http/request/try-parse-head`
+  applies the same framing rejections as `try-parse`); a spooled request always closes
+  the connection afterward (no pipelining across a multi-megabyte body); it stays bound
+  by `:max-request-bytes`. Off by default → every request uses the buffered path
+  unchanged.
 - **Max connections** — `:max-connections` (default 1024). The listener spawned a
   worker per connection without limit — a connection flood = unbounded process spawn.
   Now the listener tracks live connections (one `monitor` per worker, decrement on

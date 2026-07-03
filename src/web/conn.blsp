@@ -15,7 +15,12 @@
   byte, from the binary-mode reader). The conn exposes it two ways: `:body` (decoded to UTF-8
   text, for form/JSON/text handlers) and `:body-bytes` (the raw bytes, for binary payloads).
   A `multipart/form-data` upload is parsed here: its text fields merge into `:params`, and its
-  file parts land in `:files` as `{name → {:filename :content-type :bytes}}`."
+  file parts land in `:files` as `{name → {:filename :content-type :bytes}}`.
+
+  A large body the server streamed to disk (http/server `:spool-threshold`) arrives with an
+  empty `:body` and a `:body-file` path instead; the conn carries `:body-file` through, and the
+  handler persists it zero-copy with `save-body` or parses it on demand with
+  `parse-upload-file` (never loading it into memory otherwise)."
   (let (headers (get request :headers {})
         query-params (get request :params {})
         raw (get request :body "")
@@ -29,6 +34,7 @@
      :params (into query-params body-params)
      :body-params body-params
      :files (get parsed :files)
+     :body-file (get request :body-file)
      :headers headers
      :body body-text
      :body-bytes body-bytes
@@ -116,6 +122,36 @@
   "One uploaded file by its form field `name` — a `{:filename :content-type :bytes}` map, or
   nil if no file was uploaded under that name. `spit-bytes` the `:bytes` to store it."
   (get (get conn :files {}) name))
+
+(defn body-file (conn)
+  "The path of the on-disk spool for a large request body the server streamed to disk (see
+  http/server `:spool-threshold`), or nil for an ordinary in-memory request. When set, `:body`/
+  `:body-bytes`/`:files` are empty — read the body via `save-body` or `parse-upload-file`."
+  (get conn :body-file))
+
+(defn spooled? (conn)
+  "True if this request's body was streamed to disk rather than buffered in memory."
+  (not (nil? (get conn :body-file))))
+
+(defn save-body (conn dest)
+  "Persist a spooled request body to `dest` by moving the temp spool file — zero-copy (a
+  rename, no read-back into memory), which is the point of streaming a large upload to disk.
+  Returns `dest`. Errors if the request wasn't spooled (no `:body-file`)."
+  (let (src (get conn :body-file))
+    (if (nil? src)
+      (error "save-body: request body was not spooled to disk (no :body-file)")
+      (do (rename-file src dest) dest))))
+
+(defn parse-upload-file (conn)
+  "Parse a spooled `multipart/form-data` body from disk into `{:fields :files}` (the same shape
+  http/multipart returns). Reads the spool file once — use only when the app needs the parsed
+  fields; to merely store the upload, prefer the zero-copy `save-body`. Returns nil if the
+  request wasn't spooled."
+  (let (src (get conn :body-file))
+    (if (nil? src)
+      nil
+      (http/multipart/parse (slurp-bytes src)
+        (content-type-param (get conn :headers {}) "boundary")))))
 
 (defn header (conn key)
   "Get a request header by keyword key."

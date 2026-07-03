@@ -7,6 +7,8 @@
   (:use http/request)
   (:use http/response)
   (:use http/websocket)
+  ; carrier->bytes — bridge the already-buffered body prefix back to raw bytes for spooling
+  (:use http/util)
   (:alias proc/supervisor)
   (:alias telemetry))
 ; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
@@ -24,6 +26,15 @@
 ;   :check-origin      — WebSocket upgrade Origin policy (CSWSH guard): true = same-origin
 ;                        only (default), false = allow any, or a list of allowed Origin
 ;                        header values (see websocket/origin-allowed?)
+;   :spool-threshold   — nil (default, off) or a byte count: a request whose Content-Length
+;                        exceeds it is STREAMED to a temp file (chunk-by-chunk, never held
+;                        whole in memory) and the handler receives `:body-file` (a path)
+;                        instead of an in-memory `:body`. Bounds worker memory for large
+;                        uploads. Still subject to `:max-request-bytes`. When nil, every
+;                        request uses the in-memory buffered path (unchanged).
+;   :spool-dir         — directory for spool temp files (default "/tmp"); each spooled
+;                        request writes one `hatch-upload-<token>` file, deleted after the
+;                        handler returns unless it moved it (see web/conn `save-body`)
 (def default-config
   {:read-timeout-ms 30000
    :max-request-bytes 8388608
@@ -31,7 +42,9 @@
    :error-handler (fn (request err) (server-error-resp))
    :shutdown-grace-ms 5000
    :tls nil
-   :check-origin true})
+   :check-origin true
+   :spool-threshold nil
+   :spool-dir "/tmp"})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -184,6 +197,12 @@
                                                                 (format-response {:status 413
                                                                                   :body "<h1>413 Payload Too Large</h1>"}))
                                                               (tcp-close sock))
+    ; Large-body streaming: once the headers are in, a non-chunked body-bearing request whose
+    ; Content-Length exceeds :spool-threshold is streamed straight to a temp file (never held
+    ; whole in `buf`), and the handler is given `:body-file` instead of an in-memory `:body`.
+    ; Off by default (:spool-threshold nil); when off this branch is skipped and every request
+    ; takes the buffered path below, unchanged.
+    (spool-request? buf config ws-handler) (spool--begin sock handler ws-handler config buf)
     else (match (try-parse buf)
            ([:ok request remainder]
              (if (and ws-handler (upgrade-request? request))
@@ -269,6 +288,99 @@
                            (tcp-send sock (format-response {:status 400
                                                             :body "<h1>400 Bad Request</h1>"}))
                            (tcp-close sock))))))
+
+; ---- large-body streaming to disk (opt-in via :spool-threshold) ----
+
+(defn body-method? (m)
+  "True for a method that carries a request body worth spooling (POST/PUT/PATCH)."
+  (or (= m "POST") (= m "PUT") (= m "PATCH")))
+
+(defn spool-request? (buf config ws-handler)
+  "True when `buf` holds a complete header block for a large, non-chunked, body-bearing request
+  that should be streamed to disk. A no-op (false) unless :spool-threshold is configured, so the
+  default server never leaves the buffered path."
+  (let (thr (get config :spool-threshold))
+    (if (nil? thr)
+      false
+      (match (try-parse-head buf)
+        ([:head head body-start clen] (and (> clen thr)
+                                         (body-method? (get head :method))
+                                         (not (and ws-handler (upgrade-request? head)))))
+        (_ false)))))
+
+(defn spool--path (config)
+  "A fresh unique temp path under :spool-dir for one spooled request body."
+  (str (get config :spool-dir "/tmp") "/hatch-upload-" (random-token 16)))
+
+(defn spool--begin (sock handler ws-handler config buf)
+  "Start spooling: reject if the declared length blows the request cap, else write the body
+  bytes already sitting in `buf` to a fresh temp file and stream the rest off the socket."
+  (match (try-parse-head buf)
+    ([:head head body-start clen]
+      (if (> clen (get config :max-request-bytes))
+        (do
+          (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+          (tcp-close sock))
+        (let (path (spool--path config)
+              already (substring buf body-start (string-length buf))
+              alen (string-length already)
+              take (min alen clen)
+              prefix (if (= take alen) already (substring already 0 take)))
+          ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
+          ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
+          (append-bytes path (carrier->bytes prefix))
+          (spool--drain sock handler ws-handler config head path take clen))))
+    ; unreachable (spool-request? already matched a :head) — degrade to the buffered path
+    (_ (worker--run sock handler ws-handler config buf))))
+
+(defn spool--drain (sock handler ws-handler config head path written clen)
+  "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
+  the idle wait (slow-loris → 408) and deletes the partial spool on a stalled/closed socket."
+  (if (>= written clen)
+    (spool--dispatch sock handler config head path clen)
+    (receive
+      ([:tcp ~sock chunk]
+        (let (n (count chunk)
+              take (min n (- clen written))
+              piece (if (= take n) chunk (subbytes chunk 0 take)))
+          (append-bytes path piece)
+          (spool--drain sock handler ws-handler config head path (+ written take) clen)))
+      ([:tcp-closed ~sock] (do (spool--cleanup path) nil))
+      (after (get config :read-timeout-ms)
+        (do
+          (spool--cleanup path)
+          (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+          (tcp-close sock))))))
+
+(defn spool--cleanup (path)
+  "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."
+  (try (delete-file path) (catch _e nil)))
+
+(defn spool--dispatch (sock handler config head path clen)
+  "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
+  remove the temp file unless the handler moved it. A spooled request always closes the
+  connection afterwards — no keep-alive/pipelining bookkeeping across a multi-megabyte body."
+  (let (request (assoc head :body "" :body-file path :body-length clen)
+        t0 (now)
+        response (try
+                   (handler request)
+                   (catch e
+                     (do
+                       (telemetry/emit [:hatch :request :exception]
+                         {}
+                         {:method (get request :method)
+                          :path (get request :path)
+                          :error (error-message e)})
+                       ((get config :error-handler) request (error-message e)))))
+        response (assoc-in response [:headers :connection] "close"))
+    (telemetry/emit [:hatch :request :stop]
+      {:duration (- (now) t0)}
+      {:method (get request :method)
+       :path (get request :path)
+       :status (get response :status 200)})
+    (tcp-send sock (format-response response (= (get head :method) "HEAD")))
+    (spool--cleanup path)
+    (tcp-close sock)))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request. Either side signalling
