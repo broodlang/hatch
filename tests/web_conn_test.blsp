@@ -189,3 +189,18 @@
           conn (run-pipeline (build *req*) [p1 p2]))
       (assert= (get-assign conn :step1) true)
       (assert= (get-assign conn :step2) nil))))
+
+; The framework's minimal request→conn→response adapter: build a conn, run the router,
+; serialize. An app wires (server/start port (router->handler app-router) …).
+(describe "router->handler"
+  (test "adapts a conn router into an http/server response map"
+    (let (router (fn (conn) (html-resp conn (str "hi " (param conn "name"))))
+          handler (router->handler router)
+          resp (handler *req*))
+      (assert= (get resp :status) 200)
+      (assert= (get resp :body) "hi world")))
+  (test "a router that halts still serializes"
+    (let (router (fn (conn) (send-resp conn 403 "no"))
+          resp ((router->handler router) *req*))
+      (assert= (get resp :status) 403)
+      (assert= (get resp :body) "no"))))
