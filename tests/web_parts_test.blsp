@@ -48,6 +48,32 @@
   (test "all changed" (assert= (diff-dynamics ["a" "b"] ["x" "y"]) {0 "x" 1 "y"}))
   (test "first only" (assert= (diff-dynamics ["a" "b"] ["x" "b"]) {0 "x"})))
 
+;; form-deps statically finds the model keys a dynamic slot reads, so the session can
+;; re-render only the slots a state change actually touches. It over-approximates: any
+;; opaque model use yields :all (always re-render).
+(describe "form-deps — change tracking"
+  (test "a pinned (get model :k) collects that key"
+    (assert= (form-deps '(web/template/render (get model :count)) 'model) [:count]))
+  (test "multiple pinned reads collect every key"
+    (assert= (form-deps '(str (get model :a) (get model :b)) 'model) [:a :b]))
+  (test "reads inside a map literal (attrs) are collected"
+    (assert= (form-deps '(web/template/render [:li {:class (get model :c)} "x"]) 'model) [:c]))
+  (test "a comprehension collects its collection's key"
+    (assert= (form-deps
+               '(web/parts/comp (for (x (get model :items)) (web/template/render [:li {} x])))
+               'model)
+      [:items]))
+  (test "a default expression's reads are also collected"
+    (assert= (form-deps '(get model :a (get model :b)) 'model) [:a :b]))
+  (test "a bare model use is opaque → :all"
+    (assert= (form-deps '(some-helper model) 'model) :all))
+  (test "a dynamic (get model k) key is opaque → :all"
+    (assert= (form-deps '(get model k) 'model) :all))
+  (test "no model reference → empty deps (a constant slot never re-renders)"
+    (assert= (form-deps '(str "static") 'model) []))
+  (test "honours a non-default model symbol"
+    (assert= (form-deps '(get m :count) 'm) [:count])))
+
 ;; A `(for …)` comprehension compiles to a single per-item comprehension slot.
 (describe "compile-parts — comprehensions"
   (test "a (for …) becomes one comprehension dynamic between the statics"
