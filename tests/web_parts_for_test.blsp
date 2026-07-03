@@ -1,0 +1,63 @@
+(defmodule web-parts-for-test
+  ; deflive + live-spec for a comprehension view
+  (:use web/live)
+  ; interleave / diff-dynamics / comp? — the runtime split helpers
+  (:use web/parts)
+  ; live-render / live-spec drivers
+  (:use web/test)
+  (:use test))
+
+;; A live view whose render contains a `(for …)` comprehension — the case per-item diffing
+;; targets. Each item renders to one <li>; the whole list is a single comprehension slot.
+(deflive
+  (mount (params) {:items ["a" "b" "c"]})
+  (render (model) [:ul {} (for (x (get model :items)) [:li {:data-key x} x])])
+  (on "noop" (params model) model))
+
+(describe "comprehension view — invariant"
+  ; interleave(static, dynamic(model)) must still reproduce the full render exactly, now
+  ; that the `(for …)` slot renders per-item and interleave joins the items.
+  (test "interleave(static, dynamic) == full render, for several item lists"
+    (let (spec (live-spec))
+      (assert= (interleave (get spec :render-static)
+                 ((get spec :render-dynamic) {:items ["a" "b" "c"]}))
+        (live-render spec {:items ["a" "b" "c"]}))
+      (assert= (interleave (get spec :render-static)
+                 ((get spec :render-dynamic) {:items []}))
+        (live-render spec {:items []}))
+      (assert= (interleave (get spec :render-static)
+                 ((get spec :render-dynamic) {:items ["only"]}))
+        (live-render spec {:items ["only"]}))))
+  (test "the for slot renders as a comprehension slot, not one opaque string"
+    (let (spec (live-spec)
+          dyn ((get spec :render-dynamic) {:items ["a" "b"]}))
+      (assert= (count dyn) 1)
+      (assert= (comp? (nth dyn 0)) true)
+      (assert= (count (comp-items (nth dyn 0))) 2))))
+
+(describe "comprehension view — per-item diff"
+  ; Editing one item's data must ship a per-item cdiff for that item only, not the list.
+  (test "changing one item yields a single-item cdiff"
+    (let (spec (live-spec)
+          old ((get spec :render-dynamic) {:items ["a" "b" "c"]})
+          new ((get spec :render-dynamic) {:items ["a" "X" "c"]})
+          d (diff-dynamics old new))
+      ; one slot (index 0) changed, and its cdiff carries only item index 1
+      (assert= (count d) 1)
+      (let (cdiff (get d 0))
+        (assert= (get cdiff :n) 3)
+        (assert= (count (get cdiff :__cdiff__)) 1)
+        (assert= (includes? (get (get cdiff :__cdiff__) 1) ">X</li>") true))))
+  (test "appending an item reports just the new item with the grown count"
+    (let (spec (live-spec)
+          old ((get spec :render-dynamic) {:items ["a" "b"]})
+          new ((get spec :render-dynamic) {:items ["a" "b" "c"]})
+          cdiff (get (diff-dynamics old new) 0))
+      (assert= (get cdiff :n) 3)
+      (assert= (count (get cdiff :__cdiff__)) 1)
+      (assert= (includes? (get (get cdiff :__cdiff__) 2) ">c</li>") true)))
+  (test "no change yields no diff"
+    (let (spec (live-spec)
+          old ((get spec :render-dynamic) {:items ["a" "b"]})
+          new ((get spec :render-dynamic) {:items ["a" "b"]}))
+      (assert= (diff-dynamics old new) {}))))
