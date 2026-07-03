@@ -181,3 +181,14 @@
   (if (or (nil? plugs) (halted? conn))
     conn
     (run-pipeline ((first plugs) conn) (rest plugs))))
+
+(defn router->handler (router)
+  "Adapt a conn-based `router` (a `defrouter` function) into an `http/server` request
+  handler: build a conn from the raw request, run it through the router, and serialize the
+  resulting conn into the `{:status :headers :body}` map the server sends. This is the
+  minimal `build → route → conn->response` seam every app otherwise hand-rolls — wire it
+  straight into the endpoint:
+    (server/start port (web/conn/router->handler app-router) (live/live-dispatcher))
+  An app that wants per-request logging, process isolation, a handler timeout, or themed
+  error pages composes its own adapter instead (see hatch-demo's `web/endpoint`)."
+  (fn (request) (conn->response (router (build request)))))
