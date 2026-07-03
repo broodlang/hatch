@@ -31,27 +31,17 @@
 
   `parse` returns a Brood *form*: the structure the `deflive` `template` clause emits
   as the body of `render`, so a template runs as ordinary Brood — no separate runtime.
-  The parser is invoked at macro-expansion time; this module is dependency-free.")
+  The parser is invoked at macro-expansion time; its only runtime dependency is
+  web/template, from which it borrows the canonical void-element set."
+  ; *void-tags* — the single source of truth for void elements, shared with the renderer
+  ; and the slot compiler so the three can never drift apart.
+  (:use web/template :only [*void-tags*]))
 
-; ---- void elements: no closing tag, no children (mirrors web/template) ----
+; ---- void elements: no closing tag, no children ----
+; The canonical set lives in web/template as `*void-tags*` (keyword keys). bml works with
+; string tag names, so `void-tag?` keywordizes before the lookup — one source of truth.
 
-(def *void*
-  {"area" true
-   "base" true
-   "br" true
-   "col" true
-   "embed" true
-   "hr" true
-   "img" true
-   "input" true
-   "link" true
-   "meta" true
-   "param" true
-   "source" true
-   "track" true
-   "wbr" true})
-
-(defn void-tag? (t) (contains? *void* t))
+(defn void-tag? (t) (contains? *void-tags* (keyword t)))
 
 ; Raw-text elements: their content is verbatim text (CSS/JS), not markup — no tag or
 ; `{…}` interpolation parsing, and emitted unescaped. Ended only by the close tag.
