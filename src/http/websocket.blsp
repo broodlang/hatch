@@ -27,9 +27,17 @@
     "\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef"
     "\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"))
 
+; Precomputed once: position n holds the 1-char carrier string for byte value n — the same
+; values `char-at *byte-table*` would return, but materialized into 256 shared objects.
+; `byte->char` reads from this vector rather than `char-at`-ing the table on every call: a
+; `char-at` on the (multibyte) table returns a fresh view string each time, and joining tens
+; of thousands of those into one frame body blows up super-linearly (a >64 KB render could
+; allocate gigabytes and OOM the session). Joining references to 256 shared strings is linear.
+(def *byte-strs* (into [] (map (fn (n) (char-at *byte-table* n)) (range 256))))
+
 (defn byte->char (n)
   "Convert byte value 0-255 to a 1-char string."
-  (char-at *byte-table* n))
+  (nth *byte-strs* n))
 
 (defn bytes->carrier (b)
   "A `bytes` value → the Latin-1 byte-string carrier (one codepoint 0–255 per byte).
@@ -100,8 +108,11 @@
 ; characters contribute their real byte length (not their codepoint count).
 
 (defn utf8-byte-string (s)
-  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte."
-  (join "" (map byte->char (string->utf8-bytes s))))
+  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte. Maps over
+  `bytes->list` (a plain list) rather than the raw `bytes` value — mapping `byte->char`
+  directly over `bytes` and joining the result blows up super-linearly on a large payload
+  (a >64 KB frame body could allocate gigabytes and OOM the session)."
+  (join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
 
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text."
