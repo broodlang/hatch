@@ -237,7 +237,7 @@
         ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
                                   (recv-frame--loop sock buf)
                                   [:closed]))
-        ([:tick key] [:tick key buf])
+        ([:tick key gen] [:tick key gen buf])
         ; an out-of-band message for the view's handle-info (PubSub/Presence
         ; broadcast, a timer, anything that holds this session's pid)
         ([:info payload] [:info payload buf])
@@ -247,20 +247,23 @@
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 
-(defn ticker-loop (target ms)
-  "Post `[:tick ms]` to `target` (a live session) every `ms` milliseconds, until
+(defn ticker-loop (target ms gen)
+  "Post `[:tick ms gen]` to `target` (a live session) every `ms` milliseconds, until
   `target` dies. The interval ms is the message key, so a session running several
-  tickers can tell which fired. Running each as its own process — rather than a
-  `receive` timeout in the session — keeps every beat steady, regardless of client
-  traffic. Monitored, so a closed or crashed session never leaks it."
+  tickers can tell which fired; `gen` is the session generation this ticker was started
+  under, so the session can drop a beat left in its mailbox from a view it has since
+  navigated away from (the ticker is killed on navigate, but a tick already sent isn't
+  un-sent). Running each as its own process — rather than a `receive` timeout in the
+  session — keeps every beat steady, regardless of client traffic. Monitored, so a closed
+  or crashed session never leaks it."
   (monitor target)
-  (ticker-loop--wait target ms))
+  (ticker-loop--wait target ms gen))
 
-(defn ticker-loop--wait (target ms)
+(defn ticker-loop--wait (target ms gen)
   (receive
     ; the session ended — stop ticking
     ([:down _ _ _] nil)
-    (after ms (do (send target [:tick ms]) (ticker-loop--wait target ms)))))
+    (after ms (do (send target [:tick ms gen]) (ticker-loop--wait target ms gen)))))
 
 ; ---- idle watchdog: keepalive ping + reap dead/idle connections ----
 
@@ -349,13 +352,13 @@
 
 ; ---- session actor ----
 
-(defn start-tickers (ticks)
-  "Spawn one ticker process per interval in `ticks`, each posting [:tick ms] to this
-  (the calling) session on a steady beat. Returns their pids so they can be stopped
-  when the session navigates to another view (otherwise the old view's tickers would
-  linger and accumulate across navigations)."
+(defn start-tickers (ticks gen)
+  "Spawn one ticker process per interval in `ticks`, each posting [:tick ms gen] to this
+  (the calling) session on a steady beat, stamped with the session generation `gen`.
+  Returns their pids so they can be stopped when the session navigates to another view
+  (otherwise the old view's tickers would linger and accumulate across navigations)."
   (let (me (self))
-    (map (fn (ms) (spawn (ticker-loop me ms))) (or ticks (list)))))
+    (map (fn (ms) (spawn (ticker-loop me ms gen))) (or ticks (list)))))
 
 (defn stop-tickers (pids)
   "Kill the given ticker processes — used when a session swaps to a different view."
@@ -436,7 +439,8 @@
   ; fairly with client frames); keep their pids so navigate can stop them. Also start the
   ; idle watchdog so a dead/idle peer is pinged and eventually reaped.
   (let (view (assoc view
-               :ticker-pids (start-tickers (get view :ticks))
+               :generation 0
+               :ticker-pids (start-tickers (get view :ticks) 0)
                :watchdog (spawn (idle-watchdog (self) sock 0))))
     (push-update sock view buf "render" (get view :model))))
 
@@ -502,13 +506,19 @@
     ([:ok 1 payload rem] (kick-watchdog view) (session-dispatch sock view rem payload))
     ; other opcodes (e.g. a pong, opcode 0xA) — ignored, but still client liveness
     ([:ok _ _ rem] (kick-watchdog view) (session-recv sock view rem))
-    ([:tick key buf2] (push-update sock
-                        view
-                        buf2
-                        "diff"
-                        (try
-                          ((get view :handle-tick) key (get view :model))
-                          (catch e (live--handler-error "tick" key e (get view :model))))))
+    ; A generation-stamped beat. Drop it if it's from a view we've navigated away from
+    ; (its ticker was killed, but this beat was already in the mailbox) — otherwise it'd
+    ; fire the new view's handle-tick with the old view's interval key.
+    ([:tick key gen buf2]
+      (if (= gen (get view :generation 0))
+        (push-update sock
+          view
+          buf2
+          "diff"
+          (try
+            ((get view :handle-tick) key (get view :model))
+            (catch e (live--handler-error "tick" key e (get view :model)))))
+        (session-recv sock view buf2)))
     ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
     ; view's handle-info and push the resulting diff. A view without a handle-info clause
     ; (or one that throws) keeps its current model, so a stray message is harmless.
@@ -566,6 +576,10 @@
                   _unmount (try ((get view :unmount) (get view :model))
                              (catch e (live--handler-error "unmount" :unmount e nil)))
                   _ (stop-tickers (get view :ticker-pids))
+                  ; bump the generation so a beat still queued from the OLD view's ticker
+                  ; (killed just above, but a message already sent lingers) is dropped rather
+                  ; than dispatched into the new view's handle-tick.
+                  gen (+ 1 (get view :generation 0))
                   spec (spec-fn)
                   model ((get spec :mount) params)
                   new-view (merge spec
@@ -573,7 +587,8 @@
                               :session (get entry :session)
                               :params params
                               :model model
-                              :ticker-pids (start-tickers (get spec :ticks))
+                              :generation gen
+                              :ticker-pids (start-tickers (get spec :ticks) gen)
                               ; carry the idle watchdog across the swap (same socket)
                               :watchdog (get view :watchdog)}))
               (push-update sock new-view buf "render" model))

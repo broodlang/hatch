@@ -117,6 +117,32 @@
   (test "hex offset → nil" (assert= (parse-range "bytes=0x1-2" 10) nil))
   (test "signed offset → nil" (assert= (parse-range "bytes=+1-2" 10) nil)))
 
+(describe "if-none-match?"
+  (test "exact single tag matches"
+    (assert= (if-none-match? (conn-with {} {:if-none-match "\"abc\""}) "\"abc\"") true))
+  (test "wildcard matches any tag"
+    (assert= (if-none-match? (conn-with {} {:if-none-match "*"}) "\"abc\"") true))
+  (test "our tag as one entry of a comma-separated list matches (RFC multi-tag)"
+    (assert= (if-none-match? (conn-with {} {:if-none-match "\"x\", \"abc\", \"y\""}) "\"abc\"")
+      true))
+  (test "a weak W/ validator still matches our strong tag (weak comparison)"
+    (assert= (if-none-match? (conn-with {} {:if-none-match "W/\"abc\""}) "\"abc\"") true))
+  (test "a different single tag does not match"
+    (assert= (if-none-match? (conn-with {} {:if-none-match "\"other\""}) "\"abc\"") false))
+  (test "no If-None-Match header → false"
+    (assert= (if-none-match? (conn-with {}) "\"abc\"") false)))
+
+(describe "serve — revalidation without reading the body"
+  (test "a matching If-None-Match answers 304 from the stat/etag cache (no re-slurp)"
+    ; prime the cache with a real file, then revalidate with its tag
+    (let (_ (serve (conn-with {}) "static" "brood_live.js")
+          tag (fresh-cached-etag "static/brood_live.js")
+          resp (serve (conn-with {} {:if-none-match tag}) "static" "brood_live.js"))
+      (assert= (nil? tag) false)
+      (assert= (get resp :status) 304)
+      (assert= (get resp :resp-body) "")
+      (assert= (get (get resp :resp-headers) :etag) tag))))
+
 (describe "serve-body"
   (test "200 carries etag, cache-control, nosniff, accept-ranges"
     (let (resp (serve-body (conn-with {}) "text/css; charset=utf-8" "body{}" "app.css")
@@ -145,10 +171,14 @@
     (let (resp (serve-body (conn-with {} {:range "bytes=-3"}) "text/plain" "0123456789" "f.txt"))
       (assert= (get resp :status) 206)
       (assert= (get resp :resp-body) "789")))
-  (test "unsatisfiable Range → 416"
-    (let (resp (serve-body (conn-with {} {:range "bytes=99-"}) "text/plain" "0123456789" "f.txt"))
+  (test "unsatisfiable Range → 416 carrying validators + nosniff (not a bare error)"
+    (let (resp (serve-body (conn-with {} {:range "bytes=99-"}) "text/plain" "0123456789" "f.txt")
+          h (get resp :resp-headers))
       (assert= (get resp :status) 416)
-      (assert= (get (get resp :resp-headers) :content-range) "bytes */10")))
+      (assert= (get h :content-range) "bytes */10")
+      (assert= (blank? (get h :etag)) false)
+      (assert= (get h :cache-control) "no-cache")
+      (assert= (get h :x-content-type-options) "nosniff")))
   (test "Range on a multibyte body falls back to a full 200"
     (let (
           ; em-dash: 3 bytes, 1 char

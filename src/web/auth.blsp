@@ -31,15 +31,27 @@
 
 (defn basic-auth-creds (conn)
   "The decoded `user:pass` string from a `Basic <base64>` Authorization header, or nil
-  if the header is absent or not well-formed Basic auth."
+  if the header is absent or not well-formed Basic auth. Malformed base64 (or bytes that
+  aren't valid UTF-8) yields nil — never a thrown error — so a hostile Authorization header
+  fails closed to a 401 instead of crashing the worker (a pre-auth DoS)."
   (let (raw (header conn :authorization)
         prefix "Basic ")
     (if (and raw (starts-with? raw prefix))
-      (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
+      (try (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
+        (catch _e nil))
       nil)))
+
+(defn realm-safe (realm)
+  "Strip characters that would break the `WWW-Authenticate` auth-param syntax or inject a
+  header — double quotes and CR/LF."
+  (-> (str realm)
+    (replace "\"" "")
+    (replace "\r" "")
+    (replace "\n" "")))
 
 (defn basic-auth-challenge (conn realm)
   "A 401 conn carrying the `WWW-Authenticate: Basic` challenge for `realm`."
   (-> conn
-    (put-resp-header :www-authenticate (str "Basic realm=\"" realm "\", charset=\"UTF-8\""))
+    (put-resp-header :www-authenticate
+      (str "Basic realm=\"" (realm-safe realm) "\", charset=\"UTF-8\""))
     (send-resp 401 "<h1>401 Unauthorized</h1>")))

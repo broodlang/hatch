@@ -48,6 +48,8 @@
       (assert= (file-exists? (str dir "/" fp)) true)
       (assert= (slurp (str dir "/" fp)) content)
       (assert= (static/parse-manifest (slurp (str dir "/cache-manifest"))) manifest)
+      ; the atomic write renames its temp file into place — none should be left behind
+      (assert= (file-exists? (str dir "/cache-manifest.tmp")) false)
       (delete-file (str dir "/app.css"))
       (delete-file (str dir "/" fp))
       (delete-file (str dir "/cache-manifest")))))

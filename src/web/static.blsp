@@ -141,11 +141,25 @@
   trusting (and re-using) its stored copy: the ETag and the Cache-Control."
   (send-resp (with-resp-headers conn {:etag tag :cache-control cc}) 304 ""))
 
+(defn strip-weak (t)
+  "Drop a leading weak-validator `W/` from an ETag token, so a weak `If-None-Match` still
+  matches our strong tag (the RFC 7232 comparison for `If-None-Match` is weak)."
+  (if (starts-with? t "W/") (substring t 2 (string-length t)) t))
+
 (defn if-none-match? (conn tag)
-  "True if the request's `If-None-Match` matches `tag` (or is the `*` wildcard) — i.e. the
-  client already holds this exact version, so we can answer 304 instead of resending it."
+  "True if the request's `If-None-Match` lists `tag` (or is the `*` wildcard) — i.e. the
+  client already holds this exact version, so we can answer 304 instead of resending it.
+  The header is a comma-separated list of (possibly weak) ETags; we compare each token
+  exactly (after trimming and stripping a `W/`), not by substring — a substring test both
+  misses legitimate multi-tag lists and false-positives when `tag` is a substring of an
+  unrelated token."
   (let (inm (get (get conn :headers) :if-none-match))
-    (and inm (or (= (trim inm) "*") (includes? inm tag)))))
+    (if (nil? inm)
+      false
+      (let (want (trim inm))
+        (or (= want "*")
+          (not (empty? (filter (fn (t) (= (strip-weak (trim t)) tag))
+                         (string-split want ",")))))))))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
@@ -208,6 +222,10 @@
         (nil? r) nil
         (= r :unsatisfiable) (send-resp (with-resp-headers conn
                                           {:content-type content-type
+                                           :etag tag
+                                           :cache-control cc
+                                           :accept-ranges "bytes"
+                                           :x-content-type-options "nosniff"
                                            :content-range (str "bytes */" len)})
                                416
                                "")
@@ -242,18 +260,38 @@
                200
                body)))))
 
+(defn fresh-cached-etag (path)
+  "The cached ETag for `path` if the file still matches the cached mtime+size — determined
+  from a `file-stat` alone, without reading the body. Lets a revalidation answer 304 without
+  slurping the file. nil if the file is uncached, changed, or unstattable (the caller then
+  reads + hashes it)."
+  (let (st (file-stat path))
+    (if (nil? st)
+      nil
+      (let (hit (table-get *etag-cache* path))
+        (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
+          (get hit :etag)
+          nil)))))
+
 (defn serve (conn root rel)
   "Serve `rel` under `root` into `conn`: 200 with the file's MIME type on success, a bodyless
   304 when the client's `If-None-Match` already matches, 404 on a traversal attempt or a
-  missing/unreadable file. See `serve-body` for the cache/conditional/range headers."
+  missing/unreadable file. See `serve-body` for the cache/conditional/range headers.
+
+  A revalidation whose ETag is already cached (mtime+size unchanged) short-circuits to 304
+  from the stat alone — the file body is never read, so re-checking a large asset costs a
+  syscall, not a full slurp into memory."
   (let (segs (safe-segments rel))
     (if (or (nil? segs) (empty? segs))
       (not-found-resp conn)
       (let (path (str root "/" (join "/" segs))
-            body (try (slurp path) (catch _ nil)))
-        (if (nil? body)
-          (not-found-resp conn)
-          (serve-body conn (mime-type path) body path root (cached-etag path body)))))))
+            fresh (fresh-cached-etag path))
+        (if (and fresh (if-none-match? conn fresh))
+          (not-modified conn fresh (cache-control path root))
+          (let (body (try (slurp path) (catch _ nil)))
+            (if (nil? body)
+              (not-found-resp conn)
+              (serve-body conn (mime-type path) body path root (cached-etag path body)))))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the
