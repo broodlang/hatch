@@ -9,7 +9,7 @@
 
   Wire two plugs into a `through` group, session first:
 
-    (def secret (or (getenv \"HATCH_SECRET_KEY_BASE\") \"dev-only-change-me\"))
+    (def secret (session/secret-from-env))   ; strong prod secret, or a loud boot failure
     (through [(session/fetch-session secret) session/fetch-flash]
       (get  \"/login\"  login/form)
       (post \"/login\"  login/create))
@@ -30,10 +30,40 @@
 
 (def *default-cookie* "_hatch_session")
 (def *flash-key* "__flash__")
+; The clearly-labeled dev-only signing secret. Used only when $HATCH_ENV is dev (or unset) so
+; `nest run` works with zero config; `check-secret` refuses to fall back to it outside dev.
+(def *dev-secret* "dev-only-change-me-0000000000000000")
+; Minimum acceptable secret length (bytes) outside dev. A short secret is brute-forceable, and
+; a forgeable signature means forgeable sessions (auth bypass), so we won't boot on one.
+(def *min-secret-len* 32)
 ; Reserved key carrying the session's absolute expiry (epoch-ms). Stamped into the signed
 ; payload when `:max-age` is configured, verified on decode, and stripped before the session
 ; reaches handlers — so a stolen cookie stops verifying as live past its deadline.
 (def *exp-key* "__exp__")
+
+; ---- signing secret (fail-loud on a weak prod secret) ----
+
+(defn check-secret (v dev?)
+  "The validated session signing secret. A strong secret (≥ `*min-secret-len*` chars) is used
+  as-is. In dev a missing or weak `v` falls back to the labeled dev default so local `nest run`
+  just works. Outside dev a missing or weak secret raises — signing every session cookie with a
+  known/short key makes them forgeable (full auth bypass), so we fail the boot loudly rather
+  than ship it. Pure; `secret-from-env` supplies `v`/`dev?` from the environment."
+  (cond
+    (and v (>= (string-length v) *min-secret-len*)) v
+    dev? (or v *dev-secret*)
+    (nil? v) (error "web/session: HATCH_SECRET_KEY_BASE is not set. Refusing to sign sessions "
+               "with a default key outside dev — every cookie would be forgeable. Set a strong "
+               "(>= " *min-secret-len* "-char) secret.")
+    else (error "web/session: HATCH_SECRET_KEY_BASE is too weak (< " *min-secret-len*
+             " chars). Refusing to boot outside dev with a brute-forceable signing key.")))
+
+(defn secret-from-env (&optional (var "HATCH_SECRET_KEY_BASE"))
+  "The session signing secret, read from `$var` and validated by `check-secret`: a strong
+  secret in any environment, the labeled dev default when it's missing/weak in dev, or a loud
+  boot failure when it's missing/weak outside dev. Prefer this over a hand-rolled
+  `(or (getenv …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
+  (check-secret (getenv var) (= (or (getenv "HATCH_ENV") "dev") "dev")))
 
 ; ---- signing / verification ----
 
@@ -173,6 +203,19 @@
 (defn clear-session (conn)
   "Drop the entire session (e.g. on logout) and mark it dirty — the next Set-Cookie writes
   an empty session."
+  (assoc conn :session {} :session-changed? true))
+
+(defn rotate-session (conn)
+  "Start a fresh session, discarding every current key — including the CSRF token, which
+  `csrf/protect-from-forgery` then re-mints on the next request — and mark it dirty. Call on
+  any privilege change (login, logout, role switch), then set the new state:
+
+    (-> conn (session/rotate-session) (session/put-session \"user_id\" id))
+
+  so a token or value that may have leaked to an attacker *before* authentication is not
+  carried over and honored *after* it (session/CSRF-fixation defense). In the stateless
+  cookie model this can't retroactively invalidate a cookie the attacker already holds, but
+  it does stop a pre-auth token from remaining valid post-auth."
   (assoc conn :session {} :session-changed? true))
 
 ; ---- flash ----
