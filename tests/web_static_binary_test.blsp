@@ -1,0 +1,114 @@
+(defmodule web-static-binary-test
+  (:use web/static)
+  (:use web/conn)
+  (:alias http/server)
+  (:alias http/response)
+  (:use test))
+
+(defn conn-with (params &optional (headers {}))
+  (build {:method "GET" :path "/static" :query "" :params params :headers headers :body ""}))
+
+;; ---- format-response with a binary (bytes) body ----
+
+(describe "format-response — binary body"
+  (test "a bytes body → a bytes response, raw body appended, byte-count Content-Length"
+    (let (resp (response/format-response
+                 {:status 200 :headers {:content-type "image/png"} :body (bytes [137 80 255])})
+          n (count (bytes->list resp)))
+      (assert= (bytes? resp) true)
+      ; the last 3 bytes are the raw body, verbatim (0xFF intact)
+      (assert= (into [] (bytes->list (subbytes resp (- n 3) n))) [137 80 255])
+      ; the header block declares the raw byte length and the type
+      (let (head (utf8-bytes->string (subbytes resp 0 (- n 3))))
+        (assert= (includes? head "Content-Length: 3") true)
+        (assert= (includes? head "Content-Type: image/png") true)))))
+
+;; ---- serving binary files ----
+
+(defn with-file (dir name content thunk)
+  "Write `content` (bytes) to dir/name, run (thunk path), clean up."
+  (try (make-dir dir) (catch _ nil))
+  (spit-bytes (str dir "/" name) content)
+  (let (r (thunk))
+    (delete-file (str dir "/" name))
+    r))
+
+(describe "serve — binary assets"
+  (test "a PNG is served byte-for-byte as bytes with image/png + nosniff"
+    (let (dir "/tmp/hatch-staticbin-1"
+          content (bytes [137 80 78 71 13 10 26 10 0 255 1 2]))
+      (with-file dir "logo.png" content (fn ()
+        (let (resp (serve (conn-with {}) dir "logo.png")
+              h (get resp :resp-headers))
+          (assert= (get resp :status) 200)
+          (assert= (get h :content-type) "image/png")
+          (assert= (get h :x-content-type-options) "nosniff")
+          (assert= (bytes? (get resp :resp-body)) true)
+          (assert= (into [] (bytes->list (get resp :resp-body)))
+            [137 80 78 71 13 10 26 10 0 255 1 2]))))))
+  (test "an unknown extension is read as bytes (octet-stream), not slurp-mangled"
+    (let (dir "/tmp/hatch-staticbin-2"
+          content (bytes [0 1 2 254 255]))
+      (with-file dir "blob.dat" content (fn ()
+        (let (resp (serve (conn-with {}) dir "blob.dat"))
+          (assert= (get (get resp :resp-headers) :content-type) "application/octet-stream")
+          (assert= (into [] (bytes->list (get resp :resp-body))) [0 1 2 254 255]))))))
+  (test "a matching If-None-Match revalidates to 304"
+    (let (dir "/tmp/hatch-staticbin-3"
+          content (bytes [1 2 3 255]))
+      (with-file dir "x.png" content (fn ()
+        (do
+          (serve (conn-with {}) dir "x.png")   ; prime the etag cache
+          (let (tag (fresh-cached-etag (str dir "/x.png"))
+                resp (serve (conn-with {} {:if-none-match tag}) dir "x.png"))
+            (assert= (nil? tag) false)
+            (assert= (get resp :status) 304)))))))
+  (test "Range on a binary asset → 206 with the sliced bytes + Content-Range"
+    (let (dir "/tmp/hatch-staticbin-4"
+          content (bytes [10 11 12 13 14 15]))
+      (with-file dir "y.bin" content (fn ()
+        (let (resp (serve (conn-with {} {:range "bytes=1-3"}) dir "y.bin")
+              h (get resp :resp-headers))
+          (assert= (get resp :status) 206)
+          (assert= (into [] (bytes->list (get resp :resp-body))) [11 12 13])
+          (assert= (get h :content-range) "bytes 1-3/6")))))))
+
+;; ---- end-to-end through the running server ----
+
+(defn drain-bytes (sock acc)
+  "Collect all response bytes until the server closes the connection."
+  (receive
+    ([:tcp ~sock chunk] (drain-bytes sock (bytes-concat acc chunk)))
+    ([:tcp-closed ~sock] acc)
+    (after 1500 acc)))
+
+(defn static-handler (dir)
+  (fn (request)
+    ; serve the request path (minus the leading '/') from `dir`
+    (let (p (get request :path)
+          rel (substring p 1 (string-length p)))
+      (conn->response (serve (build request) dir rel)))))
+
+(describe "binary asset end-to-end through the server"
+  (test "a PNG GET returns the raw bytes on the wire, byte-for-byte"
+    (let (dir "/tmp/hatch-staticbin-e2e"
+          content (bytes [137 80 78 71 13 10 0 255 42 13 10 7]))
+      (try (make-dir dir) (catch _ nil))
+      (spit-bytes (str dir "/pic.png") content)
+      (let (port 54741
+            _sup (server/start port (static-handler dir))
+            client (tcp-connect "127.0.0.1" port))
+        (tcp-set-binary client true)
+        (tcp-send client (str "GET /pic.png HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+        (let (resp (drain-bytes client (bytes []))
+              sep (bytes-index-of resp (string->utf8-bytes "\r\n\r\n") 0)
+              body (subbytes resp (+ sep 4) (count resp))
+              head (utf8-bytes->string (subbytes resp 0 sep)))
+          (tcp-close client)
+          (server/stop port)
+          (delete-file (str dir "/pic.png"))
+          (assert= (includes? head "200 OK") true)
+          (assert= (includes? head "Content-Type: image/png") true)
+          (assert= (includes? head "Content-Length: 12") true)
+          ; the body bytes on the wire equal the file's raw bytes
+          (assert= (into [] (bytes->list body)) [137 80 78 71 13 10 0 255 42 13 10 7]))))))

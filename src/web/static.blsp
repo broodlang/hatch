@@ -7,9 +7,9 @@
   sanitized (no `..`/`.`/backslash segments) and resolved under `root` (relative to
   the working directory). A miss or a traversal attempt yields a 404.
 
-  Bodies are read with `slurp` (text), so this serves text assets — JS, CSS, HTML,
-  SVG, JSON. Binary assets (images, fonts) need byte-faithful file reads + a binary
-  socket and aren't supported yet.
+  Text assets (JS, CSS, HTML, SVG, JSON) are read as strings with `slurp`; binary assets
+  (images, fonts, video, wasm, …) are read byte-faithfully with `slurp-bytes` and served as
+  raw `bytes`, so they reach the wire uncorrupted (`text-mime?` picks the path per media type).
 
   Every response goes through `serve-body`: a strong content ETag (so an unchanged asset
   revalidates to a bodyless 304), `X-Content-Type-Options: nosniff`, `Accept-Ranges` with
@@ -33,12 +33,39 @@
    "txt" "text/plain; charset=utf-8"
    "xml" "application/xml"
    "svg" "image/svg+xml"
-   "webmanifest" "application/manifest+json"})
-; NB: only text types here. Bodies are read with `slurp` (UTF-8), so binary assets
-; (`.ico`, `.png`, fonts) would be corrupted — they're intentionally absent until there's
-; a byte-faithful file read (see docs/tcp-http-audit.md #7). An unlisted extension serves
-; as application/octet-stream, but its bytes are still slurp-mangled, so don't rely on it
-; for binary.
+   "webmanifest" "application/manifest+json"
+   ; binary types — served byte-faithfully via slurp-bytes (see `text-mime?`/`serve-binary`)
+   "png" "image/png"
+   "jpg" "image/jpeg"
+   "jpeg" "image/jpeg"
+   "gif" "image/gif"
+   "webp" "image/webp"
+   "avif" "image/avif"
+   "ico" "image/x-icon"
+   "bmp" "image/bmp"
+   "woff" "font/woff"
+   "woff2" "font/woff2"
+   "ttf" "font/ttf"
+   "otf" "font/otf"
+   "eot" "application/vnd.ms-fontobject"
+   "pdf" "application/pdf"
+   "wasm" "application/wasm"
+   "mp3" "audio/mpeg"
+   "mp4" "video/mp4"
+   "webm" "video/webm"
+   "ogg" "audio/ogg"
+   "zip" "application/zip"
+   "gz" "application/gzip"})
+
+(defn text-mime? (mime)
+  "True if `mime` is a text media type — served with `slurp` as a string. Everything else
+  (images, fonts, video, an unknown octet-stream) is read byte-faithfully with `slurp-bytes`
+  and served as raw `bytes`, so binary assets aren't UTF-8-mangled."
+  (or (starts-with? mime "text/")
+    (= mime "application/json")
+    (= mime "application/xml")
+    (= mime "application/manifest+json")
+    (= mime "image/svg+xml")))
 
 (defn extension (path)
   "The lowercase file extension of `path` (after the last dot of the last segment),
@@ -74,30 +101,42 @@
 ; ---- caching ----
 
 (defn etag (body)
-  "A strong ETag for `body`: a quoted SHA-256 prefix. Content-addressed, so it changes iff
-  the bytes change — no filesystem mtime needed, and identical across server restarts and
+  "A strong ETag for a text `body`: a quoted SHA-256 prefix. Content-addressed, so it changes
+  iff the bytes change — no filesystem mtime needed, and identical across server restarts and
   replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
   (str "\"" (substring (hash/sha256 body) 0 16) "\""))
+
+(defn bytes-etag-hash (body)
+  "A strong ETag for a binary (`bytes`) body — same quoted-SHA-256-prefix shape as `etag`."
+  (str "\"" (substring (hash/sha256-bytes body) 0 16) "\""))
 
 ; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
 ; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
 ; registry process would funnel every read through one mailbox).
 (def *etag-cache* (table))
 
-(defn cached-etag (path body)
-  "The ETag for the file at `path` (whose contents are `body`), reusing the cached hash while
-  the file's mtime+size are unchanged and recomputing it (one `hash/sha256`) only after an edit.
-  One `file-stat` (a cheap syscall) replaces hashing the whole body on every hit. Falls back
-  to a direct hash if `path` can't be stat'd."
+(defn cached-etag--via (path fresh-fn)
+  "The ETag for `path`, reusing the cached hash while the file's mtime+size are unchanged and
+  recomputing it (via `fresh-fn`, called only on a miss) after an edit. One `file-stat` (a
+  cheap syscall) replaces hashing the whole body on every hit. Shared by the text and binary
+  paths — they differ only in how the fresh tag is hashed."
   (let (st (file-stat path))
     (if (nil? st)
-      (etag body)
+      (fresh-fn)
       (let (hit (table-get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
-          (let (tag (etag body))
+          (let (tag (fresh-fn))
             (table-put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
             tag))))))
+
+(defn cached-etag (path body)
+  "The cached strong ETag for a text file `body` at `path` (see `cached-etag--via`)."
+  (cached-etag--via path (fn () (etag body))))
+
+(defn cached-bytes-etag (path body)
+  "The cached strong ETag for a binary (`bytes`) file `body` at `path`."
+  (cached-etag--via path (fn () (bytes-etag-hash body))))
 
 (defn fingerprint-shaped? (path)
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
@@ -288,10 +327,71 @@
             fresh (fresh-cached-etag path))
         (if (and fresh (if-none-match? conn fresh))
           (not-modified conn fresh (cache-control path root))
-          (let (body (try (slurp path) (catch _ nil)))
-            (if (nil? body)
-              (not-found-resp conn)
-              (serve-body conn (mime-type path) body path root (cached-etag path body)))))))))
+          ; text types are read as a string (slurp); everything else (images, fonts, video,
+          ; an unknown octet-stream) is read byte-faithfully as `bytes` (slurp-bytes)
+          (if (text-mime? (mime-type path))
+            (serve-text conn path root)
+            (serve-binary conn path root)))))))
+
+(defn serve-text (conn path root)
+  "Serve a text asset at `path`: read as a UTF-8 string and hand to `serve-body`."
+  (let (body (try (slurp path) (catch _ nil)))
+    (if (nil? body)
+      (not-found-resp conn)
+      (serve-body conn (mime-type path) body path root (cached-etag path body)))))
+
+(defn serve-binary (conn path root)
+  "Serve a binary asset at `path`: read the raw bytes (byte-faithful, never UTF-8-mangled) and
+  hand to `serve-binary-body`."
+  (let (body (try (slurp-bytes path) (catch _ nil)))
+    (if (nil? body)
+      (not-found-resp conn)
+      (serve-binary-body conn (mime-type path) body path root (cached-bytes-etag path body)))))
+
+(defn serve-binary-body (conn content-type body path dir tag)
+  "Send a `bytes` body as a cacheable static asset: content ETag (with `If-None-Match` → 304),
+  env/fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and byte ranges (`Range` →
+  206/416, else a full 200). Byte ranges are trivially correct on `bytes` (no multibyte
+  carve-out the text path needs), so any range is honoured."
+  (let (cc (cache-control path dir)
+        len (count body))
+    (cond
+      (if-none-match? conn tag) (not-modified conn tag cc)
+      else (or (serve-bytes-range conn content-type body tag cc len)
+             (send-resp (with-resp-headers conn
+                          {:content-type content-type
+                           :etag tag
+                           :cache-control cc
+                           :accept-ranges "bytes"
+                           :x-content-type-options "nosniff"})
+               200
+               body)))))
+
+(defn serve-bytes-range (conn content-type body tag cc len)
+  "Honour a `Range` request against a `bytes` body: a 206 with the sliced bytes, a 416 for an
+  unsatisfiable range, or nil (no/garbled Range) to mean 'send the whole body'."
+  (let (r (parse-range (get (get conn :headers) :range) len))
+    (cond
+      (nil? r) nil
+      (= r :unsatisfiable) (send-resp (with-resp-headers conn
+                                        {:content-type content-type
+                                         :etag tag
+                                         :cache-control cc
+                                         :accept-ranges "bytes"
+                                         :x-content-type-options "nosniff"
+                                         :content-range (str "bytes */" len)})
+                             416
+                             "")
+      else (let ([start end] r)
+             (send-resp (with-resp-headers conn
+                          {:content-type content-type
+                           :etag tag
+                           :cache-control cc
+                           :accept-ranges "bytes"
+                           :x-content-type-options "nosniff"
+                           :content-range (str "bytes " start "-" end "/" len)})
+               206
+               (subbytes body start (+ end 1)))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the
