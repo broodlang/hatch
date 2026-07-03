@@ -1,0 +1,32 @@
+(defmodule web-application-test
+  (:use web/application)
+  (:use test))
+
+(describe "valid-level"
+  (test "known levels pass through"
+    (assert= (valid-level "debug") :debug)
+    (assert= (valid-level "info") :info)
+    (assert= (valid-level "warn") :warn)
+    (assert= (valid-level "error") :error))
+  (test "missing → debug"
+    (assert= (valid-level nil) :debug))
+  (test "an unrecognized value falls back to debug (not a dead unknown level)"
+    (assert= (valid-level "infoo") :debug)
+    (assert= (valid-level "verbose") :debug)))
+
+(describe "start-children"
+  (test "calls each child thunk in order"
+    (do
+      (start-children [(fn () (send (self) :first))
+                       (fn () (send (self) :second))]
+        0)
+      (assert= (receive (m m) (after 200 :timeout)) :first)
+      (assert= (receive (m m) (after 200 :timeout)) :second)))
+  (test "no children is a no-op"
+    (assert= (start-children [] 0) nil))
+  (test "a failing child aborts the boot naming which child and why"
+    (let (msg (try
+                (do (start-children [(fn () nil) (fn () (error "db unreachable"))] 0) nil)
+                (catch e (error-message e))))
+      (assert= (includes? msg "child #1") true)
+      (assert= (includes? msg "db unreachable") true))))

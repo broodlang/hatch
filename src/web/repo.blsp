@@ -9,19 +9,46 @@
   a thin wrapper around it) to your route handlers."
   (:alias repo))
 
+; Upper bound (ms) on waiting for a single warmup probe to answer. A probe that never
+; replies (its worker was killed, or the connection wedged) can't pin startup past this.
+(def *warmup-timeout-ms* 5000)
+
 (defn start (adaptor opts schemas)
-  "Open a repo over `adaptor` with `opts`, migrate every schema in `schemas`,
-  then fire a warmup query on every pool connection in parallel so the first
-  HTTP request pays no cold-start cost. Returns the repo handle."
+  "Open a repo over `adaptor` with `opts`, migrate every schema in `schemas`, then fire a
+  warmup query on every pool connection in parallel so the first HTTP request pays no
+  cold-start cost. Returns the repo handle.
+
+  Fails the boot loudly instead of returning a dead handle: a migration error is re-raised
+  with context, and if *every* warmup probe fails (database unreachable or rejecting queries)
+  `start` raises rather than hand back a pool that only errors on the first real request.
+  Warmup collection is bounded by `*warmup-timeout-ms*` so a wedged connection can't hang
+  startup forever."
   (let (r (repo/open adaptor opts)
-        size (get opts :size 5)
-        parent (self))
+        size (get opts :size 5))
     (dolist (s schemas)
-      (repo/migrate r s))
+      (try
+        (repo/migrate r s)
+        (catch e (error "web/repo: migration failed: " (error-message e)))))
+    (warmup r size)
+    r))
+
+(defn warmup (r size)
+  "Fire `size` parallel `SELECT 1` probes across the pool and wait for their results. Raises
+  if none succeed — a fully unreachable pool must fail the boot, not pass as healthy."
+  (let (parent (self))
     (dolist (_ (range size))
       (spawn (fn ()
-        (try (repo/exec r "SELECT 1" []) (catch _ nil))
-        (send parent [:warmed]))))
-    (dolist (_ (range size))
-      (receive ([:warmed] nil)))
-    r))
+        (send parent [:warmed (try (do (repo/exec r "SELECT 1" []) true) (catch _ false))]))))
+    (when (and (> size 0) (= (warmup--collect size 0) 0))
+      (error "web/repo: warmup failed on every connection — the database is unreachable or "
+        "rejecting queries; refusing to start with a dead pool"))))
+
+(defn warmup--collect (remaining ok)
+  "Collect the `remaining` warmup replies, returning how many succeeded. Each wait is bounded
+  by `*warmup-timeout-ms*`; a probe that never answers stops the collection with the count so
+  far (so a wedged connection can't pin startup)."
+  (if (= remaining 0)
+    ok
+    (receive
+      ([:warmed good] (warmup--collect (- remaining 1) (if good (+ ok 1) ok)))
+      (after *warmup-timeout-ms* ok))))

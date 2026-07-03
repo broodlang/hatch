@@ -47,16 +47,25 @@
 
 ;; ---- public API -------------------------------------------------------------
 
+(defn valid-level (raw)
+  "The log level keyword for `$LOG_LEVEL` value `raw`, validated against the known set
+  (`:debug`/`:info`/`:warn`/`:error`). An unrecognized value (e.g. a typo like `infoo`) falls
+  back to `:debug` rather than becoming an unknown keyword the logger backend would choke on
+  (silently dropping every line). `nil`/unset → `:debug`."
+  (let (lvl (keyword (or raw "debug")))
+    (if (contains? application--labels lvl) lvl :debug)))
+
 (defn default-logger-opts ()
   "Logger opts derived from env vars:
-  - `$LOG_LEVEL`  — `:debug` / `:info` / `:warn` / `:error` (default `:debug`)
+  - `$LOG_LEVEL`  — `:debug` / `:info` / `:warn` / `:error` (default `:debug`; an
+                    unrecognized value falls back to `:debug`, see `valid-level`)
   - `$LOG_FORMAT` — `\"json\"` for NDJSON (log shippers), else colored text
   - `$NO_COLOR`   — set to disable ANSI colors (the no-color.org convention)"
   (let (fmt (cond
               (= (getenv "LOG_FORMAT") "json") application--json-line
               (nil? (getenv "NO_COLOR"))       application--color-line
               else                             application--text-line))
-    {:level    (keyword (or (getenv "LOG_LEVEL") "debug"))
+    {:level    (valid-level (getenv "LOG_LEVEL"))
      :backends [(fn-backend (fn (line) (print line)) {:format fmt})]}))
 
 (defn start (config)
@@ -73,6 +82,16 @@
         children    (get config :children []))
     (when logger-opts
       (start-logger logger-opts))
-    (dolist (child children)
-      (child))
+    (start-children children 0)
     (receive (:shutdown nil))))
+
+(defn start-children (children i)
+  "Call each zero-arg child thunk in order. If one raises, abort the boot with an error that
+  names which child failed (and why) instead of an opaque stack — a half-started application
+  should fail loudly at boot, not park and serve in a broken state."
+  (when (not (empty? children))
+    (try
+      ((first children))
+      (catch e
+        (error "web/application: child #" i " failed to start: " (error-message e))))
+    (start-children (rest children) (+ i 1))))
