@@ -1,0 +1,57 @@
+(defmodule http-upload-test
+  (:alias http/server)
+  (:use web/conn)
+  (:use test))
+
+(defn b (s) (string->utf8-bytes s))
+
+; A file whose bytes include 0xFF (invalid UTF-8) and embedded CR/LF — proof the whole
+; server path (binary socket → carrier → parse → conn → multipart) preserves raw bytes.
+(def file-bytes (bytes [137 80 78 71 13 10 0 255 60 62]))
+
+(defn multipart-request (boundary)
+  "A raw multipart/form-data POST as bytes: one text field + one binary file part."
+  (let (body (bytes-concat
+               (b (str "--" boundary "\r\n"
+                    "Content-Disposition: form-data; name=\"title\"\r\n\r\n"
+                    "hello world\r\n"))
+               (b (str "--" boundary "\r\n"
+                    "Content-Disposition: form-data; name=\"avatar\"; filename=\"pic.png\"\r\n"
+                    "Content-Type: image/png\r\n\r\n"))
+               file-bytes
+               (b (str "\r\n--" boundary "--\r\n"))))
+    (bytes-concat
+      (b (str "POST /upload HTTP/1.1\r\n"
+           "Host: localhost\r\n"
+           "Content-Type: multipart/form-data; boundary=" boundary "\r\n"
+           "Content-Length: " (byte-length body) "\r\n"
+           "Connection: close\r\n\r\n"))
+      body)))
+
+(defn upload-handler (reporter)
+  "A conn handler that extracts the uploaded file + a text field and reports them back."
+  (fn (request)
+    (let (conn (build request)
+          f (file conn "avatar"))
+      (send reporter [:upload {:title (param conn "title")
+                               :filename (get f :filename)
+                               :ct (get f :content-type)
+                               :bytes (into [] (bytes->list (get f :bytes)))}])
+      (conn->response (send-resp conn 200 "ok")))))
+
+(describe "multipart file upload end-to-end through the server"
+  (test "a binary file POSTed over a real socket reaches the handler byte-for-byte"
+    (let (me (self)
+          port 54739
+          _sup (server/start port (upload-handler me))
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      (tcp-send client (multipart-request "XBOUNDARY42"))
+      (let (up (receive ([:upload u] u) (after 5000 :timeout)))
+        (tcp-close client)
+        (server/stop port)
+        (assert= (get up :title) "hello world")
+        (assert= (get up :filename) "pic.png")
+        (assert= (get up :ct) "image/png")
+        ; the raw file bytes survived the binary socket, carrier round-trip, and parser
+        (assert= (get up :bytes) [137 80 78 71 13 10 0 255 60 62])))))

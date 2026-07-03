@@ -1,0 +1,117 @@
+(defmodule http/multipart
+  "Parser for `multipart/form-data` request bodies — file uploads (RFC 7578). Given the raw
+  body `bytes` and the boundary from the Content-Type, `parse` splits the body on the
+  boundary, reads each part's headers, and returns:
+
+    {:fields {name → string}
+     :files  {name → {:filename … :content-type … :bytes <raw bytes>}}}
+
+  A part with a `filename` in its Content-Disposition is a file (its content is kept as raw
+  `bytes`, so a handler can `spit-bytes` it to disk or hash it); a part without one is a text
+  field (decoded to a string, like a form field). Parsing is done entirely on `bytes` so
+  binary content is never UTF-8-mangled.")
+
+; The part header/body separator and a reusable CRLF, as bytes.
+(def sep-bytes (string->utf8-bytes "\r\n\r\n"))
+
+(defn parse (body boundary)
+  "Parse `body` (bytes) as multipart/form-data delimited by `boundary`. Returns
+  `{:fields … :files …}` (see the module doc). A nil/blank boundary, or a body with no
+  boundary in it, yields empty maps."
+  (if (or (nil? boundary) (blank? boundary))
+    {:fields {} :files {}}
+    (let (delim (string->utf8-bytes (str "--" boundary))
+          parts (filter (fn (p) (not (nil? p))) (map parse-part (split-parts body delim))))
+      (fold add-part {:fields {} :files {}} parts))))
+
+; ---- splitting on the boundary ----
+
+(defn split-parts (body delim)
+  "The raw byte-segments between successive `--boundary` delimiters (each still wrapped in the
+  CRLFs the format puts around a part). The preamble before the first delimiter and the
+  closing `--boundary--` are naturally excluded."
+  (let (first-at (bytes-index-of body delim 0))
+    (if (< first-at 0)
+      (list)
+      (split-parts--loop body delim (byte-length delim) (+ first-at (byte-length delim)) (list)))))
+
+(defn split-parts--loop (body delim dlen pos acc)
+  (let (next-at (bytes-index-of body delim pos))
+    (if (< next-at 0)
+      (reverse acc)
+      (split-parts--loop body delim dlen (+ next-at dlen) (cons (subbytes body pos next-at) acc)))))
+
+; ---- one part ----
+
+(defn crlf-at? (b i)
+  "True if bytes `i`,`i+1` of `b` are CR,LF."
+  (and (>= i 0) (>= (byte-length b) (+ i 2))
+    (= (byte-at b i) 13) (= (byte-at b (+ i 1)) 10)))
+
+(defn part-trim (seg)
+  "Strip the CRLF that follows the opening boundary and the CRLF that precedes the next one,
+  leaving just the part (headers + body)."
+  (let (n (byte-length seg)
+        start (if (crlf-at? seg 0) 2 0)
+        end (if (crlf-at? seg (- n 2)) (- n 2) n))
+    (if (>= start end) (subbytes seg 0 0) (subbytes seg start end))))
+
+(defn parse-part (seg)
+  "Parse one boundary-delimited segment into `{:name :filename :content-type :bytes}`, or nil
+  if it has no header/body separator (a malformed or empty part)."
+  (let (part (part-trim seg)
+        at (bytes-index-of part sep-bytes 0))
+    (if (< at 0)
+      nil
+      (let (hdrs (parse-part-headers (utf8-bytes->string (subbytes part 0 at)))
+            content (subbytes part (+ at 4) (byte-length part))
+            disp (get hdrs "content-disposition" ""))
+        {:name (cd-param disp "name")
+         :filename (cd-param disp "filename")
+         :content-type (get hdrs "content-type")
+         :bytes content}))))
+
+(defn parse-part-headers (s)
+  "A part's header block → `lowercased-name → value` map. Parts don't repeat headers, so
+  last-wins is fine."
+  (fold (fn (m line)
+          (let (ci (index-of line ":"))
+            (if (= ci -1)
+              m
+              (assoc m
+                (lower (trim (substring line 0 ci)))
+                (trim (substring line (+ ci 1) (string-length line)))))))
+    {}
+    (filter (fn (l) (not (blank? l))) (string-split s "\r\n"))))
+
+(defn cd-param (disposition key)
+  "The quoted value of a Content-Disposition parameter — `name` / `filename` — i.e. the text
+  between the quotes after `key=\"`. nil if the parameter isn't present."
+  (let (needle (str key "=\"")
+        i (index-of disposition needle))
+    (if (= i -1)
+      nil
+      (let (start (+ i (string-length needle))
+            end (index-of-from disposition "\"" start))
+        (if (= end -1) nil (substring disposition start end))))))
+
+(defn index-of-from (s needle from)
+  "Index of `needle` in `s` at or after `from`, or -1."
+  (let (i (index-of (substring s from (string-length s)) needle))
+    (if (= i -1) -1 (+ from i))))
+
+(defn add-part (acc part)
+  "Route a parsed part into `:fields` (no filename → a text field, decoded to a string) or
+  `:files` (has filename → keep raw bytes). A nameless part is dropped."
+  (let (name (get part :name))
+    (cond
+      (nil? name) acc
+      (nil? (get part :filename)) (assoc-in acc [:fields name] (part-text (get part :bytes)))
+      else (assoc-in acc [:files name] {:filename (get part :filename)
+                                        :content-type (get part :content-type)
+                                        :bytes (get part :bytes)}))))
+
+(defn part-text (b)
+  "Decode a text field's bytes to a string, safely (a field is text; fall back to empty on
+  the pathological case of invalid UTF-8 rather than failing the whole parse)."
+  (try (utf8-bytes->string b) (catch _e "")))

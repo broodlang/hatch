@@ -53,6 +53,23 @@
       {}
       (string-split s "&"))))
 
+;; ---- carrier <-> bytes (byte-faithful request bodies) ----
+; The server reads connections in binary mode and accumulates the request as a *carrier*
+; string — one codepoint (0-255) per wire byte — so the text-based request parser stays
+; byte-correct while the body survives intact (a binary upload isn't UTF-8-lossily mangled).
+; These recover the real bytes / decoded text of the parsed body at the conn boundary.
+
+(defn carrier->bytes (carrier)
+  "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
+  the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
+  upload) from the parsed carrier body."
+  (bytes (map char->int (string->list carrier))))
+
+(defn carrier->text (carrier)
+  "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
+  bytes aren't valid UTF-8 (a binary body — which text handlers don't read anyway)."
+  (try (utf8-bytes->string (carrier->bytes carrier)) (catch _e carrier)))
+
 ;; ---- request body parser ----
 
 (defn content-type-base (headers)
@@ -62,6 +79,29 @@
     (if (nil? ct)
       ""
       (lower (trim (first (string-split ct ";")))))))
+
+(defn content-type-param (headers key)
+  "The value of a Content-Type parameter — e.g. `(content-type-param headers \"boundary\")`
+  from `multipart/form-data; boundary=abc`. Case-insensitive on the parameter name; a quoted
+  value is unquoted. nil when the header or parameter is absent."
+  (let (ct (get headers :content-type))
+    (if (nil? ct)
+      nil
+      (ct-param--find (rest (string-split ct ";")) (lower key)))))
+
+(defn ct-param--find (parts key)
+  (if (empty? parts)
+    nil
+    (let (p (trim (first parts))
+          eq (index-of p "="))
+      (if (and (not (= eq -1)) (= (lower (trim (substring p 0 eq))) key))
+        (ct-param--unquote (trim (substring p (+ eq 1) (string-length p))))
+        (ct-param--find (rest parts) key)))))
+
+(defn ct-param--unquote (v)
+  (if (and (>= (string-length v) 2) (starts-with? v "\"") (ends-with? v "\""))
+    (substring v 1 (- (string-length v) 1))
+    v))
 
 (defn parse-body-params (headers body)
   "Parse a request `body` into a string→value params map based on its Content-Type:
