@@ -57,13 +57,78 @@
    :pattern (parse-pattern pattern)
    :handler handler})
 
+(defn method-match? (r-method method)
+  "True if a route declared for `r-method` should serve a request of `method`: an exact
+  match, an `any` route (`\"*\"`), or a `HEAD` request against a `GET` route (HTTP requires
+  HEAD be served by the GET handler, with the body dropped later at serialization)."
+  (or (= r-method method)
+    (= r-method "*")
+    (and (= method "HEAD") (= r-method "GET"))))
+
 (defn dispatch (routes conn)
-  "Find the first matching route and call its handler with the conn.
-  Path params are merged into conn :params.
-  Returns a response conn, or a 404 if no route matches."
+  "Find the first route matching the request's method and path, and call its handler with
+  the conn (path params merged into `:params`). With no method+path match, returns a 405
+  (`Allow` header listing the path's methods) when the path exists for other methods, a 204
+  `Allow` response to an `OPTIONS` probe, or a 404 when the path matches nothing."
   (let (method (get conn :method)
-        segments (path-segments (get conn :path)))
-    (dispatch--find routes conn method segments)))
+        segments (path-segments (get conn :path))
+        found (find-route routes method segments))
+    (if found
+      (let (route (first found)
+            matched (second found)
+            conn (assoc conn :params (into (get conn :params {}) matched)))
+        (->resp-conn conn ((get route :handler) conn)))
+      (dispatch--no-match routes conn method segments))))
+
+(defn find-route (routes method segments)
+  "The first route whose method and path both match, as `[route params]`, or nil."
+  (cond
+    (nil? routes) nil
+    else (let (route (first routes)
+               matched (and (method-match? (get route :method) method)
+                         (match-path (get route :pattern) segments)))
+           (if matched
+             (list route matched)
+             (find-route (rest routes) method segments)))))
+
+(defn path-methods (routes segments)
+  "The distinct declared methods of every route whose *path* matches `segments`
+  (regardless of HTTP method) — the raw material for a 405 `Allow` header."
+  (dedupe (map (fn (r) (get r :method))
+            (filter (fn (r) (match-path (get r :pattern) segments)) routes))))
+
+(defn mem? (x xs)
+  "True if `x` is `=` to some element of list `xs`."
+  (not (empty? (filter (fn (y) (= y x)) xs))))
+
+(defn dedupe (xs)
+  "`xs` with later duplicates removed, order preserved."
+  (reverse (fold (fn (acc x) (if (mem? x acc) acc (cons x acc))) (list) xs)))
+
+(defn allow-header (methods)
+  "The `Allow` header value for a path serving `methods`: the declared methods, plus
+  `HEAD` wherever `GET` is served, plus `OPTIONS` (which we answer automatically)."
+  (let (with-head (if (mem? "GET" methods) (concat methods (list "HEAD")) methods))
+    (join ", " (dedupe (concat with-head (list "OPTIONS"))))))
+
+(defn dispatch--no-match (routes conn method segments)
+  "No route matched the method+path. If the path exists for other methods, answer 405
+  (or, for an OPTIONS probe, a 204) with an `Allow` header; otherwise 404."
+  (let (methods (path-methods routes segments))
+    (if (empty? methods)
+      (not-found-resp conn
+        (str "<h1>404 Not Found</h1><p>No route for "
+          (escape-html method)
+          " /"
+          (escape-html (join "/" segments))
+          "</p>"))
+      (let (allow (allow-header methods)
+            conn (put-resp-header conn :allow allow))
+        (if (= method "OPTIONS")
+          (send-resp conn 204 "")
+          (send-resp conn
+            405
+            (str "<h1>405 Method Not Allowed</h1><p>Allowed: " (escape-html allow) "</p>")))))))
 
 (defn ->resp-conn (conn result)
   "Coerce a handler's return value into a response conn. A handler usually returns a
@@ -71,25 +136,6 @@
   for a 200 response with that body — `(get \"/hi\" (fn (conn) \"hello\"))`. Anything else
   (an already-built conn) passes through untouched."
   (if (string? result) (html-resp conn result) result))
-
-(defn dispatch--find (routes conn method segments)
-  (if (nil? routes)
-    (not-found-resp conn
-      (str "<h1>404 Not Found</h1><p>No route for "
-        (escape-html method)
-        " /"
-        (escape-html (join "/" segments))
-        "</p>"))
-    (let (route (first routes)
-          r-method (get route :method)
-          r-pattern (get route :pattern)
-          r-handler (get route :handler)
-          matched (and (or (= r-method method) (= r-method "*"))
-                    (match-path r-pattern segments)))
-      (if matched
-        (let (conn (assoc conn :params (into (get conn :params {}) matched)))
-          (->resp-conn conn (r-handler conn)))
-        (dispatch--find (rest routes) conn method segments)))))
 
 ; ---- route pipelines: `through` groups ----
 
@@ -156,12 +202,16 @@
       else (list (with-plugs (compile-route clause) ctx)))))
 
 (defn compile-route (clause)
-  "A plain `(method path handler)` clause → a `{:route :setup}` map (no :setup)."
+  "A plain `(method path handler)` clause → a `{:route :setup}` map (no :setup). The handler
+  is wrapped in a thunk `(fn (conn) (handler conn))` so its symbol resolves when the route
+  runs, not when the (load-time) route table is built — a plain handler defined in another
+  module (`web/views/home/index`) may not be loaded yet when this router's module loads.
+  `parse-pattern` still runs once, at build; only the handler lookup is deferred."
   (let (verb (first clause)
         path (first (rest clause))
         handler (first (rest (rest clause)))
         method (if (= verb 'any) "*" (upper (name verb))))
-    {:route (list 'make-route method path handler)
+    {:route (list 'make-route method path (list 'fn (list 'route--conn) (list handler 'route--conn)))
      :setup nil}))
 
 (defn compile-live (clause session)
@@ -244,8 +294,9 @@
   this is where auth hooks in:
     (through [(web/auth/basic-auth \"admin\" \"admin\")]
       (get \"/dev\" dev-info))
-  `plugs` is any expression evaluating to a list/vector of plugs; it's re-evaluated per
-  request, so `(basic-auth …)`-style plug factories are fine.
+  `plugs` is any expression evaluating to a list/vector of plugs; it's evaluated once when
+  the route table is built (at load), so `(basic-auth …)`-style plug factories run once and
+  their resulting plug is reused per request — correct for pure config factories.
 
   Groups nest in any order and compose. Auth a whole admin live-session at once:
     (through [(web/auth/require-admin)]
@@ -256,7 +307,16 @@
   live-session (socket side) — neither the mount nor live-navigation can skip auth."
   (let (compiled (compile-routes routes empty-route-ctx)
         route-forms (map (fn (clause) (get clause :route)) compiled)
-        setup-forms (apply concat (map (fn (clause) (or (get clause :setup) (list))) compiled)))
+        setup-forms (apply concat (map (fn (clause) (or (get clause :setup) (list))) compiled))
+        ; Build the route table ONCE at load, not on every request. Previously the
+        ; `(make-route …)` calls sat in the router body, so `parse-pattern` re-split and
+        ; re-allocated every pattern per request; hoisting them to a module-level def
+        ; parses each pattern once. (A `through` group's plug expression is likewise
+        ; evaluated once now — plug factories like `(basic-auth …)` are pure config, so
+        ; reusing the built plug across requests is correct and cheaper.)
+        routes-sym (symbol (str (name router-name) "--routes")))
     (cons 'do
       (concat setup-forms
-        (list (list 'defn router-name (list 'conn) (list 'dispatch (cons 'list route-forms) 'conn)))))))
+        (list
+          (list 'def routes-sym (cons 'list route-forms))
+          (list 'defn router-name (list 'conn) (list 'dispatch routes-sym 'conn)))))))
