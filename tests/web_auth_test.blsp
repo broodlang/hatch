@@ -35,4 +35,21 @@
       (assert= (get conn :status) 401)))
 
   (test "basic-auth-creds decodes the Basic header to user:pass"
-    (assert= (basic-auth-creds (conn-with-auth (basic "alice" "s3cret"))) "alice:s3cret")))
+    (assert= (basic-auth-creds (conn-with-auth (basic "alice" "s3cret"))) "alice:s3cret"))
+
+  (test "malformed base64 in the header fails closed to nil (no crash → no 500 DoS)"
+    (assert= (basic-auth-creds (conn-with-auth "Basic @@@not-base64@@@")) nil))
+
+  (test "a malformed Authorization header still yields a clean 401, not an error"
+    (let (conn ((basic-auth "admin" "admin") (conn-with-auth "Basic @@@")))
+      (assert= (halted? conn) true)
+      (assert= (get conn :status) 401)))
+
+  (test "a realm with a quote/newline can't break the WWW-Authenticate header"
+    (let (conn ((basic-auth "admin" "admin" "ev\"il\r\nX-Injected: 1")
+                 (conn-with-auth nil))
+          challenge (get-in conn [:resp-headers :www-authenticate]))
+      (assert= (includes? challenge "\"") true)      ; the syntactic quotes remain
+      (assert= (includes? challenge "evil") true)    ; the realm text, minus the stray quote
+      (assert= (includes? challenge "\r") false)
+      (assert= (includes? challenge "\n") false))))

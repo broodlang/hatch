@@ -15,6 +15,7 @@
      :path (get request :path)
      :query (get request :query)
      :params (into query-params body-params)
+     :body-params body-params
      :headers headers
      :body (get request :body)
      :cookies (parse-cookies headers)
@@ -75,6 +76,12 @@
 (defn param (conn key)
   "Get a request param by string key."
   (get (get conn :params) key))
+
+(defn body-param (conn key)
+  "Get a request param that came from the request *body* (form/JSON) by string key — not the
+  query string. Use this where a query-string value must not be honored, e.g. a CSRF token
+  (which leaks via Referer/logs/history if accepted from the URL)."
+  (get (get conn :body-params {}) key))
 
 (defn header (conn key)
   "Get a request header by keyword key."

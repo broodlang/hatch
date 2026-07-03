@@ -118,8 +118,17 @@
   (let (dir (get spec :dir "static")
         files (or (get spec :files) (list))
         manifest (fold (fn (m file) (assoc m file (fingerprint-file dir file))) {} files))
-    (spit (str dir "/cache-manifest") (static/render-manifest manifest))
+    (write-manifest (str dir "/cache-manifest") (static/render-manifest manifest))
     manifest))
+
+(defn write-manifest (path text)
+  "Write the fingerprint manifest atomically: `spit` to a temp file, then `rename-file` over
+  the target. A rename is atomic on the same filesystem, so a concurrent reader (e.g. a
+  live-serving process during a redeploy) sees either the old manifest or the new one — never
+  a half-written, truncated file that would mint broken asset URLs."
+  (let (tmp (str path ".tmp"))
+    (spit tmp text)
+    (rename-file tmp path)))
 
 (defn fingerprint-file (dir file)
   "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name."

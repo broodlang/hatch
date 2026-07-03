@@ -51,9 +51,11 @@
     (or (= m "GET") (= m "HEAD") (= m "OPTIONS"))))
 
 (defn submitted-token (conn)
-  "The token the client sent: the `_csrf_token` body/query param, or the `X-CSRF-Token`
-  header (for fetch/JSON clients)."
-  (or (param conn field-name) (header conn header-key)))
+  "The token the client sent: the `_csrf_token` *body* param (form/JSON), or the
+  `X-CSRF-Token` header (for fetch/JSON clients). Deliberately not read from the query
+  string — a token in a URL leaks through Referer headers, proxy/access logs, and browser
+  history, and would otherwise be honored on an unsafe method."
+  (or (body-param conn field-name) (header conn header-key)))
 
 (defn token-ok? (conn)
   "True if the submitted token is present and matches the session token (constant-time)."
