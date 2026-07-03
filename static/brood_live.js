@@ -92,10 +92,11 @@ const BroodLive = (() => {
         this._patch(this._assemble());
       } else if (msg.event === "diff") {
         // Minimal update: a map of {slotIndex: newValue} for the dynamics that changed.
-        // Patch them into our dynamics array, re-interleave with the (unchanged) statics,
-        // and morph — so the wire only ever carries what actually changed.
+        // A value is a string (scalar slot), a full comprehension `{__comp__:[…]}`, or a
+        // per-item comprehension diff `{__cdiff__:{i:html}, n}` — _applySlot folds each into
+        // our dynamics array. Then re-interleave with the (unchanged) statics and morph.
         const d = msg.d || {};
-        for (const k in d) this.dynamics[k] = d[k];
+        for (const k in d) this.dynamics[k] = this._applySlot(this.dynamics[k], d[k]);
         this._patch(this._assemble());
       } else if (msg.event === "redirect") {
         // The navigate target isn't a live view (or the server forced a full load via
@@ -120,6 +121,27 @@ const BroodLive = (() => {
       }
     }
 
+    // The HTML for one dynamic slot value: a comprehension slot ({__comp__:[items]}) joins
+    // its per-item HTML; a scalar slot is already its string; null/undefined render empty.
+    _slotHtml(v) {
+      if (v && v.__comp__) return v.__comp__.join("");
+      return v == null ? "" : v;
+    }
+
+    // Fold a diff value for slot `k` onto its previous value. A `{__cdiff__, n}` patches the
+    // previous comprehension's item array in place (set changed items, grow/shrink to n);
+    // anything else (a string, or a full `{__comp__}`) replaces the slot outright.
+    _applySlot(prev, val) {
+      if (val && val.__cdiff__ !== undefined) {
+        const items = (prev && prev.__comp__) ? prev.__comp__.slice() : [];
+        const changed = val.__cdiff__ || {};
+        for (const j in changed) items[j] = changed[j];
+        items.length = val.n; // grow (new items are all in `changed`) or shrink
+        return { __comp__: items };
+      }
+      return val;
+    }
+
     // Assemble the full HTML by interleaving statics with the current dynamics:
     // s0 + d0 + s1 + d1 + ... + sn  (statics has one more entry than dynamics).
     _assemble() {
@@ -127,7 +149,7 @@ const BroodLive = (() => {
       let out = "";
       for (let i = 0; i < s.length; i++) {
         out += s[i];
-        if (i < d.length) out += d[i];
+        if (i < d.length) out += this._slotHtml(d[i]);
       }
       return out;
     }

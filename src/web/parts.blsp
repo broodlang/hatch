@@ -13,8 +13,10 @@
   only the *changed* dynamic slots — the client re-interleaves and morphs.
 
   Literal structure (tags, literal attrs, literal text) is folded into statics. A non-literal
-  hole — a value expression, a dynamic attribute value, an `(if …)`/`(for …)`/component call,
-  or anything else — becomes a dynamic. For correctness over granularity, an element whose
+  hole — a value expression, a dynamic attribute value, an `(if …)`/component call, or
+  anything else — becomes a dynamic. A `(for …)` comprehension becomes a *comprehension slot*
+  (`comp`) that renders per item, so a single changed row diffs on its own (see below). For
+  correctness over granularity, an element whose
   attrs-position is an ambiguous non-literal form (could be a dynamic attrs map or a child)
   is emitted whole as one opaque dynamic. Idiomatic views (and all `.bml`-compiled ones) put
   an attrs map on every element, so this fallback rarely fires.
@@ -42,6 +44,22 @@
 (defn list-form? (node)
   "True for a literal `(list …)` form, whose items we can split individually."
   (and (pair? node) (= (first node) 'list)))
+
+(defn for-form? (node)
+  "True for a `(for (binder coll …) body)` comprehension (what `:for` lowers to). It
+  compiles to a per-item comprehension slot, so a single changed row diffs on its own
+  instead of re-shipping the whole list."
+  (and (pair? node) (= (first node) 'for)))
+
+(defn comp-form (node)
+  "Transform `(for spec body…)` into the dynamic form for its comprehension slot:
+  `(web/parts/comp (for spec (web/template/render <body>)))`. The `for` yields one HTML
+  string per item; `comp` tags that list so interleave/diff treat it per item. The per-item
+  HTML concatenated equals a whole-list render, so the interleave invariant still holds."
+  (let (spec (first (rest node))
+        body-forms (rest (rest node))
+        body (if (= (count body-forms) 1) (first body-forms) (cons 'do body-forms)))
+    (list 'web/parts/comp (list 'for spec (list 'web/template/render body)))))
 
 ; ---- builder state: {:s reversed-completed-statics :d reversed-dynamic-forms :cur current} ----
 
@@ -78,6 +96,7 @@
     (float? node) (emit-static st (str node))
     (bool? node) st
     (elem? node) (walk-element st node)
+    (for-form? node) (emit-dynamic st (comp-form node))
     (list-form? node) (fold walk st (rest node))
     else (emit-dynamic st (list 'web/template/render node))))
 
@@ -109,6 +128,31 @@
     {:statics (apply vector statics)
      :dynamics dynamics}))
 
+; ---- comprehension slots (per-item diffing) ----
+; A `:for`/`(for …)` renders to a *list* of per-item HTML strings tagged by `comp`, rather
+; than one opaque string. interleave joins them (so the full HTML is unchanged), and the
+; diff compares item-by-item — so editing one row of a 1000-row list ships that one row, not
+; the whole list. On the wire a comp slot is `{"__comp__":[…items…]}` on join and
+; `{"__cdiff__":{idx:html},"n":count}` on update; brood_live.js patches the item array.
+
+(defn comp (items)
+  "Tag a comprehension's per-item HTML strings as one slot value so the runtime diffs the
+  list per item instead of treating the whole thing as one opaque string."
+  {:__comp__ (into [] items)})
+
+(defn comp? (v)
+  "True if `v` is a comprehension slot value (from `comp`)."
+  (and (map? v) (contains? v :__comp__)))
+
+(defn comp-items (v)
+  "The per-item HTML string vector of a comprehension slot value."
+  (get v :__comp__))
+
+(defn slot->html (v)
+  "The HTML for a rendered slot value: a comprehension slot joins its items; a scalar slot
+  is already its HTML string."
+  (if (comp? v) (join "" (comp-items v)) v))
+
 ; ---- runtime: assemble HTML and diff dynamic slots ----
 
 (defn interleave (statics dynamics)
@@ -119,13 +163,14 @@
   (if (>= i n)
     acc
     (let (acc (str acc (nth statics i))
-          acc (if (< i (count dynamics)) (str acc (nth dynamics i)) acc))
+          acc (if (< i (count dynamics)) (str acc (slot->html (nth dynamics i))) acc))
       (interleave--at statics dynamics (+ i 1) n acc))))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole
   count is fixed by the template, so the two are normally equal length; if they ever differ
-  (defensive), every new slot is reported."
+  (defensive), every new slot is reported. A changed comprehension slot carries a per-item
+  diff (`slot-diff`) rather than its whole re-rendered list."
   (if (= (count old) (count new))
     (diff--at old new 0 (count new) {})
     (diff--at (list) new 0 (count new) {})))
@@ -133,10 +178,32 @@
 (defn diff--at (old new i n acc)
   (if (>= i n)
     acc
-    (diff--at old
-      new
-      (+ i 1)
-      n
+    (let (nv (nth new i)
+          same (and (< i (count old)) (= (nth old i) nv)))
+      (diff--at old new (+ i 1) n
+        (if same
+          acc
+          (assoc acc i (slot-diff (if (< i (count old)) (nth old i) nil) nv)))))))
+
+(defn slot-diff (o nv)
+  "The wire value for a changed slot: a per-item comprehension diff when both old and new
+  are comprehensions, else the whole new value (a string, or a full comprehension marker
+  when a slot just became — or was replaced by — a comprehension)."
+  (if (and (comp? o) (comp? nv))
+    (comp-slot-diff (comp-items o) (comp-items nv))
+    nv))
+
+(defn comp-slot-diff (old-items new-items)
+  "A per-item diff of a comprehension slot: `{:__cdiff__ {item-idx html} :n new-count}` —
+  only the items whose HTML changed, plus the new item count so the client grows/shrinks the
+  list. Items past the old length are all reported (they're new)."
+  {:__cdiff__ (comp-diff--at old-items new-items 0 (count new-items) {})
+   :n (count new-items)})
+
+(defn comp-diff--at (old new i n acc)
+  (if (>= i n)
+    acc
+    (comp-diff--at old new (+ i 1) n
       (if (and (< i (count old)) (= (nth old i) (nth new i)))
         acc
         (assoc acc i (nth new i))))))
