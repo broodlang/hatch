@@ -61,6 +61,52 @@
         body (if (= (count body-forms) 1) (first body-forms) (cons 'do body-forms)))
     (list 'web/parts/comp (list 'for spec (list 'web/template/render body)))))
 
+; ---- change tracking: which model keys each dynamic slot reads ----
+; So the session can re-render only the slots a state change actually affects (Phoenix
+; HEEx-style), `form-deps` statically finds the `model` keys a dynamic form reads via
+; `(get model <literal>)`. It over-approximates on purpose: any *opaque* use of the model —
+; the bare `model` symbol, a dynamic `(get model k)` key, `model` passed to a function —
+; yields `:all`, meaning "always re-render this slot". Under-approximating would ship a stale
+; render, so when unsure we re-render.
+
+(defn model-get-form? (form model-sym)
+  "True if `form` is `(get <model-sym> <literal-key> …)` — a statically pinned model read."
+  (and (pair? form)
+    (>= (count form) 3)
+    (= (first form) 'get)
+    (= (first (rest form)) model-sym)
+    (let (k (first (rest (rest form)))) (or (keyword? k) (string? k)))))
+
+(defn deps-merge (a b)
+  "Combine two dependency results — `:all` (opaque) dominates; otherwise concatenate keys."
+  (if (or (= a :all) (= b :all)) :all (concat a b)))
+
+(defn deps-seq (forms model-sym)
+  "Merge the dependencies of every form in `forms`."
+  (fold (fn (acc x) (deps-merge acc (deps-of x model-sym))) (list) forms))
+
+(defn deps-of (form model-sym)
+  "The model keys `form` reads, or `:all` for any opaque model use. See the section comment."
+  (cond
+    (model-get-form? form model-sym)
+      ; the pinned key, plus deps in any args past the key (e.g. a default expression)
+      (deps-merge (list (first (rest (rest form))))
+        (deps-seq (rest (rest (rest form))) model-sym))
+    (= form model-sym) :all
+    (pair? form) (deps-seq form model-sym)
+    (vector? form) (deps-seq form model-sym)
+    ; a map literal in the form (e.g. an attrs map inside a comprehension body) — its keys
+    ; and values can themselves read the model
+    (map? form) (deps-merge (deps-seq (keys form) model-sym) (deps-seq (vals form) model-sym))
+    else (list)))
+
+(defn form-deps (form model-sym)
+  "The dependency descriptor for a dynamic slot `form` whose model parameter is `model-sym`:
+  a vector of the model keys it reads, or `:all` if it uses the model in a way that can't be
+  pinned to specific keys (so it must always re-render). Called at `deflive` expansion time."
+  (let (d (deps-of form model-sym))
+    (if (= d :all) :all (into [] d))))
+
 ; ---- builder state: {:s reversed-completed-statics :d reversed-dynamic-forms :cur current} ----
 
 (defn emit-static (st s)

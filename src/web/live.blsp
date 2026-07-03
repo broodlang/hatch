@@ -458,23 +458,57 @@
 
 (defn push-full (sock view buf)
   "Send the whole view — `{:event \"join\" :s statics :d dynamics}` — and record the dynamic
-  slots so later updates diff against them. The client assembles the HTML and morphs."
+  slots (and the model they were rendered from) so later updates diff and change-track
+  against them. The client assembles the HTML and morphs."
   (let (statics (get view :render-static)
-        dynamics ((get view :render-dynamic) (get view :model))
-        view (assoc view :dynamics dynamics))
+        model (get view :model)
+        dynamics ((get view :render-dynamic) model)
+        view (assoc view :dynamics dynamics :render-model model))
     (if (send-msg sock {:event "join" :s statics :d dynamics})
       (session-recv sock view buf)
       (close-session sock))))
 
+(defn slot-dirty? (dep old-model model)
+  "True if a slot with dependency descriptor `dep` must re-render: `:all` (an opaque model
+  use) always re-renders; otherwise only when one of its dependency keys changed value."
+  (if (= dep :all)
+    true
+    (slot-dirty?--at dep old-model model 0 (count dep))))
+
+(defn slot-dirty?--at (dep old-model model i n)
+  (if (>= i n)
+    false
+    (if (not (= (get old-model (nth dep i)) (get model (nth dep i))))
+      true
+      (slot-dirty?--at dep old-model model (+ i 1) n))))
+
+(defn recompute-dynamics (view old model)
+  "The new dynamic slot values, re-rendering only the slots whose model dependencies changed
+  since `old` was rendered and reusing the prior value for the rest (Phoenix HEEx-style
+  change tracking). Falls back to a full re-render when the tracking metadata is absent (an
+  older spec) or no prior model was recorded."
+  (let (slots (get view :render-slots)
+        deps (get view :slot-deps)
+        old-model (get view :render-model))
+    (if (or (nil? slots) (nil? deps) (nil? old-model))
+      ((get view :render-dynamic) model)
+      (into []
+        (map (fn (i) (if (slot-dirty? (nth deps i) old-model model)
+                       ((nth slots i) model)
+                       (nth old i)))
+          (range (count old)))))))
+
 (defn push-diff (sock view buf)
-  "Re-render the dynamic slots and send only those that changed — `{:event \"diff\" :d
-  {idx val}}`. No prior dynamics (no join yet) → a full push; nothing changed → send nothing."
+  "Re-render the dynamic slots that a state change actually touched and send only those that
+  changed — `{:event \"diff\" :d {idx val}}`. No prior dynamics (no join yet) → a full push;
+  nothing changed → send nothing."
   (if (nil? (get view :dynamics))
     (push-full sock view buf)
     (let (old (get view :dynamics)
-          dynamics ((get view :render-dynamic) (get view :model))
+          model (get view :model)
+          dynamics (recompute-dynamics view old model)
           changed (web/parts/diff-dynamics old dynamics)
-          view (assoc view :dynamics dynamics))
+          view (assoc view :dynamics dynamics :render-model model))
       (if (= (count changed) 0)
         (session-recv sock view buf)
         (if (send-msg sock {:event "diff" :d changed})
@@ -897,6 +931,25 @@
                               'render-dynamic
                               render-dyn-args
                               (cons 'vector (get parts :dynamics)))
+        ; Change tracking (Phoenix HEEx-style): a per-slot render fn plus, in parallel, the
+        ; set of model keys each slot reads. `push-diff` re-renders only the slots whose
+        ; dependencies changed and reuses the prior HTML for the rest — so a one-field update
+        ; doesn't re-run every hole (or re-render a whole `:for` list). The model symbol is
+        ; the render clause's first arg; if it isn't a plain symbol (e.g. a destructure), we
+        ; can't track keys, so every slot is `:all` (always re-render) — correct, just not
+        ; granular.
+        model-sym (if (and (pair? render-dyn-args) (symbol? (first render-dyn-args)))
+                    (first render-dyn-args)
+                    nil)
+        render-slots-defn (list 'def 'render-slots
+                            (cons 'vector
+                              (map (fn (d) (list 'fn render-dyn-args d)) (get parts :dynamics))))
+        slot-deps-defn (list 'def 'slot-deps
+                         (apply vector
+                           (map (fn (d) (if (nil? model-sym)
+                                          :all
+                                          (web/parts/form-deps d model-sym)))
+                             (get parts :dynamics))))
         ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
         ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
         ; view that doesn't opt in just ignores such messages, keeping its model.
@@ -922,6 +975,8 @@
       render-defn
       render-static-defn
       render-dynamic-defn
+      render-slots-defn
+      slot-deps-defn
       (list 'defn
         'handle-event
         (list 'event--name 'event--params 'event--model)
@@ -939,6 +994,8 @@
          :render 'render
          :render-static 'render-static
          :render-dynamic 'render-dynamic
+         :render-slots 'render-slots
+         :slot-deps 'slot-deps
          :handle-event 'handle-event
          :handle-tick 'handle-tick
          :handle-info 'handle-info

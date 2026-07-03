@@ -1,0 +1,61 @@
+(defmodule web-change-tracking-test
+  ; deflive + live-spec + recompute-dynamics / slot-dirty?
+  (:use web/live)
+  (:use web/parts)
+  (:use web/test)
+  (:use test))
+
+;; A view with two independent dynamic slots: a heading bound to :title and a counter bound
+;; to :count. Change tracking must let a change to one skip re-rendering the other.
+(deflive
+  (mount (params) {:title "hi" :count 0})
+  (render (model) [:div {} [:h1 {} (get model :title)] [:span {} (str (get model :count))]])
+  (on "inc" (params model) (assoc model :count (inc (get model :count)))))
+
+(defn view-from-spec (spec model)
+  "A session-style view map primed as if push-full had just rendered `model`."
+  (merge spec {:model model
+               :dynamics ((get spec :render-dynamic) model)
+               :render-model model}))
+
+(describe "change tracking — slot deps"
+  (test "each slot records exactly the model keys it reads"
+    (assert= (get (live-spec) :slot-deps) [[:title] [:count]])))
+
+(describe "change tracking — transparency"
+  ; The optimization must be invisible: re-rendering only the dirty slots must produce the
+  ; exact same dynamics vector as re-rendering all of them.
+  (test "recompute-dynamics equals a full render-dynamic for the new model"
+    (let (spec (live-spec)
+          v (view-from-spec spec {:title "hi" :count 0}))
+      (assert= (recompute-dynamics v (get v :dynamics) {:title "hi" :count 5})
+        ((get spec :render-dynamic) {:title "hi" :count 5}))
+      (assert= (recompute-dynamics v (get v :dynamics) {:title "yo" :count 5})
+        ((get spec :render-dynamic) {:title "yo" :count 5})))))
+
+(describe "change tracking — selectivity"
+  ; Seed each slot with a sentinel its render fn would never produce, so a reused (not
+  ; re-rendered) slot is provably the old value.
+  (test "an unchanged slot's key → the old value is reused, not recomputed"
+    (let (spec (live-spec)
+          v (merge (view-from-spec spec {:title "hi" :count 0})
+              {:dynamics ["SENTINEL-TITLE" "0"]})
+          out (recompute-dynamics v (get v :dynamics) {:title "hi" :count 7}))
+      ; :title unchanged → slot 0 kept as the sentinel; :count changed → slot 1 re-rendered
+      (assert= (nth out 0) "SENTINEL-TITLE")
+      (assert= (nth out 1) "7")))
+  (test "a changed key re-renders its slot"
+    (let (spec (live-spec)
+          v (merge (view-from-spec spec {:title "hi" :count 0})
+              {:dynamics ["SENTINEL-TITLE" "0"]})
+          out (recompute-dynamics v (get v :dynamics) {:title "bye" :count 0}))
+      (assert= (nth out 0) "bye")     ; :title changed → re-rendered
+      (assert= (nth out 1) "0"))))    ; :count unchanged → reused
+
+(describe "slot-dirty?"
+  (test ":all is always dirty" (assert= (slot-dirty? :all {:a 1} {:a 1}) true))
+  (test "a changed dependency key is dirty" (assert= (slot-dirty? [:a] {:a 1} {:a 2}) true))
+  (test "an unchanged dependency key is clean (other keys ignored)"
+    (assert= (slot-dirty? [:a] {:a 1 :b 9} {:a 1 :b 8}) false))
+  (test "empty deps → never dirty (a constant slot)"
+    (assert= (slot-dirty? [] {:a 1} {:a 2}) false)))
