@@ -136,6 +136,32 @@
       (assert= (wait-roster-without "B" 60) true)
       (exit a :kill))))
 
+;; Cross-node roster merge. True multi-node needs two runtimes (a node is one OS process), so
+;; the merge + replication is verified end-to-end by a separate two-node run; these cover the
+;; pure merge logic and the single-node no-op.
+(describe "cross-node roster merge"
+  (test "the merged roster is local presences plus every peer's reported roster"
+    (let (state (web/presence/presence--put {} "room" 1 "local-a" {})
+          remotes {:nodeB {"room" (list {:key "remote-b" :meta {}})}
+                   :nodeC {"room" (list {:key "remote-c" :meta {}})}}
+          keys (map (fn (e) (get e :key)) (web/presence/presence--merged state remotes "room")))
+      (assert= (member? "local-a" keys) true)
+      (assert= (member? "remote-b" keys) true)
+      (assert= (member? "remote-c" keys) true)
+      (assert= (count keys) 3)))
+  (test "a topic with only remote members still merges"
+    (let (remotes {:nodeB {"room" (list {:key "b" :meta {}})}})
+      (assert= (map (fn (e) (get e :key)) (web/presence/presence--merged {} remotes "room"))
+        (list "b"))))
+  (test "remote-topics-of lists the topics a departed peer was on"
+    (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}}
+          ts (web/presence/presence--remote-topics-of remotes :nodeB))
+      (assert= (member? "r1" ts) true)
+      (assert= (member? "r2" ts) true)
+      (assert= (count ts) 2)))
+  (test "remote-nodes is empty on a single (non-distributed) runtime"
+    (assert= (remote-nodes) (list))))
+
 ; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
 ; primitive) — hard-killing the shared :hatch-presence singleton would race any concurrent
 ; test using it (a killed process drops its in-flight mailbox).

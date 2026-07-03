@@ -16,8 +16,14 @@
       (render (model) …))
 
   Roster updates go to the present members themselves (they are the audience). A non-present
-  observer that also wants live updates can pair this with web/pubsub on the same topic; this
-  node-local registry is the foundation a distributed/CRDT version would layer onto."
+  observer that also wants live updates can pair this with web/pubsub on the same topic.
+
+  Cluster-aware: when the runtime is a distributed node (`node-start` + `connect`/`ensure-link`
+  to peers, wired once in the app's entry point), a topic's roster is the *merge* of every
+  node's presences. Each node owns its local presences and replicates each topic's roster to
+  peers on every change (a state-based CRDT); a member is notified by its own node, and a
+  departed peer's presences are dropped on node-down. With no node started it's a single-node
+  registry, unchanged."
   ; send-info — push the roster to a tracked session
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
@@ -34,43 +40,70 @@
 ; (pid → monitor ref, local — to demonitor a pid once its last presence drops, so monitors
 ; don't pile up across a session's live-navigations).
 
+; The loop carries a third value, `remotes` (`{peer-node → {topic → roster}}`): the last
+; roster every peer reported for each topic. It's replicated peer-owned state, re-derivable
+; from re-syncs, so it is NOT vaulted — only local `state` is. The roster a member sees is the
+; *merge*: this node's local presences plus every peer's reported roster (see below).
+
 (defn presence--boot ()
-  "Start (or restart) the registry: recover state from the vault, re-monitor each restored
-  pid (a dead one re-fires [:down] at once and is removed), then enter the loop."
+  "Start (or restart) the registry: recover local state from the vault, re-monitor each
+  restored pid (a dead one re-fires [:down] at once and is removed), then enter the loop with
+  empty peer state (it re-populates as peers sync)."
   (let (state (pull-snapshot vault-name {})
         refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (presence--all-pids state)))
-    (presence--loop state refs)))
+    (presence--loop state refs {})))
 
-(defn presence--save (state refs)
-  "Mirror the new state to the vault, then continue the loop."
+(defn presence--save (state refs remotes)
+  "Mirror the new *local* state to the vault (peer state isn't durable), then continue."
   (mirror vault-name state)
-  (presence--loop state refs))
+  (presence--loop state refs remotes))
 
-(defn presence--loop (state refs)
+(defn presence--loop (state refs remotes)
   (receive
+    ; A local track: update local state, tell peers our new roster for the topic, and notify
+    ; local members with the merged (local + peers) roster.
     ([:track topic pid key meta] (let (refs2 (if (contains? refs pid)
                                                refs
                                                (assoc refs pid (monitor pid)))
                                        state2 (presence--put state topic pid key meta))
-                                   (presence--notify state2 topic)
-                                   (presence--save state2 refs2)))
+                                   (presence--broadcast-sync state2 topic)
+                                   (presence--notify-merged state2 remotes topic)
+                                   (presence--save state2 refs2 remotes)))
     ([:untrack topic pid]
       (let (state2 (presence--remove state topic pid)
             ; demonitor on the last untrack so monitors don't leak
             refs2 (if (presence--tracked? state2 pid) refs (presence--drop-ref refs pid)))
-        (presence--notify state2 topic)
-        (presence--save state2 refs2)))
-    ; a tracked session died — drop it everywhere and refresh each affected topic; its
+        (presence--broadcast-sync state2 topic)
+        (presence--notify-merged state2 remotes topic)
+        (presence--save state2 refs2 remotes)))
+    ; a tracked session died — drop it everywhere, resync + refresh each affected topic; its
     ; monitor already fired, so just drop the ref ([:down ref pid reason])
     ([:down _ pid _] (let (affected (presence--topics-of state pid)
                            state2 (presence--remove-pid state pid))
-                       (dolist (t affected) (presence--notify state2 t))
-                       (presence--save state2 (dissoc refs pid))))
-    ; reply with the roster, keyed by the caller's ref `r` so a late reply can't be
+                       (dolist (t affected)
+                         (presence--broadcast-sync state2 t)
+                         (presence--notify-merged state2 remotes t))
+                       (presence--save state2 (dissoc refs pid) remotes)))
+    ; A peer reported its roster for `topic`. Record it, and if this is the first we've heard
+    ; from that node, monitor it (for node-down) and reply with our full state so it learns our
+    ; existing presences (a one-time bootstrap — converges without looping). Then notify local
+    ; members with the refreshed merge. Peer state isn't vaulted, so recurse without a save.
+    ([:presence-sync from topic roster]
+      (let (fresh (not (contains? remotes from))
+            remotes2 (assoc-in remotes [from topic] roster))
+        (when fresh (monitor-node from) (presence--sync-all-to state from))
+        (presence--notify-merged state remotes2 topic)
+        (presence--loop state refs remotes2)))
+    ; A peer node went down — forget its presences and refresh every topic it was on.
+    ([:nodedown node] (let (topics (presence--remote-topics-of remotes node)
+                            remotes2 (dissoc remotes node))
+                        (dolist (t topics) (presence--notify-merged state remotes2 t))
+                        (presence--loop state refs remotes2)))
+    ; reply with the merged roster, keyed by the caller's ref `r` so a late reply can't be
     ; mismatched to another call
     ([:list topic from r] (do
-                            (send from [:list r (presence--roster state topic)])
-                            (presence--loop state refs)))))
+                            (send from [:list r (presence--merged state remotes topic)])
+                            (presence--loop state refs remotes)))))
 
 (defn presence--tracked? (state pid)
   "True if `pid` is still tracked on any topic."
@@ -126,10 +159,56 @@
   "The public roster for `topic`: a list of {:key :meta} (pids dropped)."
   (map (fn (e) {:key (get e :key) :meta (get e :meta)}) (presence--entries state topic)))
 
-(defn presence--notify (state topic)
-  "Push the current `topic` roster to every member present on it."
-  (let (roster (presence--roster state topic))
+; ---- cross-node roster replication ----
+; Presence is cluster-aware when the runtime is a distributed node (node-start + connect/
+; ensure-link, wired in the app's entry point). Each node owns its LOCAL presences and
+; replicates each topic's roster to peers on every change; the roster a member sees is the
+; merge of the local presences and every peer's last-reported roster. A member is only ever
+; notified by its OWN node (its pid is local there). node-down purges a departed peer. With no
+; node started, `(nodes)` is empty and every peer step is a no-op — single-node behaviour is
+; unchanged.
+
+(defn remote-nodes ()
+  "Connected peer node names, or empty when this runtime isn't a distributed node."
+  (or (try (nodes) (catch _e nil)) (list)))
+
+(defn presence--remote-roster (remotes topic)
+  "The concatenation of every peer's last-reported roster for `topic`."
+  (apply concat (map (fn (kv) (get (first (rest kv)) topic (list))) (entries remotes))))
+
+(defn presence--merged (state remotes topic)
+  "The full roster for `topic`: this node's local presences plus every peer's reported roster."
+  (concat (presence--roster state topic) (presence--remote-roster remotes topic)))
+
+(defn presence--notify-merged (state remotes topic)
+  "Push the merged `topic` roster to every LOCAL member present on it. Remote members are
+  notified by their own node (their pid lives there), so we never send to a remote pid."
+  (let (roster (presence--merged state remotes topic))
     (dolist (e (presence--entries state topic)) (send-info (get e :pid) {:presence roster}))))
+
+(defn presence--sync-to (target-node from-node topic roster)
+  "Best-effort: report `from-node`'s `roster` for `topic` to `target-node`'s registry."
+  (try (send {:name :hatch-presence :node target-node} [:presence-sync from-node topic roster])
+    (catch _e nil)))
+
+(defn presence--broadcast-sync (state topic)
+  "Tell every peer node this node's current local roster for `topic` (state-based
+  replication). A no-op with no peers."
+  (let (me (node-name)
+        roster (presence--roster state topic))
+    (dolist (n (remote-nodes)) (presence--sync-to n me topic roster))))
+
+(defn presence--sync-all-to (state target-node)
+  "Send this node's full local rosters (every topic) to `target-node` — the one-time bootstrap
+  when a peer is first seen, so it learns our already-tracked presences."
+  (let (me (node-name))
+    (dolist (kv (entries state))
+      (presence--sync-to target-node me (first kv) (presence--roster state (first kv))))))
+
+(defn presence--remote-topics-of (remotes node)
+  "The topics a departed `node` had presences on (so a node-down only refreshes those)."
+  (let (rr (get remotes node {}))
+    (map (fn (kv) (first kv)) (entries rr))))
 
 (defn presence--all-pids (state)
   "Every distinct tracked pid across all topics — for re-monitoring on recovery."
