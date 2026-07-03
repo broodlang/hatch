@@ -7,18 +7,32 @@
   the body goes out as UTF-8, so a body with any multibyte char (− … ●, emoji)
   has more bytes than `string-length`, and reporting the codepoint count truncates
   the response in the client."
-  (count (string->utf8-bytes s)))
+  (count (seq (string->utf8-bytes s))))
 
-(defn format-response (resp)
-  "Serialize a response map to an HTTP/1.1 response string ready to send over TCP."
+(defn bodyless-status? (status)
+  "True for a status that MUST NOT carry a message body or `Content-Length` (RFC 7230
+  §3.3.1/§3.3.2): 1xx informational, 204 No Content, and 304 Not Modified. Emitting either
+  on these desyncs a keep-alive client, which reads the next response's bytes as this body."
+  (or (and (>= status 100) (< status 200))
+    (= status 204)
+    (= status 304)))
+
+(defn format-response (resp &optional (head? false))
+  "Serialize a response map to an HTTP/1.1 response string ready to send over TCP.
+
+  `head?` serializes a response to a HEAD request: the status line and headers (including
+  the `Content-Length` the equivalent GET would report) are emitted, but the body is not.
+  A 1xx/204/304 response carries no body or `Content-Length` regardless of `head?`; the
+  `Connection` header is emitted only when the caller set one (http/server decides
+  keep-alive vs close and stamps it), never forced here."
   (let (status (get resp :status 200)
         body (get resp :body "")
+        bodyless (bodyless-status? status)
         headers (get resp :headers {})
-        headers (if (contains? headers :content-type)
+        headers (if (or bodyless (contains? headers :content-type))
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8"))
-        headers (assoc headers :content-length (str (byte-length body)))
-        headers (assoc headers :connection "keep-alive"))
+        headers (if bodyless headers (assoc headers :content-length (str (byte-length body)))))
     (str "HTTP/1.1 "
       status
       " "
@@ -26,7 +40,7 @@
       "\r\n"
       (join "" (map format-header (entries headers)))
       "\r\n"
-      body)))
+      (if (or bodyless head?) "" body))))
 
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect

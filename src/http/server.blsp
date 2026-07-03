@@ -227,10 +227,18 @@
                    {:method (get request :method)
                     :path (get request :path)
                     :status (get response :status 200)})
-                 (tcp-send sock (format-response response))
-                 (if (keep-alive? request response)
-                   (worker--run sock handler ws-handler config remainder)
-                   (tcp-close sock)))))
+                 ; Decide keep-alive once, then tell the client the truth: stamp the
+                 ; Connection header to match what we actually do with the socket (the old
+                 ; code always said "keep-alive" even when it closed). HEAD suppresses the
+                 ; body while keeping the headers the equivalent GET would send.
+                 (let (ka (keep-alive? request response)
+                       response (assoc-in response
+                                  [:headers :connection]
+                                  (if ka "keep-alive" "close")))
+                   (tcp-send sock (format-response response (= (get request :method) "HEAD")))
+                   (if ka
+                     (worker--run sock handler ws-handler config remainder)
+                     (tcp-close sock))))))
            ; Waiting for more request bytes: bound the wait so a client that connects and
            ; then stalls (slow-loris) can't pin this worker forever — answer 408 and close.
            ([:incomplete] (receive
@@ -255,8 +263,15 @@
                            (tcp-close sock))))))
 
 (defn keep-alive? (request response)
-  "True if the connection should be reused for another request."
-  (let (req-conn (lower (get-in request [:headers :connection] ""))
+  "True if the connection should be reused for another request. Either side signalling
+  `Connection: close` ends it. Otherwise the default follows the request's HTTP version:
+  HTTP/1.1 persists unless closed, HTTP/1.0 closes unless the request opted in with
+  `Connection: keep-alive` (RFC 7230 §6.3)."
+  (let (version (get request :version "1.1")
+        req-conn (lower (get-in request [:headers :connection] ""))
         resp-conn (lower (get-in response [:headers :connection] "")))
-    (and (not (= req-conn "close"))
-      (not (= resp-conn "close")))))
+    (cond
+      (= resp-conn "close") false
+      (= req-conn "close") false
+      (= version "1.0") (= req-conn "keep-alive")
+      else true)))

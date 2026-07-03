@@ -17,7 +17,7 @@
           ((req-line & header-lines)
             (match (parse-request-line req-line)
               ([:error e] [:error e])
-              ([:ok method path query]
+              ([:ok method path query version]
                 (let (headers (parse-headers header-lines)
                       buflen (string-length buf))
                   (cond
@@ -47,6 +47,7 @@
                                                                ([:ok body remainder] [:ok (mk-request method
                                                                                             path
                                                                                             query
+                                                                                            version
                                                                                             headers
                                                                                             body)
                                                                                        remainder]))
@@ -64,17 +65,19 @@
                              [:ok (mk-request method
                                     path
                                     query
+                                    version
                                     headers
                                     (substring buf body-start body-end))
                                (substring buf body-end buflen)]))))))))))))
 
-(defn mk-request (method path query headers body)
-  "Build the request map shared by the Content-Length and chunked paths."
+(defn mk-request (method path query version headers body)
+  "Build the request map shared by the Content-Length and chunked paths. `version` is the
+  request line's HTTP version ('1.1' or '1.0'), which drives keep-alive defaulting."
   {:method method
    :path path
    :query query
    :params (parse-query query)
-   :version "1.1"
+   :version version
    :headers headers
    :body body})
 
@@ -197,28 +200,55 @@
   "The integer Content-Length, or 0 when absent. Assumes `valid-content-length?`."
   (if (nil? cl) 0 (string->number (trim cl))))
 
+(defn http-version (token)
+  "Extract the numeric HTTP version ('1.1', '1.0') from a request-line version token like
+  `HTTP/1.1`; defaults to '1.1' when the token is missing the `/version` suffix."
+  (let (slash (index-of (str token) "/"))
+    (if (= slash -1) "1.1" (substring token (+ slash 1) (string-length token)))))
+
 (defn parse-request-line (line)
-  "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query]` or `[:error msg]`."
+  "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query version]` or
+  `[:error msg]`. `version` is the numeric HTTP version ('1.1'/'1.0')."
   (let (parts (string-split line " "))
     (match parts
-      ((method target _version & _) (let (qi (index-of target "?"))
-                                      (if (= qi -1)
-                                        [:ok (upper method) target ""]
-                                        [:ok (upper method)
-                                          (substring target 0 qi)
-                                          (substring target (+ qi 1) (string-length target))])))
+      ((method target version & _) (let (qi (index-of target "?")
+                                         v (http-version version))
+                                     (if (= qi -1)
+                                       [:ok (upper method) target "" v]
+                                       [:ok (upper method)
+                                         (substring target 0 qi)
+                                         (substring target (+ qi 1) (string-length target))
+                                         v])))
       (_ [:error (str "invalid request line: " line)]))))
+
+(defn header-join-sep (k)
+  "The separator RFC 7230 §3.2.2 uses to combine a repeated header `k` into one value:
+  `; ` for `Cookie` (its own list syntax), `, ` for every other field. `Set-Cookie` is a
+  response header, so it never reaches request parsing."
+  (if (= k :cookie) "; " ", "))
+
+(defn combine-header (k prior v)
+  "Fold a repeated header value `v` onto any `prior` value for key `k`. First value wins
+  when there's no prior. `Content-Length` must stay a single token, so identical
+  duplicates collapse to the first (a *differing* duplicate is rejected separately by
+  `content-length-conflict?`); every other repeat is combined per RFC 7230 §3.2.2."
+  (cond
+    (nil? prior) v
+    (= k :content-length) prior
+    else (str prior (header-join-sep k) v)))
 
 (defn parse-headers (lines)
   "Parse a list of raw header lines into a keyword→string map. Splits on the first
   `:` and trims the value, so the space after the colon is optional (`Host:localhost`
-  is valid HTTP and must not be dropped)."
+  is valid HTTP and must not be dropped). A header repeated across lines is combined
+  into a single comma-separated value (RFC 7230 §3.2.2) — `; `-separated for `Cookie` —
+  rather than last-wins, so multi-valued `X-Forwarded-For`/`Forwarded`/`Via` survive."
   (fold (fn (m line)
           (let (ci (index-of line ":"))
             (if (= ci -1)
               m
               (let (k (keyword (lower (trim (substring line 0 ci))))
                     v (trim (substring line (+ ci 1) (string-length line))))
-                (assoc m k v)))))
+                (assoc m k (combine-header k (get m k) v))))))
     {}
     lines))

@@ -2,13 +2,15 @@
 
 (describe "parse-request-line"
   (test "GET no query"
-    (assert= (parse-request-line "GET / HTTP/1.1") [:ok "GET" "/" ""]))
+    (assert= (parse-request-line "GET / HTTP/1.1") [:ok "GET" "/" "" "1.1"]))
   (test "GET with query"
-    (assert= (parse-request-line "GET /search?q=foo HTTP/1.1") [:ok "GET" "/search" "q=foo"]))
+    (assert= (parse-request-line "GET /search?q=foo HTTP/1.1") [:ok "GET" "/search" "q=foo" "1.1"]))
   (test "POST path"
-    (assert= (parse-request-line "POST /users HTTP/1.1") [:ok "POST" "/users" ""]))
+    (assert= (parse-request-line "POST /users HTTP/1.1") [:ok "POST" "/users" "" "1.1"]))
   (test "lowercase method normalized"
-    (assert= (parse-request-line "get / HTTP/1.1") [:ok "GET" "/" ""]))
+    (assert= (parse-request-line "get / HTTP/1.1") [:ok "GET" "/" "" "1.1"]))
+  (test "HTTP/1.0 version parsed"
+    (assert= (parse-request-line "GET / HTTP/1.0") [:ok "GET" "/" "" "1.0"]))
   (test "garbage returns error"
     (let (r (parse-request-line "GARBAGE"))
       (assert= (first r) :error))))

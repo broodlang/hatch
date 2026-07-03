@@ -85,7 +85,31 @@
       (assert= (includes? r "HTTP/1.1 404 Not Found") true)))
   (test "custom header included"
     (let (r (format-response (redirect "/new")))
-      (assert= (includes? r "Location: /new") true))))
+      (assert= (includes? r "Location: /new") true)))
+  (test "does not force a Connection header (http/server sets it)"
+    (let (r (format-response (ok "hi")))
+      (assert= (includes? r "Connection:") false)))
+  (test "emits whatever Connection the caller set"
+    (let (r (format-response {:status 200 :body "hi" :headers {:connection "close"}}))
+      (assert= (includes? r "Connection: close") true))))
+
+(describe "format-response: bodyless statuses (RFC 7230)"
+  (test "204 carries no body or Content-Length"
+    (let (r (format-response {:status 204 :body "should be dropped"}))
+      (assert= (includes? r "HTTP/1.1 204 No Content") true)
+      (assert= (includes? r "Content-Length:") false)
+      (assert= (includes? r "should be dropped") false)))
+  (test "304 carries no body or Content-Length"
+    (let (r (format-response {:status 304 :body "x"}))
+      (assert= (includes? r "Content-Length:") false)
+      (assert= (includes? r "\r\n\r\nx") false))))
+
+(describe "format-response: HEAD"
+  (test "keeps the GET Content-Length but drops the body"
+    (let (r (format-response (ok "hello") true))
+      (assert= (includes? r "Content-Length: 5") true)
+      (assert= (includes? r "\r\n\r\nhello") false)
+      (assert= (ends-with? r "\r\n\r\n") true))))
 
 ; Audit #2 — HTTP response splitting. A header value carrying CR/LF must not inject a
 ; new header line; format-header strips them.
