@@ -1,0 +1,43 @@
+(defmodule http-multipart-test
+  (:use http/multipart)
+  (:use http/util)
+  (:use test))
+
+(defn b (s) (string->utf8-bytes s))
+
+;; A realistic multipart body: one text field ("title") and one binary file part ("avatar")
+;; whose content deliberately includes 0xFF (invalid UTF-8) and embedded CR/LF bytes — to
+;; prove the parser splits on the boundary (not on CRLF) and keeps binary content intact.
+(def png-bytes (bytes [137 80 78 71 0 255 13 10]))
+(def body
+  (bytes-concat
+    (b "--BOUND\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n")
+    (b (str "--BOUND\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n"
+         "Content-Type: image/png\r\n\r\n"))
+    png-bytes
+    (b "\r\n--BOUND--\r\n")))
+
+(describe "content-type-param (boundary extraction)"
+  (test "reads the boundary"
+    (assert= (content-type-param {:content-type "multipart/form-data; boundary=BOUND"} "boundary")
+      "BOUND"))
+  (test "case-insensitive param name + quoted value"
+    (assert= (content-type-param {:content-type "multipart/form-data; Boundary=\"x y\""} "boundary")
+      "x y"))
+  (test "nil when absent"
+    (assert= (content-type-param {:content-type "text/plain"} "boundary") nil)))
+
+(describe "multipart parse"
+  (test "a text field is decoded to a string under :fields"
+    (assert= (get-in (parse body "BOUND") [:fields "title"]) "Hello"))
+  (test "a file part keeps filename + content-type"
+    (let (f (get-in (parse body "BOUND") [:files "avatar"]))
+      (assert= (get f :filename) "a.png")
+      (assert= (get f :content-type) "image/png")))
+  (test "file content is kept as raw bytes, byte-for-byte (binary + embedded CRLF survive)"
+    (let (f (get-in (parse body "BOUND") [:files "avatar"]))
+      (assert= (into [] (bytes->list (get f :bytes))) [137 80 78 71 0 255 13 10])))
+  (test "a body with no boundary present yields empty maps"
+    (assert= (parse (b "not multipart at all") "BOUND") {:fields {} :files {}}))
+  (test "a blank boundary yields empty maps"
+    (assert= (parse body "") {:fields {} :files {}})))

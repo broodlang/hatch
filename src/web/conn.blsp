@@ -1,23 +1,37 @@
 (defmodule web/conn
   "Request/response context value — the Conn."
-  ; parse-body-params — merge form/JSON body fields into :params
-  (:use http/util))
+  ; parse-body-params / carrier->bytes / content-type-param — body parsing + byte-faithful bodies
+  (:use http/util)
+  ; parse — multipart/form-data (file upload) body parsing
+  (:use http/multipart))
 
 (defn build (request)
   "Construct a Conn from a raw parsed request map. `:params` merges the request's query
   params (already parsed by http/request) with any form/JSON body params, body winning on
   a key clash; the router later merges path params on top. Request cookies are parsed from
-  the `Cookie` header into `:cookies`."
+  the `Cookie` header into `:cookies`.
+
+  The request `:body` arrives as a byte-faithful *carrier* string (one codepoint per wire
+  byte, from the binary-mode reader). The conn exposes it two ways: `:body` (decoded to UTF-8
+  text, for form/JSON/text handlers) and `:body-bytes` (the raw bytes, for binary payloads).
+  A `multipart/form-data` upload is parsed here: its text fields merge into `:params`, and its
+  file parts land in `:files` as `{name → {:filename :content-type :bytes}}`."
   (let (headers (get request :headers {})
         query-params (get request :params {})
-        body-params (parse-body-params headers (get request :body "")))
+        raw (get request :body "")
+        body-bytes (carrier->bytes raw)
+        body-text (carrier->text raw)
+        parsed (parse-conn-body headers body-text body-bytes)
+        body-params (get parsed :params))
     {:method (get request :method)
      :path (get request :path)
      :query (get request :query)
      :params (into query-params body-params)
      :body-params body-params
+     :files (get parsed :files)
      :headers headers
-     :body (get request :body)
+     :body body-text
+     :body-bytes body-bytes
      :cookies (parse-cookies headers)
      :assigns {}
      :status nil
@@ -26,6 +40,16 @@
      :resp-cookies (list)
      :before-send (list)
      :halted? false}))
+
+(defn parse-conn-body (headers body-text body-bytes)
+  "Parse the request body into `{:params <string→value> :files <name→file-map>}`.
+  `multipart/form-data` splits file parts out into `:files` (raw bytes) and merges its text
+  fields into `:params`; `x-www-form-urlencoded`/JSON parse into `:params` (from the decoded
+  text) as before; any other type contributes nothing."
+  (if (= (content-type-base headers) "multipart/form-data")
+    (let (mp (http/multipart/parse body-bytes (content-type-param headers "boundary")))
+      {:params (get mp :fields) :files (get mp :files)})
+    {:params (parse-body-params headers body-text) :files {}}))
 
 (defn parse-cookies (headers)
   "Parse the request `Cookie` header into a string→string map. Values are taken verbatim
@@ -82,6 +106,16 @@
   query string. Use this where a query-string value must not be honored, e.g. a CSRF token
   (which leaks via Referer/logs/history if accepted from the URL)."
   (get (get conn :body-params {}) key))
+
+(defn files (conn)
+  "The uploaded files from a multipart/form-data request: `{name → {:filename :content-type
+  :bytes}}`. Empty when the request wasn't a multipart upload."
+  (get conn :files {}))
+
+(defn file (conn name)
+  "One uploaded file by its form field `name` — a `{:filename :content-type :bytes}` map, or
+  nil if no file was uploaded under that name. `spit-bytes` the `:bytes` to store it."
+  (get (get conn :files {}) name))
 
 (defn header (conn key)
   "Get a request header by keyword key."

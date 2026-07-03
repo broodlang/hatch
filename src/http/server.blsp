@@ -155,6 +155,12 @@
           (tcp-close client)
           (listener--loop lsock handler ws-handler config workers))
         (let (worker (spawn (worker--run client handler ws-handler config "")))
+          ; Read the connection in binary mode from the very first byte — set here, before
+          ; the socket is handed to the worker, so there's no window where the reader would
+          ; UTF-8-lossily decode (and corrupt) a binary request body (a file upload). The
+          ; worker bridges each `bytes` chunk to a byte-faithful carrier string (one codepoint
+          ; per byte), on which the text-based request parser is exactly byte-correct.
+          (tcp-set-binary client true)
           (monitor worker)
           (tcp-controlling-process client worker)
           (listener--loop lsock handler ws-handler config (cons worker workers)))))
@@ -242,11 +248,13 @@
            ; Waiting for more request bytes: bound the wait so a client that connects and
            ; then stalls (slow-loris) can't pin this worker forever — answer 408 and close.
            ([:incomplete] (receive
+                            ; binary mode → `chunk` is a `bytes` value; bridge it to the
+                            ; byte-faithful carrier string the parser accumulates in `buf`.
                             ([:tcp ~sock chunk] (worker--run sock
                                                   handler
                                                   ws-handler
                                                   config
-                                                  (str buf chunk)))
+                                                  (str buf (bytes->carrier chunk))))
                             ([:tcp-closed ~sock] nil)
                             (after (get config :read-timeout-ms)
                               (do
