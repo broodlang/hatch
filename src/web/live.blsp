@@ -13,7 +13,9 @@
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
   ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
-  (:alias proc/supervisor))
+  (:alias proc/supervisor)
+  ; emit — surface a raising view handler as a [:hatch :live :exception] event
+  (:alias telemetry))
 ; ---- JSON encode via the Encode protocol -----------------------------------
 ; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
 ; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
@@ -50,118 +52,165 @@
 
 ; ---- JSON decode (minimal, for incoming WS messages) ----
 
+; The parser walks the input as a *list of chars* (`string->list` once), consuming with
+; `first`/`rest` — both O(1). This sidesteps two brood quadratics that bite on a large inbound
+; frame (a pasted textarea, a big form): `(char-at s i)` is O(i) on a UTF-8 string (it scans
+; codepoints), and appending to a string/vector one element at a time copies it each step. So
+; string/number content is gathered into a reversed list and joined once, and array items are
+; consed and turned into a vector once at the end (never `(into vec [x])` per item). This is
+; dramatically faster than the old per-char substring/append version (a 5k-element array went
+; ~21 s → ~0.4 s); objects still assoc per key, so a pathological huge object is the remaining
+; superlinear case — bounded by *ws-max-message-bytes* and far off the tiny-event hot path.
+; Each parser takes a char list and returns `[value remaining-chars]`.
+
 (defn json-decode (s)
   "Parse a JSON string into a Brood value.
   Handles objects, arrays, strings, numbers, true/false/null."
-  (let ([v _] (json-parse--value (trim s)))
+  (let ([v _] (jp-value (string->list s)))
     v))
 
-(defn json-parse--value (s)
+(defn jp-ws? (c)
+  "True if `c` is JSON insignificant whitespace (space, tab, CR, LF)."
+  (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+
+(defn jp-skip-ws (cs)
+  "Drop leading whitespace chars from char list `cs`."
+  (match cs
+    (nil nil)
+    ((c & rest) (if (jp-ws? c) (jp-skip-ws rest) cs))))
+
+(defn jp-drop (cs n)
+  "The char list `cs` with its first `n` chars dropped."
+  (if (or (= n 0) (nil? cs)) cs (jp-drop (rest cs) (- n 1))))
+
+(defn jp-value (cs0)
+  "Parse one JSON value from char list `cs0` (leading whitespace skipped). `[value rest]`."
+  (let (cs (jp-skip-ws cs0))
+    (match cs
+      (nil [nil nil])
+      (("\"" & _) (jp-string cs))
+      (("{" & _) (jp-object cs))
+      (("[" & _) (jp-array cs))
+      (("t" & _) [true (jp-drop cs 4)])
+      (("f" & _) [false (jp-drop cs 5)])
+      (("n" & _) [nil (jp-drop cs 4)])
+      (_ (jp-number cs)))))
+
+(defn jp-join (acc)
+  "Assemble a reversed list of chars into a string in one linear pass."
+  (join "" (reverse acc)))
+
+(defn jp-string (cs)
+  "Parse the JSON string whose opening quote is the head of `cs`. `[value rest]`."
+  (jp-str-acc (rest cs) nil))
+
+(defn jp-str-acc (cs acc)
+  "Gather string chars (reversed) until the closing quote; `\\` hands off to `jp-str-esc`."
+  (match cs
+    (nil [(jp-join acc) nil])
+    (("\"" & rest) [(jp-join acc) rest])
+    (("\\" & rest) (jp-str-esc rest acc))
+    ((c & rest) (jp-str-acc rest (cons c acc)))))
+
+(defn jp-str-esc (cs acc)
+  "Decode the escape whose char heads `cs`, then resume the string. `\\uXXXX` → `jp-str-uni`."
+  (match cs
+    (nil [(jp-join acc) nil])
+    (("u" & rest) (jp-str-uni rest acc))
+    ((e & rest) (jp-str-acc rest (cons (jp-unescape e) acc)))))
+
+(defn jp-unescape (e)
+  "The character a single-letter escape `\\e` denotes. `\\\\`, `\\\"`, `\\/`, and any stray
+  escape keep the escaped char verbatim (so `e` itself)."
   (cond
-    (blank? s) [nil ""]
-    (starts-with? s "null") [nil (substring s 4 (string-length s))]
-    (starts-with? s "true") [true (substring s 4 (string-length s))]
-    (starts-with? s "false") [false (substring s 5 (string-length s))]
-    (starts-with? s "\"") (json-parse--string s)
-    (starts-with? s "{") (json-parse--object s)
-    (starts-with? s "[") (json-parse--array s)
-    else (json-parse--number s)))
+    (= e "n") "\n"
+    (= e "r") "\r"
+    (= e "t") "\t"
+    (= e "b") (int->char 8)
+    (= e "f") (int->char 12)
+    else e))
 
-(defn json-parse--string (s)
-  (json-parse--string--acc (substring s 1 (string-length s)) ""))
-
-(defn json-parse--string--acc (s acc)
-  (if (blank? s)
-    [acc ""]
-    (let (c (char-at s 0)
-          rest (substring s 1 (string-length s)))
-      (cond
-        (= c "\"") [acc rest]
-        (= c "\\") (let (esc (char-at rest 0)
-                         rest2 (substring rest 1 (string-length rest)))
-                     (cond
-                       (= esc "n") (json-parse--string--acc rest2 (str acc "\n"))
-                       (= esc "r") (json-parse--string--acc rest2 (str acc "\r"))
-                       (= esc "t") (json-parse--string--acc rest2 (str acc "\t"))
-                       (= esc "b") (json-parse--string--acc rest2 (str acc (int->char 8)))
-                       (= esc "f") (json-parse--string--acc rest2 (str acc (int->char 12)))
-                       (= esc "\\") (json-parse--string--acc rest2 (str acc "\\"))
-                       (= esc "\"") (json-parse--string--acc rest2 (str acc "\""))
-                       ; \uXXXX — JSON.stringify emits these for control chars (and a non-
-                       ; browser client could send any codepoint), so decode the hex escape
-                       (= esc "u") (json-parse--unicode rest2 acc)
-                       ; \/ and any stray escape: keep the escaped char verbatim
-                       else (json-parse--string--acc rest2 (str acc esc))))
-        else (json-parse--string--acc rest (str acc c))))))
-
-; U+FFFD, substituted for a \uXXXX escape we can't represent (see json-parse--unicode).
+; U+FFFD, substituted for a \uXXXX escape we can't represent (see jp-str-uni).
 (def json--replacement-char (int->char 65533))
 
 (defn json--hex-val (c)
   "Hex digit (0-9, a-f, case-insensitive) → its value 0-15, or -1 for a non-hex char."
   (index-of "0123456789abcdef" (lower c)))
 
-(defn json-parse--unicode (s acc)
-  "Continue `json-parse--string--acc` after a `\\u` escape: decode the next 4 hex digits of
-  `s` into a character, append it to `acc`, and resume on the remainder. Falls back to U+FFFD
-  for a malformed or unrepresentable escape — truncated, non-hex, or a lone surrogate, which
+(defn jp-str-uni (cs acc)
+  "Decode a `\\uXXXX` escape: the 4 hex chars head `cs`. Falls back to U+FFFD for a
+  malformed or unrepresentable escape — truncated, non-hex, or a lone surrogate, which
   `int->char` rejects — so a hand-crafted frame from a non-browser client can't crash the
   session. (BMP only: a surrogate pair decodes to two replacement chars, which is all
   JSON.stringify ever needs since it escapes only control chars.)"
-  (if (< (string-length s) 4)
-    [(str acc json--replacement-char) ""]
-    (let (h0 (json--hex-val (char-at s 0))
-          h1 (json--hex-val (char-at s 1))
-          h2 (json--hex-val (char-at s 2))
-          h3 (json--hex-val (char-at s 3))
-          rest (substring s 4 (string-length s)))
-      (if (or (< h0 0) (< h1 0) (< h2 0) (< h3 0))
-        (json-parse--string--acc rest (str acc json--replacement-char))
-        (let (cp (+ (* 4096 h0) (* 256 h1) (* 16 h2) h3)
-              ch (try (int->char cp) (catch e json--replacement-char)))
-          (json-parse--string--acc rest (str acc ch)))))))
+  (match cs
+    ((h0 h1 h2 h3 & rest)
+      (let (v0 (json--hex-val h0)
+            v1 (json--hex-val h1)
+            v2 (json--hex-val h2)
+            v3 (json--hex-val h3))
+        (if (or (< v0 0) (< v1 0) (< v2 0) (< v3 0))
+          (jp-str-acc rest (cons json--replacement-char acc))
+          (let (cp (+ (* 4096 v0) (* 256 v1) (* 16 v2) v3)
+                ch (try (int->char cp) (catch e json--replacement-char)))
+            (jp-str-acc rest (cons ch acc))))))
+    (_ [(jp-join (cons json--replacement-char acc)) nil])))
 
-(defn json-parse--number (s)
-  (let (end (json-parse--num-end s 0))
-    [(string->number (substring s 0 end)) (substring s end (string-length s))]))
+(defn jp-num-char? (c)
+  "True if `c` can appear in a JSON number token (digit, sign, dot, exponent)."
+  (includes? "0123456789.-+eE" c))
 
-(defn json-parse--num-end (s i)
-  (if (>= i (string-length s))
-    i
-    (let (c (char-at s i))
-      (if (includes? "0123456789.-+eE" c)
-        (json-parse--num-end s (+ i 1))
-        i))))
+(defn jp-number (cs)
+  "Parse a JSON number from the head of `cs`. `[number rest]`."
+  (jp-num-acc cs nil))
 
-(defn json-parse--object (s)
-  (json-parse--object--acc (substring s 1 (string-length s)) {}))
+(defn jp-num-acc (cs acc)
+  (match cs
+    (nil (jp-num-finish acc nil))
+    ((c & rest) (if (jp-num-char? c)
+                  (jp-num-acc rest (cons c acc))
+                  (jp-num-finish acc cs)))))
 
-(defn json-parse--object--acc (s acc)
-  (let (s (trim s))
-    (if (starts-with? s "}")
-      [acc (substring s 1 (string-length s))]
-      (let (s (if (starts-with? s ",") (substring s 1 (string-length s)) s)
-            s (trim s)
-            [k rest] (json-parse--string s)
-            rest (trim rest)
-            rest (if (starts-with? rest ":") (substring rest 1 (string-length rest)) rest)
-            rest (trim rest)
-            [v rest] (json-parse--value rest)
-            rest (trim rest))
-        (json-parse--object--acc rest (assoc acc k v))))))
+(defn jp-num-finish (acc cs)
+  "Convert the gathered number chars to a value. Empty (a stray non-number at value
+  position in malformed input) yields nil rather than erroring on `(string->number \"\")`."
+  (if (nil? acc) [nil cs] [(string->number (jp-join acc)) cs]))
 
-(defn json-parse--array (s)
-  (json-parse--array--acc (substring s 1 (string-length s)) []))
+(defn jp-object (cs)
+  "Parse a JSON object; `{` heads `cs`. `[map rest]`."
+  (jp-obj-entries (rest cs) {}))
 
-(defn json-parse--array--acc (s acc)
-  (let (s (trim s))
-    (if (starts-with? s "]")
-      [acc (substring s 1 (string-length s))]
-      (let (s (if (starts-with? s ",") (substring s 1 (string-length s)) s)
-            s (trim s)
-            [v r] (json-parse--value s)
-            r (trim r))
-        (json-parse--array--acc r (into acc [v]))))))
+(defn jp-obj-entries (cs0 acc)
+  (let (cs (jp-skip-ws cs0))
+    (match cs
+      (nil [acc nil])
+      (("}" & rest) [acc rest])
+      (("," & rest) (jp-obj-entries rest acc))
+      (_ (let ([k cs1] (jp-string cs)
+               cs2 (jp-skip-colon (jp-skip-ws cs1))
+               [v cs3] (jp-value cs2))
+           (jp-obj-entries cs3 (assoc acc k v)))))))
+
+(defn jp-skip-colon (cs)
+  "Drop a leading `:` between an object key and its value, if present."
+  (match cs
+    ((":" & rest) rest)
+    (_ cs)))
+
+(defn jp-array (cs)
+  "Parse a JSON array; `[` heads `cs`. `[vector rest]`."
+  (jp-arr-entries (rest cs) nil))
+
+(defn jp-arr-entries (cs0 acc)
+  ; acc gathers items in reverse via `cons` (O(1)); the vector is built once at the end.
+  ; `(into vector [v])` per element would copy the vector each time — O(n²) for a big array.
+  (let (cs (jp-skip-ws cs0))
+    (match cs
+      (nil [(into [] (reverse acc)) nil])
+      (("]" & rest) [(into [] (reverse acc)) rest])
+      (("," & rest) (jp-arr-entries rest acc))
+      (_ (let ([v cs1] (jp-value cs))
+           (jp-arr-entries cs1 (cons v acc)))))))
 
 ; ---- wire protocol messages ----
 
@@ -323,6 +372,56 @@
   (try (send session [:info payload]) (catch _ nil))
   nil)
 
+; ---- handler-initiated effects (push event / navigate / redirect) ----
+; A view handler (`on`/`tick`/`handle-info`) returns the next model — the declarative path.
+; But some things are imperative: "after save, go to /thanks", "on this event, focus a
+; field". These helpers let a handler queue a one-off message to the client alongside its
+; model update. They run in the session process (handlers are called there), so they just
+; post `[:push-effect …]` to `(self)`; the session flushes the queue to the socket right
+; after pushing the model diff (see `flush-effects`). The handler still returns a model, so
+; nothing about the model-in/model-out contract or the diffing changes.
+
+(defn push-event (name &optional (payload {}))
+  "From inside a live handler, tell the client to dispatch a `brood:event` CustomEvent
+  (`detail = {name, payload}`). App JS listens for it — the escape hatch for client effects a
+  re-render can't express (focus a field, start an animation, call into a JS lib)."
+  (send (self) [:push-effect {:event "push" :name name :payload payload}])
+  nil)
+
+(defn push-navigate (path)
+  "From inside a live handler, navigate the client to `path` over the live socket — the
+  server-initiated equivalent of the user clicking a `data-nav` link (a live view morphs in
+  place, a non-live path falls back to a full load), with the address bar updated."
+  (send (self) [:push-effect {:event "nav" :path path}])
+  nil)
+
+(defn push-redirect (url)
+  "From inside a live handler, force the client to do a full page load to `url` (leaving the
+  live socket) — e.g. after logout, or to cross a live-session/auth boundary."
+  (send (self) [:push-effect {:event "redirect" :path url}])
+  nil)
+
+(defn flush-effects (sock)
+  "Drain every `[:push-effect …]` the just-run handler queued to this session (via
+  `push-event`/`push-navigate`/`push-redirect`) and send each to the client. Non-blocking
+  (`after 0`): it only pulls push-effect messages, leaving frames/ticks/info untouched, and
+  returns the moment none remain. Run at the top of `session-recv`, so effects go out right
+  after the model diff and before the session blocks for the next client frame."
+  (receive
+    ([:push-effect msg] (do (send-msg sock msg) (flush-effects sock)))
+    (after 0 nil)))
+
+(defn live--handler-error (phase key e fallback)
+  "A view lifecycle handler (`phase` = \"event\"/\"tick\"/\"info\"/\"unmount\", `key` its
+  event/message key) raised. Emit a `[:hatch :live :exception]` telemetry event — the same
+  observability seam http/server uses for a raising request handler — so the failure is
+  logged/traced by whatever's attached (a no-op until an app attaches a handler) instead of
+  vanishing. Returns `fallback` (the prior model) so the session survives the bad callback."
+  (telemetry/emit [:hatch :live :exception]
+    {}
+    {:phase phase :key (str key) :error (error-message e)})
+  fallback)
+
 (defn session-loop (sock view buf)
   "Per-connection WebSocket event loop.
   `view` is a map {:mount :render :handle-event :handle-tick :ticks :model :ticker-pids}."
@@ -387,6 +486,9 @@
   nil)
 
 (defn session-recv (sock view buf)
+  ; Flush any effects the last handler queued (push-event/navigate/redirect) before we block
+  ; for the next frame — so they reach the client right after that handler's model diff.
+  (flush-effects sock)
   (match (recv-frame--loop sock buf)
     ; client close
     ([:ok 8 _ _] (close-session sock))
@@ -406,7 +508,7 @@
                         "diff"
                         (try
                           ((get view :handle-tick) key (get view :model))
-                          (catch _ (get view :model)))))
+                          (catch e (live--handler-error "tick" key e (get view :model))))))
     ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
     ; view's handle-info and push the resulting diff. A view without a handle-info clause
     ; (or one that throws) keeps its current model, so a stray message is harmless.
@@ -416,7 +518,8 @@
                             "diff"
                             (let (h (get view :handle-info))
                               (if h
-                                (try (h payload (get view :model)) (catch _ (get view :model)))
+                                (try (h payload (get view :model))
+                                  (catch e (live--handler-error "info" :message e (get view :model))))
                                 (get view :model)))))
     ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
                           view (if spec (merge view spec) view))
@@ -443,7 +546,8 @@
                    view
                    buf
                    "diff"
-                   (try ((get view :handle-event) name params model) (catch _ model)))))
+                   (try ((get view :handle-event) name params model)
+                     (catch e (live--handler-error "event" name e model))))))
       ; Live navigation: switch this session to the live view registered at `path`
       ; WITHOUT a page reload — stop the old view's tickers, mount the target, start
       ; its tickers, and push a full render (the client swaps the live container and
@@ -459,7 +563,8 @@
                   ; before it's replaced — the session process lives on across a navigate,
                   ; so the monitor-based cleanup never fires for it. Runs here in the session
                   ; process, so (self) is the same pid that mount subscribed/tracked.
-                  _unmount (try ((get view :unmount) (get view :model)) (catch _ nil))
+                  _unmount (try ((get view :unmount) (get view :model))
+                             (catch e (live--handler-error "unmount" :unmount e nil)))
                   _ (stop-tickers (get view :ticker-pids))
                   spec (spec-fn)
                   model ((get spec :mount) params)
@@ -638,7 +743,9 @@
 (defn live-dispatcher ()
   "The server's single ws-handler: route each `/live/ws<path>` upgrade to the live view
   registered at `<path>` (via `(live path module)` in the router); close the socket on
-  an unknown path. Wire it in the endpoint:
+  an unknown path. The CSWSH origin check runs a layer up, in http/server before the 101
+  (see `http/websocket/origin-allowed?` and the `:check-origin` config), so every ws-handler
+  is covered — this dispatcher doesn't repeat it. Wire it in the endpoint:
     (server/start port adapter (live/live-dispatcher))"
   (fn (sock request)
     (let (entry (lookup-live (live--ws-path (get request :path))))
@@ -689,6 +796,13 @@
   to the session with `web/live/send-info` — PubSub/Presence broadcasts and timers. `msg`
   is the delivered payload; return the new model (it re-renders, like an event). Omit it and
   such messages are ignored.
+
+  A handler (`on`/`tick`/`handle-info`) returns the next model — the declarative path. For
+  imperative one-offs it can also call `web/live/push-navigate` (drive client navigation),
+  `web/live/push-redirect` (force a full page load), or `web/live/push-event` (dispatch a
+  `brood:event` CustomEvent for app JS) alongside returning its model — e.g. `(on \"save\"
+  (params model) (do (web/live/push-navigate \"/thanks\") (save! model)))`. The effects are
+  flushed to the client right after the model diff.
 
   An optional `(unmount (model) …)` clause runs (in the session process) when the session
   live-navigates away from this view, before the next view mounts — undo what `mount` did

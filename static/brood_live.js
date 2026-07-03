@@ -98,8 +98,20 @@ const BroodLive = (() => {
         for (const k in d) this.dynamics[k] = d[k];
         this._patch(this._assemble());
       } else if (msg.event === "redirect") {
-        // The navigate target isn't a live view — fall back to a full page load.
+        // The navigate target isn't a live view (or the server forced a full load via
+        // push-redirect) — fall back to a full page load.
         window.location.href = msg.path;
+      } else if (msg.event === "nav") {
+        // Server-initiated live navigation (push-navigate): drive the same socket-side
+        // navigation a data-nav click would, updating the address bar and morphing in place.
+        this.navigate(msg.path);
+      } else if (msg.event === "push") {
+        // Server-initiated client effect (push-event): dispatch a CustomEvent app JS can
+        // listen for — `brood:event` with { name, payload } — to do imperative work
+        // (focus a field, start an animation) that a re-render can't express.
+        document.dispatchEvent(new CustomEvent("brood:event", {
+          detail: { name: msg.name, payload: msg.payload },
+        }));
       } else if (msg.event === "reload-css") {
         // A stylesheet rebuilt (asset watcher) — hot-swap every <link> in place,
         // preserving live state. No full reload, no flash: we re-stamp the href with

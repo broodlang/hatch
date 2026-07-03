@@ -133,3 +133,41 @@
     (assert= (json-decode "\"\\uZZZZ\"") (int->char 65533)))
   (test "\\u inside an object value"
     (assert= (json-decode "{\"k\":\"\\u0041\"}") {"k" "A"})))
+
+; The decoder threads an index cursor (linear, no per-char substring). Cover the shapes
+; brood_live.js sends — objects/arrays/numbers/booleans with insignificant whitespace.
+(describe "json-decode structures"
+  (test "object with whitespace around tokens"
+    (assert= (json-decode "  { \"event\" : \"inc\" , \"params\" : { \"value\" : \"3\" } }  ")
+      {"event" "inc" "params" {"value" "3"}}))
+  (test "array of mixed scalars"
+    (assert= (json-decode "[1, 2.5, true, false, null, \"x\"]") [1 2.5 true false nil "x"]))
+  (test "empty object and array"
+    (assert= (json-decode "{}") {})
+    (assert= (json-decode "[]") []))
+  (test "nested array in object"
+    (assert= (json-decode "{\"a\":[1,[2,3]]}") {"a" [1 [2 3]]}))
+  (test "negative and exponent numbers"
+    (assert= (json-decode "[-5, 1e3]") [-5 1000.0])))
+
+; Handler effects queue a [:push-effect …] to the session process (here, the test process),
+; which flush-effects later forwards to the client. Assert each helper posts the right frame.
+(describe "handler effects"
+  (test "push-event queues a client push-effect"
+    (push-event "focus" {"id" "field"})
+    (receive
+      ([:push-effect m]
+        (assert= (get m :event) "push")
+        (assert= (get m :name) "focus")
+        (assert= (get m :payload) {"id" "field"}))
+      (after 200 (assert= "no push-effect received" false))))
+  (test "push-navigate queues a nav effect"
+    (push-navigate "/next")
+    (receive
+      ([:push-effect m] (assert= (get m :event) "nav") (assert= (get m :path) "/next"))
+      (after 200 (assert= "no nav effect received" false))))
+  (test "push-redirect queues a redirect effect"
+    (push-redirect "/logout")
+    (receive
+      ([:push-effect m] (assert= (get m :event) "redirect") (assert= (get m :path) "/logout"))
+      (after 200 (assert= "no redirect effect received" false)))))
