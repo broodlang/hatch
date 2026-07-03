@@ -153,8 +153,12 @@ Live updates no longer re-send the full HTML — only the dynamic slots that cha
   validation returning changeset-style error maps
 - **`live-navigate`** — client-side navigation without full reload
   (`push_patch` equivalent); browser history management
-- **File uploads** — chunked multipart in `http/request`; progress events
-  to live sessions
+- **File uploads** ✅ — `multipart/form-data` parsed byte-faithfully in `http/multipart`
+  (fields + file parts with raw `:bytes`), exposed on the conn as `files`/`file`. Large
+  bodies stream to disk instead of buffering: `http/server`'s `:spool-threshold` writes the
+  body to a temp file chunk-by-chunk (via the `append-bytes` runtime builtin), handing the
+  handler a `:body-file` path — persist it zero-copy with `web/conn/save-body` or parse it
+  from disk with `parse-upload-file`. **Still to do:** progress events to live sessions.
 
 ### Phase 10 — Developer experience
 
@@ -174,12 +178,12 @@ Live updates no longer re-send the full HTML — only the dynamic slots that cha
 - **Chunked Transfer-Encoding** — for streaming responses (SSE, large file
   downloads). ⛔ **needs a runtime builtin:** responses serialize as one string today; a
   streaming/binary socket write is the prerequisite (pairs with binary serving below).
-- **Binary asset serving** — images, fonts, `.ico`, `.gz`. ⛔ **needs a runtime builtin:**
-  `slurp` is UTF-8 and lossy, so there's no byte-faithful file read — a `slurp-bytes`
-  (file → byte vector) in `brood` (`crates/lisp/src/builtins.rs`) is the prerequisite, then
-  send over a binary-mode socket. The MIME table (`web/static/*mime-types*`) and a
-  `byte-range`-correct `serve-body` slot in behind it. *Cache/ETag/nosniff/range scaffolding
-  already shipped (Assets & dev tooling) — only the byte I/O is missing.*
+- **Binary asset serving** ✅ — images, fonts, `.ico`, video, wasm. `web/static` reads binary
+  types (`text-mime?` picks the path) via `slurp-bytes` and serves them as raw `bytes`;
+  `http/response/format-response` returns the whole response as `bytes` for a binary body so it
+  reaches the wire byte-for-byte. Full ETag/304, Cache-Control, nosniff, and byte ranges
+  (206/416) apply, and an unknown extension is served as `application/octet-stream` bytes
+  rather than being UTF-8-mangled.
 - **Compression** — gzip response middleware plug + `Content-Encoding`/`Accept-Encoding`
   negotiation (and pre-compressed `.gz` static variants). ⛔ **needs a runtime builtin:** no
   gzip/deflate/brotli exists in `brood` (no `flate2`/`brotli` dep) — add a `gzip`/`gunzip`
@@ -190,13 +194,17 @@ Live updates no longer re-send the full HTML — only the dynamic slots that cha
   `broadcast-from` over string topics, fanning out to subscribers via `send-info` (→ the
   view's `handle-info`). A named registry process holds `topic → pids` and monitors each
   subscriber, so a dropped session is auto-removed. Built on `deflive`'s `handle-info`
-  clause + `web/live/send-info`. Demo: `web/views/room`. **Still to do:** distribute
-  broadcasts across Brood nodes (the registry is currently single-node).
-- **Presence** ✅ (node-local) — `web/presence`: `track`/`untrack`/`roster` over string
-  topics. A registry holds `topic → [{:pid :key :meta}]`, monitors each tracked session
-  (auto-leave on death), and pushes the refreshed roster to present members via `send-info`.
-  Demo: `web/views/presence`. **Still to do:** a non-present-observer mode (pair with
-  PubSub) and cross-node/CRDT distribution.
+  clause + `web/live/send-info`. Demo: `web/views/room`. **Cross-node** ✅ — a broadcast
+  fans out to local subscribers and forwards to peer nodes (`{:name :hatch-pubsub :node n}`),
+  tagged `:local`/`:remote` so a forwarded message isn't re-forwarded; a no-op with no nodes.
+- **Presence** ✅ (node-local + **cross-node**) — `web/presence`: `track`/`untrack`/`roster`
+  over string topics. A registry holds `topic → [{:pid :key :meta}]`, monitors each tracked
+  session (auto-leave on death), and pushes the refreshed roster to present members via
+  `send-info`. Across a cluster the roster is a state-based CRDT: each node owns its local
+  presences and replicates each topic's roster to peers, a joining node learns existing
+  presences via a one-time bootstrap, and a departed node's presences drop on node-down.
+  Verified across two real OS-process nodes. Demo: `web/views/presence`. **Still to do:** a
+  non-present-observer mode (pair with PubSub).
 
 ---
 

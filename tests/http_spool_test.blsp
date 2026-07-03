@@ -1,0 +1,146 @@
+(defmodule http-spool-test
+  (:alias http/server)
+  (:alias http/request)
+  (:use web/conn)
+  (:use test))
+
+(defn b (s) (string->utf8-bytes s))
+
+;; ---- try-parse-head: parse line + headers before the body arrives ----
+
+(describe "try-parse-head"
+  (test "parses method + Content-Length + body offset without the body present"
+    (let (buf "POST /u HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-a-fragment")
+      (match (request/try-parse-head buf)
+        ([:head head body-start clen]
+          (do
+            (assert= (get head :method) "POST")
+            (assert= (get head :path) "/u")
+            (assert= clen 100)
+            (assert= body-start (+ (index-of buf "\r\n\r\n") 4))))
+        (other (assert= other :expected-head)))))
+  (test "incomplete until the whole header block has arrived"
+    (assert= (request/try-parse-head "POST /u HTTP/1.1\r\nContent-Len") [:incomplete]))
+  (test "a chunked body is not spoolable — deferred to the buffered path"
+    (assert= (first (request/try-parse-head
+                      "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"))
+      :chunked))
+  (test "rejects smuggling framing (Transfer-Encoding + Content-Length) like try-parse"
+    (assert= (first (request/try-parse-head
+                      "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"))
+      :error)))
+
+;; ---- end-to-end: a large body is streamed to a temp file, never buffered whole ----
+
+(defn drain (sock acc)
+  (receive
+    ([:tcp ~sock chunk] (drain sock (str acc (utf8-bytes->string chunk))))
+    ([:tcp-closed ~sock] acc)
+    (after 1500 acc)))
+
+; a 20-byte body with 0xFF (invalid UTF-8) + CRLFs — proof the spool path is byte-faithful
+(def raw-body (bytes [137 80 78 71 13 10 0 255 1 2 3 4 5 6 7 8 9 10 254 253]))
+
+(defn post-raw ()
+  (bytes-concat
+    (b "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\nConnection: close\r\n\r\n")
+    raw-body))
+
+(defn spool-save-handler (dest reporter)
+  (fn (request)
+    (let (conn (build request)
+          info {:spooled (spooled? conn)
+                :body-empty (= (get conn :body) "")
+                :body-file-set (not (nil? (body-file conn)))})
+      ; zero-copy persist: move the spool file into place, never reading it back
+      (save-body conn dest)
+      (send reporter [:done info])
+      (conn->response (send-resp conn 200 "ok")))))
+
+(describe "large body streamed to disk"
+  (test "a body over :spool-threshold is spooled and save-body persists it byte-for-byte"
+    (let (me (self)
+          dest "/tmp/hatch-spool-dest.bin"
+          _ (try (delete-file dest) (catch _ nil))
+          port 54743
+          _sup (server/start port (spool-save-handler dest me) nil
+                 {:spool-threshold 10 :spool-dir "/tmp"})
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      (tcp-send client (post-raw))
+      (let (info (receive ([:done d] d) (after 5000 :timeout))
+            _resp (drain client ""))
+        (let (saved (into [] (bytes->list (slurp-bytes dest))))
+          (tcp-close client)
+          (server/stop port)
+          (try (delete-file dest) (catch _ nil))
+          ; the handler saw a spooled request with an empty in-memory body
+          (assert= (get info :spooled) true)
+          (assert= (get info :body-empty) true)
+          (assert= (get info :body-file-set) true)
+          ; the bytes on disk equal what was POSTed, 0xFF and all
+          (assert= saved (into [] (bytes->list raw-body)))))))
+  (test "a body under the threshold takes the buffered path (in-memory :body, no :body-file)"
+    (let (me (self)
+          port 54744
+          _sup (server/start port
+                 (fn (request)
+                   (let (conn (build request))
+                     (send me [:small {:spooled (spooled? conn) :body (get conn :body)}])
+                     (conn->response (send-resp conn 200 "ok"))))
+                 nil {:spool-threshold 1000 :spool-dir "/tmp"})
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      (tcp-send client (b "POST /s HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"))
+      (let (info (receive ([:small d] d) (after 5000 :timeout))
+            _ (drain client ""))
+        (tcp-close client)
+        (server/stop port)
+        (assert= (get info :spooled) false)
+        (assert= (get info :body) "hello")))))
+
+;; ---- a spooled multipart upload parses from disk ----
+
+(defn multipart-post (boundary file-bytes)
+  (let (body (bytes-concat
+               (b (str "--" boundary "\r\n"
+                    "Content-Disposition: form-data; name=\"title\"\r\n\r\n"
+                    "hello world\r\n"))
+               (b (str "--" boundary "\r\n"
+                    "Content-Disposition: form-data; name=\"avatar\"; filename=\"pic.png\"\r\n"
+                    "Content-Type: image/png\r\n\r\n"))
+               file-bytes
+               (b (str "\r\n--" boundary "--\r\n"))))
+    (bytes-concat
+      (b (str "POST /upload HTTP/1.1\r\nHost: x\r\n"
+           "Content-Type: multipart/form-data; boundary=" boundary "\r\n"
+           "Content-Length: " (byte-length body) "\r\nConnection: close\r\n\r\n"))
+      body)))
+
+(describe "spooled multipart upload parses from disk"
+  (test "parse-upload-file reads the spooled body and recovers the file bytes"
+    (let (me (self)
+          file-bytes (bytes [137 80 78 71 13 10 0 255 60 62])
+          port 54745
+          _sup (server/start port
+                 (fn (request)
+                   (let (conn (build request)
+                         mp (parse-upload-file conn)
+                         f (get (get mp :files) "avatar"))
+                     (send me [:mp {:spooled (spooled? conn)
+                                    :title (get (get mp :fields) "title")
+                                    :filename (get f :filename)
+                                    :bytes (into [] (bytes->list (get f :bytes)))}])
+                     (conn->response (send-resp conn 200 "ok"))))
+                 nil {:spool-threshold 10 :spool-dir "/tmp"})
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      (tcp-send client (multipart-post "XSPOOL99" file-bytes))
+      (let (info (receive ([:mp d] d) (after 5000 :timeout))
+            _ (drain client ""))
+        (tcp-close client)
+        (server/stop port)
+        (assert= (get info :spooled) true)
+        (assert= (get info :title) "hello world")
+        (assert= (get info :filename) "pic.png")
+        (assert= (get info :bytes) [137 80 78 71 13 10 0 255 60 62])))))

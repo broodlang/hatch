@@ -70,6 +70,45 @@
                                     (substring buf body-start body-end))
                                (substring buf body-end buflen)]))))))))))))
 
+(defn try-parse-head (buf)
+  "Parse a request's line + headers WITHOUT requiring the body to have arrived — for the
+  streaming/spool path, which needs the method, headers, Content-Length and body offset before
+  it can decide to stream the body to disk. Runs the SAME framing rejections as `try-parse`.
+  Returns `[:head {:method :path :query :version :headers} body-start content-length]`,
+  `[:incomplete]` (headers not fully received yet), `[:chunked]` (a chunked body — not
+  spoolable; the caller uses the buffered path, which de-chunks), or `[:error msg]`."
+  (let (sep (index-of buf "\r\n\r\n"))
+    (if (= sep -1)
+      [:incomplete]
+      (let (header-block (substring buf 0 sep)
+            body-start (+ sep 4)
+            lines (string-split header-block "\r\n"))
+        (match lines
+          (nil [:error "empty request"])
+          ((req-line & header-lines)
+            (match (parse-request-line req-line)
+              ([:error e] [:error e])
+              ([:ok method path query version]
+                (let (headers (parse-headers header-lines))
+                  (cond
+                    (obs-fold? header-lines) [:error "obs-fold header line"]
+                    (duplicate-transfer-encoding? header-lines) [:error "multiple Transfer-Encoding"]
+                    (and (contains? headers :transfer-encoding)
+                      (contains? headers :content-length)) [:error "Transfer-Encoding with Content-Length"]
+                    ; a chunked body has no Content-Length to size the spool by — defer to the
+                    ; buffered path (which de-chunks) rather than mis-frame it
+                    (contains? headers :transfer-encoding) [:chunked]
+                    (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                    (not (valid-content-length? (get headers :content-length))) [:error "invalid Content-Length"]
+                    else [:head {:method method
+                                 :path path
+                                 :query query
+                                 :params (parse-query query)
+                                 :version version
+                                 :headers headers}
+                           body-start
+                           (content-length-value (get headers :content-length))]))))))))))
+
 (defn mk-request (method path query version headers body)
   "Build the request map shared by the Content-Length and chunked paths. `version` is the
   request line's HTTP version ('1.1' or '1.0'), which drives keep-alive defaulting."
