@@ -67,6 +67,26 @@
         (unsubscribe "room:bf2")
         (assert= mine {:y 2})))))
 
+;; Cross-node fan-out. True multi-node delivery needs two runtimes (a node is one OS process),
+;; so it's verified by the design (brood's location-transparent send) + manual clustering
+;; rather than in-harness here. What IS unit-testable: (a) it's a no-op on a single node, and
+;; (b) the registry delivers a :remote-origin broadcast — exactly what a peer forwards — to
+;; local subscribers without re-forwarding.
+(describe "cross-node fan-out"
+  (test "remote-nodes is empty when the runtime isn't a distributed node"
+    (assert= (remote-nodes) (list)))
+  (test "pubsub--fanout-remote is a safe no-op with no peers"
+    (assert= (web/pubsub/pubsub--fanout-remote "room:noop" {:a 1}) nil))
+  (test "a :remote-origin broadcast (as a peer replicates it) reaches local subscribers"
+    (do
+      (subscribe "room:xnode")
+      (wait-member "room:xnode" (self) 60)
+      ; simulate a peer node forwarding a broadcast into this node's registry
+      (send (pubsub) [:broadcast "room:xnode" nil {:from "peer"} :remote])
+      (let (got (receive ([:info p] p) (after 5000 :timeout)))
+        (unsubscribe "room:xnode")
+        (assert= got {:from "peer"})))))
+
 (describe "dead-subscriber cleanup"
   (test "a subscriber that dies is removed from its topics"
     (let (me (self)

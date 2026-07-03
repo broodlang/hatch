@@ -15,7 +15,14 @@
   vault and re-monitors the restored pids — so a crash doesn't silently drop every
   subscription. It monitors each subscriber, so a dropped session is removed automatically.
   Delivery is fire-and-forget (no ordering or delivery guarantee across topics), which is
-  what a live UI wants. This is node-local; cross-node fan-out is a later layer."
+  what a live UI wants.
+
+  Cluster-aware: if the runtime is started as a distributed node (`node-start` plus
+  `connect`/`ensure-link` to peers, wired once in the app's entry point), a broadcast fans
+  out to subscribers on every connected node — each node keeps only its local subscribers and
+  a locally-published broadcast is replicated once per peer (see `pubsub--fanout-remote`).
+  With no node started, `(nodes)` is empty and the replication is a no-op, so a single-node
+  app behaves exactly as before."
   ; send-info — deliver a payload to a subscribed session
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
@@ -54,10 +61,15 @@
                                             refs
                                             (pubsub--drop-ref refs pid)))
                                 (pubsub--save subs2 refs2)))
-    ([:broadcast topic except payload]
+    ; A broadcast. `origin` is `:local` (published on this node via the API) or `:remote`
+    ; (replicated here from a peer node). Either way we fan out to this node's subscribers;
+    ; only a *local*-origin broadcast is forwarded on to peer nodes, so a replicated message
+    ; is never re-forwarded — that bounds cross-node traffic to one hop and can't loop.
+    ([:broadcast topic except payload origin]
       (do
         (dolist (p (get subs topic (list)))
           (when (not (= p except)) (send-info p payload)))
+        (when (= origin :local) (pubsub--fanout-remote topic payload))
         ; broadcast doesn't change state — no mirror
         (pubsub--loop subs refs)))
     ; a subscriber died — drop it from every topic; its monitor already fired, so just drop
@@ -68,6 +80,30 @@
     ([:subscribers topic from r] (do
                                    (send from [:subscribers r (get subs topic (list))])
                                    (pubsub--loop subs refs)))))
+
+; ---- cross-node fan-out ----
+; PubSub is cluster-aware when the runtime is started as a distributed node (`node-start` +
+; `connect`/`ensure-link`, wired in the app's entry point). Each node keeps only its *local*
+; subscribers; a locally-published broadcast is replicated once to every connected peer's
+; registry (addressed by its distributed name `:hatch-pubsub`), which fans it out to that
+; node's subscribers. Delivery to a subscriber — local or remote — already rides brood's
+; location-transparent `send` (via `send-info`). When the runtime isn't a distributed node,
+; `(nodes)` is empty and this is a no-op, so single-node apps are entirely unaffected.
+
+(defn remote-nodes ()
+  "The connected peer node names, or an empty list when this runtime isn't a distributed
+  node (so cross-node fan-out is a safe no-op)."
+  (or (try (nodes) (catch _e nil)) (list)))
+
+(defn pubsub--fanout-remote (topic payload)
+  "Replicate a locally-originated broadcast to every peer node's registry — once each, marked
+  `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
+  O(nodes) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
+  that just dropped, is skipped rather than failing the publish."
+  (dolist (n (remote-nodes))
+    (try
+      (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])
+      (catch _e nil))))
 
 (defn pubsub--subscribed? (subs pid)
   "True if `pid` is still subscribed to any topic."
@@ -136,14 +172,17 @@
 
 (defn broadcast (topic payload)
   "Broadcast `payload` to every subscriber of `topic`, including the sender. Each receives
-  it at `handle-info`. Returns nil."
-  (send (pubsub) [:broadcast topic nil payload])
+  it at `handle-info`. In a cluster (this runtime started as a distributed node) the message
+  also reaches subscribers on every connected peer node; single-node apps are unaffected.
+  Returns nil."
+  (send (pubsub) [:broadcast topic nil payload :local])
   nil)
 
 (defn broadcast-from (topic payload)
   "Like `broadcast`, but does not deliver to the calling process — use it when the sender
-  has already updated its own view and only the *other* subscribers need the message."
-  (send (pubsub) [:broadcast topic (self) payload])
+  has already updated its own view and only the *other* subscribers need the message. (The
+  sender is only ever skipped on its own node; peer-node subscribers all receive it.)"
+  (send (pubsub) [:broadcast topic (self) payload :local])
   nil)
 
 (defn subscribers (topic)
