@@ -1,6 +1,5 @@
 (defmodule web-parts-test
   (:use web/parts)
-  (:use web/template)
   (:use test))
 
 ;; compile-parts is a macro-time function but is a plain defn, so we can call it on quoted
@@ -36,6 +35,20 @@
     (let (p (compile-parts '[:div attrs-var "y"]))
       (assert= (get p :statics) ["" ""])
       (assert= (count (get p :dynamics)) 1))))
+
+(describe "compile-parts — component holes"
+  (test "a (component module assigns) form gets its own dynamic hole"
+    (let (p (compile-parts '[:div {} (component web/components/like-button {"id" "x"})]))
+      (assert= (get p :statics) ["<div>" "</div>"])
+      (assert= (count (get p :dynamics)) 1)))
+  (test "the hole resolves module/live-component-spec and threads live--components"
+    (let (p (compile-parts '(component web/components/like-button assigns-var)))
+      (assert= (get p :dynamics)
+        (list (list 'web/component/render-slot
+                (list 'quote 'web/components/like-button)
+                'web/components/like-button/live-component-spec
+                'assigns-var
+                'live--components))))))
 
 (describe "interleave"
   (test "one hole" (assert= (interleave ["a" "b"] ["X"]) "aXb"))

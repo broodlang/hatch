@@ -1,6 +1,16 @@
+;; Unit tests for web/application: valid-level/start-children (the boot helpers) and the
+;; log-line formatters `default-logger-opts` wires into the logger backend. The formatters
+;; were previously only exercised indirectly (hatch-demo's req_log_test.blsp tested a
+;; demo-local copy of this logic that predated the refactor moving it into the framework)
+;; with no coverage in this repo; this restores that coverage at its new, correct location.
+;; The formatters are private (`application--*`, so `default-logger-opts` picks one without
+;; exposing all three as public API) — referenced fully-qualified here, bypassing the
+;; `:use`-refer-all "unused import"-style privacy convention, which only governs bare-name
+;; resolution.
 (defmodule web-application-test
   (:use web/application)
-  (:use test))
+  (:use test)
+  (:use json :only [json-parse]))
 
 (describe "valid-level"
   (test "known levels pass through"
@@ -30,3 +40,44 @@
                 (catch e (error-message e))))
       (assert= (includes? msg "child #1") true)
       (assert= (includes? msg "db unreachable") true))))
+
+(defn rec (level msg meta)
+  {:level level :msg msg :meta meta})
+
+(describe "application--text-line"
+  (test "renders [LEVEL] msg with a trailing newline, no ANSI color"
+    (assert= (web/application/application--text-line (rec :debug "hello" {}))
+      "[DEBUG] hello\n"))
+  (test "each level gets its own label"
+    (assert= (web/application/application--text-line (rec :info "x" {})) "[INFO] x\n")
+    (assert= (web/application/application--text-line (rec :warn "x" {})) "[WARN] x\n")
+    (assert= (web/application/application--text-line (rec :error "x" {})) "[ERROR] x\n")))
+
+(describe "application--color-line"
+  (test "wraps the text-line body in the level's ANSI color + reset"
+    (let (line (web/application/application--color-line (rec :error "boom" {})))
+      (assert= (includes? line "\x1b[31m") true)
+      (assert= (includes? line "[ERROR] boom") true)
+      (assert= (includes? line "\x1b[0m") true))))
+
+(describe "application--json-line"
+  (test "one NDJSON object per record, meta fields flattened alongside timestamp/level/message"
+    (let (line (web/application/application--json-line
+                 {:level :warn :msg "slow" :ts 1000 :meta {:request_id "r1" :duration_ms 4.2}})
+          parsed (json-parse line))
+      (assert= (get parsed :timestamp) 1000)
+      (assert= (get parsed :level) "warn")
+      (assert= (get parsed :message) "slow")
+      (assert= (get parsed :request_id) "r1")
+      (assert= (get parsed :duration_ms) 4.2)
+      (assert= (includes? line "\n") true)))
+  (test "an unrecognized level falls back to \"info\""
+    (assert= (get (json-parse (web/application/application--json-line {:level :bogus :msg "x" :ts 0 :meta {}}))
+               :level)
+      "info")))
+
+(describe "default-logger-opts"
+  (test "picks :level from $LOG_LEVEL, defaulting to :debug"
+    (assert= (get (web/application/default-logger-opts) :level) :debug))
+  (test "always returns exactly one fn-backend"
+    (assert= (count (get (web/application/default-logger-opts) :backends)) 1)))

@@ -25,7 +25,19 @@
           m0   (live-mount spec {\"start\" \"5\"})
           m1   (live-event spec \"increment\" {} m0))
       (assert= (get m1 :count) 6)
-      (assert= (includes? (live-render spec m1) \"6\") true))"
+      (assert= (includes? (live-render spec m1) \"6\") true))
+
+    ; a view with an `on-mount-guard`, with and without a session cookie:
+    (assert= (live-guard spec (conn-for \"GET\" \"/dashboard\")) \"/account\")
+    (assert= (live-guard spec (conn-for \"GET\" \"/dashboard\" {:headers {:cookie \"…\"}})) nil)
+
+  Live components (a `deflive-component` module's `live-component-spec` thunk):
+
+    (let (spec (web/components/like-button/live-component-spec)
+          s0   (component-mount spec \"like-1\" {\"id\" \"like-1\"})
+          s1   (component-event spec \"toggle\" {} s0))
+      (assert= (get s1 :liked?) true)
+      (assert= (includes? (component-render spec s1) \"Liked\") true))"
   ; build, html-resp — synthetic conns + string-return coercion
   (:use web/conn)
   (:alias web/template))
@@ -112,3 +124,35 @@
   session live-navigates away (it runs in the caller's process, so `(self)` stands in for
   the session pid that any pubsub/presence cleanup targets)."
   ((get spec :unmount) model))
+
+(defn live-guard (spec conn)
+  "Run `spec`'s `on-mount-guard` against `conn` (build one with `conn-for`) — `nil`/`false`
+  means the mount is allowed; any other value is the path the client would be redirected to.
+  A view without an `on-mount-guard` clause always returns `nil` here."
+  ((get spec :mount-guard) conn))
+
+(defn live-patch (spec params model)
+  "The model after a live-patch delivers `params` to `spec` at `model` — the unit-test view
+  of what a session.patch(href) push does: handle-params runs against the *current* model,
+  with no mount/remount involved (unlike live-mount, which starts a session fresh)."
+  ((get spec :handle-params) params model))
+
+; ---- live components --------------------------------------------------------
+; A component `spec` is the map `deflive-component` produces via the module's
+; `live-component-spec` thunk: {:mount :render :handle-event}. Pass
+; `(some/component/live-component-spec)`. Drives the same functions a running session's
+; web/component/render-slot and dispatch-event do, without a socket or a parent view.
+
+(defn component-mount (spec id assigns)
+  "The initial state for component `spec` mounted with `id` and `assigns` (string-keyed,
+  as a parent's `(component module assigns)` call supplies)."
+  ((get spec :mount) id assigns))
+
+(defn component-render (spec state)
+  "Render component `spec` at `state` to an HTML string — the same lowering
+  web/component/render-slot does (minus its `data-cid` wrapper)."
+  (web/template/render ((get spec :render) state)))
+
+(defn component-event (spec event-name params state)
+  "The state after event `event-name` (with `params`) fires on component `spec` at `state`."
+  ((get spec :handle-event) event-name params state))

@@ -1,0 +1,70 @@
+(defmodule web-component-test (:use web/component) (:use web/template) (:use test))
+
+; ---- a fixture component to drive ----
+
+(deflive-component
+  (mount (id assigns) {:n (or (get assigns "start") 0)})
+  (render (state) [:span {} (str (get state :n))])
+  (on "bump" (params state) (assoc state :n (inc (get state :n))))
+  (on "set" (params state) (assoc state :n (get params "value"))))
+
+(describe "deflive-component"
+  (test "mount builds state from id + assigns"
+    (assert= ((get (live-component-spec) :mount) "x" {"start" 5}) {:n 5}))
+  (test "mount defaults when assigns carries no start"
+    (assert= ((get (live-component-spec) :mount) "x" {}) {:n 0}))
+  (test "render lowers state to HTML"
+    (assert= (web/template/render ((get (live-component-spec) :render) {:n 7})) "<span>7</span>"))
+  (test "on dispatches by event name"
+    (assert= ((get (live-component-spec) :handle-event) "bump" {} {:n 5}) {:n 6})
+    (assert= ((get (live-component-spec) :handle-event) "set" {"value" 9} {:n 5}) {:n 9}))
+  (test "an unrecognized event name is a no-op"
+    (assert= ((get (live-component-spec) :handle-event) "nope" {} {:n 5}) {:n 5})))
+
+(describe "render-slot"
+  (test "mounts on first render, wrapping the component's HTML in [data-cid]"
+    (let (t (table)
+          html (render-slot 'web-component-test live-component-spec {"id" "c1" "start" 3} t))
+      (assert= html "<div data-cid=\"c1\"><span>3</span></div>")
+      (assert= (get (table-get t "c1") :state) {:n 3})))
+  (test "reuses stored state on later renders, ignoring changed assigns"
+    (let (t (table))
+      (render-slot 'web-component-test live-component-spec {"id" "c2" "start" 1} t)
+      (assert= (render-slot 'web-component-test live-component-spec {"id" "c2" "start" 99} t)
+        "<div data-cid=\"c2\"><span>1</span></div>")))
+  (test "a different module reusing the same id remounts fresh instead of reusing foreign state"
+    (let (t (table))
+      (render-slot 'web-component-test live-component-spec {"id" "shared" "start" 1} t)
+      ; a different (fictitious) module claims the same id — same spec shape here just to
+      ; keep the fixture simple, but a distinct :module tag is what actually matters
+      (assert= (render-slot 'some-other-module live-component-spec {"id" "shared" "start" 7} t)
+        "<div data-cid=\"shared\"><span>7</span></div>")
+      (assert= (get (table-get t "shared") :module) 'some-other-module))))
+
+(describe "dispatch-event"
+  (test "routes to the component's own handle-event and stores the result"
+    (let (t (table))
+      (render-slot 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
+      (dispatch-event t "c3" "bump" {})
+      (assert= (get (table-get t "c3") :state) {:n 1})
+      ; the next render picks up the mutated state
+      (assert= (render-slot 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
+        "<div data-cid=\"c3\"><span>1</span></div>")))
+  (test "a stale/unknown cid is a safe no-op"
+    (assert= (dispatch-event (table) "nope" "bump" {}) nil)))
+
+(describe "apply-update"
+  (test "merges changes into stored state (send-update's session-side handler)"
+    (let (t (table))
+      (render-slot 'web-component-test live-component-spec {"id" "c4" "start" 0} t)
+      (apply-update t "c4" {:n 42})
+      (assert= (get (table-get t "c4") :state) {:n 42})))
+  (test "a stale/unknown cid is a safe no-op"
+    (assert= (apply-update (table) "nope" {:n 1}) nil)))
+
+(describe "send-update"
+  (test "delivers an [:update-component cid changes] envelope to the session pid"
+    (do
+      (assert= (send-update (self) "c1" {:n 1}) nil)
+      (assert= (receive ([:update-component cid changes] [cid changes]) (after 1000 :timeout))
+        ["c1" {:n 1}]))))

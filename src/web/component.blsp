@@ -1,0 +1,172 @@
+(defmodule web/component
+  "LiveComponents: scoped, independently-testable UI pieces embedded in a live view's
+  template via `(component module assigns)`. A component has its own `mount`/`render`/`on`
+  lifecycle — the same vocabulary as `deflive` — but no ticks, handle-info, unmount, or
+  on-mount-guard: those stay parent concerns.
+
+  State lives in the session's per-connection component table (a `table` — Brood's ETS —
+  created once at connect time and carried across live-navigate, alongside the session's
+  socket watchdog), keyed by the string `\"id\"` the parent's `assigns` map supplies.
+  `mount` runs once, the first time an id is seen; a parent re-render that keeps the same
+  id does *not* re-run it — `web/component/send-update` pushes new state into a running
+  component from anywhere (a sibling event, a PubSub handler, a parent tick) and triggers
+  a re-render.
+
+  v1 scope: a component's rendered HTML is one opaque slot in the parent's existing
+  static/dynamic split (`web/parts`) — it doesn't yet get its own wire-level diff, so a
+  state change re-sends that whole slot's HTML rather than a minimal patch. Independent
+  wire-level component diffing is later work, the same 'coarser but correct' carve-out
+  the roadmap already uses for `if`/`for`."
+  ; deflive--render-expr / deflive--handle-event-body — the macro-expansion deflive
+  ; already built for inline-vs-template render resolution and event-arm dispatch;
+  ; deflive-component reuses both (called fully-qualified below) rather than
+  ; duplicating them.
+  (:alias web/live)
+  ; render — lowers a component's Hiccup to an HTML string for its opaque parent slot
+  (:use web/template)
+  ; defbehaviour — LiveComponentModule
+  (:use protocol))
+
+; ---- the LiveComponentModule behaviour ----
+
+(defbehaviour LiveComponentModule
+  "A live component: build state from an id + assigns, render it, and handle its own
+  client events, scoped independently of the parent view."
+  (mount [id assigns])
+  (render [state])
+  (handle-event [name params state]))
+
+; ---- deflive-component macro ----
+
+(defmacro deflive-component (& clauses)
+  "Define a live component in the current module.
+
+  Expands to `mount`, `render`, `handle-event`, and the `live-component-spec` thunk.
+  Embed it in a parent live view's template with `(component this-module assigns)` —
+  `assigns` must carry a string `\"id\"`, the component's identity within the session.
+
+  Syntax:
+    (deflive-component
+      (mount (id assigns) initial-state)
+      (render (state) hiccup-template)      ; — or —  (template \"component.bml\")
+      (on \"event-name\" (params state) updated-state))
+
+  `mount` runs once, the first time this id is seen in the session — a parent re-render
+  that keeps the same id does *not* re-mount; push new data in with `web/component/send-update`
+  instead. `render` and `on` read exactly like `deflive`'s, with `state` standing in for a
+  view's `model`."
+  (let (mount-clause (live/deflive--clause 'mount clauses)
+        render-clause (live/deflive--clause 'render clauses)
+        template-clause (live/deflive--clause 'template clauses)
+        on-clauses (live/deflive--clauses 'on clauses)
+        mount-args (first (rest mount-clause))
+        mount-body (rest (rest mount-clause))
+        render-args (first (rest render-clause))
+        handle-body (live/deflive--handle-event-body on-clauses)
+        render-expr (live/deflive--render-expr render-clause template-clause)
+        ; a (template …) clause's compiled body always references a variable literally
+        ; named `model` (web/bml hardcodes `@field` -> `(get model :field)`, matching
+        ; deflive's own template default) — *not* `state`, even though inline (render
+        ; (state) …) is the idiomatic name elsewhere in this module.
+        render-dyn-args (if render-clause render-args (list 'model))
+        render-defn (list 'defn 'render render-dyn-args render-expr))
+    (list 'do
+      (list 'defn 'mount mount-args (cons 'do mount-body))
+      render-defn
+      (list 'defn
+        'handle-event
+        (list 'event--name 'event--params 'event--model)
+        handle-body)
+      ; A 0-arg thunk, mirroring deflive's live-spec — re-resolves the component's
+      ; functions by name each call, so hot-reloaded code is picked up.
+      (list 'defn
+        'live-component-spec
+        (list)
+        {:mount 'mount
+         :render 'render
+         :handle-event 'handle-event}))))
+
+; ---- the components table: {id -> {:module 'mod :spec-thunk spec-thunk :state state}} ----
+; Storing the spec-thunk alongside state (not just state) is what lets an event or an
+; out-of-band update find the right component's functions by id alone — table-put/get
+; round-trip function values fine (a spec-thunk is a plain closure) *as callables*, but a
+; value read back out is never `=` to the original (table-put/get deep-clone in and out) —
+; so `:module` (a plain symbol, stable across the round-trip) is what render-slot actually
+; compares to tell "the same component" from "a different module reusing this id".
+
+(defn component-entry (module spec-thunk state)
+  "One components-table entry: the module tag (compared to detect an id collision — see
+  render-slot), the spec-thunk (to call mount/render/handle-event by name each time,
+  hot-reload-friendly), and the component's current state."
+  {:module module :spec-thunk spec-thunk :state state})
+
+; ---- render-slot: called from a parent's render-dynamic for a (component …) hole ----
+
+(defn render-slot (module spec-thunk assigns components-table)
+  "Render one `(component module assigns)` hole to an HTML string, for the parent's
+  opaque dynamic slot. `components-table` is the session's live per-id state table
+  (a `table`): first time `(get assigns \"id\")` is seen, calls the component's `mount`
+  and stores the result; thereafter reuses the stored state as-is (the parent's `assigns`
+  are only consulted on first mount — see the module docstring). Returns just the HTML —
+  v1 has no independent wire diff, so this slot re-renders whenever the *parent*
+  re-renders, exactly like any other opaque dynamic already does.
+
+  Wraps the component's own Hiccup in one `[:div {:data-cid id} …]` — brood_live.js reads
+  the nearest ancestor `data-cid` off a client event's target and sends it along, which is
+  how `web/live/session-dispatch` knows to route that event to this component's own
+  `handle-event` instead of the parent's. The wrapper guarantees exactly one tagged root
+  regardless of what the component's `render` returns (one element, a list, …) — the same
+  reason Phoenix's LiveComponent requires a single HTML root.
+
+  Ids aren't namespaced per parent view — the components table is session-wide, and
+  persists across live-navigate. If a stored entry's `:module` doesn't match this call's
+  (two different component modules reused the same id string, or a different view swapped
+  in via live-navigate happens to reuse it), that's not the same component: treat it as
+  unmounted and mount fresh rather than rendering a foreign module's state through this
+  one's `render`."
+  (let (id (get assigns "id")
+        entry (table-get components-table id)
+        same-component? (and entry (= (get entry :module) module))
+        state (if same-component?
+                (get entry :state)
+                (let (initial ((get (spec-thunk) :mount) id assigns))
+                  (table-put components-table id (component-entry module spec-thunk initial))
+                  initial)))
+    (web/template/render [:div {:data-cid id} ((get (spec-thunk) :render) state)])))
+
+; ---- event routing: a client event whose target DOM carries data-cid ----
+
+(defn dispatch-event (components-table cid name params)
+  "Run component `cid`'s own `handle-event` for a client event that targeted it (routed
+  by `web/live/session-dispatch` on a wire event carrying a `cid`), storing the resulting
+  state back. A no-op (swallowed) if `cid` names no mounted component — a stale id from a
+  slow client is harmless, the same defensive stance `send-info`/a late tick already take."
+  (let (entry (table-get components-table cid))
+    (when entry
+      (let (spec-thunk (get entry :spec-thunk)
+            new-state (try
+                        ((get (spec-thunk) :handle-event) name params (get entry :state))
+                        (catch _ (get entry :state))))
+        (table-put components-table cid (component-entry (get entry :module) spec-thunk new-state)))))
+  nil)
+
+; ---- send-update: push new state into a running component from anywhere ----
+
+(defn apply-update (components-table cid changes)
+  "Merge `changes` into component `cid`'s stored state — the session-side handler for a
+  `[:update-component cid changes]` mailbox message (see `send-update`). A no-op if `cid`
+  names no mounted component."
+  (let (entry (table-get components-table cid))
+    (when entry
+      (table-put components-table
+        cid
+        (component-entry (get entry :module) (get entry :spec-thunk) (merge (get entry :state) changes)))))
+  nil)
+
+(defn send-update (session cid changes)
+  "Merge `changes` into component `cid`'s stored state within `session` (a live session
+  pid) and trigger a re-render — the mechanism that lets code *outside* a component's own
+  event handlers (a sibling event, a PubSub broadcast, a parent tick) push fresh data into
+  it. Sending to an already-dead session is swallowed — see `web/live/send-safely`, which
+  `send-info` also builds on."
+  (live/send-safely session [:update-component cid changes]))

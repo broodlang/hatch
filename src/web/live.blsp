@@ -7,9 +7,16 @@
   (:use web/bml)
   ; compile-parts — split a render form into statics + dynamic holes (minimal diffs)
   (:use web/parts)
-  ; send-resp / put-resp-header (client-js-handler)
+  ; build — a read-only Conn from the WS upgrade request, for on-mount-guard
   (:use web/conn)
   (:use protocol)
+  ; apply-update / dispatch-event — this module's own session runtime calls these
+  ; fully-qualified (web/component/…); declaring the dependency here — rather than
+  ; relying entirely on deflive-expanded consumers to have loaded it — means it
+  ; resolves even for a hand-built LiveModule spec that never goes through the deflive
+  ; macro. web/component itself :alias web/live — Brood tolerates the mutual reference
+  ; fine (verified empirically), so this isn't a load-order hazard.
+  (:alias web/component)
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
   ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
@@ -241,6 +248,8 @@
         ; an out-of-band message for the view's handle-info (PubSub/Presence
         ; broadcast, a timer, anything that holds this session's pid)
         ([:info payload] [:info payload buf])
+        ; a web/component/send-update push — merge into that component's stored state
+        ([:update-component cid changes] [:update-component cid changes buf])
         ([:reload] [:reload buf])
         ([:reload-css] [:reload-css buf])))
     ([:error msg] [:error msg])))
@@ -364,16 +373,21 @@
   "Kill the given ticker processes — used when a session swaps to a different view."
   (dolist (p pids) (exit p :kill)))
 
+(defn send-safely (pid msg)
+  "Send `msg` to `pid`, swallowing a failure — the shared delivery guarantee behind
+  `send-info` and `web/component/send-update`: a fan-out caller (a PubSub/Presence
+  registry looping over subscribers) must not crash because one of them just vanished —
+  the registry's monitor cleans the stale pid up moments later anyway."
+  (try (send pid msg) (catch _ nil))
+  nil)
+
 (defn send-info (session payload)
   "Deliver an out-of-band `payload` to a live `session` process; it arrives at the view's
   `handle-info`, which returns a new model and triggers a re-render. This is the delivery
   primitive PubSub/Presence (and one-off timers) build on. `session` is a live session pid
   — the value `(self)` has inside a running session, e.g. captured in `mount` to subscribe.
-  Sending to an already-dead session is swallowed: a fan-out caller (a PubSub/Presence
-  registry looping over subscribers) must not crash because one of them just vanished —
-  the registry's monitor cleans the stale pid up moments later anyway."
-  (try (send session [:info payload]) (catch _ nil))
-  nil)
+  Sending to an already-dead session is swallowed — see `send-safely`."
+  (send-safely session [:info payload]))
 
 ; ---- handler-initiated effects (push event / navigate / redirect) ----
 ; A view handler (`on`/`tick`/`handle-info`) returns the next model — the declarative path.
@@ -459,14 +473,16 @@
 (defn push-full (sock view buf)
   "Send the whole view — `{:event \"join\" :s statics :d dynamics}` — and record the dynamic
   slots (and the model they were rendered from) so later updates diff and change-track
-  against them. The client assembles the HTML and morphs."
+  against them. The client assembles the HTML and morphs. Any `(component …)` holes
+  read/write the session's live component table (`:components`) as they render — see
+  web/component."
   (let (statics (get view :render-static)
         model (get view :model)
-        dynamics ((get view :render-dynamic) model)
+        dynamics ((get view :render-dynamic) model (get view :components))
         view (assoc view :dynamics dynamics :render-model model))
     (if (send-msg sock {:event "join" :s statics :d dynamics})
       (session-recv sock view buf)
-      (close-session sock))))
+      (close-session sock view))))
 
 (defn slot-dirty? (dep old-model model)
   "True if a slot with dependency descriptor `dep` must re-render: `:all` (an opaque model
@@ -486,15 +502,19 @@
   "The new dynamic slot values, re-rendering only the slots whose model dependencies changed
   since `old` was rendered and reusing the prior value for the rest (Phoenix HEEx-style
   change tracking). Falls back to a full re-render when the tracking metadata is absent (an
-  older spec) or no prior model was recorded."
+  older spec) or no prior model was recorded. `components` (the session's live component
+  table) is threaded through every slot call, same as `push-full` — a component-holding
+  slot's dependency is always `:all` (see web/parts' `deps-of`), so it's never skipped here,
+  but it still needs the table to actually render."
   (let (slots (get view :render-slots)
         deps (get view :slot-deps)
-        old-model (get view :render-model))
+        old-model (get view :render-model)
+        components (get view :components))
     (if (or (nil? slots) (nil? deps) (nil? old-model))
-      ((get view :render-dynamic) model)
+      ((get view :render-dynamic) model components)
       (into []
         (map (fn (i) (if (slot-dirty? (nth deps i) old-model model)
-                       ((nth slots i) model)
+                       ((nth slots i) model components)
                        (nth old i)))
           (range (count old)))))))
 
@@ -513,15 +533,39 @@
         (session-recv sock view buf)
         (if (send-msg sock {:event "diff" :d changed})
           (session-recv sock view buf)
-          (close-session sock))))))
+          (close-session sock view))))))
 
-(defn close-session (sock)
-  "Drop out of the reload registry and close the socket. The close-frame send and the
-  close itself are best-effort — the peer may already be gone (a broken pipe)."
-  (live--unregister (self))
+(defn close-socket (sock)
+  "Send a close frame and close the TCP socket. Best-effort throughout — the peer may
+  already be gone (a broken pipe), so a failed write here is never itself an error."
   (try (tcp-send sock (close-frame)) (catch _ nil))
   (try (tcp-close sock) (catch _ nil))
   nil)
+
+(defn close-session (sock view)
+  "Drop out of the reload registry, free the session's live component table (web/component),
+  and close the socket."
+  (live--unregister (self))
+  (try (table-drop (get view :components)) (catch _ nil))
+  (close-socket sock))
+
+(defn redirect-and-close (sock path)
+  "Send the client a redirect (brood_live.js does a full `window.location.href` load to
+  `path`) and close the socket. Used when an `on-mount-guard` vetoes a fresh connect, before
+  any session state exists — so there's no live-registry registration to undo, unlike
+  `close-session`."
+  (try (send-msg sock {:event "redirect" :path path}) (catch _ nil))
+  (close-socket sock))
+
+(defn redirect-and-continue (sock view buf path)
+  "Send the client a redirect to `path` (a full page load — an unknown/cross-group
+  navigate target, or a target view's on-mount-guard veto) and, if the send succeeds,
+  keep listening on the *current*, still-live `view` — the socket doesn't have to
+  cross the boundary itself, the browser's own reload does. A failed send means the peer
+  is already gone, so end the session instead."
+  (if (send-msg sock {:event "redirect" :path path})
+    (session-recv sock view buf)
+    (close-session sock view)))
 
 (defn session-recv (sock view buf)
   ; Flush any effects the last handler queued (push-event/navigate/redirect) before we block
@@ -529,13 +573,13 @@
   (flush-effects sock)
   (match (recv-frame--loop sock buf)
     ; client close
-    ([:ok 8 _ _] (close-session sock))
+    ([:ok 8 _ _] (close-session sock view))
     ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
     ; is best-effort: a failed write means the peer is gone, so end the session.
     ([:ok 9 payload _] (kick-watchdog view)
       (if (try (do (tcp-send sock (pong-frame payload)) true) (catch _ false))
         (session-recv sock view buf)
-        (close-session sock)))
+        (close-session sock view)))
     ; client message
     ([:ok 1 payload rem] (kick-watchdog view) (session-dispatch sock view rem payload))
     ; other opcodes (e.g. a pong, opcode 0xA) — ignored, but still client liveness
@@ -565,6 +609,13 @@
                                 (try (h payload (get view :model))
                                   (catch e (live--handler-error "info" :message e (get view :model))))
                                 (get view :model)))))
+    ; a web/component/send-update push: merge into that component's stored state (a no-op
+    ; if cid names no mounted component) and re-render — the parent's :model is untouched,
+    ; but its next render-dynamic pass picks up the component's fresh state.
+    ([:update-component cid changes buf2]
+      (try (web/component/apply-update (get view :components) cid changes)
+        (catch e (live--handler-error "update-component" cid e nil)))
+      (push-update sock view buf2 "diff" (get view :model)))
     ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
                           view (if spec (merge view spec) view))
                       (push-update sock view buf2 "render" (get view :model))))
@@ -572,9 +623,12 @@
     ; re-render, so the live model (form state, scroll, focus) is preserved.
     ([:reload-css buf2] (if (send-msg sock {:event "reload-css"})
                           (session-recv sock view buf2)
-                          (close-session sock)))
-    ([:closed] (live--unregister (self)) nil)
-    ([:error _] (close-session sock))))
+                          (close-session sock view)))
+    ; the peer already closed the TCP connection (no WS close frame) — same cleanup as
+    ; close-session (registry + the session's component table), its socket-write calls are
+    ; already best-effort/try-caught so they're harmless to make on an already-dead socket
+    ([:closed] (close-session sock view) nil)
+    ([:error _] (close-session sock view))))
 
 (defn session-dispatch (sock view buf payload)
   ; `payload` is a byte string (binary mode) holding the client's UTF-8 JSON —
@@ -584,14 +638,33 @@
         params (get msg "params" {}))
     (match event
       ("join" (push-update sock view buf "render" ((get view :mount) params)))
+      ; A component-targeted event carries a `cid` (brood_live.js reads the nearest
+      ; ancestor's data-cid) — route it to that component's own handle-event instead of
+      ; the parent's, and re-render with the parent's :model unchanged (the component's
+      ; slot picks up its fresh state on the next render-dynamic pass).
       ("event" (let (name (get msg "name" "")
+                     cid (get msg "cid" nil)
                      model (get view :model))
-                 (push-update sock
-                   view
-                   buf
-                   "diff"
-                   (try ((get view :handle-event) name params model)
-                     (catch e (live--handler-error "event" name e model))))))
+                 (if cid
+                   (do
+                     (try (web/component/dispatch-event (get view :components) cid name params)
+                       (catch e (live--handler-error "event" name e nil)))
+                     (push-update sock view buf "diff" model))
+                   (push-update sock
+                     view
+                     buf
+                     "diff"
+                     (try ((get view :handle-event) name params model)
+                       (catch e (live--handler-error "event" name e model)))))))
+      ; Live-patch: the client already updated the URL/history itself (session.patch in
+      ; brood_live.js); this just runs handle-params against the *current* view/model — no
+      ; lookup-live, no unmount/remount, no ticker restart, the lightest possible update.
+      ("patch" (push-update sock
+                 view
+                 buf
+                 "diff"
+                 (try ((get view :handle-params) params (get view :model))
+                   (catch e (live--handler-error "patch" :params e (get view :model))))))
       ; Live navigation: switch this session to the live view registered at `path`
       ; WITHOUT a page reload — stop the old view's tickers, mount the target, start
       ; its tickers, and push a full render (the client swaps the live container and
@@ -601,61 +674,87 @@
         (let (path (get msg "path" "")
               entry (lookup-live path))
           (if (and entry (= (get entry :session) (get view :session)))
-            ; same live-session group → swap the view over this socket, no reload
-            (let (spec-fn (get entry :spec)
-                  ; let the OLD view clean up (pubsub/unsubscribe, presence/untrack, …)
-                  ; before it's replaced — the session process lives on across a navigate,
-                  ; so the monitor-based cleanup never fires for it. Runs here in the session
-                  ; process, so (self) is the same pid that mount subscribed/tracked.
-                  _unmount (try ((get view :unmount) (get view :model))
-                             (catch e (live--handler-error "unmount" :unmount e nil)))
-                  _ (stop-tickers (get view :ticker-pids))
-                  ; bump the generation so a beat still queued from the OLD view's ticker
-                  ; (killed just above, but a message already sent lingers) is dropped rather
-                  ; than dispatched into the new view's handle-tick.
-                  gen (+ 1 (get view :generation 0))
-                  spec (spec-fn)
-                  model ((get spec :mount) params)
-                  new-view (merge spec
-                             {:spec-fn spec-fn
-                              :session (get entry :session)
-                              :params params
-                              :model model
-                              :generation gen
-                              :ticker-pids (start-tickers (get spec :ticks) gen)
-                              ; carry the idle watchdog across the swap (same socket)
-                              :watchdog (get view :watchdog)}))
-              (push-update sock new-view buf "render" model))
+            ; same live-session group → run the target's on-mount-guard (against the Conn
+            ; built once at connect time) before swapping the view over this socket. The
+            ; whole check-and-swap is try-wrapped: a throwing guard (or spec-fn) has no
+            ; sensible redirect target to fall back to (redirecting to the very path that
+            ; just threw could loop), so it fails closed — the session ends — rather than
+            ; crashing, matching how every other optional hook (handle-info/tick/unmount)
+            ; is guarded against a user-code exception.
+            (try
+              (let (spec-fn (get entry :spec)
+                    spec (spec-fn)
+                    guard-result ((get spec :mount-guard) (get view :conn)))
+                (if guard-result
+                  ; the target view vetoed — redirect there (full reload) instead of
+                  ; swapping, and stay on the current view (mirrors the cross-group
+                  ; fallback below)
+                  (redirect-and-continue sock view buf guard-result)
+                  (let (; let the OLD view clean up (pubsub/unsubscribe, presence/untrack, …)
+                      ; before it's replaced — the session process lives on across a navigate,
+                      ; so the monitor-based cleanup never fires for it. Runs here in the session
+                      ; process, so (self) is the same pid that mount subscribed/tracked.
+                      _unmount (try ((get view :unmount) (get view :model))
+                                 (catch e (live--handler-error "unmount" :unmount e nil)))
+                      _ (stop-tickers (get view :ticker-pids))
+                      ; bump the generation so a beat still queued from the OLD view's ticker
+                      ; (killed just above, but a message already sent lingers) is dropped
+                      ; rather than dispatched into the new view's handle-tick.
+                      gen (+ 1 (get view :generation 0))
+                      model ((get spec :mount) params)
+                      new-view (merge spec
+                                 {:spec-fn spec-fn
+                                  :session (get entry :session)
+                                  :params params
+                                  :model model
+                                  :generation gen
+                                  :ticker-pids (start-tickers (get spec :ticks) gen)
+                                  ; carry the idle watchdog + Conn + component table across
+                                  ; the swap (same socket, same session-lifetime state)
+                                  :watchdog (get view :watchdog)
+                                  :conn (get view :conn)
+                                  :components (get view :components)}))
+                  (push-update sock new-view buf "render" model))))
+              (catch _ (close-session sock view)))
             ; unknown path, OR a different live-session group → full reload, which
             ; re-enters the HTTP pipeline (and that group's auth). The socket can't
             ; cross the boundary on its own.
-            (if (send-msg sock {:event "redirect" :path path})
-              (session-recv sock view buf)
-              (close-session sock)))))
+            (redirect-and-continue sock view buf path))))
       (_ (session-recv sock view buf)))))
-
-(defn render (view model)
-  "Call the view's render fn and convert to an HTML string."
-  (let (node ((get view :render) model))
-    (web/template/render node)))
 
 ; ---- session start ----
 
 (defn start-session (sock request entry)
   "Run a live session for the registry `entry` (`{:spec :session}`) on a freshly-upgraded
-  socket: build the initial model from the request params, then enter the per-connection
-  event loop. The session remembers its `:session` group, so live navigation can refuse
-  to cross into another group (forcing a full reload that re-runs that group's auth)."
+  socket: build a read-only Conn from `request` (cookies parsed, so an `on-mount-guard` can
+  read a session) and run the target spec's guard. A veto sends a redirect and closes the
+  socket, never entering the session loop. Otherwise build the initial model from the request
+  params and enter the per-connection event loop. The session remembers its `:session` group,
+  so live navigation can refuse to cross into another group (forcing a full reload that re-runs
+  that group's auth); the Conn is carried in `view` so live-navigate can re-run a guard too."
   (let (spec-fn (get entry :spec)
         params (get request :params {})
         spec (spec-fn)
-        model ((get spec :mount) params)
-        view (merge spec
-               {:spec-fn spec-fn
-                :session (get entry :session)
-                :params params
-                :model model}))
-    (session-loop sock view "")))
+        conn (build request)
+        ; a throwing guard has no session yet to fail into and no sensible redirect
+        ; target, so it fails closed — the raw socket is just closed, no session ever
+        ; starts — rather than crashing, matching how every other optional hook
+        ; (handle-info/tick/unmount) is guarded against a user-code exception
+        guard-result (try ((get spec :mount-guard) conn) (catch _ :hatch/guard-error)))
+    (cond
+      (= guard-result :hatch/guard-error) (try (tcp-close sock) (catch _ nil))
+      guard-result (redirect-and-close sock guard-result)
+      else (let (model ((get spec :mount) params)
+            view (merge spec
+                   {:spec-fn spec-fn
+                    :session (get entry :session)
+                    :params params
+                    :model model
+                    :conn conn
+                    ; the session's live per-id LiveComponent state (web/component); lives
+                    ; for the socket's lifetime, carried across live-navigate
+                    :components (table)}))
+        (session-loop sock view "")))))
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
 ; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
@@ -811,8 +910,59 @@
 (defbehaviour LiveModule
   "A live view: build a model from params, render it, and handle client events."
   (mount [params])
-  (render [model])
+  (render [model &optional (live--components (table))])
   (handle-event [name params model]))
+
+; ---- shared macro-time expansion, used by both deflive and deflive-component ----
+
+(defn deflive--clause (tag clauses)
+  "The first clause in `clauses` headed by symbol `tag` (e.g. `'mount`), or nil — the
+  singular clauses (`mount`/`render`/`template`/`handle-info`/`unmount`/`on-mount-guard`/
+  `handle-params`), of which a deflive/deflive-component form has at most one each."
+  (first (filter (fn (c) (= (first c) tag)) clauses)))
+
+(defn deflive--clauses (tag clauses)
+  "Every clause in `clauses` headed by symbol `tag` — the repeatable ones (`on`/`tick`),
+  of which a deflive/deflive-component form can have several."
+  (filter (fn (c) (= (first c) tag)) clauses))
+
+(defn deflive--render-expr (render-clause template-clause)
+  "The macro-time render expression: an inline `(render …)` clause's body (`do`-wrapped
+  if more than one form), or — failing that — a `(template \"file.bml\")` clause compiled
+  to Hiccup here at expansion time. Shared by `deflive` and `deflive-component` so the
+  inline-vs-template resolution lives in one place."
+  (if render-clause
+    (let (render-body (rest (rest render-clause)))
+      (if (= (count render-body) 1) (first render-body) (cons 'do render-body)))
+    (compile-template (first (rest template-clause)))))
+
+(defn deflive--handle-event-body (on-clauses)
+  "The macro-time `handle-event` body: one `match` arm per `(on \"name\" (args…) …)`
+  clause, keyed by the client's event name, falling through to an identity default (an
+  unrecognized event name is a no-op, not an error). Shared by `deflive` and
+  `deflive-component` — an `on` clause reads the same either way, just with a different
+  second binding (`model` for a view, `state` for a component)."
+  (let (event-arms (map (fn (c)
+                          (let (ev-name (first (rest c))
+                                args (first (rest (rest c)))
+                                body (rest (rest (rest c))))
+                            (list ev-name args body)))
+                     on-clauses))
+    (cons 'match
+      (cons 'event--name
+        (concat (map (fn (arm)
+                       (let (ev-name (first arm)
+                             args (first (rest arm))
+                             body (first (rest (rest arm))))
+                         (list ev-name
+                           (list 'let
+                             (list (first args)
+                               'event--params
+                               (first (rest args))
+                               'event--model)
+                             (cons 'do body)))))
+                  event-arms)
+          (list (list '_ 'event--model)))))))
 
 ; ---- deflive macro ----
 
@@ -839,7 +989,17 @@
       (tick 1000 (model) updated-model)   ; optional: a beat every ms (repeatable)
       (handle-info (msg model) updated-model) ; optional: out-of-band messages
       (unmount (model) …)                     ; optional: cleanup on live-navigate away
+      (handle-params (params model) updated-model) ; optional: live-patch (same view, new params)
       ...)
+
+  An optional `(handle-params (params model) …)` clause runs on a live-patch —
+  `web/live/send-update`'s sibling for the *view itself*: `brood_live.js`'s
+  `session.patch(href)` updates the URL/history without a full reload or remount, the
+  lightest possible update (Phoenix's `handle_params`, as opposed to a full `mount`). No
+  ticker restart, no unmount/remount, `:model` carries over — only the new `params` are
+  handed to this clause, which returns the updated model (it re-renders, like an event).
+  Omit it and a patch leaves the model unchanged (the URL/history still updates
+  client-side; the view just doesn't react to it).
 
   An optional `(handle-info (msg model) …)` clause handles out-of-band messages delivered
   to the session with `web/live/send-info` — PubSub/Presence broadcasts and timers. `msg`
@@ -857,39 +1017,29 @@
   live-navigates away from this view, before the next view mounts — undo what `mount` did
   (`pubsub/unsubscribe`, `presence/untrack`, …). It's not needed for socket close: a dropped
   socket kills the session process and the registries clean up via their monitors; unmount
-  covers the navigate-without-death case the monitors can't see."
-  (let (mount-clause (first (filter (fn (c) (= (first c) 'mount)) clauses))
-        render-clause (first (filter (fn (c) (= (first c) 'render)) clauses))
-        template-clause (first (filter (fn (c) (= (first c) 'template)) clauses))
-        on-clauses (filter (fn (c) (= (first c) 'on)) clauses)
-        tick-clauses (filter (fn (c) (= (first c) 'tick)) clauses)
-        info-clause (first (filter (fn (c) (= (first c) 'handle-info)) clauses))
-        unmount-clause (first (filter (fn (c) (= (first c) 'unmount)) clauses))
+  covers the navigate-without-death case the monitors can't see.
+
+  An optional `(on-mount-guard (conn) …)` clause runs before `mount`, both on the initial
+  WebSocket connect and on every live-navigate into this view — `conn` is a read-only Conn
+  built from the WS upgrade request (cookies parsed, so a plug like `web/session/fetch-session`
+  can run against it: `((session/fetch-session secret) conn)`). Return `nil`/`false` to allow
+  the mount; any other value (a path string) redirects the client there instead, via the same
+  `{\"event\":\"redirect\"}` message live-navigation already sends for a cross-live-session jump
+  — `brood_live.js` does a full page load, so the target path's own HTTP-side `through` plugs
+  run again. Omit the clause and every view mounts unconditionally, as before."
+  (let (mount-clause (deflive--clause 'mount clauses)
+        render-clause (deflive--clause 'render clauses)
+        template-clause (deflive--clause 'template clauses)
+        on-clauses (deflive--clauses 'on clauses)
+        tick-clauses (deflive--clauses 'tick clauses)
+        info-clause (deflive--clause 'handle-info clauses)
+        unmount-clause (deflive--clause 'unmount clauses)
+        guard-clause (deflive--clause 'on-mount-guard clauses)
+        params-clause (deflive--clause 'handle-params clauses)
         mount-args (first (rest mount-clause))
         mount-body (rest (rest mount-clause))
         render-args (first (rest render-clause))
-        render-body (rest (rest render-clause))
-        event-arms (map (fn (c)
-                          (let (ev-name (first (rest c))
-                                args (first (rest (rest c)))
-                                body (rest (rest (rest c))))
-                            (list ev-name args body)))
-                     on-clauses)
-        handle-body (cons 'match
-                      (cons 'event--name
-                        (concat (map (fn (arm)
-                                       (let (ev-name (first arm)
-                                             args (first (rest arm))
-                                             body (first (rest (rest arm))))
-                                         (list ev-name
-                                           (list 'let
-                                             (list (first args)
-                                               'event--params
-                                               (first (rest args))
-                                               'event--model)
-                                             (cons 'do body)))))
-                                  event-arms)
-                          (list (list '_ 'event--model)))))
+        handle-body (deflive--handle-event-body on-clauses)
         ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
         ; tick--model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
         tick-arms (map (fn (c)
@@ -915,11 +1065,8 @@
         ; The single render expression — the inline `(render …)` body or the compiled
         ; `.bml` form — computed once and reused for both the full `render` and the
         ; static/dynamic split below.
-        render-expr (if render-clause
-                      (if (= (count render-body) 1) (first render-body) (cons 'do render-body))
-                      (compile-template (first (rest template-clause))))
+        render-expr (deflive--render-expr render-clause template-clause)
         render-dyn-args (if render-clause render-args (list 'model))
-        render-defn (list 'defn 'render render-dyn-args render-expr)
         ; Static/dynamic split for minimal-diff rendering (web/parts). On a malformed form
         ; the whole render falls back to one opaque dynamic — correct, just not granular.
         parts (try
@@ -927,9 +1074,29 @@
                 (catch _e
                   {:statics ["" ""] :dynamics (list (list 'web/template/render render-expr))}))
         render-static-defn (list 'def 'render-static (get parts :statics))
+        ; Both render and render-dynamic take one extra, optional, framework-internal arg
+        ; beyond the user-facing render-dyn-args: the session's live component table (a
+        ; `table`), which a `(component …)` hole (web/parts' component-form? case, or
+        ; rewrite-components for a nested one) reads/writes via web/component/render-slot.
+        ; Optional + defaulted so every existing view (no component holes) is unaffected —
+        ; only component holes ever reference `live--components`.
+        render-with-components-args (list (first render-dyn-args) '&optional (list 'live--components (list 'table)))
+        ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap
+        ; it in web/template/render themselves), so it can't just call render-dynamic
+        ; (which returns an already-rendered *string*,
+        ; and wrapping that in web/template/render again would double-escape it). Instead
+        ; run render-expr through web/parts/rewrite-components: every `(component module
+        ; assigns)` sub-form — direct child or nested inside `(if …)`/`(for …)` — becomes
+        ; a `(web/template/raw (web/component/render-slot …))` call, itself a valid Hiccup
+        ; node (a raw-escaped string), with a fresh, unshared component table each call —
+        ; correct for a one-off render outside a live session (no persistence to offer).
+        render-defn (list 'defn
+                      'render
+                      render-with-components-args
+                      (web/parts/rewrite-components render-expr))
         render-dynamic-defn (list 'defn
                               'render-dynamic
-                              render-dyn-args
+                              render-with-components-args
                               (cons 'vector (get parts :dynamics)))
         ; Change tracking (Phoenix HEEx-style): a per-slot render fn plus, in parallel, the
         ; set of model keys each slot reads. `push-diff` re-renders only the slots whose
@@ -941,9 +1108,13 @@
         model-sym (if (and (pair? render-dyn-args) (symbol? (first render-dyn-args)))
                     (first render-dyn-args)
                     nil)
+        ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a
+        ; slot compiled from a `(component …)` hole references `live--components` as a free
+        ; variable (see web/parts' component-slot-form), so it must be bound as a parameter
+        ; here too, exactly like render-dynamic itself.
         render-slots-defn (list 'def 'render-slots
                             (cons 'vector
-                              (map (fn (d) (list 'fn render-dyn-args d)) (get parts :dynamics))))
+                              (map (fn (d) (list 'fn render-with-components-args d)) (get parts :dynamics))))
         slot-deps-defn (list 'def 'slot-deps
                          (apply vector
                            (map (fn (d) (if (nil? model-sym)
@@ -969,14 +1140,37 @@
                          'unmount
                          (first (rest unmount-clause))
                          (cons 'do (rest (rest unmount-clause))))
-                       (list 'defn 'unmount (list 'unmount--model) nil)))
+                       (list 'defn 'unmount (list 'unmount--model) nil))
+        ; Optional `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
+        ; live-navigate into this view). Absent → a no-op guard that always allows the mount,
+        ; so every existing view is unaffected.
+        mount-guard-defn (if guard-clause
+                           (list 'defn
+                             'mount-guard
+                             (first (rest guard-clause))
+                             (cons 'do (rest (rest guard-clause))))
+                           (list 'defn 'mount-guard (list 'guard--conn) nil))
+        ; Optional `(handle-params (params model) …)` — runs on a live-patch (params/URL
+        ; change on the *current* view, no remount — Phoenix's handle_params, the light
+        ; sibling of a full mount). Absent → an identity handler, so a view that doesn't
+        ; opt in just keeps its model unchanged on a patch.
+        handle-params-defn (if params-clause
+                              (list 'defn
+                                'handle-params
+                                (first (rest params-clause))
+                                (cons 'do (rest (rest params-clause))))
+                              (list 'defn 'handle-params (list 'patch--params 'patch--model) 'patch--model)))
     (list 'do
+      ; a (component …) hole in render-expr compiles to a call on web/component/render-slot
+      ; (fully qualified — this module needn't :use web/component itself). No explicit
+      ; require needed here: every view already (:use web/live) before calling deflive,
+      ; and web/live now (:alias web/component) itself.
       (list 'defn 'mount mount-args (cons 'do mount-body))
-      render-defn
       render-static-defn
       render-dynamic-defn
       render-slots-defn
       slot-deps-defn
+      render-defn
       (list 'defn
         'handle-event
         (list 'event--name 'event--params 'event--model)
@@ -984,6 +1178,8 @@
       (list 'defn 'handle-tick (list 'tick--key 'tick--model) handle-tick-body)
       handle-info-defn
       unmount-defn
+      mount-guard-defn
+      handle-params-defn
       (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses)))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
@@ -1000,6 +1196,8 @@
          :handle-tick 'handle-tick
          :handle-info 'handle-info
          :unmount 'unmount
+         :mount-guard 'mount-guard
+         :handle-params 'handle-params
          :ticks 'live-ticks})
       ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
       ; top-level defs), so a save signals open sessions to re-render. No-op at first

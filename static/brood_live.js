@@ -164,9 +164,12 @@ const BroodLive = (() => {
       morphChildren(this.container, next);
     }
 
-    // Called by event bindings to push a user event to the server.
-    pushEvent(name, params = {}) {
-      this._send({ event: "event", name, params });
+    // Called by event bindings to push a user event to the server. `cid` (a live
+    // component's id, from the nearest ancestor [data-cid]) routes the event to that
+    // component's own handle-event server-side instead of the parent view's — see
+    // web/component and web/live's session-dispatch.
+    pushEvent(name, params = {}, cid = null) {
+      this._send({ event: "event", name, params, ...(cid ? { cid } : {}) });
     }
 
     // Live navigation: switch this session to another live view over the SAME socket,
@@ -180,6 +183,17 @@ const BroodLive = (() => {
       if (push) history.pushState({ broodNav: true }, "", url.pathname + url.search);
       this.path = path;
       this._send({ event: "navigate", path, params });
+    }
+
+    // Live-patch: update the URL/params on the *current* view, no remount — the light
+    // sibling of navigate (Phoenix's push_patch vs push_navigate/live_redirect). Only the
+    // query string is expected to change; the path is carried along for the history entry
+    // but the server never re-runs mount/lookup-live for a patch.
+    patch(href, push = true) {
+      const url = new URL(href, location.origin);
+      const params = Object.fromEntries(url.searchParams);
+      if (push) history.pushState({ broodPatch: true }, "", url.pathname + url.search);
+      this._send({ event: "patch", params });
     }
   }
 
@@ -211,6 +225,26 @@ const BroodLive = (() => {
     }
   }
 
+  // insertBefore on a node that's already in the document is spec'd as an in-place move —
+  // but if the focused element is a *descendant* of that node (not the node itself), some
+  // browsers still blur it, even though the element is reused rather than recreated (verified:
+  // a reorder that happens to leave the focused row's relative position unchanged never
+  // blurs it; one that actually needs to reposition that row does — every time). Save and
+  // restore focus (and, for a text input, the caret/selection) around the move so a keyed
+  // reorder never steals focus out of a field the user is typing in.
+  function moveKeepingFocus(parent, node, pos) {
+    const active = document.activeElement;
+    const refocus = active && node !== active && node.contains(active);
+    const isTextField = refocus && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+    const selStart = isTextField ? active.selectionStart : null;
+    const selEnd = isTextField ? active.selectionEnd : null;
+    parent.insertBefore(node, pos);
+    if (refocus && document.activeElement !== active) {
+      active.focus();
+      if (isTextField && selStart !== null) active.setSelectionRange(selStart, selEnd);
+    }
+  }
+
   // Keyed reconcile: match new children to existing ones by key, moving reused nodes into
   // order and cloning genuinely new ones. A `placed` set drives removal, so it's robust to
   // moves, inserts, deletes, and a same-key tag change.
@@ -236,7 +270,7 @@ const BroodLive = (() => {
       if (pos === node) {
         pos = pos.nextSibling;      // already in the right spot
       } else {
-        parent.insertBefore(node, pos);  // move/insert ahead of the current cursor
+        moveKeepingFocus(parent, node, pos);  // move/insert ahead of the current cursor
       }
     }
     // Drop every original node we didn't reuse (leftover keys, removed items, tag swaps).
@@ -305,6 +339,13 @@ const BroodLive = (() => {
     });
   }
 
+  // The nearest ancestor live-component id (web/component), if `el` sits inside one —
+  // routes the event server-side to that component's own handle-event.
+  function nearestCid(el) {
+    const cidEl = el.closest("[data-cid]");
+    return cidEl ? cidEl.dataset.cid : null;
+  }
+
   // Wire up all [data-event] elements inside a container.
   function bindEvents(container, session) {
     container.addEventListener("click", (e) => {
@@ -313,7 +354,7 @@ const BroodLive = (() => {
       e.preventDefault();
       const name = el.dataset.event;
       const params = el.dataset.params ? JSON.parse(el.dataset.params) : {};
-      session.pushEvent(name, params);
+      session.pushEvent(name, params, nearestCid(el));
     });
 
     container.addEventListener("change", (e) => {
@@ -321,7 +362,7 @@ const BroodLive = (() => {
       if (!el.dataset.event) return;
       const name = el.dataset.event;
       const params = { value: el.value, ...(el.dataset.params ? JSON.parse(el.dataset.params) : {}) };
-      session.pushEvent(name, params);
+      session.pushEvent(name, params, nearestCid(el));
     });
 
     // Fire on every keystroke (not just on blur, which is what "change" gives) so a
@@ -333,7 +374,7 @@ const BroodLive = (() => {
       if (!el.dataset.event) return;
       const name = el.dataset.event;
       const params = { value: el.value, ...(el.dataset.params ? JSON.parse(el.dataset.params) : {}) };
-      session.pushEvent(name, params);
+      session.pushEvent(name, params, nearestCid(el));
     });
 
     container.addEventListener("submit", (e) => {
@@ -342,20 +383,23 @@ const BroodLive = (() => {
       e.preventDefault();
       const name = form.dataset.event;
       const data = Object.fromEntries(new FormData(form));
-      session.pushEvent(name, data);
+      session.pushEvent(name, data, nearestCid(form));
     });
   }
 
   // Live navigation wiring (set up once, document-wide):
   //  - a click on an `<a data-nav href="…">` is live-navigated over the open socket
-  //    instead of reloading the page — but only if a live session exists and is
-  //    connected; otherwise the browser does its normal navigation (a plain page has
-  //    no socket, so its data-nav links just load).
-  //  - back/forward (popstate) re-navigates to the new address over the same socket.
+  //    instead of reloading the page (full remount, a different view) — but only if a
+  //    live session exists and is connected; otherwise the browser does its normal
+  //    navigation (a plain page has no socket, so its data-nav links just load).
+  //  - a click on an `<a data-patch href="…">` is live-*patched* instead — same view,
+  //    just new params (handle-params), no remount. Same connected-socket gating.
+  //  - back/forward (popstate) replays a navigate or a patch depending on which one
+  //    pushed that history entry (the `broodNav`/`broodPatch` state flag).
   function setupNavigation() {
     document.addEventListener("click", (e) => {
       if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      const a = e.target.closest("a[data-nav]");
+      const a = e.target.closest("a[data-nav], a[data-patch]");
       if (!a) return;
       const href = a.getAttribute("href");
       if (!href || a.target === "_blank") return;
@@ -364,11 +408,15 @@ const BroodLive = (() => {
       if (url.origin !== location.origin) return;
       if (!navSession || !navSession.connected) return; // let the browser navigate
       e.preventDefault();
-      navSession.navigate(url.pathname + url.search);
+      if (a.hasAttribute("data-patch")) navSession.patch(url.pathname + url.search);
+      else navSession.navigate(url.pathname + url.search);
     });
 
-    window.addEventListener("popstate", () => {
-      if (navSession && navSession.connected) {
+    window.addEventListener("popstate", (e) => {
+      if (!navSession || !navSession.connected) return;
+      if (e.state && e.state.broodPatch) {
+        navSession.patch(location.pathname + location.search, false);
+      } else {
         navSession.navigate(location.pathname + location.search, false);
       }
     });

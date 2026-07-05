@@ -75,7 +75,9 @@
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
   (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))
   (handle-info (msg model) (assoc model :count (+ (get model :count) msg)))
-  (unmount (model) (send (self) [:unmounted (get model :count)])))
+  (unmount (model) (send (self) [:unmounted (get model :count)]))
+  (on-mount-guard (conn) (if (get-cookie conn "session") nil "/login"))
+  (handle-params (params model) (assoc model :page (string->number (get params "page" "1")))))
 
 (describe "live-view harness"
   (test "live-mount builds the initial model from params"
@@ -96,7 +98,14 @@
   (test "live-render lowers the view to HTML"
     (assert= (includes? (live-render (live-spec) {:count 42}) "<span>42</span>") true))
   (test "live-html mounts then renders in one step"
-    (assert= (includes? (live-html (live-spec) {"start" "7"}) "<span>7</span>") true)))
+    (assert= (includes? (live-html (live-spec) {"start" "7"}) "<span>7</span>") true))
+  (test "on-mount-guard vetoes without the guarded cookie"
+    (assert= (live-guard (live-spec) (conn-for "GET" "/")) "/login"))
+  (test "on-mount-guard allows the mount once its condition is met"
+    (assert= (live-guard (live-spec) (conn-for "GET" "/" {:headers {:cookie "session=1"}}))
+      nil))
+  (test "live-patch runs handle-params against the current model, keeping other fields"
+    (assert= (live-patch (live-spec) {"page" "3"} {:count 5}) {:count 5 :page 3})))
 
 (describe "static/dynamic parts (minimal diffs)"
   ; The invariant the wire protocol relies on: assembling the static skeleton with the
