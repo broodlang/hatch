@@ -21,6 +21,15 @@
   is emitted whole as one opaque dynamic. Idiomatic views (and all `.bml`-compiled ones) put
   an attrs map on every element, so this fallback rarely fires.
 
+  A `(component module assigns)` form (web/component's LiveComponents) gets its own dynamic
+  hole via `web/component/render-slot` rather than falling into the generic opaque-dynamic
+  case — same granularity (one opaque slot; a component doesn't yet get its own wire-level
+  diff — v1 scope, see web/component's docstring) but a distinct compiled form so render-slot
+  can thread the session's live component table through. Its change-tracking dependency is
+  always `:all` (see `deps-of`'s `live--components` case) — a component's own state can change
+  (via `web/component/send-update` or its own event) without any `model` key changing at all,
+  so the slot must always be considered dirty; there's no way to pin it to specific keys.
+
   `interleave` and `diff-dynamics` are the runtime helpers the session actor uses."
   ; render / render-attr / escape-html / *void-tags* — reused at compile time and in the
   ; emitted dynamic forms
@@ -61,6 +70,29 @@
         body (if (= (count body-forms) 1) (first body-forms) (cons 'do body-forms)))
     (list 'web/parts/comp (list 'for spec (list 'web/template/render body)))))
 
+(defn component-form? (node)
+  "True for a literal `(component module assigns)` form — a LiveComponent slot
+  (web/component), compiled to its own dynamic hole instead of falling through to the
+  generic opaque-dynamic case (walk's else branch)."
+  (and (pair? node) (= (first node) 'component)))
+
+(defn component-slot-form (node)
+  "The generated call for a `(component module assigns)` hole: resolves `module` to its
+  `live-component-spec` thunk symbol at compile time — mirroring how web/router's
+  compile-live resolves `module/live-spec` — and threads the session's live component
+  table (`live--components`, a free variable deflive's generated render-dynamic binds as
+  an extra param) through to web/component/render-slot. Passes the quoted bare `module`
+  symbol too, alongside the resolved spec-thunk: render-slot stores it next to a mounted
+  component's state so a same-id-different-module collision can be detected by comparing
+  symbols (stable across a table round-trip) rather than the spec-thunk function value
+  (table-put/get deep-clone a stored function, so two 'equal' thunks are never `=` after
+  a round-trip — comparing those would report every render as a different component)."
+  (list 'web/component/render-slot
+    (list 'quote (nth node 1))
+    (symbol (str (name (nth node 1)) "/live-component-spec"))
+    (nth node 2)
+    'live--components))
+
 ; ---- change tracking: which model keys each dynamic slot reads ----
 ; So the session can re-render only the slots a state change actually affects (Phoenix
 ; HEEx-style), `form-deps` statically finds the `model` keys a dynamic form reads via
@@ -86,13 +118,19 @@
   (fold (fn (acc x) (deps-merge acc (deps-of x model-sym))) (list) forms))
 
 (defn deps-of (form model-sym)
-  "The model keys `form` reads, or `:all` for any opaque model use. See the section comment."
+  "The model keys `form` reads, or `:all` for any opaque model use. See the section comment.
+  `live--components` (a component slot's free-variable reference to the session's live
+  component table — see `component-slot-form`) is always `:all`: a LiveComponent's own state
+  can change via `web/component/send-update` or its own event handler without any `model` key
+  changing, so a slot containing one can never be pinned to specific model keys — it must
+  always be considered dirty, or its own state updates would never reach a diff."
   (cond
     (model-get-form? form model-sym)
       ; the pinned key, plus deps in any args past the key (e.g. a default expression)
       (deps-merge (list (first (rest (rest form))))
         (deps-seq (rest (rest (rest form))) model-sym))
     (= form model-sym) :all
+    (= form 'live--components) :all
     (pair? form) (deps-seq form model-sym)
     (vector? form) (deps-seq form model-sym)
     ; a map literal in the form (e.g. an attrs map inside a comprehension body) — its keys
@@ -133,6 +171,24 @@
       (emit-static st (render-attr kv))
       (emit-dynamic st (list 'web/template/render-attr (list 'vector k v))))))
 
+(defn rewrite-components (form)
+  "Recursively replace every `(component module assigns)` sub-form of `form` with its
+  compiled `web/component/render-slot` call, wrapped in `web/template/raw` so the
+  already-rendered HTML isn't re-escaped as text. `component-form?`'s top-level case in
+  `walk` only catches a component that's a *direct* child of an element or `(list …)`; a
+  component nested inside anything else — `(if …)`, `(for …)`, a component call — falls
+  into the generic opaque-dynamic `else` branch below, which preserves the original code
+  verbatim. This walk fixes that form up before it's embedded, so a nested component
+  still compiles to a real call instead of literal code trying to invoke the bare symbol
+  `component` (which is never a real function — it only exists as this compile-time
+  marker). Also used to fix up deflive's plain, non-split `render`, which composes
+  render-static + render-dynamic rather than re-walking render-expr itself (see deflive)."
+  (cond
+    (component-form? form) (list 'web/template/raw (component-slot-form form))
+    (pair? form) (map rewrite-components form)
+    (vector? form) (into [] (map rewrite-components form))
+    else form))
+
 (defn walk (st node)
   "Walk one Hiccup `node`, threading the builder state."
   (cond
@@ -143,8 +199,9 @@
     (bool? node) st
     (elem? node) (walk-element st node)
     (for-form? node) (emit-dynamic st (comp-form node))
+    (component-form? node) (emit-dynamic st (component-slot-form node))
     (list-form? node) (fold walk st (rest node))
-    else (emit-dynamic st (list 'web/template/render node))))
+    else (emit-dynamic st (list 'web/template/render (rewrite-components node)))))
 
 (defn walk-element (st node)
   (let (tag (name (first node))

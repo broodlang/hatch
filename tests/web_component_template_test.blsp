@@ -1,0 +1,17 @@
+; Regression coverage for a bug found while auditing hatch-demo's feature coverage:
+; deflive-component's (template "file.bml") clause used to bind the template-default
+; render arg as `state` (matching deflive-component's own inline-render convention), but
+; web/bml's `@field` always compiles to `(get model :field)` — a hardcoded name, the same
+; default deflive itself already uses for its own template clause. Any component using
+; (template …) instead of inline (render (state) …) hit "unbound symbol: model" at
+; render time. Fixed by defaulting the template render-arg to `model`, matching deflive.
+(defmodule web-component-template-test (:alias web/component) (:use test))
+
+(component/deflive-component
+  (mount (id assigns) {:n (get assigns "start" 0)})
+  (template "component_widget.bml"))
+
+(describe "deflive-component's (template …) clause"
+  (test "compiles and renders against `model`, not `state`"
+    (let (spec (live-component-spec))
+      (assert= (web/template/render ((get spec :render) {:n 7})) "<span class=\"widget\">7</span>"))))

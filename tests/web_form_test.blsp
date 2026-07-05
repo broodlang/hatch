@@ -1,0 +1,71 @@
+(defmodule web-form-test (:use web/form) (:use test))
+
+(describe "validate"
+  (test "all rules pass → [:ok params]"
+    (assert= (validate {"name" "Ada"} [["name" required? "is required"]])
+      [:ok {"name" "Ada"}]))
+  (test "a failing rule → [:error {field message}]"
+    (assert= (validate {"name" ""} [["name" required? "is required"]])
+      [:error {"name" "is required"}]))
+  (test "a missing field is treated as blank"
+    (assert= (validate {} [["name" required? "is required"]])
+      [:error {"name" "is required"}]))
+  (test "only the first failing rule per field is recorded"
+    (assert= (validate {"name" ""}
+               [["name" required? "is required"]
+                ["name" (min-length? 2) "must be at least 2 characters"]])
+      [:error {"name" "is required"}]))
+  (test "multiple fields collect independent errors"
+    (assert= (validate {"name" "" "email" "nope"}
+               [["name" required? "is required"]
+                ["email" email? "must be a valid email"]])
+      [:error {"name" "is required" "email" "must be a valid email"}]))
+  (test "a rule whose predicate closes over an external check composes fine"
+    ; stands in for a storage-backed uniqueness check — web/form never depends on
+    ; storage itself, but an ordinary closure over one is just another predicate
+    (let (taken? (fn (v) (= v "taken@example.com")))
+      (assert= (validate {"email" "taken@example.com"}
+                 [["email" (fn (v) (not (taken? v))) "is already taken"]])
+        [:error {"email" "is already taken"}])
+      (assert= (validate {"email" "free@example.com"}
+                 [["email" (fn (v) (not (taken? v))) "is already taken"]])
+        [:ok {"email" "free@example.com"}]))))
+
+(describe "required?"
+  (test "blank is invalid" (assert= (required? "") false))
+  (test "non-blank is valid" (assert= (required? "x") true)))
+
+(describe "email?"
+  (test "a plausible email is valid" (assert= (email? "ada@example.com") true))
+  (test "no @ is invalid" (assert= (email? "notanemail") false))
+  (test "no domain dot is invalid" (assert= (email? "a@b") false))
+  (test "a space is invalid" (assert= (email? "a b@example.com") false)))
+
+(describe "min-length? / max-length?"
+  (test "min-length? rejects a too-short value"
+    (assert= ((min-length? 3) "ab") false))
+  (test "min-length? accepts a long-enough value"
+    (assert= ((min-length? 3) "abc") true))
+  (test "max-length? rejects a too-long value"
+    (assert= ((max-length? 3) "abcd") false))
+  (test "max-length? accepts a short-enough value"
+    (assert= ((max-length? 3) "abc") true)))
+
+(describe "matches-pattern?"
+  (test "matches the whole string"
+    (assert= ((matches-pattern? "\\d+") "12345") true))
+  (test "rejects a partial/non-matching string"
+    (assert= ((matches-pattern? "\\d+") "123a5") false)))
+
+(describe "error-for"
+  (test "returns the message when the field has an error"
+    (assert= (error-for {"name" "is required"} "name") "is required"))
+  (test "returns nil when the field has no error"
+    (assert= (error-for {} "name") nil)))
+
+(describe "field-class"
+  (test "base class only, no error"
+    (assert= (field-class {} "name" "input" "input-error") "input"))
+  (test "base + error class, when the field has an error"
+    (assert= (field-class {"name" "is required"} "name" "input" "input-error")
+      "input input-error")))

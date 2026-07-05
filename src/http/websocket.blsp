@@ -1,6 +1,5 @@
 (defmodule http/websocket
   "WebSocket (RFC 6455) handshake, frame encoder, and frame parser."
-  (:use http/util)
   (:use http/base64))
 
 (require 'hash)   ; the RFC 6455 accept-key is a SHA-1 of the client key + magic
@@ -108,10 +107,11 @@
 ; characters contribute their real byte length (not their codepoint count).
 
 (defn utf8-byte-string (s)
-  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte. Maps over
-  `bytes->list` (a plain list) rather than the raw `bytes` value — mapping `byte->char`
-  directly over `bytes` and joining the result blows up super-linearly on a large payload
-  (a >64 KB frame body could allocate gigabytes and OOM the session)."
+  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte. Goes
+  through `bytes->list` before `map` — `bytes`' `rest` reallocates the remaining bytes
+  on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
+  payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
+  through a list first keeps this O(n)."
   (join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
 
 (defn byte-string->utf8 (s)

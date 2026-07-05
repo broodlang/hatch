@@ -1,0 +1,81 @@
+(defmodule web/form
+  "A small, composable form-validation toolkit — plain functions over plain maps, no
+  changeset object (matching web/session/web/csrf's style, not Ecto's). `validate` takes
+  `params` (string-keyed, as the client sends them) and a vector of `[field
+  validator-fn message]` rules, and returns a tagged tuple: `[:ok params]` on success, or
+  `[:error {field message}]` on the first failing rule per field.
+
+  A `validator-fn` is just `(fn (value) bool)` — this module ships a handful of common
+  ones (`required?`, `email?`, `min-length?`, `max-length?`, `matches?`), but any function
+  of that shape composes, including one that closes over a storage lookup:
+
+    (validate params
+      [[\"email\" email? \"must be a valid email\"]
+       [\"email\" (fn (v) (nil? (repo/get-by :users {:email v}))) \"is already taken\"]])
+
+  This module deliberately never depends on any storage/repo module itself — validation
+  stays storage-agnostic, so it doesn't care whether an app has a database at all. A
+  uniqueness-style check is just an ordinary rule whose predicate happens to close over
+  a repo/query call made by the *caller* — web/form only ever calls the predicate it's
+  given.
+
+  Template helpers `error-for`/`field-class` read an `{field message}` error map (the
+  `:error` case's shape) the same way every view already hand-rolls per-field error
+  styling — `(field-class errors \"email\" \"input\" \"input-error\")` is
+  `\"input input-error\"` when `email` has an error, else plain `\"input\"`."
+  ; matches? — the whole-string regex check `matches?/2` (this module's own validator)
+  ; wraps, disambiguated by name from web/form's own `matches?`
+  (:alias regex))
+
+; ---- rule application ----
+
+(defn validate (params rules)
+  "Run every `[field validator-fn message]` rule against `(get params field)`. Returns
+  `[:ok params]` if every rule passes, or `[:error {field message}]` with the *first*
+  failing rule recorded per field (later rules for a field already in error are skipped —
+  one message per field, matching how every hand-rolled per-field validator in this
+  codebase already shows just one reason at a time)."
+  (let (errors (fold (fn (errs rule)
+                       (let (field (nth rule 0)
+                             valid? (nth rule 1)
+                             message (nth rule 2))
+                         (if (or (contains? errs field) (valid? (get params field "")))
+                           errs
+                           (assoc errs field message))))
+                 {}
+                 rules))
+    (if (= (count errors) 0) [:ok params] [:error errors])))
+
+; ---- built-in validators — each (fn (value) bool) ----
+
+(defn required? (v) (not (blank? v)))
+
+(defn email? (v)
+  "A deliberately simple email check: one `@` with text before it and a dotted domain
+  after (the dot not last), and no spaces. Enough for demo/basic use, not RFC 5322."
+  (let (at (index-of v "@"))
+    (and (> at 0)
+      (= (index-of v " ") -1)
+      (let (domain (substring v (+ at 1) (string-length v)))
+        (and (= (index-of domain "@") -1)
+          (> (index-of domain ".") 0)
+          (< (index-of domain ".") (- (string-length domain) 1)))))))
+
+(defn min-length? (n) (fn (v) (>= (string-length v) n)))
+
+(defn max-length? (n) (fn (v) (<= (string-length v) n)))
+
+(defn matches-pattern? (pattern) (fn (v) (regex/matches? pattern v)))
+
+; ---- template helpers ----
+
+(defn error-for (errors field)
+  "The error message for `field`, or nil if it has none. `errors` is the map from a
+  `[:error errors]` validate result."
+  (get errors field))
+
+(defn field-class (errors field base error-class)
+  "`base`, or `\"base error-class\"` when `field` has an error — the common
+  conditional-error-styling pattern (e.g. a red input border) every hand-rolled form in
+  this codebase already reimplements per field."
+  (if (error-for errors field) (str base " " error-class) base))
