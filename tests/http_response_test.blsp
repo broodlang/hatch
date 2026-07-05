@@ -1,4 +1,5 @@
-(defmodule http-response-test (:use http/response) (:use test))
+;; byte-string->utf8 / utf8-byte-string — verifying format-response's byte-faithful output
+(defmodule http-response-test (:use http/response) (:use http/websocket) (:use test))
 
 (describe "capitalize"
   (test "lowercase word" (assert= (capitalize "content") "Content"))
@@ -18,6 +19,27 @@
     (let (out (format-response {:status 200 :body "" :headers {:set-cookie (list "a=1" "b=2")}}))
       (assert= (includes? out "Set-Cookie: a=1\r\n") true)
       (assert= (includes? out "Set-Cookie: b=2\r\n") true))))
+
+(describe "format-response: byte-faithful output for a binary-mode socket"
+  ; http/server puts every connection in binary mode unconditionally (tcp-set-binary at
+  ; accept, for byte-faithful upload bodies) — tcp-send on such a socket requires either a
+  ; `bytes` value or a string where every codepoint is a raw byte (0-255). A text response
+  ; with any multibyte character (an em dash, an arrow, any non-ASCII prose — common in
+  ; ordinary page copy) used to come back as a plain Brood string still holding the real
+  ; multibyte codepoint, which crashes tcp-send the instant it's sent.
+  (test "every codepoint in a multibyte text body is a single byte (0-255)"
+    (let (out (format-response (ok "em dash — arrow → done")))
+      (assert=
+        (fold (fn (ok c) (and ok (<= (char->int c) 255))) true (string->list out))
+        true)))
+  (test "the body round-trips through byte-string decoding back to the original text"
+    (let (out (format-response (ok "em dash — arrow →")))
+      (assert= (includes? (byte-string->utf8 out) "em dash — arrow →") true)))
+  (test "Content-Length reports UTF-8 byte length, matching the encoded body actually sent"
+    (let (out (format-response (ok "é")))  ; 1 codepoint, 2 UTF-8 bytes
+      (assert= (includes? out "Content-Length: 2") true)
+      ; the header block + 2-byte body — never the 1-codepoint length
+      (assert= (ends-with? out (utf8-byte-string "é")) true))))
 
 (describe "header-name"
   (test "single segment" (assert= (header-name :host) "Host"))
