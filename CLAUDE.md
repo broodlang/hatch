@@ -30,10 +30,22 @@ The demo (`../hatch-demo/src/web/routes.blsp`) serves:
 - `GET /` — home page (plain)
 - `GET /page-inline`, `GET /page-template` — plain pages (inline Hiccup vs `.bml`)
 - `GET /counter`, `GET /counter-inline` — live counter (events + tickers)
-- `GET /signup` — live form with as-you-type validation
-- `GET /room` — PubSub demo (real-time broadcast across clients)
+- `GET /signup` — live form with as-you-type validation (web/form)
+- `GET /room` — PubSub demo: `broadcast-from` + an optimistic local update (not just
+  plain `broadcast`)
 - `GET /presence` — Presence demo (live who's-here roster)
-- `GET`/`POST /account` — form body params + signed session + flash (PRG)
+- `GET /reorder` — keyed DOM morphing + live-patch (`?highlight=` via `handle-params`,
+  no remount — the rotation tick keeps running across it)
+- `GET /dashboard` — gated by `on-mount-guard` (redirects to `/account` until the session
+  has a name); embeds three LiveComponents (`web/component`): two independent
+  `like-button` instances (inline render) + one `counter-widget` rendered from a `.bml`
+  template
+- `GET`/`POST /account` — form body params + signed session + flash (PRG); `save`
+  validates with `web/form` (`max-length?`)
+- `GET`/`POST /messages`, `GET /messages/:id` — Postgres-backed message board; `create`
+  validates with `web/form` (`required?`, `matches-pattern?`); `:id` is the demo's one
+  named-path-param route; the form's second button posts via `fetch` with the CSRF token
+  as an `X-CSRF-Token` header instead of the hidden field
 - `GET /dev` — Basic-auth-gated diagnostics; `GET /slow` — slow-request logging demo
 - `GET /static/*` — static assets (+ `/static/brood_live.js`, the live client)
 
@@ -50,17 +62,24 @@ src/
     websocket.blsp  — RFC 6455 handshake + frame codec
   web/
     template.blsp   — Hiccup → HTML renderer
+    bml.blsp        — .bml → Hiccup template compiler (HEEx-flavoured: {expr}, @field,
+                      :if, :for, components); macro-time, invoked by deflive's template clause
     conn.blsp       — immutable Conn value + response pipeline (conn->response); cookies,
                       body params, before-send hook
     page.blsp       — plain (non-live) page render helper: (page conn hiccup)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input)
+    auth.blsp       — HTTP Basic-auth plug for router through groups (basic-auth)
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
                       page-chrome
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
+    component.blsp  — LiveComponents: deflive-component macro, render-slot, send-update
+    form.blsp       — validate/rules → [:ok params]/[:error {field message}]; built-in
+                      validators (required?/email?/min-length?/max-length?/matches-pattern?);
+                      error-for/field-class template helpers
     registry.blsp   — supervised, vault-backed named registries (shared by pubsub/presence)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
     presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
@@ -77,25 +96,39 @@ tests/
   http_response_test.blsp
   http_base64_test.blsp
   http_websocket_test.blsp
+  http_server_test.blsp
+  protocol_test.blsp
   web_template_test.blsp
+  web_bml_test.blsp
   web_conn_test.blsp
+  web_page_test.blsp
   web_csrf_test.blsp
+  web_auth_test.blsp
   web_router_test.blsp
   web_session_test.blsp
   web_static_test.blsp
   web_live_test.blsp
   web_parts_test.blsp
+  web_component_test.blsp
+  web_component_template_test.blsp
+  web_live_component_integration_test.blsp
+  web_form_test.blsp
   web_registry_test.blsp
   web_pubsub_test.blsp
   web_presence_test.blsp
   web_assets_test.blsp
   web_test_test.blsp
+  web_application_test.blsp
 docs/
   roadmap.md
   assets.md
   web-framework-design.md
   brood-http.md
   brood-for-claude.md
+  hardening.md            — adversarial security/concurrency/renderer review findings
+  robustness.md           — http/server hardening tiers (DoS limits, timeouts)
+  tcp-http-audit.md       — socket-stack audit (kernel + framework), findings & fix plan
+  live-view-ergonomics.md — router-wired live views design note
 ```
 
 ## Key conventions
