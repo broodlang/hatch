@@ -39,10 +39,11 @@
                     ; (gzip, …) we don't decode, so reject rather than mis-frame it.
                     (contains? headers :transfer-encoding) (if (chunked? (get headers
                                                                            :transfer-encoding))
-                                                             (match (dechunk-body buf
-                                                                      body-start
-                                                                      buflen)
-                                                               ([:incomplete] [:incomplete])
+                                                             ; one decoder for both paths: `dechunk-step`
+                                                             ; (its `:more` = "need more bytes" = `:incomplete`
+                                                             ; for a single whole-buffer parse)
+                                                             (match (dechunk-step buf body-start (list) 0)
+                                                               ([:more _tail _decoded _dlen] [:incomplete])
                                                                ([:error e] [:error e])
                                                                ([:ok body remainder] [:ok (mk-request method
                                                                                             path
@@ -162,11 +163,6 @@
       0
       (string->list s))))
 
-(defn dechunk-body (buf pos buflen)
-  "De-chunk an HTTP/1.1 chunked body in `buf` from `pos`. Returns
-  `[:ok decoded remainder]`, `[:incomplete]` (need more bytes), or `[:error msg]`."
-  (dechunk--loop buf pos buflen ""))
-
 (defn dechunk--trailers (buf pos buflen)
   "Skip any trailer headers after the last (0-size) chunk; return the index past the
   terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
@@ -177,42 +173,18 @@
       ; empty line → end of trailers
       else (dechunk--trailers buf (+ eol 2) buflen))))
 
-(defn dechunk--loop (buf pos buflen acc)
-  "Decode one chunk at `pos` and recurse, accumulating decoded bytes in `acc`."
-  (let (eol (idx-from buf "\r\n" pos))
-    (if (= eol -1)
-      ; chunk-size line not fully buffered
-      [:incomplete]
-      (let (size-line (substring buf pos eol)
-            ; a chunk size may carry extensions: "1a;name=val" — take the part before ";"
-            semi (index-of size-line ";")
-            size-tok (if (= semi -1) size-line (substring size-line 0 semi))
-            size (parse-hex (trim size-tok)))
-        (cond
-          (nil? size) [:error "invalid chunk size"]
-          (= size 0) (let (end (dechunk--trailers buf (+ eol 2) buflen))
-                       (if (= end -1) [:incomplete] [:ok acc (substring buf end buflen)]))
-          else (let (data-start (+ eol 2)
-                     data-end (+ data-start size)
-                     after (+ data-end 2))
-                 ; chunk data is followed by a CRLF
-                 (if (< buflen after)
-                   [:incomplete]
-                   (if (= (substring buf data-end after) "\r\n")
-                     (dechunk--loop buf after buflen (str acc (substring buf data-start data-end)))
-                     [:error "malformed chunk"]))))))))
-
 (defn dechunk-step (buf pos decoded dlen)
   "Incremental de-chunk: decode every chunk that is *fully present* in `buf` from `pos`,
   accumulating decoded pieces (newest-first) in `decoded` with running length `dlen`. Returns:
     `[:ok body remainder]`  — the terminating 0-size chunk was reached; `body` is the joined
                               decoded bytes, `remainder` anything after the trailers.
     `[:more tail decoded dlen]` — need more bytes; `tail` is only the *undecoded* remainder (a
-                              partial chunk/size-line), so the caller re-scans just that, never
-                              the bytes already decoded. This is what makes streaming O(n): the
-                              buffered `try-parse` re-decodes the whole body on every socket read.
+                              partial chunk/size-line), so a streaming caller (server/chunked--drain)
+                              feeds the next read onto `tail` and resumes without re-scanning the
+                              bytes already decoded — what makes streaming O(n).
     `[:error msg]`          — malformed framing.
-  Pieces are `join`ed once (at `:ok`) rather than `(str acc …)` per chunk."
+  Pieces are `join`ed once (at `:ok`) rather than `(str acc …)` per chunk. `try-parse` reuses this
+  on a whole buffer (`:more` → `:incomplete`), so both paths share one decoder."
   (let (buflen (string-length buf)
         eol (idx-from buf "\r\n" pos))
     (if (= eol -1)
