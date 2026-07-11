@@ -56,6 +56,52 @@
   (test "root live path" (assert= (web/live/live--ws-path "/live/ws/") "/"))
   (test "passes non-ws paths through" (assert= (web/live/live--ws-path "/counter") "/counter")))
 
+; recv-frame--loop must reassemble a WebSocket message that arrives split across many TCP reads,
+; in O(n): once the length header is in, `frame-size` sizes the frame and the reader gathers the
+; remaining reads into a list, joining once (no O(n²) re-`str`ing of the whole buffer per read).
+; A 300-byte masked frame (16-bit length, non-zero key) is delivered here in small chunks.
+
+(defn ws-masked-frame (opcode payload-vals key)
+  "A masked client frame (16-bit length form) as a `bytes` value: FIN+opcode, masked|126, the
+  big-endian length, the 4-byte mask, then payload XORed with key[i%4]."
+  (let (n (count payload-vals)
+        masked (map (fn (i) (bit-xor (nth payload-vals i) (nth key (mod i 4)))) (range n)))
+    (bytes (concat [(+ 128 opcode) (+ 128 126) (quot n 256) (mod n 256)] key masked))))
+
+(defn feed-tcp (sock frame chunk)
+  "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
+  as the socket layer would deliver them."
+  (let (flen (byte-length frame))
+    (fold (fn (_ k)
+            (send (self) [:tcp sock (subbytes frame (* k chunk) (min flen (* (+ k 1) chunk)))]))
+      nil
+      (range (quot (+ flen (- chunk 1)) chunk)))))
+
+(describe "recv-frame--loop: a large frame gathered across many reads"
+  (test "reassembles a 300-byte masked text frame split into 50-byte reads"
+    (let (payload (into [] (map (fn (i) (mod i 100)) (range 300)))
+          frame (ws-masked-frame 1 payload [17 34 51 68])
+          sock :sock
+          _ (feed-tcp sock frame 50))
+      (match (web/live/recv-frame--loop sock "")
+        ([:ok opcode payload-out rem]
+          (do
+            (assert= opcode 1)
+            (assert= rem "")
+            (assert= (into [] (map char->int (string->list payload-out))) payload)))
+        (o (assert= o :ok)))))
+  (test "also reassembles when delivered one byte per read (header assembled incrementally)"
+    (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
+          frame (ws-masked-frame 1 payload [9 88 200 3])
+          sock :sock
+          _ (feed-tcp sock frame 1))
+      (match (web/live/recv-frame--loop sock "")
+        ([:ok _opcode payload-out rem]
+          (do
+            (assert= rem "")
+            (assert= (into [] (map char->int (string->list payload-out))) payload)))
+        (o (assert= o :ok))))))
+
 ; One test, run sequentially: registering and looking up both touch the shared
 ; :hatch-live-routes process, and concurrent tests would race its first-time init
 ; (a race that can't happen in production — the router registers at load, before any

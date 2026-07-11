@@ -231,28 +231,50 @@
   "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload
   remainder]`, `[:closed]`, `[:error msg]`, or `[:tick buf]` when the session's
   ticker process posts a `[:tick]` (carrying the partial frame read so far, so the
-  caller can resume reading after handling the tick)."
+  caller can resume reading after handling the tick).
+
+  Once the frame is incomplete but its size is known, `recv-frame--fill` gathers exactly the
+  missing bytes into a list and joins once — O(n) — rather than re-`str`ing the whole buffer on
+  every socket read (which was O(n²) up to the message-size cap)."
   (match (parse-frame buf)
     ([:ok opcode payload rem] [:ok opcode payload rem])
-    ([:incomplete]
-      (receive
-        ; The socket is in binary mode (see http/server's pre-101 tcp-set-binary), so
-        ; `chunk` arrives as a `bytes` value — convert it to the Latin-1 carrier string
-        ; before it flows into the string-based frame accumulator/parser.
-        ([:tcp ~sock chunk] (recv-frame--loop sock (str buf (bytes->carrier chunk))))
-        ([:tcp-closed ~sock] [:closed])
-        ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
-                                  (recv-frame--loop sock buf)
-                                  [:closed]))
-        ([:tick key gen] [:tick key gen buf])
-        ; an out-of-band message for the view's handle-info (PubSub/Presence
-        ; broadcast, a timer, anything that holds this session's pid)
-        ([:info payload] [:info payload buf])
-        ; a web/component/send-update push — merge into that component's stored state
-        ([:update-component cid changes] [:update-component cid changes buf])
-        ([:reload] [:reload buf])
-        ([:reload-css] [:reload-css buf])))
+    ([:incomplete] (recv-frame--fill sock buf (list) 0 (frame-shortfall buf)))
     ([:error msg] [:error msg])))
+
+(defn frame-shortfall (buf)
+  "Bytes still needed to complete the first frame in `buf`, or nil if not yet determinable
+  (the length header hasn't fully arrived)."
+  (let (sz (frame-size buf))
+    (if (nil? sz) nil (- sz (string-length buf)))))
+
+(defn recv-frame--fill (sock buf pieces got need)
+  "Gather socket reads (carrier `pieces`, newest-first; `got` bytes so far) until the current
+  frame's `need` more bytes are in hand, then join once and re-enter `recv-frame--loop`. `need`
+  nil means the frame isn't sized yet (header still arriving) — append one read and re-derive it
+  (the header is tiny). The session-control messages are handled exactly as in `recv-frame--loop`
+  (keep the two in sync), carrying the bytes gathered so far so the caller can resume."
+  (if (and (not (nil? need)) (>= got need))
+    (recv-frame--loop sock (str buf (join "" (reverse pieces))))
+    (receive
+      ; Binary-mode socket (see http/server's pre-101 tcp-set-binary): `chunk` is a `bytes`
+      ; value — bridge it to the Latin-1 carrier the parser reads.
+      ([:tcp ~sock chunk]
+        (let (p (bytes->carrier chunk))
+          (if (nil? need)
+            (recv-frame--loop sock (str buf p))
+            (recv-frame--fill sock buf (cons p pieces) (+ got (string-length p)) need))))
+      ([:tcp-closed ~sock] [:closed])
+      ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
+                                (recv-frame--fill sock buf pieces got need)
+                                [:closed]))
+      ([:tick key gen] [:tick key gen (str buf (join "" (reverse pieces)))])
+      ; an out-of-band message for the view's handle-info (PubSub/Presence
+      ; broadcast, a timer, anything that holds this session's pid)
+      ([:info payload] [:info payload (str buf (join "" (reverse pieces)))])
+      ; a web/component/send-update push — merge into that component's stored state
+      ([:update-component cid changes] [:update-component cid changes (str buf (join "" (reverse pieces)))])
+      ([:reload] [:reload (str buf (join "" (reverse pieces)))])
+      ([:reload-css] [:reload-css (str buf (join "" (reverse pieces)))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 

@@ -172,6 +172,27 @@
     (assert= (first (parse-message (str (cframe 0 1 "aaaa") (cframe 1 0 "bbbb")) 65535 6))
       :error)))
 
+; frame-size: the length probe that lets the live reader gather one frame in O(n). It must
+; agree with parse-frame's completion point (a frame is complete exactly when its bytes reach
+; frame-size), and return nil while the length header is still arriving.
+(describe "frame-size"
+  (test "nil until the 2-byte header is present"
+    (assert= (frame-size "") nil)
+    (assert= (frame-size "\x81") nil))
+  (test "7-bit length: header(2)+mask(4)+payload, = the full frame length"
+    (let (f (cframe 1 1 "hello"))
+      (assert= (frame-size f) 11)
+      (assert= (frame-size f) (string-length f))))
+  (test "sizes from the 2-byte header alone (payload not yet present)"
+    (assert= (frame-size (substring (cframe 1 1 "hello") 0 2)) 11))
+  (test "16-bit length: nil until 4 bytes, then header(4)+mask(4)+payload"
+    (let (hdr (str "\x81" (byte->char 254)))
+      (assert= (frame-size hdr) nil)
+      ; length 300 (0x012c) → 8 header/mask bytes + 300
+      (assert= (frame-size (str hdr (byte->char 1) (byte->char 44))) 308)))
+  (test "64-bit length form is not sized (unsupported; the parser raises on it)"
+    (assert= (frame-size (str "\x81" (byte->char 255))) nil)))
+
 ; A masked frame with a NON-zero key, so the XOR unmask is actually exercised (cframe uses a
 ; zero key, which is identity). Each payload byte is XORed with key[i % 4] on the wire.
 (defn masked-frame (opcode payload key)
