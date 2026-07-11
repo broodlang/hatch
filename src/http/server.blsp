@@ -243,64 +243,76 @@
         (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
         (tcp-close sock)))))
 
+(defn bad-request-close (sock msg)
+  "Answer a generic 400 and close. Doesn't reflect the parser message (it echoes attacker-
+  controlled bytes) — the detail goes to telemetry instead."
+  (telemetry/emit [:hatch :request :bad-request] {} {:error msg})
+  (tcp-send sock (format-response {:status 400 :body "<h1>400 Bad Request</h1>"}))
+  (tcp-close sock))
+
 (defn worker--dispatch (sock handler ws-handler config buf)
-  "Dispatch a request whose head is fully buffered in `buf`. Routes the body to the right reader
-  (spool to disk / O(n) in-memory drain / incremental de-chunk) so none re-buffers it, then runs
-  the handler (or upgrades a WebSocket)."
-  (cond
-    ; Large-body streaming: a non-chunked body-bearing request whose Content-Length exceeds
-    ; :spool-threshold is streamed straight to a temp file (never held whole in memory), and the
-    ; handler is given `:body-file` instead of an in-memory `:body`. Off by default.
-    (spool-request? buf config ws-handler) (spool--begin sock handler ws-handler config buf)
-    ; Non-chunked body still arriving over several reads: drain it by length in O(n) (collect
-    ; reads in a list, join once) instead of re-`str`ing the whole buffer per read.
-    (buffered-body-incoming? buf config ws-handler) (buffered--begin sock handler ws-handler config buf)
-    ; Chunked body: decode incrementally (only the newly-arrived bytes each read) instead of
-    ; re-de-chunking the whole buffer on every read (O(n²)).
-    (chunked-incoming? buf config ws-handler) (chunked--begin sock handler ws-handler config buf)
-    else (match (try-parse buf)
-           ([:ok request remainder]
-             (if (and ws-handler (upgrade-request? request))
-               ; CSWSH guard: a WebSocket upgrade isn't bound by the same-origin policy, yet
-               ; the browser still sends the user's cookies — so a cross-origin Origin must be
-               ; refused before the 101, or another site could open an authenticated session.
-               ; Policy is `:check-origin` (default: same-origin); see websocket/origin-allowed?.
-               (if (origin-allowed? request (get config :check-origin))
-                 (let (key (get (get request :headers) :sec-websocket-key ""))
-                   ; WebSocket framing is binary (control bytes ≥ 0x80, masked
-                   ; payloads). Switch the socket to binary mode BEFORE the 101 —
-                   ; the client only sends frames after it sees the 101, so this
-                   ; closes the race where the reader would otherwise decode the
-                   ; first frame(s) as UTF-8-lossy text and corrupt them (the
-                   ; ws-handler may do a slow registry lookup before its own
-                   ; tcp-set-binary, leaving a window the client beats).
-                   (tcp-set-binary sock true)
-                   (tcp-send sock (upgrade-response key))
-                   (ws-handler sock request))
-                 (do
-                   (tcp-send sock (format-response {:status 403
-                                                    :body "<h1>403 Forbidden</h1>"}))
-                   (tcp-close sock)))
-               (dispatch-buffered sock handler ws-handler config request remainder)))
-           ; With the head complete and every incomplete-body case routed above, this is only
-           ; reached with a complete request; keep the incomplete recursion as a safety net.
-           ([:incomplete] (receive
-                            ([:tcp ~sock chunk] (worker--run sock handler ws-handler config
-                                                  (str buf (bytes->carrier chunk))))
-                            ([:tcp-closed ~sock] nil)
-                            (after (get config :read-timeout-ms)
-                              (do
-                                (tcp-send sock
-                                  (format-response {:status 408
-                                                    :body "<h1>408 Request Timeout</h1>"}))
-                                (tcp-close sock)))))
-           ; A malformed request: answer a generic 400 (don't reflect the parser message,
-           ; which echoes attacker-controlled bytes — the detail goes to telemetry instead).
-           ([:error msg] (do
-                           (telemetry/emit [:hatch :request :bad-request] {} {:error msg})
-                           (tcp-send sock (format-response {:status 400
-                                                            :body "<h1>400 Bad Request</h1>"}))
-                           (tcp-close sock))))))
+  "Dispatch a request whose head is fully buffered in `buf`. Parses the head ONCE, then routes
+  the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
+  so no path re-buffers the body. A body that already landed whole (and every WebSocket upgrade)
+  falls through to `dispatch-complete`; malformed framing answers 400."
+  (match (try-parse-head buf)
+    ([:head head body-start clen]
+      (cond
+        ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
+        ; in memory); the handler gets `:body-file` instead of `:body`. Off by default.
+        (spool-body? config head clen ws-handler)
+          (spool--begin sock handler ws-handler config buf head body-start clen)
+        ; Body still arriving over several reads → drain by length in O(n) (collect reads in a
+        ; list, join once) rather than re-`str`ing the whole buffer per read.
+        (partial-body? buf head body-start clen ws-handler)
+          (buffered--begin sock handler ws-handler config buf head body-start clen)
+        ; Body already complete/empty (or a WebSocket upgrade) → parse it whole and run it.
+        else (dispatch-complete sock handler ws-handler config buf)))
+    ; Chunked body → decode incrementally (only the newly-arrived bytes each read) instead of
+    ; re-de-chunking the whole buffer on every read.
+    ([:chunked head body-start]
+      (chunked--begin sock handler ws-handler config buf head body-start))
+    ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
+    ([:error msg] (bad-request-close sock msg))
+    ; head-complete? gated us here, so :incomplete cannot occur; be defensive.
+    (_ (dispatch-complete sock handler ws-handler config buf))))
+
+(defn dispatch-complete (sock handler ws-handler config buf)
+  "Fast path: the request (head + any body) is fully buffered. Parse it whole and either perform
+  the WebSocket upgrade or run the handler."
+  (match (try-parse buf)
+    ([:ok request remainder]
+      (if (and ws-handler (upgrade-request? request))
+        ; CSWSH guard: a WebSocket upgrade isn't bound by the same-origin policy, yet the browser
+        ; still sends the user's cookies — so a cross-origin Origin must be refused before the 101,
+        ; or another site could open an authenticated session. Policy is `:check-origin` (default:
+        ; same-origin); see websocket/origin-allowed?.
+        (if (origin-allowed? request (get config :check-origin))
+          (let (key (get (get request :headers) :sec-websocket-key ""))
+            ; WebSocket framing is binary (control bytes ≥ 0x80, masked payloads). Switch the
+            ; socket to binary mode BEFORE the 101 — the client only sends frames after it sees the
+            ; 101, so this closes the race where the reader would otherwise decode the first
+            ; frame(s) as UTF-8-lossy text and corrupt them (the ws-handler may do a slow registry
+            ; lookup before its own tcp-set-binary, leaving a window the client beats).
+            (tcp-set-binary sock true)
+            (tcp-send sock (upgrade-response key))
+            (ws-handler sock request))
+          (do
+            (tcp-send sock (format-response {:status 403 :body "<h1>403 Forbidden</h1>"}))
+            (tcp-close sock)))
+        (dispatch-buffered sock handler ws-handler config request remainder)))
+    ; With the head complete and every incomplete-body case routed above, this is only reached
+    ; with a complete request; keep the incomplete recursion as a safety net.
+    ([:incomplete] (receive
+                     ([:tcp ~sock chunk] (worker--run sock handler ws-handler config
+                                           (str buf (bytes->carrier chunk))))
+                     ([:tcp-closed ~sock] nil)
+                     (after (get config :read-timeout-ms)
+                       (do
+                         (tcp-send sock
+                           (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+                         (tcp-close sock)))))
+    ([:error msg] (bad-request-close sock msg))))
 
 ; ---- buffered request dispatch (shared by the fast path and the O(n) body drain) ----
 
@@ -347,32 +359,24 @@
 ; and `join` exactly once when the declared length is reached. Spooling (when enabled and over
 ; its threshold) streams to disk; this is the in-memory equivalent for bodies kept in memory.
 
-(defn buffered-body-incoming? (buf config ws-handler)
-  "True when `buf` holds a complete head for a non-chunked, body-bearing request whose body
-  has NOT fully arrived yet — exactly the case the fast path would drain with O(n²) `str`ing.
-  False for chunked bodies, WebSocket upgrades, empty bodies, and already-complete requests
-  (all still handled by the existing buffered path)."
-  (match (try-parse-head buf)
-    ([:head head body-start clen]
-      (and (> clen 0)
-        (< (string-length buf) (+ body-start clen))
-        (not (and ws-handler (upgrade-request? head)))))
-    (_ false)))
+(defn partial-body? (buf head body-start clen ws-handler)
+  "True when a non-chunked, body-bearing request's body has NOT fully arrived yet — exactly the
+  case the fast path would drain with O(n²) `str`ing. False for empty bodies, WebSocket upgrades,
+  and already-complete requests (all handled by the fast path)."
+  (and (> clen 0)
+    (< (string-length buf) (+ body-start clen))
+    (not (and ws-handler (upgrade-request? head)))))
 
-(defn buffered--begin (sock handler ws-handler config buf)
+(defn buffered--begin (sock handler ws-handler config buf head body-start clen)
   "Start an O(n) in-memory body drain: reject if the declared request size blows the cap,
   else seed the drain with the body bytes already in `buf` and read the rest by length."
-  (match (try-parse-head buf)
-    ([:head head body-start clen]
-      (if (> (+ body-start clen) (get config :max-request-bytes))
-        (do
-          (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-          (tcp-close sock))
-        (let (already (substring buf body-start (string-length buf)))
-          (buffered--drain sock handler ws-handler config head
-            (list already) (string-length already) clen))))
-    ; unreachable (buffered-body-incoming? already matched a :head) — degrade to the fast path
-    (_ (worker--run sock handler ws-handler config buf))))
+  (if (> (+ body-start clen) (get config :max-request-bytes))
+    (do
+      (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+      (tcp-close sock))
+    (let (already (substring buf body-start (string-length buf)))
+      (buffered--drain sock handler ws-handler config head
+        (list already) (string-length already) clen))))
 
 (defn buffered--drain (sock handler ws-handler config head chunks got clen)
   "Accumulate incoming body reads (carrier chunks, newest-first) in `chunks` until `clen`
@@ -404,20 +408,10 @@
 ; Chunked bodies have no Content-Length (so they can't be spooled by size); this is their
 ; in-memory, memory-capped reader.
 
-(defn chunked-incoming? (buf config ws-handler)
-  "True when `buf` holds a complete head for a chunked request — routed to the incremental drain."
-  (match (try-parse-head buf)
-    ([:chunked _head _body-start] true)
-    (_ false)))
-
-(defn chunked--begin (sock handler ws-handler config buf)
+(defn chunked--begin (sock handler ws-handler config buf head body-start)
   "Start an incremental de-chunk drain, seeded with the body bytes already in `buf`."
-  (match (try-parse-head buf)
-    ([:chunked head body-start]
-      (chunked--drain sock handler ws-handler config head
-        (substring buf body-start (string-length buf)) (list) 0))
-    ; unreachable (chunked-incoming? already matched) — degrade to the buffered path
-    (_ (worker--run sock handler ws-handler config buf))))
+  (chunked--drain sock handler ws-handler config head
+    (substring buf body-start (string-length buf)) (list) 0))
 
 (defn chunked--drain (sock handler ws-handler config head pending decoded dlen)
   "Decode whatever chunks are fully present in `pending`, keep only the undecoded tail, and read
@@ -427,11 +421,7 @@
   (match (dechunk-step pending 0 decoded dlen)
     ([:ok body remainder]
       (dispatch-buffered sock handler ws-handler config (assoc head :body body) remainder))
-    ([:error msg]
-      (do
-        (telemetry/emit [:hatch :request :bad-request] {} {:error msg})
-        (tcp-send sock (format-response {:status 400 :body "<h1>400 Bad Request</h1>"}))
-        (tcp-close sock)))
+    ([:error msg] (bad-request-close sock msg))
     ([:more tail decoded dlen]
       (if (> (+ dlen (string-length tail)) (get config :max-request-bytes))
         (do
@@ -454,43 +444,36 @@
   "True for a method that carries a request body worth spooling (POST/PUT/PATCH)."
   (or (= m "POST") (= m "PUT") (= m "PATCH")))
 
-(defn spool-request? (buf config ws-handler)
-  "True when `buf` holds a complete header block for a large, non-chunked, body-bearing request
-  that should be streamed to disk. A no-op (false) unless :spool-threshold is configured, so the
-  default server never leaves the buffered path."
+(defn spool-body? (config head clen ws-handler)
+  "True when :spool-threshold is configured and this non-chunked request's Content-Length exceeds
+  it (a large, body-bearing, non-WS-upgrade request) → stream it to disk. A no-op (false) unless
+  :spool-threshold is set, so the default server never leaves the in-memory path."
   (let (thr (get config :spool-threshold))
-    (if (nil? thr)
-      false
-      (match (try-parse-head buf)
-        ([:head head body-start clen] (and (> clen thr)
-                                         (body-method? (get head :method))
-                                         (not (and ws-handler (upgrade-request? head)))))
-        (_ false)))))
+    (and (not (nil? thr))
+      (> clen thr)
+      (body-method? (get head :method))
+      (not (and ws-handler (upgrade-request? head))))))
 
 (defn spool--path (config)
   "A fresh unique temp path under :spool-dir for one spooled request body."
   (str (get config :spool-dir "/tmp") "/hatch-upload-" (random-token 16)))
 
-(defn spool--begin (sock handler ws-handler config buf)
+(defn spool--begin (sock handler ws-handler config buf head body-start clen)
   "Start spooling: reject if the declared length blows the request cap, else write the body
   bytes already sitting in `buf` to a fresh temp file and stream the rest off the socket."
-  (match (try-parse-head buf)
-    ([:head head body-start clen]
-      (if (> clen (get config :max-request-bytes))
-        (do
-          (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-          (tcp-close sock))
-        (let (path (spool--path config)
-              already (substring buf body-start (string-length buf))
-              alen (string-length already)
-              take (min alen clen)
-              prefix (if (= take alen) already (substring already 0 take)))
-          ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
-          ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
-          (append-bytes path (carrier->bytes prefix))
-          (spool--drain sock handler ws-handler config head path take clen))))
-    ; unreachable (spool-request? already matched a :head) — degrade to the buffered path
-    (_ (worker--run sock handler ws-handler config buf))))
+  (if (> clen (get config :max-request-bytes))
+    (do
+      (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+      (tcp-close sock))
+    (let (path (spool--path config)
+          already (substring buf body-start (string-length buf))
+          alen (string-length already)
+          take (min alen clen)
+          prefix (if (= take alen) already (substring already 0 take)))
+      ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
+      ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
+      (append-bytes path (carrier->bytes prefix))
+      (spool--drain sock handler ws-handler config head path take clen))))
 
 (defn spool--drain (sock handler ws-handler config head path written clen)
   "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
