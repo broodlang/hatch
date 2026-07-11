@@ -151,15 +151,20 @@ turned a large POST into quadratic CPU/RSS. Fixes applied:
   accumulated per continuation frame; now gathered in a list and `join`ed once at FIN.
 - **`web/parts interleave`** — the live-view HTML was `(str acc …)`-assembled over every
   static/dynamic slot on *each* re-render; now collected in a list and `join`ed once.
+- **`web/live recv-frame--loop`** — accumulated raw inbound WebSocket bytes with `(str buf
+  chunk)` per read. Now, once the length header is in, `websocket/frame-size` sizes the frame and
+  `recv-frame--fill` gathers the remaining reads into a list, joining once — a frame arriving over
+  many reads is O(n). The string-buffer interface is unchanged, so the session read loop
+  (tick/info/reload interleaving) is untouched.
 
-**Residual (bounded, not fixed):** `web/live recv-frame--loop` still accumulates raw inbound
-WebSocket bytes with `(str buf chunk)`, and `parse-frame` re-parses (re-unmasks) all buffered
-fragments of a fragmented message on every read — O(n²) up to `*ws-max-message-bytes*` (1 MB).
-Client→server frames are normally small unfragmented events, and a true fix needs an
-incremental frame parser threaded through the live-session read loop (which returns
-partial-buffer state to interleave ticks/info/reload) — deferred with #16 (a real `bytes`
-type + byte-faithful sockets would let that loop drain by length like the request paths do).
-Same rationale as `byte-string->utf8` in #14.
+**Residual (bounded, not fixed):** for a *fragmented* WebSocket message, `parse-frame` still
+re-parses (re-unmasks) the already-received fragments each time a new frame completes — O(F²) in
+the fragment count, bounded by `*ws-max-message-bytes*` (1 MB). Browsers rarely fragment, and the
+per-frame gather above is already O(n), so only a deliberately many-fragment message pays it. A
+full fix needs an incremental *message* parser that keeps decoded fragments across reads (like the
+request `dechunk-step`), threaded through the live-session loop — deferred with #16 (a real `bytes`
+type + byte-faithful sockets would let that loop drain by length like the request paths do). Same
+rationale as `byte-string->utf8` in #14.
 
 ---
 
