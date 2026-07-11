@@ -259,14 +259,16 @@
 ; ---- runtime: assemble HTML and diff dynamic slots ----
 
 (defn interleave (statics dynamics)
-  "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn."
-  (interleave--at statics dynamics 0 (count statics) ""))
+  "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn.
+  Collects the pieces in a list and `join`s once — a per-slot `(str acc …)` fold re-copies the
+  whole growing HTML each step, O(n²) in the slot count (and this runs on every re-render)."
+  (join "" (reverse (interleave--at statics dynamics 0 (count statics) (list)))))
 
 (defn interleave--at (statics dynamics i n acc)
   (if (>= i n)
     acc
-    (let (acc (str acc (nth statics i))
-          acc (if (< i (count dynamics)) (str acc (slot->html (nth dynamics i))) acc))
+    (let (acc (cons (nth statics i) acc)
+          acc (if (< i (count dynamics)) (cons (slot->html (nth dynamics i)) acc) acc))
       (interleave--at statics dynamics (+ i 1) n acc))))
 
 (defn diff-dynamics (old new)

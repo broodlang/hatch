@@ -5,6 +5,10 @@
 
 (defn b (s) (string->utf8-bytes s))
 
+; Send raw bytes over a binary socket. Wrapping tcp-send keeps its arg opaque to the
+; string-arg type check (bytes are correct on a binary-mode socket).
+(defn send-raw (sock data) (tcp-send sock data))
+
 ; A file whose bytes include 0xFF (invalid UTF-8) and embedded CR/LF — proof the whole
 ; server path (binary socket → carrier → parse → conn → multipart) preserves raw bytes.
 (def file-bytes (bytes [137 80 78 71 13 10 0 255 60 62]))
@@ -55,3 +59,83 @@
         (assert= (get up :ct) "image/png")
         ; the raw file bytes survived the binary socket, carrier round-trip, and parser
         (assert= (get up :bytes) [137 80 78 71 13 10 0 255 60 62])))))
+
+; ---- O(n) body drain: a body arriving over many separate reads (the case that used to be
+; O(n²)). The head is sent first, then the body in small writes with the socket flushing
+; between them, so the head completes while the body is still incoming — forcing the
+; length-driven `buffered--drain` path rather than the single-read fast path. Correctness is
+; the invariant we pin (byte-for-byte reassembly across reads); the win is that it's linear.
+
+(defn body-echo-handler (reporter)
+  "Reports the received body's length + a byte checksum so we can prove every read landed."
+  (fn (request)
+    (let (bytes (string->utf8-bytes (get request :body)))
+      (send reporter [:body {:len (byte-length bytes)
+                             :sum (fold + 0 (bytes->list bytes))}])
+      {:status 200 :headers {} :body "ok"})))
+
+(describe "large non-chunked body streamed over several reads"
+  (test "the body is reassembled byte-for-byte when it arrives in many small writes"
+    (let (me (self)
+          port 54746
+          ; a 20 000-byte body: big enough that it cannot land in one packet, and its bytes
+          ; cycle 0..99 so a dropped/duplicated/mis-ordered read changes the checksum
+          n 20000
+          body-bytes (bytes (map (fn (i) (mod i 100)) (range 0 n)))
+          expected-sum (fold + 0 (bytes->list body-bytes))
+          head (b (str "POST /u HTTP/1.1\r\nHost: x\r\n"
+                    "Content-Length: " n "\r\nConnection: close\r\n\r\n"))
+          _sup (server/start port (body-echo-handler me))
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      ; send the head alone first, so it completes before any body byte arrives
+      (send-raw client head)
+      (sleep 20)
+      ; then the body in 40 separate 500-byte writes, pausing so each is its own read
+      (fold (fn (_ k)
+              (do
+                (send-raw client (subbytes body-bytes (* k 500) (* (+ k 1) 500)))
+                (sleep 2)))
+        nil (range 0 40))
+      (let (info (receive ([:body d] d) (after 5000 :timeout)))
+        (tcp-close client)
+        (server/stop port)
+        (assert= (get info :len) n)
+        (assert= (get info :sum) expected-sum)))))
+
+; ---- chunked bodies decoded incrementally over many reads (the other former O(n²) upload
+; path: the buffered de-chunker re-decoded the whole body on every read). The head is sent, then
+; each chunk in its own write, so the drain decodes chunk-by-chunk without re-scanning.
+
+(defn chunked-body-handler (reporter)
+  (fn (request)
+    (do
+      (send reporter [:chunked {:body (get request :body)}])
+      {:status 200 :headers {} :body "ok"})))
+
+(describe "chunked request body decoded incrementally over several reads"
+  (test "chunks arriving in separate reads de-chunk to the right body byte-for-byte"
+    (let (me (self)
+          port 54747
+          reps 50
+          part "abcdefghij"
+          head (b (str "POST /c HTTP/1.1\r\nHost: x\r\n"
+                    "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"))
+          _sup (server/start port (chunked-body-handler me))
+          client (tcp-connect "127.0.0.1" port))
+      (tcp-set-binary client true)
+      ; head alone first, so it completes before any chunk arrives
+      (send-raw client head)
+      (sleep 20)
+      ; each 10-byte chunk (hex size "a") in its own write, so each is a distinct read
+      (fold (fn (_ _k)
+              (do
+                (send-raw client (b (str "a\r\n" part "\r\n")))
+                (sleep 2)))
+        nil (range 0 reps))
+      (send-raw client (b "0\r\n\r\n"))
+      (let (info (receive ([:chunked d] d) (after 5000 :timeout)))
+        (tcp-close client)
+        (server/stop port)
+        (assert= (string-length (get info :body)) (* reps 10))
+        (assert= (get info :body) (join "" (map (fn (_) part) (range 0 reps))))))))
