@@ -490,6 +490,49 @@ a 4-rotation live-browser repro that failed before the fix and passed after).
 
 ---
 
+## Blocked on Brood language changes
+
+These are hatch-side follow-ups that only become worth doing once the matching
+Brood language/runtime change ships. We proposed all six upstream — they're at the
+top of [`brood/ROADMAP.md`](../../brood/ROADMAP.md) under *"Findings from hatch
+(2026-07-11)"*. Revisit each entry here when its upstream item lands. Context for the
+first three is `docs/tcp-http-audit.md` §16–§17 (the O(n²) class they retire).
+
+- ⬜ **Iolists → delete the manual list+`join` accumulation idiom.** Once the I/O +
+  join builtins (`tcp-send`, `spit`/`append-bytes`, `join`, `str`, `bytes-concat`)
+  accept arbitrarily nested lists flattened at the write boundary, rewrite the five
+  hand-rolled accumulators (`http/server` body drain + head reader, `http/request`
+  `dechunk-step`, `http/websocket` `reassemble`, `web/parts` `interleave`) to just
+  *describe* their structure and let the write flatten it — no more cons+`reverse`+
+  `join`. Also lets `web/parts` build the render tree as a nested iolist instead of
+  interleaving into one string.
+- ⬜ **`bytes`-native parsing → drop the carrier-string bridge.** When `bytes` grows a
+  fuller search/slice surface, port the HTTP/WebSocket parsers off the Latin-1
+  `(str buf (bytes->carrier chunk))` read buffer onto raw `bytes`. Removes the
+  text/binary mode-flip seam (root cause of the original U+FFFD live-nav bug) and the
+  O(n²) carrier conversions. Retires audit §16.
+- ⬜ **Growable read buffer → simplify the length-drain loops.** A transient append
+  buffer that freezes to immutable `bytes` on read would make `http/server`'s head
+  reader, chunked drain, and `web/live`'s WS frame gather trivially O(n) — deleting the
+  manual list+`join` and length-drain gymnastics those currently use. Also the clean fix
+  for the WS fragmented-message O(F²) residual noted in §17 (an incremental *message*
+  parser keeping decoded fragments across reads).
+- ⬜ **`mapv`/`filterv` → drop the `(into [] (map …))` wrappers.** Sweep the codebase
+  for `(into [] (map …))` / `(into [] (filter …))` (added wherever a vector was needed
+  because `map`/`filter` return lists) and collapse them once the vector-returning
+  variants exist.
+- ⬜ **Link-checked `--private` → catch cross-module misuse at compile time.** A private
+  `foo--bar` called from another module currently only fails at runtime (it bit us during
+  the audit work). Once the convention is link-checked upstream, no hatch code change is
+  needed — just confirm the suite stays green under the stricter check and drop any
+  workarounds.
+- ⬜ **`let` vector-destructure of a list value → remove the `first`/`rest` workarounds.**
+  We avoid `(let ([a b] some-list) …)` throughout (documented in CLAUDE.md's conventions)
+  and hand-expand to `first`/`rest`. If Brood makes vector-destructure work on lists (or
+  errors clearly), revisit those sites and the CLAUDE.md caveat.
+
+---
+
 ## Open design questions
 
 | # | Question | Decision needed |
