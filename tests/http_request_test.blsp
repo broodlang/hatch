@@ -107,6 +107,41 @@
     (assert= (first (try-parse "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
       :error)))
 
+; The incremental de-chunker behind the server's O(n) chunked drain: decode each chunk exactly
+; once and keep only the undecoded tail across reads (vs `try-parse` re-decoding the whole body
+; every read). These pin that it matches `try-parse`'s decoding while never re-scanning decoded
+; bytes.
+(describe "dechunk-step: incremental de-chunk"
+  (test "decodes complete chunks and returns the body + pipelined remainder at the terminator"
+    (match (dechunk-step "5\r\nhello\r\n0\r\n\r\nNEXT" 0 (list) 0)
+      ([:ok body rem] (do (assert= body "hello") (assert= rem "NEXT")))
+      (o (assert= o :ok))))
+  (test "returns :more with only the undecoded tail — decoded pieces are carried, not re-scanned"
+    (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
+      ([:more tail _decoded dlen]
+        (do
+          ; "hello" is already decoded (dlen 5); the tail is just the partial second chunk
+          (assert= tail "3\r\nab")
+          (assert= dlen 5)))
+      (o (assert= o :more))))
+  (test "resuming from a :more tail completes the body without re-decoding the first chunk"
+    (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
+      ([:more tail decoded dlen]
+        (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
+          ([:ok body rem] (do (assert= body "helloabc") (assert= rem "")))
+          (o (assert= o :ok))))
+      (o (assert= o :more))))
+  (test "an incomplete size line yields :more (needs the rest of the line)"
+    (match (dechunk-step "5\r\nhello\r\n1" 0 (list) 0)
+      ([:more tail _decoded dlen] (do (assert= tail "1") (assert= dlen 5)))
+      (o (assert= o :more))))
+  (test "chunk extensions on the size line are ignored, like try-parse"
+    (match (dechunk-step "4;name=val\r\nWiki\r\n0\r\n\r\n" 0 (list) 0)
+      ([:ok body _rem] (assert= body "Wiki"))
+      (o (assert= o :ok))))
+  (test "a malformed chunk size errors"
+    (assert= (first (dechunk-step "zz\r\ndata\r\n" 0 (list) 0)) :error)))
+
 (describe "try-parse: hardening"
   (test "rejects negative Content-Length (#3 — used to crash on substring)"
     (assert= (first (try-parse "POST / HTTP/1.1\r\nContent-Length: -5\r\n\r\n")) :error))

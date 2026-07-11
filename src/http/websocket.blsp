@@ -186,19 +186,22 @@
         ; a complete (FIN) data frame is the whole message
         (= fin 1) [:ok opcode payload rem]
         ; otherwise it's the head of a fragmented message — gather continuations
-        else (reassemble rem opcode payload maxf maxm)))))
+        else (reassemble rem opcode (list payload) (string-length payload) maxf maxm)))))
 
-(defn reassemble (buf msg-opcode acc maxf maxm)
-  "Accumulate continuation frames (opcode 0) onto `acc` until the FIN frame, capping the
-  total at `maxm`. `msg-opcode` carries the original (text/binary) opcode forward."
+(defn reassemble (buf msg-opcode pieces acclen maxf maxm)
+  "Accumulate continuation frames (opcode 0) until the FIN frame, capping the total at `maxm`.
+  `pieces` holds the payloads gathered so far (newest-first) and `acclen` their total length;
+  they're `join`ed once at FIN rather than `(str acc payload)` per frame (which is O(n²) in
+  the fragment count). `msg-opcode` carries the original (text/binary) opcode forward."
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
     ([:ok fin opcode payload rem] (cond
                                     (not (= opcode 0)) [:error "websocket: expected continuation frame"]
-                                    (> (+ (string-length acc) (string-length payload)) maxm) [:error "websocket: message too large"]
-                                    (= fin 1) [:ok msg-opcode (str acc payload) rem]
-                                    else (reassemble rem msg-opcode (str acc payload) maxf maxm)))))
+                                    (> (+ acclen (string-length payload)) maxm) [:error "websocket: message too large"]
+                                    (= fin 1) [:ok msg-opcode (join "" (reverse (cons payload pieces))) rem]
+                                    else (reassemble rem msg-opcode (cons payload pieces)
+                                           (+ acclen (string-length payload)) maxf maxm)))))
 
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload

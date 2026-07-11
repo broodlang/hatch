@@ -131,6 +131,36 @@ per-index `char-at` — left as-is for now; small frames. Noted for #16.)
 - Thread-per-connection (1 OS reader thread / conn) scales to hundreds, not tens of
   thousands. Tied to #1 (and a future writer thread).
 
+### 17. O(n²) streaming accumulation on the request/render paths — FIXED
+The request reader and several accumulators re-copied a growing buffer on every step —
+`(str acc chunk)` over immutable strings is O(n²) in the step count. On the upload path this
+turned a large POST into quadratic CPU/RSS. Fixes applied:
+- **`http/server worker--run` body read** — a non-chunked body arriving over many reads was
+  re-`str`ed into `buf` each read. Now once the head is in, the body is drained *by length*
+  into a list and `join`ed once (`buffered--drain`). Multipart uploads carry a Content-Length,
+  so they took exactly this path.
+- **`http/server worker--run` head read** — the head block itself was accumulated with
+  `(str buf chunk)` + a full `index-of` per read (O(n²), a cheap slow-loris CPU amplifier).
+  Split into `worker--read-head`, which conses reads onto a list (O(1)) and re-scans only a
+  3-byte carry for the `\r\n\r\n` terminator, joining once when it lands.
+- **`http/request` chunked de-chunk** — `try-parse` re-decoded the *whole* chunked body on
+  every read, and `dechunk--loop` `(str acc …)`-accumulated each chunk (doubly O(n²)). New
+  `dechunk-step` decodes each chunk exactly once, keeps only the undecoded tail across reads,
+  and `join`s the body once; the server drains chunked bodies through it (`chunked--drain`).
+- **`http/websocket reassemble`** — fragmented-message payloads were `(str acc payload)`-
+  accumulated per continuation frame; now gathered in a list and `join`ed once at FIN.
+- **`web/parts interleave`** — the live-view HTML was `(str acc …)`-assembled over every
+  static/dynamic slot on *each* re-render; now collected in a list and `join`ed once.
+
+**Residual (bounded, not fixed):** `web/live recv-frame--loop` still accumulates raw inbound
+WebSocket bytes with `(str buf chunk)`, and `parse-frame` re-parses (re-unmasks) all buffered
+fragments of a fragmented message on every read — O(n²) up to `*ws-max-message-bytes*` (1 MB).
+Client→server frames are normally small unfragmented events, and a true fix needs an
+incremental frame parser threaded through the live-session read loop (which returns
+partial-buffer state to interleave ticks/info/reload) — deferred with #16 (a real `bytes`
+type + byte-faithful sockets would let that loop drain by length like the request paths do).
+Same rationale as `byte-string->utf8` in #14.
+
 ---
 
 ## 🟣 The one bad abstraction (highest leverage) — TODO (kernel, large)
