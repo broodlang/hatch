@@ -133,6 +133,24 @@
         (assert= ((get e :spec)) {:ok true})
         (assert= (get e :session) :customer)))))
 
+(describe "reload broadcast"
+  ; notify-reload fans a [:reload] out to every registered session via the :hatch-live
+  ; reload registry — the code-hot-reload sibling of notify-reload-css. A `deflive`
+  ; sentinel (`(def live--reloaded (notify-reload))`) fires it on every module (re)load,
+  ; and `nest run --watch src/` drives that reload on each save; the session's [:reload]
+  ; handler then re-resolves fresh code via spec-fn and re-renders. Register this test
+  ; process as a stand-in session, fire the notify, and confirm the message arrives.
+  ; Unregister after so we don't leak into other tests.
+  (test "notify-reload is a safe no-op before any session registers"
+    (assert= (notify-reload) nil))
+  (test "a registered session receives [:reload]"
+    (do
+      (web/live/live--register (self))
+      (notify-reload)
+      (let (got (receive ([:reload] :got) (after 1000 :timeout)))
+        (web/live/live--unregister (self))
+        (assert= got :got)))))
+
 (describe "reload-css broadcast"
   ; notify-reload-css fans a [:reload-css] out to every registered session via the
   ; :hatch-live reload registry. Register this test process as a stand-in session, fire

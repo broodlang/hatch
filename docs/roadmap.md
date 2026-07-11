@@ -230,15 +230,54 @@ split — the same "coarser but correct" precedent already used for `if`/`for`.
   handler a `:body-file` path — persist it zero-copy with `web/conn/save-body` or parse it
   from disk with `parse-upload-file`. **Still to do:** progress events to live sessions.
 
-### Phase 10 — Developer experience
+### Phase 10 — Developer experience ✅
 
-- **`nest new myapp --template web`** — scaffold: routes, live view,
-  layout, `brood_live.js`, `project.blsp` with hatch dependency
-- **`nest new myapp --template web-api`** — JSON API variant (no live layer)
-- **Hot reload** — `nest run --watch src/` triggers re-render diffs in
-  running live sessions without a server restart
+Turned out to be almost entirely already-built once we actually looked (2026-07-11).
+`nest new` templates live in Brood's own stdlib (`std/tool/project.blsp`), *not* in
+nest's Rust — `nest new` is a thin dispatcher to `project/new-project` — so scaffolding
+is a pure-Brood, upstream change (still "no new Rust"). The hot-reload chain was already
+wired end to end in `web/live`; this phase's work was verifying it, closing a test gap,
+and adding the missing API template.
+
+- **`nest new myapp --template hatch`** ✅ — the scaffold. A full runnable Hatch app:
+  `project.blsp` wiring `[hatch :path …]` + `store-postgres`, `web/endpoint`,
+  `web/errors` (themed error pages), `web/layout` (Tailwind + daisyUI), `web/routes`
+  (session + CSRF pipeline), a `home` page + a Postgres-backed `messages` board, and
+  tests. (Named `hatch`, not `web` — it's more batteries-included than the original
+  bullet: it includes the database board.) The live client (`brood_live.js`) isn't
+  copied in — apps serve it straight from the hatch dep via
+  `(web/live/client-js-handler)`, so there's no vendored copy to drift.
+  **Two real bugs found + fixed while verifying it** (2026-07-11): the scaffold didn't
+  load at all — `db.blsp` aliased both store's `repo` and `web/repo` to the same `repo`
+  name (collision → now `:as web-repo`), and `web/endpoint` referenced a `web/errors`
+  module the scaffold never generated (now generated, mirroring the demo). Plus a
+  `layout.blsp` unused-`:use` warning. Verified: `nest new … --template hatch && nest
+  test` is now green and warning-free.
+- **`nest new myapp --template web-api`** ✅ — the JSON-API variant, no live layer, no
+  database (just the `hatch` dep — the smallest runnable Hatch app). Router →
+  `web/api` handlers returning JSON via `web/live/encode`; `web/endpoint` runs with no
+  ws-handler and emits bare JSON 500/504. Serves `GET /`, `GET /api/health`, and
+  `GET|POST /api/echo` (query- and JSON-body-param merging both exercised). Verified
+  end to end: `nest test` green, and a running server returns the right JSON for each
+  route and a 404 for the rest.
+- **Hot reload** ✅ — `nest run --watch src/` (which already exists) re-`load`s a changed
+  module on save; `deflive` emits a `(def live--reloaded (web/live/notify-reload))`
+  sentinel that fires on every (re)load, fanning `[:reload]` through the `:hatch-live`
+  registry to open sessions, whose `[:reload]` handler re-resolves fresh code via
+  `spec-fn` and re-renders — a diff, no restart. The whole chain was already built; this
+  phase added the missing regression test (only the sibling `notify-reload-css` path had
+  one) and a direct end-to-end proof that loading a `deflive` module delivers `[:reload]`
+  to a registered session.
 - ~~**`web/conn/test`** — test helpers for pure-function handler testing~~ ✅
   shipped as `web/test` (see Assets & dev tooling above)
+
+> **Note:** the `hatch`/`web-api` template changes live in the *brood* repo
+> (`std/tool/project.blsp`, `include_str!`'d into `nest` at build time), so they reach
+> a user's `nest` only after the next `make install` of brood. Fixed in the same pass:
+> nest's `--template --help` blurb (it had named a non-existent `http-server` and omitted
+> `editor`/`gui`/`hatch`) and Brood's `brood-for-claude.md` template list (baked into
+> every scaffold). The authoritative list is `*project-templates*` at runtime, surfaced
+> by `nest new --template <unknown>`.
 
 ### Phase 11 — Production hardening
 

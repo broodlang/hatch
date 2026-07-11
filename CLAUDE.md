@@ -13,6 +13,12 @@ Hatch is a **library package**: `src/` holds only the framework (`http/` +
 which depends on Hatch via a local `:path` dep (`[hatch :path "../hatch"]`) —
 so the demo is also our proof that Hatch installs and loads as a real package.
 
+New apps are scaffolded with `nest new myapp --template hatch` (a full
+Postgres-backed app) or `--template web-api` (a minimal JSON API, no live layer).
+Those templates live **upstream** in Brood's `std/tool/project.blsp` (`nest new` is a
+thin dispatcher to `project/new-project`), so editing them is a brood-repo change that
+reaches users on the next `make install` of brood — not a hatch-side edit.
+
 ## Running
 
 ```bash
