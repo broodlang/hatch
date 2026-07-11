@@ -344,7 +344,7 @@ The framework has four layers:
 
 The template layer is part of `web/live` but can be used standalone for static rendering.
 
-The framework ships as a `nest` project template: `nest new myapp --template http-server` scaffolds a working web app with a `web/` directory, `project.blsp` dependencies, and an example route.
+The framework ships as a pair of `nest` project templates (in Brood's `std/tool/project.blsp`, so `nest new` needs no framework-specific Rust): `nest new myapp --template hatch` scaffolds a full app (a `web/` tree, `project.blsp` deps, session/CSRF-protected routes, and a Postgres-backed message board), and `nest new myapp --template web-api` scaffolds a minimal JSON API with no live layer or database.
 
 ### 5.1 HTTP layer — Conn, Router, Middleware
 
@@ -903,7 +903,7 @@ The hook handles it: `this.handleEvent("chart-data-updated", data => this.chart.
 
 ### 5.8 JavaScript client and wire protocol
 
-The framework ships a single small JS file (`brood_live.js`, ~600 lines target) with no npm dependencies. It is copied into `public/js/` by `nest new`. Ideas are freely taken from `phoenix.js` and `phoenix_live_view.js` but the code is original — no fork, no import.
+The framework ships a single small JS file (`brood_live.js`, ~600 lines target) with no npm dependencies. It lives in the hatch package (`static/brood_live.js`) and apps serve it straight from the dep via `(web/live/client-js-handler)` — no vendored copy in the app to drift out of sync. Ideas are freely taken from `phoenix.js` and `phoenix_live_view.js` but the code is original — no fork, no import.
 
 #### Wire protocol
 
@@ -1181,40 +1181,47 @@ LiveBrood session processes are created with `(spawn ...)` and registered under 
 
 ### 5.7 Developer experience and macros
 
-#### Project template
+#### Project templates
 
-`nest new myapp --template http-server` scaffolds:
+> **As shipped** (this subsection was an early sketch; the two templates below are the
+> real ones, in Brood's `std/tool/project.blsp`). `brood_live.js` is *not* vendored into
+> the app — it's served straight from the hatch dep via `(web/live/client-js-handler)`.
+
+`nest new myapp --template hatch` scaffolds a full app:
 
 ```
 myapp/
-  project.blsp                  ; name, version, web framework dependency
+  project.blsp                  ; name, version, [hatch :path …] + store-postgres deps
   src/
-    main.blsp                   ; starts the web supervisor and HTTP listener
-    router.blsp                 ; route table
-    controllers/
-      pages.blsp                ; example static handler
-    live/
-      home.blsp                 ; example deflive view
-    templates/
-      layout.blsp               ; app-wide HTML layout
+    main.blsp                   ; logger + DB pool + HTTP endpoint, then park
+    db.blsp                     ; the messages schema + CRUD helpers
+    db-setup.blsp               ; `nest run --main db-setup` — create DB + migrate
+    web/
+      endpoint.blsp             ; HTTP listener (router + live-dispatcher), per-request timeout
+      errors.blsp               ; themed error pages (500/504/404 …)
+      layout.blsp               ; app-wide HTML shell (Tailwind + daisyUI)
+      routes.blsp               ; routes under a session + CSRF pipeline
+      views/
+        home.blsp               ; a plain page
+        messages.blsp           ; a Postgres-backed message board
   tests/
-    controllers/
-      pages_test.blsp
-  public/                       ; static assets
-    js/
-      app.js                    ; LiveSocket initialization
-    css/
-      app.css
+    main_test.blsp
+    web/views/messages_test.blsp
 ```
 
-`src/main.blsp`:
+`nest new myapp --template web-api` scaffolds the minimal JSON variant — no live layer,
+no database (just the `hatch` dep): `src/main.blsp`, `src/web/{endpoint,routes,api}.blsp`,
+and `tests/{main_test,web/api_test}.blsp`. Handlers return JSON via `web/live/encode`.
+
+`src/main.blsp` (web-api):
 ```lisp
-(defmodule main "Application entry point."
-  (:use web/http)
-  (:use router))
+(defmodule main "Entry point for myapp."
+  (:use web/endpoint :only [serve])
+  (:use web/application :only [start default-logger-opts]))
 
 (defn main ()
-  (http-serve 4000 router/dispatch))
+  (start {:logger   (default-logger-opts)
+          :children [(fn () (serve))]}))
 ```
 
 #### Key macros
@@ -1309,12 +1316,12 @@ The LiveBrood session process itself can be tested with `spawn-server` + `gen-ca
 
 #### Hot reload integration
 
-`nest run --watch src/` watches `.blsp` files. When a template file changes:
-1. The file is reloaded — `def`/`defn` rebind.
-2. All running LiveBrood sessions receive a `[:reload module]` message.
-3. Each session re-renders with the new render function and sends a full re-render diff to the client.
+`nest run --watch src/` watches `.blsp` files. When a view module changes (as shipped):
+1. The file is re-`load`ed on save — `def`/`defn` rebind.
+2. That reload re-evaluates the sentinel `deflive` emits — `(def live--reloaded (web/live/notify-reload))` — which fans a `[:reload]` message through the `:hatch-live` registry to every open session.
+3. Each session's `[:reload]` handler re-resolves the fresh view spec via `spec-fn`, re-renders, and sends a re-render frame to the client — no process restart, no page reload.
 
-Because `defn` rebinds the global and processes use late binding (they call `module/render` by name, not by captured closure), the new render function is picked up automatically on the next event. The hot reload just needs to trigger a re-render — it doesn't need to restart processes.
+Because `defn` rebinds the global and the session re-resolves its spec by name (not from a captured closure), the new render function is picked up on reload. The hot reload just needs to trigger the re-render.
 
 ```lisp
 ;; In the session actor
