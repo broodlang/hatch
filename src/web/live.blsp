@@ -1012,10 +1012,14 @@
 ; ---- shared macro-time expansion, used by both deflive and deflive-component ----
 
 (defn deflive--clause (tag clauses)
-  "The first clause in `clauses` headed by symbol `tag` (e.g. `'mount`), or nil — the
+  "The single clause in `clauses` headed by symbol `tag` (e.g. `'mount`), or nil — the
   singular clauses (`mount`/`render`/`template`/`handle-info`/`unmount`/`on-mount-guard`/
-  `handle-params`), of which a deflive/deflive-component form has at most one each."
-  (first (filter (fn (c) (= (first c) tag)) clauses)))
+  `handle-params`), of which a deflive/deflive-component form has at most one each. A duplicate
+  is a mistake (a second one would be silently ignored), so it's an error at macro-expansion."
+  (let (matches (filter (fn (c) (= (first c) tag)) clauses))
+    (if (> (count matches) 1)
+      (error (str "deflive: duplicate `" (name tag) "` clause — a view declares it at most once"))
+      (first matches))))
 
 (defn deflive--clauses (tag clauses)
   "Every clause in `clauses` headed by symbol `tag` — the repeatable ones (`on`/`tick`),

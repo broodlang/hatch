@@ -67,7 +67,9 @@
     (assert= (parse "<li :for={x <- xs} :if={(even? x)}>{x}</li>")
       (list 'for (list 'x 'xs :when (list 'even? 'x)) [:li {} 'x])))
   (test "a directive without a brace value errors"
-    (assert-error (parse "<p :if=\"flag\">y</p>"))))
+    (assert-error (parse "<p :if=\"flag\">y</p>")))
+  (test "a bare directive (no value at all) errors, not a boolean attr"
+    (assert-error (parse "<p :if>y</p>"))))
 
 (describe "render — end to end"
   (test "@name renders the model value"

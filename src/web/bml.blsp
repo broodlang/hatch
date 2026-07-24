@@ -230,7 +230,7 @@
   (let (parts (attr-parts inner nil ""))
     (cond
       (empty? parts) ""
-      (and (= (count parts) 1) (string? (first parts))) (first parts)
+      ; one part — a lone literal string or a lone `{expr}` — is used as-is
       (= (count parts) 1) (first parts)
       else (cons 'str parts))))
 
@@ -292,7 +292,11 @@
                 (bml-error s2 "directive " k " needs a brace value, e.g. " k "={…}"))
               (let ([v s3] (parse-attr-value s2))
                 (parse-attrs s3 (assoc attrs (keyword k) v) directives))))
-          (parse-attrs s1 (assoc attrs (keyword k) true) directives))))))
+          ; a bare name (no `=value`) is a boolean attribute — but a bare `:if`/`:for`
+          ; directive is a mistake (it needs a brace value), not a boolean attr, so reject it.
+          (if (directive? k)
+            (bml-error s1 "directive " k " needs a brace value, e.g. " k "={…}")
+            (parse-attrs s1 (assoc attrs (keyword k) true) directives)))))))
 
 ; ---- elements ----
 
