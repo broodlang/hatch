@@ -127,11 +127,11 @@
             (assert= (into [] (bytes->list payload-out)) payload)))
         (o (assert= o :ok))))))
 
-; One test, run sequentially: registering and looking up both touch the shared
-; :hatch-live-routes process, and concurrent tests would race its first-time init
-; (a race that can't happen in production — the router registers at load, before any
-; connection looks a path up).
-(describe "live-route registry"
+; :isolated — registering and looking up both touch the shared :hatch-live-routes process,
+; and running concurrently with other suites (especially the crash test below) would race its
+; kill/restart window. Isolated units run alone, serially, first — mirroring production, where
+; the router registers every route at load, before any connection looks a path up.
+(describe "live-route registry" :isolated
   (test "register, look up, and miss"
     (do
       (register-live "/reg-test" (fn () {:ok true}) :admin)
@@ -144,7 +144,7 @@
 
 ; Tier-3 (docs/robustness.md): the route table survives the registry process crashing —
 ; it mirrors to a supervised vault and re-seeds from it on restart.
-(describe "live-route registry survives a crash"
+(describe "live-route registry survives a crash" :isolated
   (test "a registered route is still there after the registry process is killed"
     (do
       (register-live "/crash-test" (fn () {:ok true}) :customer)
