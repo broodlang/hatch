@@ -164,6 +164,18 @@
   (test "remote-nodes is empty on a single (non-distributed) runtime"
     (assert= (remote-nodes) (list))))
 
+(describe "presence--record-remote: peer state doesn't leak empty rosters"
+  (test "a non-empty roster is recorded"
+    (assert= (web/presence/presence--record-remote {} :nodeB "room" (list {:key "b" :meta {}}))
+      {:nodeB {"room" (list {:key "b" :meta {}})}}))
+  (test "an empty roster drops the [node topic] entry"
+    (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}})
+      (assert= (web/presence/presence--record-remote remotes :nodeB "r1" (list))
+        {:nodeB {"r2" (list {:key "b" :meta {}})}})))
+  (test "emptying a peer's last topic drops the node entirely"
+    (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}})}})
+      (assert= (web/presence/presence--record-remote remotes :nodeB "r1" (list)) {}))))
+
 ; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
 ; primitive) — hard-killing the shared :hatch-presence singleton would race any concurrent
 ; test using it (a killed process drops its in-flight mailbox).

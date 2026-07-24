@@ -27,7 +27,9 @@
   ; send-info — push the roster to a tracked session
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
-  (:use web/registry))
+  (:use web/registry)
+  ; set/set — distinct tracked pids as a first-class #{} set (ADR-060), no O(n²) dedupe
+  (:alias set))
 
 (def vault-name :hatch-presence-vault)
 
@@ -90,7 +92,7 @@
     ; members with the refreshed merge. Peer state isn't vaulted, so recurse without a save.
     ([:presence-sync from topic roster]
       (let (fresh (not (contains? remotes from))
-            remotes2 (assoc-in remotes [from topic] roster))
+            remotes2 (presence--record-remote remotes from topic roster))
         (when fresh (monitor-node from) (presence--sync-all-to state from))
         (presence--notify-merged state remotes2 topic)
         (presence--loop state refs remotes2)))
@@ -205,18 +207,26 @@
     (dolist (kv (entries state))
       (presence--sync-to target-node me (first kv) (presence--roster state (first kv))))))
 
+(defn presence--record-remote (remotes from topic roster)
+  "Record peer `from`'s `roster` for `topic`. An EMPTY roster (that peer's topic emptied) drops
+  the `[from topic]` entry — and the `from` node entry if that was its last topic — rather than
+  accumulating dead empty-roster keys, an unbounded per-topic memory leak on a long-lived link
+  (local `state` already prunes emptied topics the same way)."
+  (if (empty? roster)
+    (let (node-map (dissoc (get remotes from {}) topic))
+      (if (empty? node-map) (dissoc remotes from) (assoc remotes from node-map)))
+    (assoc-in remotes [from topic] roster)))
+
 (defn presence--remote-topics-of (remotes node)
   "The topics a departed `node` had presences on (so a node-down only refreshes those)."
   (let (rr (get remotes node {}))
     (map (fn (kv) (first kv)) (entries rr))))
 
 (defn presence--all-pids (state)
-  "Every distinct tracked pid across all topics — for re-monitoring on recovery."
-  (presence--dedupe (apply concat
-                      (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
-
-(defn presence--dedupe (xs)
-  (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) (list) xs)))
+  "Every distinct tracked pid across all topics, as a set — for re-monitoring on recovery
+  (already distinct, no O(n²) `member?` dedupe pass); `presence--boot` folds over it."
+  (set/set (apply concat
+             (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
 
 (defn presence ()
   "The presence registry pid — a supervised, vault-backed singleton. Started on first use
