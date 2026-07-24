@@ -10,6 +10,16 @@
 (defn client-js-conn ()
   (build {:method "GET" :path "/static/brood_live.js" :query "" :params {} :headers {} :body ""}))
 
+(describe "json-str: escapes all C0 control characters (RFC 8259)"
+  (test "named escapes" (assert= (json-str "a\nb\tc") "\"a\\nb\\tc\""))
+  (test "quote and backslash" (assert= (json-str "a\"\\b") "\"a\\\"\\\\b\""))
+  ; a backspace/ESC/NUL in user text must be \u-escaped, not emitted raw (raw → invalid JSON
+  ; → the client's JSON.parse drops the whole frame). \b = U+0008, ESC = U+001B, NUL = U+0000.
+  (test "backspace → \\b" (assert= (json-str (utf8-bytes->string (bytes [8]))) "\"\\b\""))
+  (test "ESC → \\u001b" (assert= (json-str (utf8-bytes->string (bytes [27]))) "\"\\u001b\""))
+  (test "NUL → \\u0000" (assert= (json-str (utf8-bytes->string (bytes [0]))) "\"\\u0000\""))
+  (test "vertical tab → \\u000b" (assert= (json-str (utf8-bytes->string (bytes [11]))) "\"\\u000b\"")))
+
 (describe "client-script"
   (test "default src + defer"
     (let (h (render (client-script)))
