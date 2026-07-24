@@ -18,7 +18,12 @@
   (test "normal path" (assert= (safe-segments "css/app.css") (list "css" "app.css")))
   (test "rejects .." (assert= (safe-segments "../secret") nil))
   (test "rejects nested .." (assert= (safe-segments "a/../b") nil))
-  (test "rejects ." (assert= (safe-segments "./x") nil)))
+  (test "rejects ." (assert= (safe-segments "./x") nil))
+  ; percent-decode is per-segment, and traversal checks run on the DECODED value
+  (test "decodes %20 into the segment" (assert= (safe-segments "my%20file.css") (list "my file.css")))
+  (test "rejects encoded .. (%2e%2e)" (assert= (safe-segments "%2e%2e/secret") nil))
+  (test "rejects a decoded separator (%2f) merging segments" (assert= (safe-segments "..%2f..%2fetc") nil))
+  (test "rejects a NUL/control byte segment" (assert= (safe-segments "a%00b") nil)))
 
 (describe "serve"
   (test "traversal attempt is 404"

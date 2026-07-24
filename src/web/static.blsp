@@ -16,7 +16,10 @@
   best-effort byte ranges (206/416), and an env-aware `Cache-Control` — `no-cache` in dev
   and for un-fingerprinted URLs, `immutable`/one-year for content-fingerprinted ones. Pair
   with `web/assets/fingerprint` (build) + `asset-path` (link) for cache-busting in prod."
-  (:use web/conn))
+  (:use web/conn)
+  ; url-decode — percent-decode each path segment (so a `%20` filename resolves), on the
+  ; DECODED value of which the traversal checks run
+  (:alias http/util))
 
 (require 'hash)   ; strong ETags are a SHA-256 prefix of the body
 
@@ -80,14 +83,24 @@
 
 ; ---- path safety ----
 
+(defn has-control-byte? (s)
+  "True if `s` contains any control byte (< 0x20) or DEL (0x7f) — e.g. a NUL, which can
+  truncate a path at the OS layer and on which `file-stat` may raise."
+  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string->codepoints s)))))
+
 (defn unsafe-segment? (s)
-  "True if a path segment would escape the root or is otherwise unsafe."
-  (or (= s "..") (= s ".") (includes? s "\\")))
+  "True if a (percent-decoded) path segment would escape the root or is otherwise unsafe:
+  `.`/`..`, or a segment carrying a path separator (`/` from a decoded `%2f`, or `\\`) or any
+  control/NUL byte. Checking the DECODED value is what makes `%2e%2e`/`%2f` fail closed."
+  (or (= s "..") (= s ".") (includes? s "/") (includes? s "\\") (has-control-byte? s)))
 
 (defn safe-segments (rel)
-  "Path segments of `rel` (empties dropped), or `nil` if any segment is unsafe —
-  i.e. a path-traversal attempt like `../../etc/passwd`."
-  (let (segs (filter (fn (s) (not (blank? s))) (string-split rel "/")))
+  "Percent-decoded path segments of `rel` (empties dropped), or `nil` if any decoded segment
+  is unsafe — a path-traversal attempt like `../../etc/passwd`, `..%2f..`, or `%2e%2e`. Decode
+  is per-segment so a `%2f` becomes a literal `/` *inside* a segment (rejected by
+  `unsafe-segment?`) rather than a new separator."
+  (let (segs (map http/util/url-decode
+               (filter (fn (s) (not (blank? s))) (string-split rel "/"))))
     (if (empty? (filter unsafe-segment? segs)) segs nil)))
 
 ; ---- environment ----
@@ -303,8 +316,9 @@
   "The cached ETag for `path` if the file still matches the cached mtime+size — determined
   from a `file-stat` alone, without reading the body. Lets a revalidation answer 304 without
   slurping the file. nil if the file is uncached, changed, or unstattable (the caller then
-  reads + hashes it)."
-  (let (st (file-stat path))
+  reads + hashes it). `file-stat` is guarded: a path the OS rejects (an interior NUL that
+  slipped a check, an odd encoding) fails closed to 404 rather than crashing the worker."
+  (let (st (try (file-stat path) (catch _ nil)))
     (if (nil? st)
       nil
       (let (hit (table-get *etag-cache* path))

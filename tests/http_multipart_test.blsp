@@ -41,3 +41,27 @@
     (assert= (parse (b "not multipart at all") "BOUND") {:fields {} :files {}}))
   (test "a blank boundary yields empty maps"
     (assert= (parse body "") {:fields {} :files {}})))
+
+;; A file part whose binary content contains a bare `--BOUND` (not CRLF-preceded) must NOT
+;; be split there — the delimiter is CRLF-anchored (`\r\n--BOUND`).
+(def body-boundary-in-content
+  (bytes-concat
+    (b "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f.bin\"\r\n\r\n")
+    (b "data--BOUNDstill-data")
+    (b "\r\n--BOUND--\r\n")))
+
+(describe "multipart parse: robustness"
+  (test "a bare --boundary inside a part's content is not treated as a delimiter"
+    (let (f (get-in (parse body-boundary-in-content "BOUND") [:files "file"]))
+      (assert= (utf8-bytes->string (get f :bytes)) "data--BOUNDstill-data")))
+  ; A part with only `filename` and no `name` (malformed per RFC 7578) must be dropped, not
+  ; mis-filed — `cd-param … "name"` must not match the `name="` inside `filename="`.
+  (test "cd-param name does not match inside filename"
+    (assert= (cd-param "form-data; filename=\"orphan.txt\"" "name") nil))
+  (test "a nameless file part is dropped"
+    (assert= (parse (bytes-concat
+                      (b "--BOUND\r\nContent-Disposition: form-data; filename=\"orphan.txt\"\r\n\r\n")
+                      (b "content")
+                      (b "\r\n--BOUND--\r\n"))
+               "BOUND")
+      {:fields {} :files {}})))

@@ -34,6 +34,8 @@
     (assert= (match-path ["users" :id] ["users" "42"]) {"id" "42"}))
   (test "multi-capture"
     (assert= (match-path ["a" :b "c" :d] ["a" "1" "c" "2"]) {"b" "1" "d" "2"}))
+  (test "a captured param is percent-decoded"
+    (assert= (match-path ["users" :id] ["users" "a%20b"]) {"id" "a b"}))
   (test "root pattern"
     (assert= (match-path nil nil) {}))
   (test "splat captures remaining segments"

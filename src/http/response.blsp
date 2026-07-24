@@ -40,6 +40,12 @@
         ; the response iolist. `bodyless` skips it entirely (no body, no Content-Length).
         body-bytes (if bodyless nil (bytes-concat (or (get resp :body) "")))
         headers (get resp :headers {})
+        ; A 1xx/204/304 MUST NOT carry a body/Content-Length (RFC 7230 §3.3): strip any the
+        ; handler set, or a stray Content-Length desyncs a keep-alive client (it reads that
+        ; many bytes of the next response as this body).
+        headers (if bodyless
+                  (dissoc (dissoc (dissoc headers :content-length) :content-type) :transfer-encoding)
+                  headers)
         headers (if (or bodyless (contains? headers :content-type))
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8"))
