@@ -67,6 +67,22 @@
     (assert= (render [:div {:class ["foo" "bar"]} "x"])
       "<div class=\"foo bar\">x</div>")))
 
+(describe "render: URL-attribute scheme sanitization"
+  (test "javascript: href is neutralized to #"
+    (assert= (includes? (render [:a {:href "javascript:alert(1)"}]) "href=\"#\"") true))
+  (test "obfuscated javascript: (leading space, mixed case) is neutralized"
+    (assert= (includes? (render [:a {:href "  JaVaScRiPt:alert(1)"}]) "href=\"#\"") true))
+  (test "whitespace-split javascript: scheme is neutralized"
+    (assert= (safe-url "java\tscript:alert(1)") "#"))
+  (test "a normal https href passes through"
+    (assert= (includes? (render [:a {:href "https://example.com/x"}]) "href=\"https://example.com/x\"") true))
+  (test "a relative href passes through"
+    (assert= (includes? (render [:a {:href "/dashboard"}]) "href=\"/dashboard\"") true))
+  (test "a legitimate data: image src passes through"
+    (assert= (includes? (render [:img {:src "data:image/png;base64,AAAA"}]) "src=\"data:image/png;base64,AAAA\"") true))
+  (test "a non-URL attribute is not treated as a URL"
+    (assert= (includes? (render [:div {:title "javascript:not-a-url"}]) "javascript:not-a-url") true)))
+
 (describe "render: lists of children"
   (test "list rendered as concatenation"
     (let (items ["a" "b" "c"]
