@@ -114,3 +114,24 @@
     (assert= (web/pubsub/pubsub--remove {"t" #{1 2}} "t" 1) {"t" #{2}}))
   (test "remove-pid drops the topics it empties and keeps the rest"
     (assert= (web/pubsub/pubsub--remove-pid {"a" #{1} "b" #{1 2}} 1) {"b" #{2}})))
+
+;; The [:sync …] barrier: a synchronous round-trip the registry answers only after processing
+;; everything queued ahead of it (used by web/live to flush stale broadcasts on live-navigate).
+(describe "sync barrier"
+  (test "a :sync request gets a ref-pinned reply"
+    (let (r (ref))
+      (send (pubsub) [:sync (self) r])
+      (assert= (receive ([:sync ~r] :ok) (after 1000 :timeout)) :ok)))
+  (test "a broadcast queued before a sync is delivered by the time sync replies"
+    ; enqueue a broadcast to ourselves, then a sync; the registry processes in order, so the
+    ; [:info] is in our mailbox before the [:sync] reply
+    (do
+      (subscribe "sync:room")
+      (wait-member "sync:room" (self) 60)
+      (broadcast "sync:room" {:hi 1})
+      (let (r (ref))
+        (send (pubsub) [:sync (self) r])
+        (receive ([:sync ~r] :ok) (after 1000 :timeout)))
+      (unsubscribe "sync:room")
+      ; the broadcast is already waiting, no further wait needed
+      (assert= (receive ([:info m] m) (after 0 :none)) {:hi 1}))))

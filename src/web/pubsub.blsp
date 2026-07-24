@@ -99,7 +99,12 @@
                                    ; convert the pid set → a list at the API boundary (the
                                    ; public `subscribers` snapshot has always returned a list)
                                    (send from [:subscribers r (into (list) (get subs topic #{}))])
-                                   (pubsub--loop subs refs vault-ref)))))
+                                   (pubsub--loop subs refs vault-ref)))
+    ; A synchronous barrier: reply once we've processed everything queued ahead of it. A caller
+    ; that just unsubscribed uses this to know its unsubscribe is applied AND that any broadcast
+    ; queued before it has already been delivered to the caller's mailbox — so a live-navigate
+    ; can drain those stale deliveries before mounting the next view (see web/live's sync-registry).
+    ([:sync from r] (do (send from [:sync r]) (pubsub--loop subs refs vault-ref)))))
 
 ; ---- cross-node fan-out ----
 ; PubSub is cluster-aware when the runtime is started as a distributed node (`node-start` +

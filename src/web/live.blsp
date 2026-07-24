@@ -291,7 +291,9 @@
       ; a web/component/send-update push — merge into that component's stored state
       ([:update-component cid changes] [:update-component cid changes (bytes-concat buf (reverse pieces))])
       ([:reload] [:reload (bytes-concat buf (reverse pieces))])
-      ([:reload-css] [:reload-css (bytes-concat buf (reverse pieces))]))))
+      ([:reload-css] [:reload-css (bytes-concat buf (reverse pieces))])
+      ; the idle watchdog decided this peer is dead — reap the session (it owns the socket)
+      ([:reap] [:reap (bytes-concat buf (reverse pieces))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 ; A `tick` interval is a native `send-interval` timer (Erlang parity, prelude): a tiny
@@ -325,9 +327,10 @@
     ([:down _ _ _] nil)
     (after *ws-ping-ms*
       (if (>= misses 2)
-        ; two pings unanswered → peer is gone; closing wakes the session's reader
-        ; ([:tcp-closed] → clean session shutdown).
-        (try (tcp-close sock) (catch _ nil))
+        ; two pings unanswered → peer is gone. Ask the SESSION to reap rather than closing the
+        ; fd from here: the session is the sole socket owner, and it's parked reading, so `[:reap]`
+        ; wakes it → close-session (registry + component cleanup + socket close). Then stop.
+        (send session [:reap])
         (do
           (send session [:ws-send sock (ping-frame)])
           (idle-watchdog--loop session sock (+ misses 1)))))))
@@ -610,13 +613,24 @@
     (session-recv sock view buf)
     (close-session sock view)))
 
+(defn sync-registry (nm)
+  "Synchronously round-trip the named registry (`:hatch-pubsub` / `:hatch-presence`), if it's
+  running, so anything it queued for THIS session before our just-sent unsubscribe/untrack has
+  been delivered to our mailbox by the time it replies — a barrier a following `drain-oob` then
+  relies on. A no-op when the registry isn't up (this app doesn't use it); bounded by a short
+  timeout so a wedged registry can't hang a navigate."
+  (let (reg (whereis nm))
+    (when reg
+      (let (r (ref))
+        (send reg [:sync (self) r])
+        (receive ([:sync ~r] :ok) (after 200 :ok))))))
+
 (defn drain-oob ()
   "Discard out-of-band messages (PubSub/Presence broadcasts, component updates) already queued
   for the OLD view before a live-navigate swaps in a new one. The old view unsubscribes in its
-  unmount, but a broadcast already delivered to this session's mailbox would otherwise reach the
-  NEW view's `handle-info` (or a carried-over component). Called after unmount and before the new
-  mount subscribes, so only stale messages are dropped — never the incoming view's own. (A
-  broadcast racing our unsubscribe by landing just after this drain is a narrow residual window.)"
+  unmount; `sync-registry` (called first) barriers the registries so every broadcast queued
+  before that unsubscribe has landed here, and this then drops them — so none reaches the NEW
+  view's `handle-info` (or a carried-over component), and no incoming-view message is lost."
   (receive
     ([:info _] (drain-oob))
     ([:update-component _ _] (drain-oob))
@@ -689,6 +703,8 @@
     ([:reload-css buf2] (if (send-msg sock {:event "reload-css"})
                           (session-recv sock view buf2)
                           (close-session sock view)))
+    ; the idle watchdog reaped a dead/silent peer — clean up + close the socket (we own it)
+    ([:reap _buf2] (close-session sock view))
     ; the peer already closed the TCP connection (no WS close frame) — same cleanup as
     ; close-session (registry + the session's component table), its socket-write calls are
     ; already best-effort/try-caught so they're harmless to make on an already-dead socket
@@ -780,8 +796,10 @@
                       _unmount (try ((get view :unmount) (get view :model))
                                  (catch e (live--handler-error "unmount" :unmount e nil)))
                       _ (stop-tickers (get view :ticker-pids))
-                      ; drop any out-of-band message (broadcast, component update) queued for
-                      ; the old view — now unsubscribed — so it can't reach the new view.
+                      ; barrier the pubsub/presence registries so every broadcast queued before
+                      ; the old view's unsubscribe (run in unmount above) has landed here, THEN
+                      ; drop those stale out-of-band messages so none reaches the new view.
+                      _sync (do (sync-registry :hatch-pubsub) (sync-registry :hatch-presence))
                       _drain (drain-oob)
                       ; free the old view's LiveComponent table and start the new view with a
                       ; fresh one: carrying it leaked every navigated-away view's component

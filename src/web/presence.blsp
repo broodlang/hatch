@@ -119,7 +119,10 @@
     ; mismatched to another call
     ([:list topic from r] (do
                             (send from [:list r (presence--merged state remotes topic)])
-                            (presence--loop state refs remotes vault-ref)))))
+                            (presence--loop state refs remotes vault-ref)))
+    ; A synchronous barrier — see web/pubsub's `[:sync …]`. Lets a live-navigate confirm its
+    ; untrack is applied and any roster push queued before it has landed, before draining.
+    ([:sync from r] (do (send from [:sync r]) (presence--loop state refs remotes vault-ref)))))
 
 (defn presence--tracked? (state pid)
   "True if `pid` is still tracked on any topic."
