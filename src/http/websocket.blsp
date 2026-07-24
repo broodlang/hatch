@@ -148,10 +148,12 @@
   (bytes [136 0]))
 
 (defn pong-frame (payload)
-  "Build a WebSocket pong frame (opcode 0xA, FIN=1) as `bytes`. Control frames are capped
-  at 125 bytes (RFC 6455), so an over-long payload is truncated — guarding against an
+  "Build a WebSocket pong frame (opcode 0xA, FIN=1) as `bytes`, echoing `payload`. The
+  bytes-native parser hands a client ping's payload here as a `bytes` value — accept that
+  directly (a string is UTF-8-encoded, for callers/tests that pass one). Control frames are
+  capped at 125 bytes (RFC 6455), so an over-long payload is truncated — guarding against an
   echoed length that would overflow the single length byte into an extended-length marker."
-  (let (raw (string->utf8-bytes payload)
+  (let (raw (if (bytes? payload) payload (string->utf8-bytes payload))
         body (if (> (count raw) 125) (bytes (take 125 (bytes->list raw))) raw))
     (bytes-concat (bytes [138 (count body)]) body)))
 
