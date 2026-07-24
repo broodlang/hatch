@@ -40,9 +40,15 @@
 (defn watch (config)
   "Start every watcher in `config` (`:watchers`), each as its own green process that
   pipes the bundler's output to the log and, on a finished rebuild, hot-swaps CSS in
-  open live sessions. Returns the manager pids (close them to stop watching). Call from
-  the endpoint when running in dev — see web/assets' module doc."
+  open live sessions. Returns the manager pids; pass them to `stop-watchers` to shut the
+  bundler subprocesses down. Call from the endpoint when running in dev — see the module doc."
   (map (fn (w) (spawn (fn () (watcher-loop w)))) (or (get config :watchers) (list))))
+
+(defn stop-watchers (managers)
+  "Stop watcher managers started by `watch`: each closes its bundler subprocess and exits, so
+  the external `--watch` process doesn't linger. Wire it into the endpoint's shutdown."
+  (dolist (m managers) (send m [:stop]))
+  nil)
 
 (defn watcher-loop (w)
   "Spawn one watcher child and forward its output until it exits. The child is spawned
@@ -59,29 +65,39 @@
                      nil))))
     (when handle
       (log/log-info (str "[assets] watching: " (join " " cmd)))
-      (watcher-recv handle (get w :reload-on *default-reload-marker*) (join " " cmd)))))
+      (watcher-recv handle (get w :reload-on *default-reload-marker*) (join " " cmd) ""))))
 
-(defn watcher-recv (handle marker label)
-  "Drain a watcher child's piped stdout/stderr: log each line and, when a line marks a
-  finished rebuild (`marker`), tell open live sessions to reload their CSS. On exit, log
-  and stop (a dead watcher is usually a config error; restart the server to retry)."
+(defn watcher-recv (handle marker label buf)
+  "Drain a watcher child's piped stdout/stderr, accumulating a `buf` of the trailing partial
+  line across reads: log each COMPLETE line and hot-swap CSS when one contains `marker` (so a
+  marker split across two reads isn't missed, and a filename that merely contains it on a
+  different line doesn't false-trigger). A `[:stop]` closes the child; on the child's own exit,
+  flush the last line, log, and stop (a dead watcher is usually a config error — restart to
+  retry)."
   (receive
-    ([:proc ~handle data] (on-output data marker) (watcher-recv handle marker label))
-    ([:proc-err ~handle data] (on-output data marker) (watcher-recv handle marker label))
-    ([:proc-closed ~handle code] (log/log-warn (str "[assets] watcher exited (code "
-                                                 code
-                                                 "): "
-                                                 label)))))
+    ([:proc ~handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
+    ([:proc-err ~handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
+    ([:stop] (do
+               (try (proc-close handle) (catch _ nil))
+               (log/log-info (str "[assets] stopped watching: " label))))
+    ([:proc-closed ~handle code] (do
+                                   (emit-line buf marker)
+                                   (log/log-warn (str "[assets] watcher exited (code " code "): " label))))))
 
-(defn on-output (data marker)
-  "Log a chunk of watcher output line-by-line; if it contains `marker`, hot-swap CSS."
-  (emit-lines data)
-  (when (and marker (includes? data marker)) (web/live/notify-reload-css)))
+(defn on-output (buf marker)
+  "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that
+  contains `marker`; return the trailing incomplete line (no newline yet) to carry forward."
+  (let (lines (string-split buf "\n")
+        complete (reverse (rest (reverse lines))))
+    (dolist (line complete) (emit-line line marker))
+    (first (reverse lines))))
 
-(defn emit-lines (data)
-  "Log each non-blank line of `data` under an `[assets]` prefix."
-  (dolist (line (string-split (trimr data) "\n"))
-    (when (not (blank? line)) (log/log-info (str "[assets] " line)))))
+(defn emit-line (line marker)
+  "Log one non-blank watcher line under an `[assets]` prefix; if it contains `marker`, hot-swap
+  CSS in open live sessions."
+  (when (not (blank? line))
+    (log/log-info (str "[assets] " line))
+    (when (and marker (includes? line marker)) (web/live/notify-reload-css))))
 
 (defn proc-opts (w)
   "The proc-spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
@@ -113,8 +129,8 @@
   "Content-fingerprint built assets. `spec` is `{:dir <static-dir> :files [<logical-name> …]}`:
   for each file, read it, hash it, write a copy named `base.<sha8>.ext`, and record
   `logical → fingerprinted`. Writes the manifest to `<dir>/cache-manifest` (read by
-  `web/static/asset-path`) and returns the manifest map. Text assets only — `slurp` is UTF-8
-  (see web/static)."
+  `web/static/asset-path`) and returns the manifest map. Handles any asset — binary files
+  (fonts, images, wasm) are copied and hashed byte-faithfully (see `fingerprint-file`)."
   (let (dir (get spec :dir "static")
         files (or (get spec :files) (list))
         manifest (fold (fn (m file) (assoc m file (fingerprint-file dir file))) {} files))
@@ -131,10 +147,13 @@
     (rename-file tmp path)))
 
 (defn fingerprint-file (dir file)
-  "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name."
-  (let (body (slurp (str dir "/" file))
-        fp (fingerprint-name file (substring (hash/sha256 body) 0 8)))
-    (spit (str dir "/" fp) body)
+  "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name. Reads
+  and writes the raw bytes (`slurp-bytes`/`spit-bytes`) and hashes the bytes, so a binary asset
+  (.woff2/.png/.ico/.wasm) is copied byte-faithfully — a UTF-8 `slurp`/`spit` round-trip would
+  corrupt it AND change its hash, shipping a broken file under an immutable/cache-forever URL."
+  (let (body (slurp-bytes (str dir "/" file))
+        fp (fingerprint-name file (substring (hash/sha256-bytes body) 0 8)))
+    (spit-bytes (str dir "/" fp) body)
     (log/log-info (str "[assets] fingerprint: " file " -> " fp))
     fp))
 
