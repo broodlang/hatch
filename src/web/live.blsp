@@ -28,15 +28,31 @@
 ; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
 ; own types without touching the framework. `encode` dispatches on the value's type.
 
+(def *json-hex* "0123456789abcdef")
+
+(defn json--esc-control (cp)
+  "The JSON escape for a C0 control codepoint `cp` (0x00–0x1F): the named short form where one
+  exists, else `\\u00XX`."
+  (cond
+    (= cp 8) "\\b"
+    (= cp 9) "\\t"
+    (= cp 10) "\\n"
+    (= cp 12) "\\f"
+    (= cp 13) "\\r"
+    else (str "\\u00" (char-at *json-hex* (quot cp 16)) (char-at *json-hex* (mod cp 16)))))
+
 (defn json-str (s)
-  "Encode a Brood string as a JSON string (with escaping)."
+  "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
+  (U+0000–U+001F) — the named short forms (\\b \\t \\n \\f \\r) or `\\u00XX`. RFC 8259 requires
+  all chars < U+0020 to be escaped; emitting a raw control (a backspace/ESC/NUL pasted into
+  user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
+  the whole frame — a per-field server↔client desync with no error surfaced."
   (str "\""
-    (-> s
-      (replace "\\" "\\\\")
-      (replace "\"" "\\\"")
-      (replace "\n" "\\n")
-      (replace "\r" "\\r")
-      (replace "\t" "\\t"))
+    (fold (fn (acc cp) (replace acc (utf8-bytes->string (bytes [cp])) (json--esc-control cp)))
+      (-> s
+        (replace "\\" "\\\\")
+        (replace "\"" "\\\""))
+      (range 32))
     "\""))
 
 (defprotocol Encode
@@ -460,14 +476,14 @@
   ; 101, before this handler (which may do a registry lookup first) reaches here.
   ; Register so a hot reload can push a fresh render here.
   (live--register (self))
-  ; Start this view's tickers (ticks arrive as ordinary mailbox messages, interleaved
-  ; fairly with client frames); keep their pids so navigate can stop them. Also start the
-  ; idle watchdog so a dead/idle peer is pinged and eventually reaped.
+  ; The view is not mounted yet — mount, the initial render, and this view's tickers all wait
+  ; for the client's `join` frame (which carries the real URL params), so each happens exactly
+  ; once (see the `join` arm of session-dispatch). Start only the idle watchdog so a peer that
+  ; connects but never joins is still pinged and eventually reaped. Enter the recv loop.
   (let (view (assoc view
                :generation 0
-               :ticker-pids (start-tickers (get view :ticks) 0)
                :watchdog (spawn (idle-watchdog (self) sock 0))))
-    (push-update sock view buf "render" (get view :model))))
+    (session-recv sock view buf)))
 
 ; The loop's one render-and-reply step: set the new model on the view, push a frame
 ; ("render" for a full page, "diff" for an update), and go back to listening. Every
@@ -489,11 +505,17 @@
   web/component."
   (let (statics (get view :render-static)
         model (get view :model)
-        dynamics ((get view :render-dynamic) model (get view :components))
-        view (assoc view :dynamics dynamics :render-model model))
-    (if (send-msg sock {:event "join" :s statics :d dynamics})
-      (session-recv sock view buf)
-      (close-session sock view))))
+        ; Guard the render like every other view hook: a template that throws (a nil deref, a
+        ; bad `get`) fails to an isolated, logged `[:hatch :live :exception]` and ends the
+        ; session, rather than crashing the whole session process with no telemetry.
+        dynamics (try ((get view :render-dynamic) model (get view :components))
+                   (catch e (live--handler-error "render" :render e nil))))
+    (if (nil? dynamics)
+      (close-session sock view)
+      (let (view (assoc view :dynamics dynamics :render-model model))
+        (if (send-msg sock {:event "join" :s statics :d dynamics})
+          (session-recv sock view buf)
+          (close-session sock view))))))
 
 (defn slot-dirty? (dep old-model model)
   "True if a slot with dependency descriptor `dep` must re-render: `:all` (an opaque model
@@ -537,14 +559,19 @@
     (push-full sock view buf)
     (let (old (get view :dynamics)
           model (get view :model)
-          dynamics (recompute-dynamics view old model)
-          changed (web/parts/diff-dynamics old dynamics)
-          view (assoc view :dynamics dynamics :render-model model))
-      (if (= (count changed) 0)
+          ; Guard the re-render (see push-full). On a throw, keep the prior render and keep
+          ; listening — a transient bad model shouldn't tear down the session.
+          dynamics (try (recompute-dynamics view old model)
+                     (catch e (live--handler-error "render" :render e nil))))
+      (if (nil? dynamics)
         (session-recv sock view buf)
-        (if (send-msg sock {:event "diff" :d changed})
-          (session-recv sock view buf)
-          (close-session sock view))))))
+        (let (changed (web/parts/diff-dynamics old dynamics)
+              view (assoc view :dynamics dynamics :render-model model))
+          (if (= (count changed) 0)
+            (session-recv sock view buf)
+            (if (send-msg sock {:event "diff" :d changed})
+              (session-recv sock view buf)
+              (close-session sock view))))))))
 
 (defn close-socket (sock)
   "Send a close frame and close the TCP socket. Best-effort throughout — the peer may
@@ -577,6 +604,18 @@
   (if (send-msg sock {:event "redirect" :path path})
     (session-recv sock view buf)
     (close-session sock view)))
+
+(defn drain-oob ()
+  "Discard out-of-band messages (PubSub/Presence broadcasts, component updates) already queued
+  for the OLD view before a live-navigate swaps in a new one. The old view unsubscribes in its
+  unmount, but a broadcast already delivered to this session's mailbox would otherwise reach the
+  NEW view's `handle-info` (or a carried-over component). Called after unmount and before the new
+  mount subscribes, so only stale messages are dropped — never the incoming view's own. (A
+  broadcast racing our unsubscribe by landing just after this drain is a narrow residual window.)"
+  (receive
+    ([:info _] (drain-oob))
+    ([:update-component _ _] (drain-oob))
+    (after 0 nil)))
 
 (defn session-recv (sock view buf)
   ; Flush any effects the last handler queued (push-event/navigate/redirect) before we block
@@ -648,7 +687,22 @@
         event (get msg "event" "")
         params (get msg "params" {}))
     (match event
-      ("join" (push-update sock view buf "render" ((get view :mount) params)))
+      ; The first client frame: mount (exactly once, with the real URL params), start this
+      ; view's tickers, and push the initial render. `mount` runs client-controlled params, so
+      ; it's guarded like every other hook — a throw ends the session cleanly (no model to
+      ; render) instead of crashing it. A repeated `join` stops the prior tickers first so a
+      ; re-mount can't leak them.
+      ("join" (let (model (try ((get view :mount) params)
+                            (catch e (live--handler-error "mount" :mount e :hatch/mount-error))))
+                (if (= model :hatch/mount-error)
+                  (close-session sock view)
+                  (do
+                    (stop-tickers (get view :ticker-pids))
+                    (push-update sock
+                      (assoc view :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
+                      buf
+                      "render"
+                      model)))))
       ; A component-targeted event carries a `cid` (brood_live.js reads the nearest
       ; ancestor's data-cid) — route it to that component's own handle-event instead of
       ; the parent's, and re-render with the parent's :model unchanged (the component's
@@ -708,6 +762,13 @@
                       _unmount (try ((get view :unmount) (get view :model))
                                  (catch e (live--handler-error "unmount" :unmount e nil)))
                       _ (stop-tickers (get view :ticker-pids))
+                      ; drop any out-of-band message (broadcast, component update) queued for
+                      ; the old view — now unsubscribed — so it can't reach the new view.
+                      _drain (drain-oob)
+                      ; free the old view's LiveComponent table and start the new view with a
+                      ; fresh one: carrying it leaked every navigated-away view's component
+                      ; state and let a same-id component in the new view silently reuse it.
+                      _drop (try (table-drop (get view :components)) (catch _ nil))
                       ; bump the generation so a beat still queued from the OLD view's ticker
                       ; (killed just above, but a message already sent lingers) is dropped
                       ; rather than dispatched into the new view's handle-tick.
@@ -720,11 +781,11 @@
                                   :model model
                                   :generation gen
                                   :ticker-pids (start-tickers (get spec :ticks) gen)
-                                  ; carry the idle watchdog + Conn + component table across
-                                  ; the swap (same socket, same session-lifetime state)
+                                  ; carry the idle watchdog + Conn across the swap (same socket,
+                                  ; same session lifetime); the component table starts fresh
                                   :watchdog (get view :watchdog)
                                   :conn (get view :conn)
-                                  :components (get view :components)}))
+                                  :components (table)}))
                   (push-update sock new-view buf "render" model))))
               (catch _ (close-session sock view)))
             ; unknown path, OR a different live-session group → full reload, which
@@ -755,15 +816,17 @@
     (cond
       (= guard-result :hatch/guard-error) (try (tcp-close sock) (catch _ nil))
       guard-result (redirect-and-close sock guard-result)
-      else (let (model ((get spec :mount) params)
-            view (merge spec
+      ; Do NOT mount here: the paramless upgrade request (the WS URL carries no query string)
+      ; would build the model with the wrong params, and the client's first frame — `join` —
+      ; carries the real URL params and mounts anyway, so mounting here runs `mount` (and its
+      ; side effects) twice. Enter the loop unmounted; the `join` arm mounts exactly once.
+      else (let (view (merge spec
                    {:spec-fn spec-fn
                     :session (get entry :session)
                     :params params
-                    :model model
                     :conn conn
                     ; the session's live per-id LiveComponent state (web/component); lives
-                    ; for the socket's lifetime, carried across live-navigate
+                    ; for the socket's lifetime, reset on live-navigate
                     :components (table)}))
         (session-loop sock view "")))))
 
