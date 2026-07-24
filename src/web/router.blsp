@@ -2,7 +2,9 @@
 (defmodule web/router
   "HTTP router: pattern matching, path params, pipeline dispatch."
   (:use web/conn)
-  (:use web/template))
+  (:use web/template)
+  ; url-decode — a captured path param / splat is percent-decoded (`/users/a%20b` → `a b`)
+  (:alias http/util))
 ; ---- path matching ----
 
 (defn path-segments (path)
@@ -24,13 +26,15 @@
 (defn match-path--acc (pattern segments acc)
   (let (p (first pattern))
     (cond
-      ; A splat consumes everything that remains (including nothing).
-      (splat? p) (assoc acc (first (rest p)) (if (nil? segments) "" (join "/" segments)))
+      ; A splat consumes everything that remains (including nothing), each segment decoded.
+      (splat? p) (assoc acc (first (rest p)) (if (nil? segments) "" (join "/" (map http/util/url-decode segments))))
       (and (nil? pattern) (nil? segments)) acc
       (or (nil? pattern) (nil? segments)) nil
+      ; A `:param` captures one segment, percent-decoded (matching literals stays on the raw
+      ; segment above, so a literal route is unaffected).
       (keyword? p) (match-path--acc (rest pattern)
                      (rest segments)
-                     (assoc acc (name p) (first segments)))
+                     (assoc acc (name p) (http/util/url-decode (first segments))))
       (= p (first segments)) (match-path--acc (rest pattern) (rest segments) acc)
       else nil)))
 

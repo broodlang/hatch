@@ -132,7 +132,12 @@
   (test "304 carries no body or Content-Length"
     (let (r (rtext (format-response {:status 304 :body "x"})))
       (assert= (includes? r "Content-Length:") false)
-      (assert= (includes? r "\r\n\r\nx") false))))
+      (assert= (includes? r "\r\n\r\nx") false)))
+  ; a handler-set Content-Length on a bodyless status must be stripped, not passed through
+  ; (a stray Content-Length desyncs a keep-alive client — the exact hazard bodyless guards)
+  (test "204 strips a handler-set Content-Length"
+    (let (r (rtext (format-response {:status 204 :headers {:content-length "5"} :body "x"})))
+      (assert= (includes? r "Content-Length:") false))))
 
 (describe "format-response: HEAD"
   (test "keeps the GET Content-Length but drops the body"
