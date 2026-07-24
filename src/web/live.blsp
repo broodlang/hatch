@@ -258,39 +258,40 @@
     ([:error msg] [:error msg])))
 
 (defn frame-shortfall (buf)
-  "Bytes still needed to complete the first frame in `buf`, or nil if not yet determinable
-  (the length header hasn't fully arrived)."
+  "Bytes still needed to complete the first frame in the `bytes` `buf`, or nil if not yet
+  determinable (the length header hasn't fully arrived)."
   (let (sz (frame-size buf))
-    (if (nil? sz) nil (- sz (string-length buf)))))
+    (if (nil? sz) nil (- sz (count buf)))))
 
 (defn recv-frame--fill (sock buf pieces got need)
-  "Gather socket reads (carrier `pieces`, newest-first; `got` bytes so far) until the current
-  frame's `need` more bytes are in hand, then join once and re-enter `recv-frame--loop`. `need`
-  nil means the frame isn't sized yet (header still arriving) — append one read and re-derive it
-  (the header is tiny). The session-control messages are handled exactly as in `recv-frame--loop`
-  (keep the two in sync), carrying the bytes gathered so far so the caller can resume."
+  "Gather socket reads (`bytes` `pieces`, newest-first; `got` bytes so far) until the current
+  frame's `need` more bytes are in hand, then `bytes-concat` once and re-enter `recv-frame--loop`.
+  `need` nil means the frame isn't sized yet (header still arriving) — append one read and
+  re-derive it (the header is tiny). The parser is bytes-native (ADR-141), so chunks accumulate
+  as `bytes` with no carrier hop. The session-control messages are handled exactly as in
+  `recv-frame--loop` (keep the two in sync), carrying the bytes gathered so far so the caller
+  can resume."
   (if (and (not (nil? need)) (>= got need))
-    (recv-frame--loop sock (str buf (join "" (reverse pieces))))
+    (recv-frame--loop sock (bytes-concat buf (reverse pieces)))
     (receive
-      ; Binary-mode socket (see http/server's pre-101 tcp-set-binary): `chunk` is a `bytes`
-      ; value — bridge it to the Latin-1 carrier the parser reads.
+      ; Binary-mode socket (see http/server's pre-101 tcp-set-binary): `chunk` is a first-class
+      ; `bytes` value — the parser reads it directly.
       ([:tcp ~sock chunk]
-        (let (p (bytes->carrier chunk))
-          (if (nil? need)
-            (recv-frame--loop sock (str buf p))
-            (recv-frame--fill sock buf (cons p pieces) (+ got (string-length p)) need))))
+        (if (nil? need)
+          (recv-frame--loop sock (bytes-concat buf chunk))
+          (recv-frame--fill sock buf (cons chunk pieces) (+ got (count chunk)) need)))
       ([:tcp-closed ~sock] [:closed])
       ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
                                 (recv-frame--fill sock buf pieces got need)
                                 [:closed]))
-      ([:tick key gen] [:tick key gen (str buf (join "" (reverse pieces)))])
+      ([:tick key gen] [:tick key gen (bytes-concat buf (reverse pieces))])
       ; an out-of-band message for the view's handle-info (PubSub/Presence
       ; broadcast, a timer, anything that holds this session's pid)
-      ([:info payload] [:info payload (str buf (join "" (reverse pieces)))])
+      ([:info payload] [:info payload (bytes-concat buf (reverse pieces))])
       ; a web/component/send-update push — merge into that component's stored state
-      ([:update-component cid changes] [:update-component cid changes (str buf (join "" (reverse pieces)))])
-      ([:reload] [:reload (str buf (join "" (reverse pieces)))])
-      ([:reload-css] [:reload-css (str buf (join "" (reverse pieces)))]))))
+      ([:update-component cid changes] [:update-component cid changes (bytes-concat buf (reverse pieces))])
+      ([:reload] [:reload (bytes-concat buf (reverse pieces))])
+      ([:reload-css] [:reload-css (bytes-concat buf (reverse pieces))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 ; A `tick` interval is a native `send-interval` timer (Erlang parity, prelude): a tiny
@@ -681,9 +682,9 @@
     ([:error _] (close-session sock view))))
 
 (defn session-dispatch (sock view buf payload)
-  ; `payload` is a byte string (binary mode) holding the client's UTF-8 JSON —
-  ; decode the bytes back to text before parsing.
-  (let (msg (try (json-decode (byte-string->utf8 payload)) (catch _ nil))
+  ; `payload` is a `bytes` value (bytes-native parser) holding the client's UTF-8 JSON —
+  ; decode it to text before parsing.
+  (let (msg (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
         event (get msg "event" "")
         params (get msg "params" {}))
     (match event
@@ -828,7 +829,8 @@
                     ; the session's live per-id LiveComponent state (web/component); lives
                     ; for the socket's lifetime, reset on live-navigate
                     :components (table)}))
-        (session-loop sock view "")))))
+        ; the bytes-native frame parser reads a `bytes` buffer — start empty
+        (session-loop sock view (bytes []))))))
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
 ; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the

@@ -167,14 +167,17 @@
 (def *ws-max-frame-bytes* 65535)
 (def *ws-max-message-bytes* 1048576)
 
+; The inbound frame parser is bytes-native (ADR-141): `buf` is a `bytes` value delivered by the
+; binary-mode socket, and a frame's payload/remainder are `bytes` — no Latin-1 carrier-string
+; hop, and `byte-at`/`bytes-uint`/`subbytes` index it in O(1). The masking key and length fields
+; are read with ADR-140 bit-syntax helpers (`bytes-uint`).
 (defn parse-frame (buf)
-  "Parse one complete WebSocket *message* from `buf`, reassembling a fragmented message
-  (a non-FIN data frame followed by continuation frames). Returns
-  `[:ok opcode payload remainder]`, `[:incomplete]`, or `[:error msg]`. A control frame
-  (close/ping/pong) is returned standalone. Each frame is capped at *ws-max-frame-bytes*
-  and a reassembled message at *ws-max-message-bytes*; an interleaved non-continuation
-  frame mid-message is rejected (we don't support control frames interleaved in a
-  fragmented message — the live client never sends them)."
+  "Parse one complete WebSocket *message* from the `bytes` `buf`, reassembling a fragmented
+  message (a non-FIN data frame followed by continuation frames). Returns
+  `[:ok opcode payload remainder]` (payload + remainder are `bytes`), `[:incomplete]`, or
+  `[:error msg]`. A control frame (close/ping/pong) is returned standalone. Each frame is capped
+  at *ws-max-frame-bytes* and a reassembled message at *ws-max-message-bytes*; an interleaved
+  non-continuation frame mid-message is rejected (the live client never sends them)."
   (parse-message buf *ws-max-frame-bytes* *ws-max-message-bytes*))
 
 (defn parse-message (buf maxf maxm)
@@ -190,22 +193,22 @@
         ; a complete (FIN) data frame is the whole message
         (= fin 1) [:ok opcode payload rem]
         ; otherwise it's the head of a fragmented message — gather continuations
-        else (reassemble rem opcode (list payload) (string-length payload) maxf maxm)))))
+        else (reassemble rem opcode (list payload) (count payload) maxf maxm)))))
 
 (defn reassemble (buf msg-opcode pieces acclen maxf maxm)
   "Accumulate continuation frames (opcode 0) until the FIN frame, capping the total at `maxm`.
-  `pieces` holds the payloads gathered so far (newest-first) and `acclen` their total length;
-  they're `join`ed once at FIN rather than `(str acc payload)` per frame (which is O(n²) in
-  the fragment count). `msg-opcode` carries the original (text/binary) opcode forward."
+  `pieces` holds the `bytes` payloads gathered so far (newest-first) and `acclen` their total
+  length; they're `bytes-concat`ed once at FIN rather than per frame (which is O(n²) in the
+  fragment count). `msg-opcode` carries the original (text/binary) opcode forward."
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
     ([:ok fin opcode payload rem] (cond
                                     (not (= opcode 0)) [:error "websocket: expected continuation frame"]
-                                    (> (+ acclen (string-length payload)) maxm) [:error "websocket: message too large"]
-                                    (= fin 1) [:ok msg-opcode (join "" (reverse (cons payload pieces))) rem]
+                                    (> (+ acclen (count payload)) maxm) [:error "websocket: message too large"]
+                                    (= fin 1) [:ok msg-opcode (bytes-concat (reverse (cons payload pieces))) rem]
                                     else (reassemble rem msg-opcode (cons payload pieces)
-                                           (+ acclen (string-length payload)) maxf maxm)))))
+                                           (+ acclen (count payload)) maxf maxm)))))
 
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload
@@ -213,7 +216,7 @@
   frame of a message). Enforces the RFC 6455 framing rules a server must (masked client
   frames, zero RSV bits, defined opcodes, unfragmented control frames) and rejects a declared
   payload over `maxf` bytes."
-  (let (buflen (string-length buf))
+  (let (buflen (count buf))
     (if (< buflen 2)
       [:incomplete]
       (let (byte0 (byte-at buf 0)
@@ -249,10 +252,10 @@
     ; Control frames (close/ping/pong) must be ≤125 bytes — reject an extended length
     ; rather than let an oversized ping drive a huge unmask / overflow `pong-frame`.
     (and (control-opcode? opcode) (>= plen7 126)) [:error "websocket: control frame too large (must be <= 125 bytes)"]
-    ; 16-bit extended length
+    ; 16-bit extended length (ADR-140 bit-syntax: a big-endian u16 at offset 2)
     (= plen7 126) (if (< buflen 4)
                     [:incomplete]
-                    (let (plen (+ (* (byte-at buf 2) 256) (byte-at buf 3))
+                    (let (plen (bytes-uint buf 2 2)
                           hlen (if (= masked 1) 8 4))
                       (one-frame--payload buf buflen fin opcode masked plen hlen maxf)))
     ; 64-bit extended length — not supported (caps inbound frames at ~64 KB)
@@ -269,8 +272,8 @@
         [:incomplete]
         (let (payload (if (= masked 1)
                         (unmask buf (- hlen 4) plen)
-                        (substring buf hlen (+ hlen plen)))
-              remainder (substring buf total buflen))
+                        (subbytes buf hlen (+ hlen plen)))
+              remainder (subbytes buf total buflen))
           [:ok fin opcode payload remainder])))))
 
 (defn frame-size (buf)
@@ -279,7 +282,7 @@
   16-bit length), or it's the unsupported 64-bit form (`parse-one-frame` raises on that anyway).
   Mirrors `one-frame--sized`'s framing so a reader can gather exactly enough bytes for one frame
   in O(n) instead of re-scanning a growing buffer. Client frames are masked (+4 mask bytes)."
-  (let (buflen (string-length buf))
+  (let (buflen (count buf))
     (if (< buflen 2)
       nil
       (let (byte1 (byte-at buf 1)
@@ -288,22 +291,20 @@
         (cond
           (= plen7 126) (if (< buflen 4)
                           nil
-                          (+ (if (= masked 1) 8 4) (+ (* (byte-at buf 2) 256) (byte-at buf 3))))
+                          (+ (if (= masked 1) 8 4) (bytes-uint buf 2 2)))
           (= plen7 127) nil
           else (+ (if (= masked 1) 6 2) plen7))))))
 
 (defn unmask (buf key-offset plen)
-  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key, as a byte string.
-  `buf` is read as an O(1)-indexable codepoint vector (`string->codepoints`, one O(n) pass) and
-  the result built with a single `join`. Indexing the byte string directly with `byte-at` is
-  O(i) per byte (codepoints ≥ 0x80 are multibyte), so a per-index walk would be O(n²) — a
-  max-size masked frame forcing ~plen² work on the WS receive hot path, a cheap CPU DoS."
-  (let (bytes-vec (string->codepoints buf)
-        key [(nth bytes-vec key-offset)
-             (nth bytes-vec (+ key-offset 1))
-             (nth bytes-vec (+ key-offset 2))
-             (nth bytes-vec (+ key-offset 3))]
+  "XOR `plen` bytes of the `bytes` `buf` starting after `key-offset` using the 4-byte masking
+  key — returning a `bytes` value. `buf` is a first-class `bytes`, so `get` indexes it in O(1)
+  and the payload is built in one pass (a masked frame is the WS receive hot path; the old
+  carrier-string form indexed with O(i) `char-at`, making this O(n²) — a cheap CPU DoS)."
+  (let (key [(get buf key-offset)
+             (get buf (+ key-offset 1))
+             (get buf (+ key-offset 2))
+             (get buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (join ""
-      (map (fn (i) (byte->char (bit-xor (nth bytes-vec (+ data-start i)) (get key (mod i 4)))))
+    (bytes
+      (map (fn (i) (bit-xor (get buf (+ data-start i)) (get key (mod i 4))))
         (range plen)))))

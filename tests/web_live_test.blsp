@@ -100,23 +100,23 @@
           frame (ws-masked-frame 1 payload [17 34 51 68])
           sock :sock
           _ (feed-tcp sock frame 50))
-      (match (web/live/recv-frame--loop sock "")
+      (match (web/live/recv-frame--loop sock (bytes []))
         ([:ok opcode payload-out rem]
           (do
             (assert= opcode 1)
-            (assert= rem "")
-            (assert= (into [] (map char->int (string->list payload-out))) payload)))
+            (assert= (count rem) 0)
+            (assert= (into [] (bytes->list payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
     (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
           frame (ws-masked-frame 1 payload [9 88 200 3])
           sock :sock
           _ (feed-tcp sock frame 1))
-      (match (web/live/recv-frame--loop sock "")
+      (match (web/live/recv-frame--loop sock (bytes []))
         ([:ok _opcode payload-out rem]
           (do
-            (assert= rem "")
-            (assert= (into [] (map char->int (string->list payload-out))) payload)))
+            (assert= (count rem) 0)
+            (assert= (into [] (bytes->list payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; One test, run sequentially: registering and looking up both touch the shared

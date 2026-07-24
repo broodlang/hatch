@@ -33,18 +33,17 @@
   (match (parse-frame buf)
     ([:ok _opcode payload _rem] payload)
     ([:incomplete] (receive
-                     ; binary-mode socket: `chunk` is a `bytes` value — convert to the
-                     ; Latin-1 carrier before feeding the string-based parser
-                     ([:tcp ~sock chunk] (read-one-frame sock (str buf (bytes->carrier chunk))))
+                     ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
+                     ([:tcp ~sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
                      ([:tcp-closed ~sock] :closed)
                      (after 2000 :timeout)))
     ([:error _m] :error)))
 
 (defn echo-one-frame (reporter)
-  "A ws-handler that reads one client frame and reports its payload to `reporter`.
+  "A ws-handler that reads one client frame and reports its `bytes` payload to `reporter`.
   Crucially it never calls tcp-set-binary — the upgrade path must have done so."
   (fn (sock _request)
-    (send reporter [:got (read-one-frame sock "")])))
+    (send reporter [:got (read-one-frame sock (bytes []))])))
 
 (defn await-101 (sock buf)
   "Read from `sock` until the 101 handshake response (its header terminator) arrives."
@@ -95,8 +94,9 @@
       (tcp-close client)
       (server/stop port)
       ; Before the fix: payload would be :timeout (frame read as U+FFFD → :incomplete).
-      (assert= (string? payload) true)
-      (assert= (string-length payload) 1)
+      ; The bytes-native parser returns the payload as a `bytes` value, byte 0xFF intact.
+      (assert= (bytes? payload) true)
+      (assert= (count payload) 1)
       (assert= (byte-at payload 0) 255))))
 
 (defn drain (sock buf)
@@ -220,7 +220,7 @@
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp-close client)
       (server/stop port)
-      (assert= payload "Hello world"))))
+      (assert= (utf8-bytes->string payload) "Hello world"))))
 
 ; Tier-3 (docs/robustness.md): server-side TLS. A full handshake needs a verification-
 ; skipping client (the runtime's tls-request validates against real roots), so the
