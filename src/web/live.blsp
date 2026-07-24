@@ -277,24 +277,12 @@
       ([:reload-css] [:reload-css (str buf (join "" (reverse pieces)))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
-
-(defn ticker-loop (target ms gen)
-  "Post `[:tick ms gen]` to `target` (a live session) every `ms` milliseconds, until
-  `target` dies. The interval ms is the message key, so a session running several
-  tickers can tell which fired; `gen` is the session generation this ticker was started
-  under, so the session can drop a beat left in its mailbox from a view it has since
-  navigated away from (the ticker is killed on navigate, but a tick already sent isn't
-  un-sent). Running each as its own process — rather than a `receive` timeout in the
-  session — keeps every beat steady, regardless of client traffic. Monitored, so a closed
-  or crashed session never leaks it."
-  (monitor target)
-  (ticker-loop--wait target ms gen))
-
-(defn ticker-loop--wait (target ms gen)
-  (receive
-    ; the session ended — stop ticking
-    ([:down _ _ _] nil)
-    (after ms (do (send target [:tick ms gen]) (ticker-loop--wait target ms gen)))))
+; A `tick` interval is a native `send-interval` timer (Erlang parity, prelude): a tiny
+; green process on the scheduler's timer wheel that posts `[:tick ms gen]` to the session
+; every `ms` and self-cleans when the session dies (it monitors the target). `ms` keys the
+; beat so a session with several tickers can tell which fired; `gen` lets the session drop
+; a beat left over from a view it has since navigated away from. Steady regardless of
+; client traffic, and no hand-rolled monitor/receive loop to maintain — see `start-tickers`.
 
 ; ---- idle watchdog: keepalive ping + reap dead/idle connections ----
 
@@ -384,16 +372,17 @@
 ; ---- session actor ----
 
 (defn start-tickers (ticks gen)
-  "Spawn one ticker process per interval in `ticks`, each posting [:tick ms gen] to this
-  (the calling) session on a steady beat, stamped with the session generation `gen`.
-  Returns their pids so they can be stopped when the session navigates to another view
-  (otherwise the old view's tickers would linger and accumulate across navigations)."
+  "Start one native `send-interval` timer per interval in `ticks`, each posting
+  `[:tick ms gen]` to this (the calling) session on a steady beat, stamped with the session
+  generation `gen`. Returns their timer handles so they can be cancelled when the session
+  navigates to another view (otherwise the old view's tickers would linger and accumulate
+  across navigations); each is self-cleaning if the session dies first."
   (let (me (self))
-    (map (fn (ms) (spawn (ticker-loop me ms gen))) (or ticks (list)))))
+    (map (fn (ms) (send-interval ms me [:tick ms gen])) (or ticks (list)))))
 
-(defn stop-tickers (pids)
-  "Kill the given ticker processes — used when a session swaps to a different view."
-  (dolist (p pids) (exit p :kill)))
+(defn stop-tickers (handles)
+  "Cancel the given interval timers — used when a session swaps to a different view."
+  (dolist (h handles) (cancel-timer h)))
 
 (defn send-safely (pid msg)
   "Send `msg` to `pid`, swallowing a failure — the shared delivery guarantee behind
