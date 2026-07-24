@@ -1,10 +1,11 @@
-;; format-response returns a `bytes` value (ADR-141: tcp-send writes bytes verbatim but
-;; UTF-8-encodes a string leaf). `rtext` decodes it back to text for the string assertions.
+;; format-response returns an ADR-139 iolist of `bytes` leaves (or a bare `bytes` value for a
+;; bodyless/HEAD response) — tcp-send UTF-8-encodes a *string* leaf (ADR-141), so the leaves
+;; are pre-encoded bytes. `rtext` flattens and decodes it back to text for the assertions.
 (defmodule http-response-test (:use http/response) (:use http/websocket) (:use test))
 
 (defn rtext (out)
-  "Decode a format-response `bytes` value back to text for assertions."
-  (utf8-bytes->string out))
+  "Flatten a format-response iolist (or bytes) and decode to text for assertions."
+  (utf8-bytes->string (bytes-concat out)))
 
 (describe "capitalize"
   (test "lowercase word" (assert= (capitalize "content") "Content"))
@@ -28,21 +29,19 @@
       (assert= (includes? out "Set-Cookie: b=2\r\n") true))))
 
 (describe "format-response: byte-faithful output for a binary-mode socket"
-  ; http/server puts every connection in binary mode; tcp-send writes a `bytes` value to the
-  ; wire verbatim but UTF-8-encodes a string leaf (ADR-141). So format-response must return
-  ; `bytes` — a string body carrying any multibyte char (an em dash, an arrow, any non-ASCII
-  ; prose) would otherwise be double-encoded and truncated at a too-short Content-Length.
-  (test "returns a bytes value"
-    (assert= (bytes? (format-response (ok "em dash — arrow → done"))) true))
+  ; tcp-send writes a `bytes` leaf verbatim but UTF-8-encodes a *string* leaf (ADR-141), so
+  ; format-response returns an ADR-139 iolist of `bytes` leaves. Flattened, a multibyte body
+  ; is single-encoded (not doubled) and Content-Length matches the bytes actually sent.
+  (test "flattens to a bytes value"
+    (assert= (bytes? (bytes-concat (format-response (ok "em dash — arrow → done")))) true))
   (test "the body round-trips through UTF-8 decoding back to the original text"
     (let (out (format-response (ok "em dash — arrow →")))
       (assert= (includes? (rtext out) "em dash — arrow →") true)))
-  ; 0xC3, the 1st — not a doubled C3 82…
   (test "the multibyte body is encoded exactly once (no doubling)"
     ; the wire bytes must equal the single UTF-8 encoding of header + body, byte for byte
-    (let (out (format-response (ok "é")))
+    (let (out (bytes-concat (format-response (ok "é"))))
       (assert= (ends-with? (rtext out) "é") true)
-      ; last byte = 0xA9, the 2nd byte of é
+      ; last byte = 0xA9, the 2nd byte of é; preceding = 0xC3 — not a doubled C3 82…
       (assert= (byte-at out (- (count out) 1)) 169)
       (assert= (byte-at out (- (count out) 2)) 195)))
   (test "Content-Length reports UTF-8 byte length, matching the encoded body actually sent"
