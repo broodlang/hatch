@@ -164,6 +164,24 @@
       (assert= (includes? resp "400") true)
       (assert= (includes? resp "ZZ-REFLECT-TOKEN") false))))
 
+; RFC 7231 §5.1.1: a client that sends `Expect: 100-continue` withholds the body until it
+; gets an interim 100 — without which it stalls until the read timeout answers 408.
+(describe "Expect: 100-continue"
+  (test "server sends an interim 100 before the body, then the final response"
+    (let (port 54748
+          _sup (server/start port (fn (req) {:status 200 :headers {} :body (str "body=" (get req :body))}))
+          sock (tcp-connect "127.0.0.1" port)
+          ; send only the head (with Expect + Content-Length) — the body is withheld
+          _h (tcp-send sock (str "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                              "Expect: 100-continue\r\nConnection: close\r\n\r\n"))
+          interim (drain sock "")
+          _b (tcp-send sock "hello")
+          final (drain sock ""))
+      (tcp-close sock)
+      (server/stop port)
+      (assert= (includes? interim "HTTP/1.1 100 Continue") true)
+      (assert= (includes? final "body=hello") true))))
+
 ; Tier-2 (docs/robustness.md): graceful shutdown drains in-flight connections.
 (describe "graceful stop lets an in-flight request finish"
   (test "a request already running when stop is called still gets its response"
