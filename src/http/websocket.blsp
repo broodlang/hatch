@@ -119,8 +119,11 @@
   (join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
 
 (defn byte-string->utf8 (s)
-  "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text."
-  (utf8-bytes->string (into [] (map (fn (i) (byte-at s i)) (range (string-length s))))))
+  "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
+  `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
+  `char-at`/`byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
+  per-index walk was O(n²) on every inbound frame payload."
+  (utf8-bytes->string (bytes (string->codepoints s))))
 
 (defn u64-be (n)
   "Eight-byte big-endian `bytes` value of a non-negative integer `n` (RFC 6455's 64-bit
@@ -290,15 +293,17 @@
           else (+ (if (= masked 1) 6 2) plen7))))))
 
 (defn unmask (buf key-offset plen)
-  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key. Built with a
-  single `join` over a mapped range — O(n). (A per-byte `(str acc …)` accumulator is O(n²):
-  a max-size masked frame would force ~plen² bytes of copying, a cheap-to-send CPU/memory
-  DoS.)"
-  (let (key [(byte-at buf key-offset)
-             (byte-at buf (+ key-offset 1))
-             (byte-at buf (+ key-offset 2))
-             (byte-at buf (+ key-offset 3))]
+  "XOR `plen` bytes starting after `key-offset` using the 4-byte masking key, as a byte string.
+  `buf` is read as an O(1)-indexable codepoint vector (`string->codepoints`, one O(n) pass) and
+  the result built with a single `join`. Indexing the byte string directly with `byte-at` is
+  O(i) per byte (codepoints ≥ 0x80 are multibyte), so a per-index walk would be O(n²) — a
+  max-size masked frame forcing ~plen² work on the WS receive hot path, a cheap CPU DoS."
+  (let (bytes-vec (string->codepoints buf)
+        key [(nth bytes-vec key-offset)
+             (nth bytes-vec (+ key-offset 1))
+             (nth bytes-vec (+ key-offset 2))
+             (nth bytes-vec (+ key-offset 3))]
         data-start (+ key-offset 4))
     (join ""
-      (map (fn (i) (byte->char (bit-xor (byte-at buf (+ data-start i)) (get key (mod i 4)))))
+      (map (fn (i) (byte->char (bit-xor (nth bytes-vec (+ data-start i)) (get key (mod i 4)))))
         (range plen)))))
