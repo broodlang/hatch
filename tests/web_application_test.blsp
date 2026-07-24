@@ -9,6 +9,9 @@
 ;; resolution.
 (defmodule web-application-test
   (:use web/application)
+  ; the application--* log-line formatters are module-private (ADR-146 `--` names);
+  ; this test exercises them directly
+  (:use-internals web/application)
   (:use test)
   (:use json :only [json-parse]))
 

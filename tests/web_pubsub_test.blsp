@@ -1,5 +1,7 @@
 (defmodule web-pubsub-test
   (:use web/pubsub)
+  ; pubsub--* registry internals are module-private (ADR-146 `--` names); tested directly here
+  (:use-internals web/pubsub)
   (:use test))
 
 ;; PubSub is process-level: a registry process fans broadcasts out to subscriber pids via
