@@ -26,13 +26,16 @@
   ; send-info — deliver a payload to a subscribed session
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
-  (:use web/registry))
+  (:use web/registry)
+  ; set/conj / set/disj / set/union — subscriber sets are first-class #{} sets (ADR-060),
+  ; O(log n) add/remove/membership vs the old O(n) list scans on the subscribe/DOWN churn
+  (:alias set))
 
 (def vault-name :hatch-pubsub-vault)
 
-; ---- registry process: topic -> list of subscriber pids ----
+; ---- registry process: topic -> set of subscriber pids ----
 
-; The loop carries two maps: `subs` (topic → pids, the durable state mirrored to the vault)
+; The loop carries two maps: `subs` (topic → pid set, the durable state mirrored to the vault)
 ; and `refs` (pid → monitor ref, local — used to demonitor a pid once its *last* subscription
 ; drops, so monitors don't pile up as a long-lived session subscribes/unsubscribes across
 ; live-navigations).
@@ -67,7 +70,7 @@
     ; is never re-forwarded — that bounds cross-node traffic to one hop and can't loop.
     ([:broadcast topic except payload origin]
       (do
-        (dolist (p (get subs topic (list)))
+        (dolist (p (get subs topic #{}))
           (when (not (= p except)) (send-info p payload)))
         (when (= origin :local) (pubsub--fanout-remote topic payload))
         ; broadcast doesn't change state — no mirror
@@ -78,7 +81,9 @@
     ; introspection, mostly for tests: reply with a topic's current subscriber list, keyed
     ; by the caller's ref `r` so a late reply can't be mismatched to another call
     ([:subscribers topic from r] (do
-                                   (send from [:subscribers r (get subs topic (list))])
+                                   ; convert the pid set → a list at the API boundary (the
+                                   ; public `subscribers` snapshot has always returned a list)
+                                   (send from [:subscribers r (into (list) (get subs topic #{}))])
                                    (pubsub--loop subs refs)))))
 
 ; ---- cross-node fan-out ----
@@ -106,8 +111,8 @@
       (catch _e nil))))
 
 (defn pubsub--subscribed? (subs pid)
-  "True if `pid` is still subscribed to any topic."
-  (not (empty? (filter (fn (kv) (member? pid (first (rest kv)))) (entries subs)))))
+  "True if `pid` is still subscribed to any topic (O(log n) per topic set)."
+  (not (empty? (filter (fn (kv) (contains? (first (rest kv)) pid)) (entries subs)))))
 
 (defn pubsub--drop-ref (refs pid)
   "Demonitor `pid` (its last subscription is gone) and drop its ref."
@@ -116,31 +121,28 @@
   (dissoc refs pid))
 
 (defn pubsub--add (subs topic pid)
-  "Add `pid` to `topic`'s subscriber list (idempotent — no duplicate entries)."
-  (let (cur (get subs topic (list)))
-    (if (member? pid cur) subs (assoc subs topic (cons pid cur)))))
+  "Add `pid` to `topic`'s subscriber set (idempotent — set membership dedupes)."
+  (assoc subs topic (set/conj (get subs topic #{}) pid)))
 
 (defn pubsub--remove (subs topic pid)
-  "Remove `pid` from `topic`'s subscriber list, dropping the topic key entirely once it has
+  "Remove `pid` from `topic`'s subscriber set, dropping the topic key entirely once it has
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
-  (let (remaining (filter (fn (q) (not (= q pid))) (get subs topic (list))))
+  (let (remaining (set/disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 
 (defn pubsub--remove-pid (subs pid)
   "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are
   dropped (not left as dead keys)."
   (fold (fn (m kv)
-          (let (remaining (filter (fn (q) (not (= q pid))) (first (rest kv))))
+          (let (remaining (set/disj (first (rest kv)) pid))
             (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
     (entries subs)))
 
 (defn pubsub--all-pids (subs)
-  "Every distinct subscriber pid across all topics — for re-monitoring on recovery."
-  (pubsub--dedupe (apply concat (map (fn (kv) (first (rest kv))) (entries subs)))))
-
-(defn pubsub--dedupe (xs)
-  (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) (list) xs)))
+  "Every distinct subscriber pid across all topics, as a set — for re-monitoring on recovery
+  (the union of every topic's subscriber set; already distinct, no dedupe pass)."
+  (fold (fn (acc kv) (set/union acc (first (rest kv)))) #{} (entries subs)))
 
 (defn pubsub ()
   "The PubSub registry pid — a supervised, vault-backed singleton. Started on first use and
