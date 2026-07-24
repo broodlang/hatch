@@ -250,6 +250,19 @@
   (tcp-send sock (format-response {:status 400 :body "<h1>400 Bad Request</h1>"}))
   (tcp-close sock))
 
+(defn expects-continue? (head)
+  "True if the request head asked for a `100 Continue` interim response (RFC 7231 §5.1.1:
+  `Expect: 100-continue`)."
+  (= (lower (trim (get (get head :headers {}) :expect ""))) "100-continue"))
+
+(defn maybe-continue (sock head)
+  "Send a `100 Continue` interim response when the client asked for it (`Expect: 100-continue`),
+  BEFORE we block waiting for the request body. Without it, such a client (curl for bodies >1KB,
+  many HTTP libraries) holds its body waiting for the interim while the server waits for the
+  body — a deadlock that only breaks when the read timeout answers 408 and the upload fails."
+  (when (expects-continue? head)
+    (try (tcp-send sock (string->utf8-bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
+
 (defn worker--dispatch (sock handler ws-handler config buf)
   "Dispatch a request whose head is fully buffered in `buf`. Parses the head ONCE, then routes
   the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
@@ -261,17 +274,20 @@
         ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
         ; in memory); the handler gets `:body-file` instead of `:body`. Off by default.
         (spool-body? config head clen ws-handler)
-          (spool--begin sock handler ws-handler config buf head body-start clen)
+          (do (maybe-continue sock head)
+            (spool--begin sock handler ws-handler config buf head body-start clen))
         ; Body still arriving over several reads → drain by length in O(n) (collect reads in a
         ; list, join once) rather than re-`str`ing the whole buffer per read.
         (partial-body? buf head body-start clen ws-handler)
-          (buffered--begin sock handler ws-handler config buf head body-start clen)
+          (do (maybe-continue sock head)
+            (buffered--begin sock handler ws-handler config buf head body-start clen))
         ; Body already complete/empty (or a WebSocket upgrade) → parse it whole and run it.
         else (dispatch-complete sock handler ws-handler config buf)))
     ; Chunked body → decode incrementally (only the newly-arrived bytes each read) instead of
     ; re-de-chunking the whole buffer on every read.
     ([:chunked head body-start]
-      (chunked--begin sock handler ws-handler config buf head body-start))
+      (do (maybe-continue sock head)
+        (chunked--begin sock handler ws-handler config buf head body-start)))
     ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
     ([:error msg] (bad-request-close sock msg))
     ; head-complete? gated us here, so :incomplete cannot occur; be defensive.
@@ -472,7 +488,7 @@
           prefix (if (= take alen) already (substring already 0 take)))
       ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
       ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
-      (append-bytes path (carrier->bytes prefix))
+      (spool--append path (carrier->bytes prefix))
       (spool--drain sock handler ws-handler config head path take clen))))
 
 (defn spool--drain (sock handler ws-handler config head path written clen)
@@ -485,7 +501,7 @@
         (let (n (count chunk)
               take (min n (- clen written))
               piece (if (= take n) chunk (subbytes chunk 0 take)))
-          (append-bytes path piece)
+          (spool--append path piece)
           (spool--drain sock handler ws-handler config head path (+ written take) clen)))
       ([:tcp-closed ~sock] (do (spool--cleanup path) nil))
       (after (get config :read-timeout-ms)
@@ -497,6 +513,14 @@
 (defn spool--cleanup (path)
   "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."
   (try (delete-file path) (catch _e nil)))
+
+(defn spool--append (path piece)
+  "Append `piece` (bytes) to the spool file `path`; on a write error (disk full, a spool-dir
+  that lost write permission) delete the partial temp file before re-raising, so a failed
+  upload can't leak an abandoned `hatch-upload-*` file (repeated failures → disk exhaustion)."
+  (try
+    (append-bytes path piece)
+    (catch e (do (spool--cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
 (defn spool--dispatch (sock handler config head path clen)
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
