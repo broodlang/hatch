@@ -15,6 +15,8 @@
         (match lines
           (nil [:error "empty request"])
           ((req-line & header-lines)
+            (if (> (count header-lines) *max-header-count*)
+              [:error "too many headers"]
             (match (parse-request-line req-line)
               ([:error e] [:error e])
               ([:ok method path query version]
@@ -69,7 +71,7 @@
                                     version
                                     headers
                                     (substring buf body-start body-end))
-                               (substring buf body-end buflen)]))))))))))))
+                               (substring buf body-end buflen)])))))))))))))
 
 (defn try-parse-head (buf)
   "Parse a request's line + headers WITHOUT requiring the body to have arrived — for the
@@ -88,6 +90,8 @@
         (match lines
           (nil [:error "empty request"])
           ((req-line & header-lines)
+            (if (> (count header-lines) *max-header-count*)
+              [:error "too many headers"]
             (match (parse-request-line req-line)
               ([:error e] [:error e])
               ([:ok method path query version]
@@ -97,9 +101,13 @@
                     (duplicate-transfer-encoding? header-lines) [:error "multiple Transfer-Encoding"]
                     (and (contains? headers :transfer-encoding)
                       (contains? headers :content-length)) [:error "Transfer-Encoding with Content-Length"]
-                    ; a chunked body has no Content-Length to size the spool by — defer to the
-                    ; incremental de-chunk drain rather than mis-frame it. Carry the head and
-                    ; body offset so the drain doesn't have to re-parse them.
+                    ; A chunked body has no Content-Length to size the spool by — defer to the
+                    ; incremental de-chunk drain rather than mis-frame it (carry the head and
+                    ; body offset so the drain doesn't re-parse them). Any OTHER coding (gzip,
+                    ; `chunked, gzip`, …) we don't decode — reject rather than mis-frame it, the
+                    ; same as `try-parse`; treating any TE as chunked is a smuggling surface.
+                    (and (contains? headers :transfer-encoding)
+                      (not (chunked? (get headers :transfer-encoding)))) [:error "unsupported transfer-encoding"]
                     (contains? headers :transfer-encoding) [:chunked
                                                             {:method method
                                                              :path path
@@ -117,7 +125,7 @@
                                  :version version
                                  :headers headers}
                            body-start
-                           (content-length-value (get headers :content-length))]))))))))))
+                           (content-length-value (get headers :content-length))])))))))))))
 
 (defn mk-request (method path query version headers body)
   "Build the request map shared by the Content-Length and chunked paths. `version` is the
@@ -282,28 +290,39 @@
   response header, so it never reaches request parsing."
   (if (= k :cookie) "; " ", "))
 
-(defn combine-header (k prior v)
-  "Fold a repeated header value `v` onto any `prior` value for key `k`. First value wins
-  when there's no prior. `Content-Length` must stay a single token, so identical
-  duplicates collapse to the first (a *differing* duplicate is rejected separately by
-  `content-length-conflict?`); every other repeat is combined per RFC 7230 §3.2.2."
-  (cond
-    (nil? prior) v
-    (= k :content-length) prior
-    else (str prior (header-join-sep k) v)))
+; Cap on the number of header lines in one request — a backstop (beyond the O(n) coalescing
+; below and the byte-size cap) against a request made of an absurd number of distinct headers.
+; A real request carries a few dozen; 100 is comfortably clear of legitimate traffic.
+(def *max-header-count* 100)
+
+(defn join-header-values (k values)
+  "Combine a header's gathered values (in wire order) into one string. `Content-Length`
+  keeps the first token — identical duplicates collapse (a *differing* duplicate is
+  rejected by `content-length-conflict?`); every other field is joined once per RFC 7230
+  §3.2.2 (`; ` for `Cookie`, `, ` otherwise)."
+  (if (= k :content-length)
+    (first values)
+    (join (header-join-sep k) values)))
 
 (defn parse-headers (lines)
   "Parse a list of raw header lines into a keyword→string map. Splits on the first
   `:` and trims the value, so the space after the colon is optional (`Host:localhost`
   is valid HTTP and must not be dropped). A header repeated across lines is combined
   into a single comma-separated value (RFC 7230 §3.2.2) — `; `-separated for `Cookie` —
-  rather than last-wins, so multi-valued `X-Forwarded-For`/`Forwarded`/`Via` survive."
-  (fold (fn (m line)
-          (let (ci (index-of line ":"))
-            (if (= ci -1)
-              m
-              (let (k (keyword (lower (trim (substring line 0 ci))))
-                    v (trim (substring line (+ ci 1) (string-length line))))
-                (assoc m k (combine-header k (get m k) v))))))
-    {}
-    lines))
+  rather than last-wins, so multi-valued `X-Forwarded-For`/`Forwarded`/`Via` survive.
+
+  Values are gathered per key and `join`ed ONCE, so a field repeated N times is O(N),
+  not the O(N²) of a per-line `(str acc v)` fold — that quadratic was a repeated-header
+  CPU-exhaustion vector (bounded only by the byte cap, i.e. minutes of CPU per request)."
+  (let (grouped (fold (fn (m line)
+                        (let (ci (index-of line ":"))
+                          (if (= ci -1)
+                            m
+                            (let (k (keyword (lower (trim (substring line 0 ci))))
+                                  v (trim (substring line (+ ci 1) (string-length line))))
+                              (assoc m k (cons v (get m k (list))))))))
+                  {}
+                  lines))
+    (fold (fn (m kv) (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
+      {}
+      (entries grouped))))
