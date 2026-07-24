@@ -68,7 +68,11 @@
   (let (spec (first (rest node))
         body-forms (rest (rest node))
         body (if (= (count body-forms) 1) (first body-forms) (cons 'do body-forms)))
-    (list 'web/parts/comp (list 'for spec (list 'web/template/render body)))))
+    ; Run the loop body through rewrite-components so a `(component …)` inside the `for` is
+    ; compiled to its render-slot call — without this it stays literal `(component …)` and
+    ; raises "unbound component" at render (a list of stateful components is a mainstream
+    ; pattern), and its change-tracking deps would be empty (never re-rendering).
+    (list 'web/parts/comp (list 'for spec (list 'web/template/render (rewrite-components body))))))
 
 (defn component-form? (node)
   "True for a literal `(component module assigns)` form — a LiveComponent slot

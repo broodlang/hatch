@@ -1168,7 +1168,10 @@
         parts (try
                 (web/parts/compile-parts render-expr)
                 (catch _e
-                  {:statics ["" ""] :dynamics (list (list 'web/template/render render-expr))}))
+                  ; rewrite-components so a `(component …)` in the fallback render still compiles
+                  ; to its render-slot call (same crash as an un-rewritten nested component)
+                  {:statics ["" ""]
+                   :dynamics (list (list 'web/template/render (web/parts/rewrite-components render-expr)))}))
         render-static-defn (list 'def 'render-static (get parts :statics))
         ; Both render and render-dynamic take one extra, optional, framework-internal arg
         ; beyond the user-facing render-dyn-args: the session's live component table (a

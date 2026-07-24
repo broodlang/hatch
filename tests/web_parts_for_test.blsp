@@ -61,3 +61,12 @@
           old ((get spec :render-dynamic) {:items ["a" "b"]})
           new ((get spec :render-dynamic) {:items ["a" "b"]}))
       (assert= (diff-dynamics old new) {}))))
+
+;; Regression: a LiveComponent nested inside a (for …) must be compiled to a render-slot
+;; call, not left as the literal `(component …)` marker (which raises "unbound component" at
+;; render). We assert on the compiled dynamic form.
+(describe "a (component …) inside a (for …) compiles to a render-slot call"
+  (test "compile-parts rewrites the nested component (not a bare component call)"
+    (let (compiled (pr-str (web/parts/compile-parts
+                             '[:ul {} (for (x coll) [:li {} (component web/x {"id" x})])])))
+      (assert= (includes? compiled "render-slot") true))))
