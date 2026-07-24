@@ -10,6 +10,14 @@
 (defn client-js-conn ()
   (build {:method "GET" :path "/static/brood_live.js" :query "" :params {} :headers {} :body ""}))
 
+(describe "deflive--clause: a duplicate singular clause is rejected"
+  (test "two render clauses error at expansion"
+    (assert-error (web/live/deflive--clause 'render (list (list 'render '(m) "a") (list 'render '(m) "b")))))
+  (test "a single clause is returned"
+    (assert= (web/live/deflive--clause 'render (list (list 'render '(m) "a"))) (list 'render '(m) "a")))
+  (test "no clause is nil"
+    (assert= (web/live/deflive--clause 'render (list (list 'mount '(p) 1))) nil)))
+
 (describe "json-str: escapes all C0 control characters (RFC 8259)"
   (test "named escapes" (assert= (json-str "a\nb\tc") "\"a\\nb\\tc\""))
   (test "quote and backslash" (assert= (json-str "a\"\\b") "\"a\\\"\\\\b\""))
