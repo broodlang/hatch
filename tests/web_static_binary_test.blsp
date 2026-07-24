@@ -11,9 +11,9 @@
 ;; ---- format-response with a binary (bytes) body ----
 
 (describe "format-response — binary body"
-  (test "a bytes body → a bytes response, raw body appended, byte-count Content-Length"
-    (let (resp (response/format-response
-                 {:status 200 :headers {:content-type "image/png"} :body (bytes [137 80 255])})
+  (test "a bytes body → raw body appended, byte-count Content-Length (flattened iolist)"
+    (let (resp (bytes-concat (response/format-response
+                               {:status 200 :headers {:content-type "image/png"} :body (bytes [137 80 255])}))
           n (count (bytes->list resp)))
       (assert= (bytes? resp) true)
       ; the last 3 bytes are the raw body, verbatim (0xFF intact)

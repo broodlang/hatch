@@ -1,9 +1,12 @@
 (defmodule http/response
-  "HTTP/1.1 response serialization. `format-response` returns a `bytes` value (never a
-  string): `tcp-send` UTF-8-encodes a string leaf (ADR-141), so a string body carrying any
-  multibyte char (an em dash, an arrow, any non-ASCII prose) would be encoded twice — the
-  bytes doubled and the response truncated at the too-short Content-Length. Encoding to
-  `bytes` here sends each body byte to the wire exactly once."
+  "HTTP/1.1 response serialization. `format-response` returns an ADR-139 iolist —
+  `[head-bytes, body-bytes]` — that `tcp-send` flattens straight onto the socket with no
+  monolithic combined buffer (a bodyless/HEAD response is just the head `bytes`). The leaves
+  are `bytes`, never strings: `tcp-send` UTF-8-encodes a string leaf (ADR-141), so a string
+  body with any multibyte char (an em dash, an arrow, any non-ASCII prose) would be encoded
+  twice — the bytes doubled and the response truncated at the too-short Content-Length.
+  `(bytes-concat (format-response …))` materialises the whole response when one value is
+  needed. A `:body` may be a string, a `bytes` value, or an iolist."
   (:use http/util))
 
 (defn byte-length (s)
@@ -12,11 +15,6 @@
   has more bytes than `string-length`, and reporting the codepoint count truncates
   the response in the client."
   (count (seq (string->utf8-bytes s))))
-
-(defn body-byte-length (body)
-  "Content-Length for a response body: the raw byte count for a binary (`bytes`) body — e.g.
-  an image served by web/static — else the UTF-8 byte length of a text (string) body."
-  (if (bytes? body) (count body) (byte-length body)))
 
 (defn bodyless-status? (status)
   "True for a status that MUST NOT carry a message body or `Content-Length` (RFC 7230
@@ -35,13 +33,17 @@
   `Connection` header is emitted only when the caller set one (http/server decides
   keep-alive vs close and stamps it), never forced here."
   (let (status (get resp :status 200)
-        body (get resp :body "")
         bodyless (bodyless-status? status)
+        ; The body may be a string, a `bytes` value (binary — images), or an iolist (a
+        ; nested string/bytes tree, ADR-139). Flatten it to `bytes` exactly once with
+        ; `bytes-concat`: its byte count is the Content-Length, and it is the body leaf of
+        ; the response iolist. `bodyless` skips it entirely (no body, no Content-Length).
+        body-bytes (if bodyless nil (bytes-concat (or (get resp :body) "")))
         headers (get resp :headers {})
         headers (if (or bodyless (contains? headers :content-type))
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8"))
-        headers (if bodyless headers (assoc headers :content-length (str (body-byte-length body)))))
+        headers (if bodyless headers (assoc headers :content-length (str (count body-bytes)))))
     (let (head-block (str "HTTP/1.1 "
                        status
                        " "
@@ -49,18 +51,16 @@
                        "\r\n"
                        (join "" (map format-header (entries headers)))
                        "\r\n"))
-      (cond
-        ; no body on the wire → the header block as UTF-8 `bytes` (a status line/header
-        ; value is ASCII almost always, but never guaranteed — encoding is a no-op for pure
-        ; ASCII, since every ASCII codepoint is already its own single UTF-8 byte)
-        (or bodyless head?) (string->utf8-bytes head-block)
-        ; a binary body → return the whole response as `bytes` so the raw bytes reach the
-        ; wire verbatim (tcp-send writes a bytes value as-is)
-        (bytes? body) (bytes-concat (string->utf8-bytes head-block) body)
-        ; a text body → UTF-8-encode the whole thing to `bytes`. It MUST be `bytes`, not a
-        ; string: tcp-send UTF-8-encodes a string leaf (ADR-141), which would double-encode
-        ; every multibyte char and truncate the client at the too-short Content-Length.
-        else (string->utf8-bytes (str head-block body))))))
+      ; Return an ADR-139 iolist: `tcp-send` flattens `[head, body]` straight onto the
+      ; socket with no monolithic combined buffer. Leaves are `bytes` (already UTF-8), so a
+      ; multibyte body is not re-encoded — tcp-send would UTF-8-encode a *string* leaf
+      ; (ADR-141), doubling it and truncating at the too-short Content-Length; encoding to
+      ; `bytes` up front sends each body byte exactly once. `(bytes-concat …)` materialises
+      ; the whole response for a caller (e.g. a test) that wants one value.
+      (let (head-bytes (string->utf8-bytes head-block))
+        (if (or bodyless head?)
+          head-bytes
+          [head-bytes body-bytes])))))
 
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect
