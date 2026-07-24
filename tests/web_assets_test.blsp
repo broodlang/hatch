@@ -20,13 +20,18 @@
   (test "install runs its commands too"
     (assert= (install {:install [["sh" "-c" "exit 0"]]}) nil)))
 
-(describe "on-output"
-  ; No live registry running in the test, so a CSS-reload signal is a safe no-op —
-  ; we're asserting it doesn't blow up whether or not the rebuild marker is present.
-  (test "marker present is a no-op without a registry"
-    (assert= (on-output "Done in 5ms\n" "Done in") nil))
-  (test "marker absent is a no-op"
-    (assert= (on-output "Rebuilding...\n" "Done in") nil)))
+(describe "on-output: per-line logging + residual buffering"
+  ; No live registry running in the test, so a CSS-reload signal is a safe no-op — we assert
+  ; the RETURN (the trailing incomplete line carried to the next chunk) and that it never blows
+  ; up. Complete lines (before the last \n) are consumed; the partial tail is returned.
+  (test "a complete line leaves an empty residual"
+    (assert= (on-output "Done in 5ms\n" "Done in") ""))
+  (test "an incomplete trailing line is returned as the residual"
+    (assert= (on-output "Rebuilding" "Done in") "Rebuilding"))
+  (test "complete lines are consumed, the partial tail carried forward"
+    (assert= (on-output "line1\nline2\npart" "Done in") "part"))
+  (test "marker absent still returns the residual, no crash"
+    (assert= (on-output "Rebuilding...\n" "Done in") "")))
 
 (describe "fingerprint-name"
   (test "inserts the digest before the extension"
