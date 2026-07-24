@@ -105,7 +105,28 @@
       :error))
   (test "a non-chunked Transfer-Encoding (gzip) is rejected, not mis-framed"
     (assert= (first (try-parse "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
-      :error)))
+      :error))
+  ; try-parse-head is the actual server (spool) path — it must reject a non-chunked coding
+  ; the same way, not route it to the chunked drain (a request-smuggling surface).
+  (test "try-parse-head rejects a non-chunked Transfer-Encoding (gzip)"
+    (assert= (first (try-parse-head "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
+      :error))
+  (test "try-parse-head still accepts chunked"
+    (assert= (first (try-parse-head "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"))
+      :chunked)))
+
+(describe "parse-headers: repeated headers coalesce in order (O(n), not O(n^2))"
+  (test "a header repeated across lines joins with ', ' in wire order"
+    (assert= (get (parse-headers (list "X-F: a" "X-F: b" "X-F: c")) :x-f) "a, b, c"))
+  (test "Cookie repeats join with '; '"
+    (assert= (get (parse-headers (list "Cookie: a=1" "Cookie: b=2")) :cookie) "a=1; b=2"))
+  (test "Content-Length keeps the first (identical dup collapses)"
+    (assert= (get (parse-headers (list "Content-Length: 5" "Content-Length: 5")) :content-length) "5")))
+
+(describe "try-parse: header-count cap"
+  (test "a request with more than *max-header-count* header lines is rejected"
+    (let (head (join "" (map (fn (i) (str "X-" i ": v\r\n")) (range 150))))
+      (assert= (first (try-parse (str "GET / HTTP/1.1\r\n" head "\r\n"))) :error))))
 
 ; The incremental de-chunker behind the server's O(n) chunked drain: decode each chunk exactly
 ; once and keep only the undecoded tail across reads (vs `try-parse` re-decoding the whole body
