@@ -20,6 +20,13 @@
 ; delivered byte-faithfully ONLY because the upgrade path already switched to binary.
 ; Revert the fix and `read-one-frame` sees U+FFFD → `:incomplete` → times out.
 
+(defn carrier->bytes (carrier)
+  "A byte-string carrier (one codepoint 0-255 per byte) → a `bytes` value, so a client frame
+  reaches the wire intact. tcp-send UTF-8-encodes a string leaf (ADR-141), which would mangle
+  every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
+  verbatim — the same reason the server builds its frames as `bytes`."
+  (bytes (map char->int (string->list carrier))))
+
 (defn read-one-frame (sock buf)
   "Block until one complete WebSocket frame is buffered; return its decoded payload,
   or :timeout / :closed. Mirrors the live session's read loop, minus the dispatch."
@@ -83,7 +90,7 @@
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
           client (ws-client-connect port)
-          _send (tcp-send client (masked-byte-frame 255))
+          _send (tcp-send client (carrier->bytes (masked-byte-frame 255)))
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp-close client)
       (server/stop port)
@@ -207,7 +214,9 @@
                  (echo-one-frame me))
           client (ws-client-connect port)
           _send (tcp-send client
-                  (str (ws-frame 0 1 "Hel") (ws-frame 0 0 "lo ") (ws-frame 1 0 "world")))
+                  (carrier->bytes (str (ws-frame 0 1 "Hel")
+                                    (ws-frame 0 0 "lo ")
+                                    (ws-frame 1 0 "world"))))
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp-close client)
       (server/stop port)

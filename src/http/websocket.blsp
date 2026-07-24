@@ -47,8 +47,11 @@
   (join "" (map byte->char (bytes->list b))))
 
 (defn byte-at (s i)
-  "Return the byte value at position `i` in string `s`."
-  (char->int (char-at s i)))
+  "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
+  frame/request parser's form) or a first-class `bytes` value (an outbound frame)."
+  (if (bytes? s)
+    (get s i)
+    (char->int (char-at s i))))
 
 ; ---- handshake ----
 
@@ -100,11 +103,12 @@
 ; ---- frame building (server → client, unmasked) ----
 
 ; A WebSocket frame is a byte sequence (control bytes ≥ 0x80, a length-prefixed
-; binary body). Brood strings are codepoint sequences, so we build the frame as a
-; *byte string* — every codepoint 0–255, one per wire byte — and send it over a
-; socket in binary mode (`tcp-set-binary`), which writes each codepoint as one raw
-; byte. The text payload is UTF-8-encoded into that byte form first, so multibyte
-; characters contribute their real byte length (not their codepoint count).
+; binary body), so we build each frame as a `bytes` value and send it verbatim.
+; `tcp-send` UTF-8-encodes a *string* leaf (ADR-141) — which would re-encode an
+; already-encoded payload, doubling every byte ≥ 0x80 (multibyte chars AND the frame's
+; own header/length bytes) and mis-sizing the frame. A `bytes` value bypasses that: the
+; payload is UTF-8-encoded exactly once (`string->utf8-bytes`), and the header bytes go
+; out as-is.
 
 (defn utf8-byte-string (s)
   "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte. Goes
@@ -119,41 +123,38 @@
   (utf8-bytes->string (into [] (map (fn (i) (byte-at s i)) (range (string-length s))))))
 
 (defn u64-be (n)
-  "Eight-byte big-endian byte string of a non-negative integer `n` (RFC 6455's 64-bit
+  "Eight-byte big-endian `bytes` value of a non-negative integer `n` (RFC 6455's 64-bit
   extended length; the high bit must be 0, which holds for any realistic payload)."
-  (join ""
-    (map (fn (shift) (byte->char (bit-and (bit-shift-right n shift) 255)))
-      [56 48 40 32 24 16 8 0])))
+  (bytes (map (fn (shift) (bit-and (bit-shift-right n shift) 255))
+           [56 48 40 32 24 16 8 0])))
 
 (defn text-frame (payload)
-  "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a byte string.
-  Send it over a binary-mode socket so the bytes reach the wire verbatim. Uses the
-  7-bit, 16-bit, or 64-bit length form by size — so a large render (>64 KB of HTML)
-  produces a valid frame instead of raising and crashing the live session."
-  (let (body (utf8-byte-string payload)
-        n (string-length body))
+  "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a `bytes` value: the
+  header bytes followed by the UTF-8-encoded `payload`, sent verbatim by `tcp-send`.
+  Uses the 7-bit, 16-bit, or 64-bit length form by size — so a large render (>64 KB of
+  HTML) produces a valid frame instead of raising and crashing the live session."
+  (let (body (string->utf8-bytes payload)
+        n (count body))
     (cond
-      (<= n 125) (str "\x81" (byte->char n) body)
-      (<= n 65535) (str "\x81\x7e"
-                     (byte->char (quot n 256))
-                     (byte->char (mod n 256))
-                     body)
-      else (str "\x81\x7f" (u64-be n) body))))
+      (<= n 125) (bytes-concat (bytes [129 n]) body)
+      (<= n 65535) (bytes-concat (bytes [129 126 (quot n 256) (mod n 256)]) body)
+      else (bytes-concat (bytes [129 127]) (u64-be n) body))))
 
 (defn close-frame ()
   "Build a WebSocket connection-close frame (opcode 0x8, FIN=1, no payload)."
-  "\x88\x00")
+  (bytes [136 0]))
 
 (defn pong-frame (payload)
-  "Build a WebSocket pong frame (opcode 0xA, FIN=1). Control frames are capped at 125
-  bytes (RFC 6455), so an over-long payload is truncated — guarding against an echoed
-  length that would overflow the single length byte into an extended-length marker."
-  (let (p (if (> (string-length payload) 125) (substring payload 0 125) payload))
-    (str "\x8a" (byte->char (string-length p)) p)))
+  "Build a WebSocket pong frame (opcode 0xA, FIN=1) as `bytes`. Control frames are capped
+  at 125 bytes (RFC 6455), so an over-long payload is truncated — guarding against an
+  echoed length that would overflow the single length byte into an extended-length marker."
+  (let (raw (string->utf8-bytes payload)
+        body (if (> (count raw) 125) (bytes (take 125 (bytes->list raw))) raw))
+    (bytes-concat (bytes [138 (count body)]) body)))
 
 (defn ping-frame ()
   "Build an empty WebSocket ping frame (opcode 0x9, FIN=1) — used for server keepalive."
-  "\x89\x00")
+  (bytes [137 0]))
 
 ; ---- frame parsing (client → server, masked) ----
 

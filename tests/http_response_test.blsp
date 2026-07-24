@@ -1,5 +1,10 @@
-;; byte-string->utf8 / utf8-byte-string — verifying format-response's byte-faithful output
+;; format-response returns a `bytes` value (ADR-141: tcp-send writes bytes verbatim but
+;; UTF-8-encodes a string leaf). `rtext` decodes it back to text for the string assertions.
 (defmodule http-response-test (:use http/response) (:use http/websocket) (:use test))
+
+(defn rtext (out)
+  "Decode a format-response `bytes` value back to text for assertions."
+  (utf8-bytes->string out))
 
 (describe "capitalize"
   (test "lowercase word" (assert= (capitalize "content") "Content"))
@@ -16,30 +21,34 @@
 
 (describe "format-response with cookies"
   (test "emits a Set-Cookie line per list element"
-    (let (out (format-response {:status 200 :body "" :headers {:set-cookie (list "a=1" "b=2")}}))
+    (let (out (rtext (format-response {:status 200
+                                       :body ""
+                                       :headers {:set-cookie (list "a=1" "b=2")}})))
       (assert= (includes? out "Set-Cookie: a=1\r\n") true)
       (assert= (includes? out "Set-Cookie: b=2\r\n") true))))
 
 (describe "format-response: byte-faithful output for a binary-mode socket"
-  ; http/server puts every connection in binary mode unconditionally (tcp-set-binary at
-  ; accept, for byte-faithful upload bodies) — tcp-send on such a socket requires either a
-  ; `bytes` value or a string where every codepoint is a raw byte (0-255). A text response
-  ; with any multibyte character (an em dash, an arrow, any non-ASCII prose — common in
-  ; ordinary page copy) used to come back as a plain Brood string still holding the real
-  ; multibyte codepoint, which crashes tcp-send the instant it's sent.
-  (test "every codepoint in a multibyte text body is a single byte (0-255)"
-    (let (out (format-response (ok "em dash — arrow → done")))
-      (assert=
-        (fold (fn (ok c) (and ok (<= (char->int c) 255))) true (string->list out))
-        true)))
-  (test "the body round-trips through byte-string decoding back to the original text"
+  ; http/server puts every connection in binary mode; tcp-send writes a `bytes` value to the
+  ; wire verbatim but UTF-8-encodes a string leaf (ADR-141). So format-response must return
+  ; `bytes` — a string body carrying any multibyte char (an em dash, an arrow, any non-ASCII
+  ; prose) would otherwise be double-encoded and truncated at a too-short Content-Length.
+  (test "returns a bytes value"
+    (assert= (bytes? (format-response (ok "em dash — arrow → done"))) true))
+  (test "the body round-trips through UTF-8 decoding back to the original text"
     (let (out (format-response (ok "em dash — arrow →")))
-      (assert= (includes? (byte-string->utf8 out) "em dash — arrow →") true)))
+      (assert= (includes? (rtext out) "em dash — arrow →") true)))
+  ; 0xC3, the 1st — not a doubled C3 82…
+  (test "the multibyte body is encoded exactly once (no doubling)"
+    ; the wire bytes must equal the single UTF-8 encoding of header + body, byte for byte
+    (let (out (format-response (ok "é")))
+      (assert= (ends-with? (rtext out) "é") true)
+      ; last byte = 0xA9, the 2nd byte of é
+      (assert= (byte-at out (- (count out) 1)) 169)
+      (assert= (byte-at out (- (count out) 2)) 195)))
   (test "Content-Length reports UTF-8 byte length, matching the encoded body actually sent"
-    (let (out (format-response (ok "é")))  ; 1 codepoint, 2 UTF-8 bytes
-      (assert= (includes? out "Content-Length: 2") true)
-      ; the header block + 2-byte body — never the 1-codepoint length
-      (assert= (ends-with? out (utf8-byte-string "é")) true))))
+    (let (out (format-response (ok "é")))
+      ; 1 codepoint, 2 UTF-8 bytes
+      (assert= (includes? (rtext out) "Content-Length: 2") true))))
 
 (describe "header-name"
   (test "single segment" (assert= (header-name :host) "Host"))
@@ -94,41 +103,41 @@
 
 (describe "format-response"
   (test "starts with status line"
-    (let (r (format-response (ok "hello")))
+    (let (r (rtext (format-response (ok "hello"))))
       (assert= (includes? r "HTTP/1.1 200 OK") true)))
   (test "includes content-length"
-    (let (r (format-response (ok "hello")))
+    (let (r (rtext (format-response (ok "hello"))))
       (assert= (includes? r "Content-Length: 5") true)))
   (test "body at end"
-    (let (r (format-response (ok "hello")))
+    (let (r (rtext (format-response (ok "hello"))))
       (assert= (includes? r "\r\n\r\nhello") true)))
   (test "404 status line"
-    (let (r (format-response (not-found "gone")))
+    (let (r (rtext (format-response (not-found "gone"))))
       (assert= (includes? r "HTTP/1.1 404 Not Found") true)))
   (test "custom header included"
-    (let (r (format-response (redirect "/new")))
+    (let (r (rtext (format-response (redirect "/new"))))
       (assert= (includes? r "Location: /new") true)))
   (test "does not force a Connection header (http/server sets it)"
-    (let (r (format-response (ok "hi")))
+    (let (r (rtext (format-response (ok "hi"))))
       (assert= (includes? r "Connection:") false)))
   (test "emits whatever Connection the caller set"
-    (let (r (format-response {:status 200 :body "hi" :headers {:connection "close"}}))
+    (let (r (rtext (format-response {:status 200 :body "hi" :headers {:connection "close"}})))
       (assert= (includes? r "Connection: close") true))))
 
 (describe "format-response: bodyless statuses (RFC 7230)"
   (test "204 carries no body or Content-Length"
-    (let (r (format-response {:status 204 :body "should be dropped"}))
+    (let (r (rtext (format-response {:status 204 :body "should be dropped"})))
       (assert= (includes? r "HTTP/1.1 204 No Content") true)
       (assert= (includes? r "Content-Length:") false)
       (assert= (includes? r "should be dropped") false)))
   (test "304 carries no body or Content-Length"
-    (let (r (format-response {:status 304 :body "x"}))
+    (let (r (rtext (format-response {:status 304 :body "x"})))
       (assert= (includes? r "Content-Length:") false)
       (assert= (includes? r "\r\n\r\nx") false))))
 
 (describe "format-response: HEAD"
   (test "keeps the GET Content-Length but drops the body"
-    (let (r (format-response (ok "hello") true))
+    (let (r (rtext (format-response (ok "hello") true)))
       (assert= (includes? r "Content-Length: 5") true)
       (assert= (includes? r "\r\n\r\nhello") false)
       (assert= (ends-with? r "\r\n\r\n") true))))
@@ -142,6 +151,6 @@
   (test "a normal value is unchanged"
     (assert= (format-header [:content-type "text/html"]) "Content-Type: text/html\r\n"))
   (test "an injected redirect Location does not become its own header line"
-    (let (r (format-response (redirect "/ok\r\nSet-Cookie: x=1")))
+    (let (r (rtext (format-response (redirect "/ok\r\nSet-Cookie: x=1"))))
       ; the bytes survive inside the Location value, but never after a CRLF (a new header)
       (assert= (includes? r "\r\nSet-Cookie:") false))))
