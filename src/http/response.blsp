@@ -1,11 +1,10 @@
 (defmodule http/response
-  "HTTP/1.1 response serialization."
-  (:use http/util)
-  ; utf8-byte-string — every connection is now unconditionally binary-mode (http/server
-  ; sets tcp-set-binary at accept, for byte-faithful upload bodies), so a text response
-  ; must be byte-encoded the same way a WS text frame already is, or tcp-send raises on
-  ; the first multibyte character (an em dash, an arrow, any non-ASCII prose).
-  (:alias http/websocket))
+  "HTTP/1.1 response serialization. `format-response` returns a `bytes` value (never a
+  string): `tcp-send` UTF-8-encodes a string leaf (ADR-141), so a string body carrying any
+  multibyte char (an em dash, an arrow, any non-ASCII prose) would be encoded twice — the
+  bytes doubled and the response truncated at the too-short Content-Length. Encoding to
+  `bytes` here sends each body byte to the wire exactly once."
+  (:use http/util))
 
 (defn byte-length (s)
   "The UTF-8 byte length of `s`. Content-Length must report bytes, not codepoints:
@@ -51,15 +50,17 @@
                        (join "" (map format-header (entries headers)))
                        "\r\n"))
       (cond
-        ; no body on the wire → just the header block, byte-encoded (a status line/header
+        ; no body on the wire → the header block as UTF-8 `bytes` (a status line/header
         ; value is ASCII almost always, but never guaranteed — encoding is a no-op for pure
         ; ASCII, since every ASCII codepoint is already its own single UTF-8 byte)
-        (or bodyless head?) (http/websocket/utf8-byte-string head-block)
+        (or bodyless head?) (string->utf8-bytes head-block)
         ; a binary body → return the whole response as `bytes` so the raw bytes reach the
-        ; wire verbatim (tcp-send writes a bytes value as-is on the binary-mode socket)
+        ; wire verbatim (tcp-send writes a bytes value as-is)
         (bytes? body) (bytes-concat (string->utf8-bytes head-block) body)
-        ; a text body → byte-encode the whole thing the same way a WS text frame is
-        else (http/websocket/utf8-byte-string (str head-block body))))))
+        ; a text body → UTF-8-encode the whole thing to `bytes`. It MUST be `bytes`, not a
+        ; string: tcp-send UTF-8-encodes a string leaf (ADR-141), which would double-encode
+        ; every multibyte char and truncate the client at the too-short Content-Length.
+        else (string->utf8-bytes (str head-block body))))))
 
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect

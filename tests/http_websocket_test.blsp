@@ -43,10 +43,12 @@
     (assert= (byte-at (text-frame "hello") 0) 129))
   (test "small frame second byte is payload length"
     (assert= (byte-at (text-frame "hello") 1) 5))
+  (test "text-frame returns a bytes value (sent verbatim by tcp-send, not re-encoded)"
+    (assert= (bytes? (text-frame "hello")) true))
   (test "small frame payload"
-    (assert= (substring (text-frame "hello") 2 7) "hello"))
+    (assert= (utf8-bytes->string (bytes (drop 2 (bytes->list (text-frame "hello"))))) "hello"))
   (test "empty payload"
-    (assert= (string-length (text-frame "")) 2))
+    (assert= (count (text-frame "")) 2))
   (test "125-byte max small frame"
     (let (payload (string-repeat "x" 125))
       (assert= (byte-at (text-frame payload) 1) 125)))
@@ -71,7 +73,16 @@
       (assert= (byte-at f 3) 136)
       (assert= (byte-at f 4) 146)))
   (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
-    (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓")))
+    (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓"))
+  ; Regression: the frame's payload must be single-UTF-8-encoded (each multibyte char
+  ; appearing exactly once). A byte-string frame would be re-encoded by tcp-send (ADR-141),
+  ; doubling every byte >= 0x80 and mis-sizing the length field — this asserts it doesn't.
+  (test "frame payload decodes back to the original multibyte text, length in bytes"
+    (let (text "café − ✓"
+          f (text-frame text)
+          expected (count (string->utf8-bytes text)))
+      (assert= (byte-at f 1) expected)
+      (assert= (utf8-bytes->string (bytes (drop 2 (bytes->list f)))) text))))
 
 (describe "parse-frame: masked client frames"
   (test "incomplete on empty"
@@ -122,7 +133,7 @@
       (assert= (byte-at f 8) 17)
       (assert= (byte-at f 9) 112)
       ; 2 header + 8 length + 70000 payload
-      (assert= (string-length f) 70010))))
+      (assert= (count f) 70010))))
 
 ; Audit #5 — control-frame limits.
 (describe "parse-frame: control-frame limits"
@@ -141,9 +152,10 @@
   (test "truncates a payload over 125 bytes"
     (let (f (pong-frame (string-repeat "x" 200)))
       (assert= (byte-at f 1) 125)
-      (assert= (string-length f) 127)))
+      (assert= (count f) 127)))
   (test "small payload echoed verbatim"
-    (assert= (pong-frame "hi") (str "\x8a\x02hi"))))
+    ; 0x8a pong, 0x02 len, "hi" = 104 105
+    (assert= (pong-frame "hi") (bytes [138 2 104 105]))))
 
 ; A masked client frame with a zero mask key (so payload bytes pass through unchanged);
 ; `payload` must be <= 125 bytes so the 7-bit length form applies. `fin` is 0 or 1.
