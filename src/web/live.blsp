@@ -314,10 +314,14 @@
   session to send a ping (the session is the sole socket writer — we never write here);
   browsers auto-pong, which resets us via `[:alive]`. After a couple of unanswered pings,
   close the socket so a dead or silently-idle peer can't pin a reader thread + a parked
-  green process forever. Monitored, so it dies with the session."
+  green process forever. Monitors the session ONCE here, then loops — re-monitoring on every
+  `[:alive]` (one per client frame) would stack watchers on the session pid without bound."
   (monitor session)
+  (idle-watchdog--loop session sock misses))
+
+(defn idle-watchdog--loop (session sock misses)
   (receive
-    ([:alive] (idle-watchdog session sock 0))
+    ([:alive] (idle-watchdog--loop session sock 0))
     ([:down _ _ _] nil)
     (after *ws-ping-ms*
       (if (>= misses 2)
@@ -326,7 +330,7 @@
         (try (tcp-close sock) (catch _ nil))
         (do
           (send session [:ws-send sock (ping-frame)])
-          (idle-watchdog session sock (+ misses 1)))))))
+          (idle-watchdog--loop session sock (+ misses 1)))))))
 
 (defn kick-watchdog (view)
   "Tell this session's idle watchdog that a client frame arrived — resets its ping/idle
@@ -651,25 +655,35 @@
     ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
     ; view's handle-info and push the resulting diff. A view without a handle-info clause
     ; (or one that throws) keeps its current model, so a stray message is harmless.
-    ([:info payload buf2] (push-update sock
-                            view
-                            buf2
-                            "diff"
-                            (let (h (get view :handle-info))
-                              (if h
-                                (try (h payload (get view :model))
-                                  (catch e (live--handler-error "info" :message e (get view :model))))
-                                (get view :model)))))
+    ; Gated on :mounted? — before the client's `join` (which mounts) there is no :model, and
+    ; rendering nil would push a bogus frame or crash the session; just keep listening. (Pre-
+    ; join, an :info/:update-component can't arrive anyway — mount is what subscribes — but a
+    ; `:reload` CAN, since the reload registry holds this pid from connect.)
+    ([:info payload buf2]
+      (if (get view :mounted?)
+        (push-update sock view buf2 "diff"
+          (let (h (get view :handle-info))
+            (if h
+              (try (h payload (get view :model))
+                (catch e (live--handler-error "info" :message e (get view :model))))
+              (get view :model))))
+        (session-recv sock view buf2)))
     ; a web/component/send-update push: merge into that component's stored state (a no-op
     ; if cid names no mounted component) and re-render — the parent's :model is untouched,
     ; but its next render-dynamic pass picks up the component's fresh state.
     ([:update-component cid changes buf2]
-      (try (web/component/apply-update (get view :components) cid changes)
-        (catch e (live--handler-error "update-component" cid e nil)))
-      (push-update sock view buf2 "diff" (get view :model)))
-    ([:reload buf2] (let (spec (try ((get view :spec-fn)) (catch _ nil))
-                          view (if spec (merge view spec) view))
-                      (push-update sock view buf2 "render" (get view :model))))
+      (if (get view :mounted?)
+        (do
+          (try (web/component/apply-update (get view :components) cid changes)
+            (catch e (live--handler-error "update-component" cid e nil)))
+          (push-update sock view buf2 "diff" (get view :model)))
+        (session-recv sock view buf2)))
+    ([:reload buf2]
+      (if (get view :mounted?)
+        (let (spec (try ((get view :spec-fn)) (catch _ nil))
+              view (if spec (merge view spec) view))
+          (push-update sock view buf2 "render" (get view :model)))
+        (session-recv sock view buf2)))
     ; CSS-only rebuild: tell the client to re-stamp its stylesheet links — no
     ; re-render, so the live model (form state, scroll, focus) is preserved.
     ([:reload-css buf2] (if (send-msg sock {:event "reload-css"})
@@ -689,18 +703,21 @@
         params (get msg "params" {}))
     (match event
       ; The first client frame: mount (exactly once, with the real URL params), start this
-      ; view's tickers, and push the initial render. `mount` runs client-controlled params, so
-      ; it's guarded like every other hook — a throw ends the session cleanly (no model to
-      ; render) instead of crashing it. A repeated `join` stops the prior tickers first so a
-      ; re-mount can't leak them.
-      ("join" (let (model (try ((get view :mount) params)
-                            (catch e (live--handler-error "mount" :mount e :hatch/mount-error))))
-                (if (= model :hatch/mount-error)
-                  (close-session sock view)
-                  (do
-                    (stop-tickers (get view :ticker-pids))
+      ; view's tickers, mark the view mounted, and push the initial render. `mount` runs
+      ; client-controlled params, so it's guarded like every other hook — a throw ends the
+      ; session cleanly (no model to render) instead of crashing it. A SECOND `join` (a buggy
+      ; or hostile client) is ignored: re-running `mount` would fire its side effects twice and
+      ; skip unmount/generation-bump — a re-mount is what `navigate` is for.
+      ("join" (if (get view :mounted?)
+                (session-recv sock view buf)
+                (let (model (try ((get view :mount) params)
+                              (catch e (live--handler-error "mount" :mount e :hatch/mount-error))))
+                  (if (= model :hatch/mount-error)
+                    (close-session sock view)
                     (push-update sock
-                      (assoc view :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
+                      (assoc view
+                        :mounted? true
+                        :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
                       buf
                       "render"
                       model)))))
@@ -780,6 +797,9 @@
                                   :session (get entry :session)
                                   :params params
                                   :model model
+                                  ; the target view is mounted here (its mount ran above), so
+                                  ; out-of-band arms stay ungated after the swap
+                                  :mounted? true
                                   :generation gen
                                   :ticker-pids (start-tickers (get spec :ticks) gen)
                                   ; carry the idle watchdog + Conn across the swap (same socket,
