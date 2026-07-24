@@ -37,9 +37,33 @@
     "'"
     "&#39;"))
 
+; Attributes whose value is a URL — a `javascript:`/`vbscript:` value here executes script on
+; click/load, which escaping does NOT stop (the scheme survives escaping). `render` neutralizes
+; those schemes on these attributes; `data:`/`http(s)`/`mailto`/relative pass through (so a
+; legitimate `data:` image URL still works).
+(def *url-attrs* {:href true :src true :action true :formaction true :poster true :ping true})
+
+(defn url--scheme-noise? (c)
+  "True for a leading char a browser strips before parsing a URL scheme (whitespace/controls)."
+  (<= (char->int c) 32))
+
+(defn dangerous-url? (v)
+  "True if `v` is a URL whose scheme executes script (`javascript:` / `vbscript:`). Whitespace
+  and control characters are removed first and case ignored, since browsers strip them before
+  resolving the scheme (`  java\\tscript:…` is `javascript:`)."
+  (let (s (lower (join "" (filter (fn (c) (not (url--scheme-noise? c))) (string->list (str v))))))
+    (or (starts-with? s "javascript:") (starts-with? s "vbscript:"))))
+
+(defn safe-url (v)
+  "A URL safe to place in a URL attribute: a script-executing scheme (`javascript:`/`vbscript:`)
+  is neutralized to `\"#\"`, everything else is returned unchanged. Applied automatically to
+  `href`/`src`/`action`/… in `render`; use it explicitly for a URL in another context."
+  (if (dangerous-url? v) "#" v))
+
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.
-  Boolean `true` emits the bare attribute name; `false`/`nil` omits it."
+  Boolean `true` emits the bare attribute name; `false`/`nil` omits it. A URL attribute's
+  value is passed through `safe-url` first, so a `javascript:` value can't smuggle script."
   (let ([k v] kv
         n (name k))
     (cond
@@ -47,6 +71,7 @@
       (= v false) ""
       (nil? v) ""
       (vector? v) (str " " n "=\"" (escape-html (join " " (map str v))) "\"")
+      (contains? *url-attrs* k) (str " " n "=\"" (escape-html (str (safe-url v))) "\"")
       else (str " " n "=\"" (escape-html (str v)) "\""))))
 
 (defn render-attrs (attrs)

@@ -101,14 +101,18 @@
       (> (now) exp) {}
       else (dissoc data *exp-key*))))
 
+; A signed session's default absolute lifetime (seconds) when `:max-age` isn't configured.
+; The browser cookie still defaults to a session cookie (no Max-Age) — this bounds only the
+; SIGNED value's validity, so a captured cookie can't be replayed forever. 7 days.
+(def *default-max-age* 604800)
+
 (defn with-expiry (data opts)
-  "Stamp an absolute `__exp__` (now + `:max-age` seconds, in epoch-ms) into `data` when
-  `:max-age` is configured, so the signature itself carries the deadline; no `:max-age`
-  leaves `data` unchanged (no expiry)."
-  (let (max-age (get opts :max-age))
-    (if (nil? max-age)
-      data
-      (assoc data *exp-key* (+ (now) (* max-age 1000))))))
+  "Stamp an absolute `__exp__` (now + max-age seconds, in epoch-ms) into `data`, so the
+  signature itself carries a deadline. Uses `:max-age` when configured, else *default-max-age*
+  — a signed session ALWAYS expires, so a captured cookie is replayable only until `__exp__`,
+  not forever (`check-expiry` enforces it on decode)."
+  (let (max-age (get opts :max-age *default-max-age*))
+    (assoc data *exp-key* (+ (now) (* max-age 1000)))))
 
 (defn decode-payload (payload)
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
@@ -215,8 +219,14 @@
   so a token or value that may have leaked to an attacker *before* authentication is not
   carried over and honored *after* it (session/CSRF-fixation defense). In the stateless
   cookie model this can't retroactively invalidate a cookie the attacker already holds, but
-  it does stop a pre-auth token from remaining valid post-auth."
-  (assoc conn :session {} :session-changed? true))
+  it does stop a pre-auth token from remaining valid post-auth.
+
+  Identical to `clear-session` in the stateless cookie model — both blank the signed data;
+  there is no server-side session id to rotate — so it delegates to it; the distinct name
+  documents intent. NOTE: this also clears any CSRF token minted earlier in the request, so do
+  NOT render a form in the SAME response that rotates the session — its token would be nil and
+  the next POST would 403. The normal POST→redirect→GET flow re-mints the token on the GET."
+  (clear-session conn))
 
 ; ---- flash ----
 
