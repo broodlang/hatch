@@ -1,4 +1,11 @@
-(defmodule web-live-test (:use web/live) (:use web/template) (:use web/conn) (:use test))
+;; Reaches into web/live internals (ADR-146 `--` names: live--register/unregister,
+;; live--ws-path, recv-frame--loop) to test them directly — hence (:use-internals web/live).
+(defmodule web-live-test
+  (:use web/live)
+  (:use-internals web/live)
+  (:use web/template)
+  (:use web/conn)
+  (:use test))
 
 (defn client-js-conn ()
   (build {:method "GET" :path "/static/brood_live.js" :query "" :params {} :headers {} :body ""}))

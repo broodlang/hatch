@@ -1,5 +1,7 @@
 (defmodule web-presence-test
   (:use web/presence)
+  ; presence--* registry internals are module-private (ADR-146 `--` names); tested directly here
+  (:use-internals web/presence)
   (:use test))
 
 ;; Presence is process-level: a registry tracks {topic -> members} and pushes the roster to

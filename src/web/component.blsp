@@ -22,6 +22,9 @@
   ; deflive-component reuses both (called fully-qualified below) rather than
   ; duplicating them.
   (:alias web/live)
+  ; deflive--clause / deflive--clauses / deflive--render-expr / deflive--handle-event-body
+  ; are web/live internals (ADR-146 `--` names); reuse them here deliberately (see above)
+  (:use-internals web/live)
   ; render — lowers a component's Hiccup to an HTML string for its opaque parent slot
   (:use web/template)
   ; defbehaviour — LiveComponentModule
