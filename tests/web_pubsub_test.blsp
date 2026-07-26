@@ -121,7 +121,7 @@
   (test "a :sync request gets a ref-pinned reply"
     (let (r (ref))
       (send (pubsub) [:sync (self) r])
-      (assert= (receive ([:sync ~r] :ok) (after 1000 :timeout)) :ok)))
+      (assert= (receive ([:sync ^r] :ok) (after 1000 :timeout)) :ok)))
   (test "a broadcast queued before a sync is delivered by the time sync replies"
     ; enqueue a broadcast to ourselves, then a sync; the registry processes in order, so the
     ; [:info] is in our mailbox before the [:sync] reply
@@ -131,7 +131,7 @@
       (broadcast "sync:room" {:hi 1})
       (let (r (ref))
         (send (pubsub) [:sync (self) r])
-        (receive ([:sync ~r] :ok) (after 1000 :timeout)))
+        (receive ([:sync ^r] :ok) (after 1000 :timeout)))
       (unsubscribe "sync:room")
       ; the broadcast is already waiting, no further wait needed
       (assert= (receive ([:info m] m) (after 0 :none)) {:hi 1}))))

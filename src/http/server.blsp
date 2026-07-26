@@ -116,10 +116,10 @@
     (send listener [:drain (self)])
     (receive
       (:drained nil)
-      ([:down ~m _ _] nil))
+      ([:down ^m _ _] nil))
     (demonitor m)
     ; flush a late down
-    (receive ([:down ~m _ _] nil) (after 0 nil))
+    (receive ([:down ^m _ _] nil) (after 0 nil))
     nil))
 (defn stop (port)
   "Gracefully stop the HTTP server on `port`: the listener stops accepting, lets in-flight
@@ -161,7 +161,7 @@
 
 (defn listener--loop (lsock handler ws-handler config workers)
   (receive
-    ([:tcp-accept ~lsock client]
+    ([:tcp-accept ^lsock client]
       (if (>= (count workers) (get config :max-connections))
         (do
           ; over capacity — refuse without spawning a worker
@@ -224,7 +224,7 @@
   the accumulated size (→ 413)."
   (receive
     ; binary mode → `chunk` is a `bytes` value; bridge it to the byte-faithful carrier string.
-    ([:tcp ~sock chunk]
+    ([:tcp ^sock chunk]
       (let (piece (bytes->carrier chunk)
             got (+ got (string-length piece)))
         (cond
@@ -237,7 +237,7 @@
           else
             (worker--read-head sock handler ws-handler config
               (cons piece chunks) (tail3 (str carry piece)) got))))
-    ([:tcp-closed ~sock] nil)
+    ([:tcp-closed ^sock] nil)
     (after (get config :read-timeout-ms)
       (do
         (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
@@ -320,9 +320,9 @@
     ; With the head complete and every incomplete-body case routed above, this is only reached
     ; with a complete request; keep the incomplete recursion as a safety net.
     ([:incomplete] (receive
-                     ([:tcp ~sock chunk] (worker--run sock handler ws-handler config
+                     ([:tcp ^sock chunk] (worker--run sock handler ws-handler config
                                            (str buf (bytes->carrier chunk))))
-                     ([:tcp-closed ~sock] nil)
+                     ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
                        (do
                          (tcp-send sock
@@ -405,10 +405,10 @@
           request (assoc head :body body))
       (dispatch-buffered sock handler ws-handler config request remainder))
     (receive
-      ([:tcp ~sock chunk]
+      ([:tcp ^sock chunk]
         (buffered--drain sock handler ws-handler config head
           (cons (bytes->carrier chunk) chunks) (+ got (count chunk)) clen))
-      ([:tcp-closed ~sock] nil)
+      ([:tcp-closed ^sock] nil)
       (after (get config :read-timeout-ms)
         (do
           (tcp-send sock
@@ -444,10 +444,10 @@
           (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
           (tcp-close sock))
         (receive
-          ([:tcp ~sock chunk]
+          ([:tcp ^sock chunk]
             (chunked--drain sock handler ws-handler config head
               (str tail (bytes->carrier chunk)) decoded dlen))
-          ([:tcp-closed ~sock] nil)
+          ([:tcp-closed ^sock] nil)
           (after (get config :read-timeout-ms)
             (do
               (tcp-send sock
@@ -497,13 +497,13 @@
   (if (>= written clen)
     (spool--dispatch sock handler config head path clen)
     (receive
-      ([:tcp ~sock chunk]
+      ([:tcp ^sock chunk]
         (let (n (count chunk)
               take (min n (- clen written))
               piece (if (= take n) chunk (subbytes chunk 0 take)))
           (spool--append path piece)
           (spool--drain sock handler ws-handler config head path (+ written take) clen)))
-      ([:tcp-closed ~sock] (do (spool--cleanup path) nil))
+      ([:tcp-closed ^sock] (do (spool--cleanup path) nil))
       (after (get config :read-timeout-ms)
         (do
           (spool--cleanup path)

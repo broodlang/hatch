@@ -115,7 +115,7 @@
 
 (defn deps-merge (a b)
   "Combine two dependency results — `:all` (opaque) dominates; otherwise concatenate keys."
-  (if (or (= a :all) (= b :all)) :all (concat a b)))
+  (if (or (= a :all) (= b :all)) :all (append a b)))
 
 (defn deps-seq (forms model-sym)
   "Merge the dependencies of every form in `forms`."

@@ -276,12 +276,12 @@
     (receive
       ; Binary-mode socket (see http/server's pre-101 tcp-set-binary): `chunk` is a first-class
       ; `bytes` value — the parser reads it directly.
-      ([:tcp ~sock chunk]
+      ([:tcp ^sock chunk]
         (if (nil? need)
           (recv-frame--loop sock (bytes-concat buf chunk))
           (recv-frame--fill sock buf (cons chunk pieces) (+ got (count chunk)) need)))
-      ([:tcp-closed ~sock] [:closed])
-      ([:ws-send ~sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
+      ([:tcp-closed ^sock] [:closed])
+      ([:ws-send ^sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
                                 (recv-frame--fill sock buf pieces got need)
                                 [:closed]))
       ([:tick key gen] [:tick key gen (bytes-concat buf (reverse pieces))])
@@ -623,7 +623,7 @@
     (when reg
       (let (r (ref))
         (send reg [:sync (self) r])
-        (receive ([:sync ~r] :ok) (after 200 :ok))))))
+        (receive ([:sync ^r] :ok) (after 200 :ok))))))
 
 (defn drain-oob ()
   "Discard out-of-band messages (PubSub/Presence broadcasts, component updates) already queued
@@ -991,7 +991,7 @@
         r (ref))
     (send registry [:get path (self) r])
     (receive
-      ([:entry ~r e] e)
+      ([:entry ^r e] e)
       (after 1000 nil))))
 
 (defn live--ws-path (req-path)
@@ -1068,7 +1068,7 @@
                      on-clauses))
     (cons 'match
       (cons 'event--name
-        (concat (map (fn (arm)
+        (append (map (fn (arm)
                        (let (ev-name (first arm)
                              args (first (rest arm))
                              body (first (rest (rest arm))))
@@ -1171,7 +1171,7 @@
                     tick-clauses)
         handle-tick-body (cons 'match
                            (cons 'tick--key
-                             (concat tick-arms (list (list '_ 'tick--model)))))
+                             (append tick-arms (list (list '_ 'tick--model)))))
         ; render comes from an inline (render …) clause or, failing that, a
         ; (template "file.bml") clause compiled to Hiccup here at expansion time.
         ; If compiling the template throws (a missing file, or a BML syntax error),

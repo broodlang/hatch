@@ -112,8 +112,8 @@
 (defn allow-header (methods)
   "The `Allow` header value for a path serving `methods`: the declared methods, plus
   `HEAD` wherever `GET` is served, plus `OPTIONS` (which we answer automatically)."
-  (let (with-head (if (mem? "GET" methods) (concat methods (list "HEAD")) methods))
-    (join ", " (dedupe (concat with-head (list "OPTIONS"))))))
+  (let (with-head (if (mem? "GET" methods) (append methods (list "HEAD")) methods))
+    (join ", " (dedupe (append with-head (list "OPTIONS"))))))
 
 (defn dispatch--no-match (routes conn method segments)
   "No route matched the method+path. If the path exists for other methods, answer 405
@@ -189,7 +189,7 @@
 
 (defn compile-routes (clauses ctx)
   "Flatten `clauses` into a list of `{:route :setup}` maps under context `ctx`."
-  (apply concat (map (fn (c) (compile-clause c ctx)) clauses)))
+  (apply append (map (fn (c) (compile-clause c ctx)) clauses)))
 
 (defn compile-clause (clause ctx)
   (let (head (first clause))
@@ -200,7 +200,7 @@
       ; (through plugs & clauses): run the enclosed routes behind `plugs`. Composes
       ; with any outer `through` — outer plugs run first.
       (= head 'through) (compile-routes (rest (rest clause))
-                          (assoc ctx :plugs (concat (get ctx :plugs) (list (first (rest clause))))))
+                          (assoc ctx :plugs (append (get ctx :plugs) (list (first (rest clause))))))
       ; leaves
       (= head 'live) (list (with-plugs (compile-live clause (get ctx :session)) ctx))
       else (list (with-plugs (compile-route clause) ctx)))))
@@ -245,7 +245,7 @@
 
 (defn with-plugs (compiled ctx)
   "If `ctx` carries `through` plugs, wrap the route's handler so they run first
-  (`through-handler`); nested groups compose into one `(concat …)` plug list."
+  (`through-handler`); nested groups compose into one `(append …)` plug list."
   (let (plugs (get ctx :plugs))
     (if (empty? plugs)
       compiled
@@ -254,7 +254,7 @@
           :route (list (nth route 0)
                    (nth route 1)
                    (nth route 2)
-                   (list 'web/router/through-handler (cons 'concat plugs) (nth route 3))))))))
+                   (list 'web/router/through-handler (cons 'append plugs) (nth route 3))))))))
 
 ; ---- defrouter macro ----
 
@@ -311,7 +311,7 @@
   live-session (socket side) — neither the mount nor live-navigation can skip auth."
   (let (compiled (compile-routes routes empty-route-ctx)
         route-forms (map (fn (clause) (get clause :route)) compiled)
-        setup-forms (apply concat (map (fn (clause) (or (get clause :setup) (list))) compiled))
+        setup-forms (apply append (map (fn (clause) (or (get clause :setup) (list))) compiled))
         ; Build the route table ONCE at load, not on every request. Previously the
         ; `(make-route …)` calls sat in the router body, so `parse-pattern` re-split and
         ; re-allocated every pattern per request; hoisting them to a module-level def
@@ -320,7 +320,7 @@
         ; reusing the built plug across requests is correct and cheaper.)
         routes-sym (symbol (str (name router-name) "--routes")))
     (cons 'do
-      (concat setup-forms
+      (append setup-forms
         (list
           (list 'def routes-sym (cons 'list route-forms))
           (list 'defn router-name (list 'conn) (list 'dispatch routes-sym 'conn)))))))

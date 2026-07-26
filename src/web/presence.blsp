@@ -88,7 +88,7 @@
     ; local state so the backup is whole again, and re-watch the fresh vault — the durability
     ; web/live's route registry has (a vault restart then a registry restart would otherwise
     ; recover empty rosters). Matched by the vault's ref, ahead of the session-down clause.
-    ([:down ~vault-ref _ _] (do
+    ([:down ^vault-ref _ _] (do
                               (await vault-name 60)
                               (mirror vault-name state)
                               (presence--loop state refs remotes (presence--watch-vault))))
@@ -193,11 +193,11 @@
 
 (defn presence--remote-roster (remotes topic)
   "The concatenation of every peer's last-reported roster for `topic`."
-  (apply concat (map (fn (kv) (get (first (rest kv)) topic (list))) (entries remotes))))
+  (apply append (map (fn (kv) (get (first (rest kv)) topic (list))) (entries remotes))))
 
 (defn presence--merged (state remotes topic)
   "The full roster for `topic`: this node's local presences plus every peer's reported roster."
-  (concat (presence--roster state topic) (presence--remote-roster remotes topic)))
+  (append (presence--roster state topic) (presence--remote-roster remotes topic)))
 
 (defn presence--notify-merged (state remotes topic)
   "Push the merged `topic` roster to every LOCAL member present on it. Remote members are
@@ -242,7 +242,7 @@
 (defn presence--all-pids (state)
   "Every distinct tracked pid across all topics, as a set — for re-monitoring on recovery
   (already distinct, no O(n²) `member?` dedupe pass); `presence--boot` folds over it."
-  (set/set (apply concat
+  (set/set (apply append
              (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
 
 (defn presence ()
@@ -280,5 +280,5 @@
   (let (rf (ref))
     (send (presence) [:list topic (self) rf])
     (receive
-      ([:list ~rf roster] roster)
+      ([:list ^rf roster] roster)
       (after 1000 (list)))))
