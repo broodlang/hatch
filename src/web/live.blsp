@@ -66,7 +66,7 @@
 (defimpl Encode :string (encode [s] (json-str s)))
 (defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
 (defimpl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :map (encode [m] (str "{" (join "," (map encode--entry (entries m))) "}")))
+(defimpl Encode :map (encode [m] (str "{" (join "," (map encode--entry (map-pairs m))) "}")))
 ; keywords, symbols, …
 (defimpl Encode :default (encode [v] (json-str (str v))))
 (defn encode--entry (kv)
@@ -890,7 +890,7 @@
     ([:down _ _ _] (live--await :hatch-live-routes-vault 60)
       (let (v (whereis :hatch-live-routes-vault))
         (when v
-          (dolist (kv (entries table)) (send v [:put (first kv) (second kv)]))
+          (dolist (kv (map-pairs table)) (send v [:put (first kv) (second kv)]))
           (monitor v)))
       (live--routes-loop table))))
 

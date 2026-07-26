@@ -76,7 +76,7 @@
 
 (defn render-attrs (attrs)
   "Serialize an attribute map to an HTML attribute string."
-  (join "" (map render-attr (entries attrs))))
+  (join "" (map render-attr (map-pairs attrs))))
 
 (defn render (node)
   "Render a Hiccup node to an HTML string.

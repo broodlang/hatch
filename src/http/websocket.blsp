@@ -73,7 +73,7 @@
   "True if the HTTP request is a WebSocket upgrade."
   (let (conn (lower (get-in request [:headers :connection] ""))
         upg (lower (get-in request [:headers :upgrade] "")))
-    (and (string-contains? conn "upgrade")
+    (and (includes? conn "upgrade")
       (= upg "websocket"))))
 
 (defn origin-host (origin)

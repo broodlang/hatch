@@ -139,7 +139,7 @@
   (cond
     (map? v) (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
                {}
-               (entries v))
+               (map-pairs v))
     (vector? v) (into [] (map stringify-keys v))
     else v))
 
