@@ -325,4 +325,4 @@
                   lines))
     (fold (fn (m kv) (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
       {}
-      (entries grouped))))
+      (map-pairs grouped))))

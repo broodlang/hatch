@@ -55,7 +55,7 @@
                        " "
                        (status-text status)
                        "\r\n"
-                       (join "" (map format-header (entries headers)))
+                       (join "" (map format-header (map-pairs headers)))
                        "\r\n"))
       ; Return an ADR-139 iolist: `tcp-send` flattens `[head, body]` straight onto the
       ; socket with no monolithic combined buffer. Leaves are `bytes` (already UTF-8), so a

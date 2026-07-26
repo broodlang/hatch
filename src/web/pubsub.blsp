@@ -132,7 +132,7 @@
 
 (defn pubsub--subscribed? (subs pid)
   "True if `pid` is still subscribed to any topic (O(log n) per topic set)."
-  (not (empty? (filter (fn (kv) (contains? (first (rest kv)) pid)) (entries subs)))))
+  (not (empty? (filter (fn (kv) (contains? (first (rest kv)) pid)) (map-pairs subs)))))
 
 (defn pubsub--drop-ref (refs pid)
   "Demonitor `pid` (its last subscription is gone) and drop its ref."
@@ -157,12 +157,12 @@
           (let (remaining (set/disj (first (rest kv)) pid))
             (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
-    (entries subs)))
+    (map-pairs subs)))
 
 (defn pubsub--all-pids (subs)
   "Every distinct subscriber pid across all topics, as a set — for re-monitoring on recovery
   (the union of every topic's subscriber set; already distinct, no dedupe pass)."
-  (fold (fn (acc kv) (set/union acc (first (rest kv)))) #{} (entries subs)))
+  (fold (fn (acc kv) (set/union acc (first (rest kv)))) #{} (map-pairs subs)))
 
 (defn pubsub ()
   "The PubSub registry pid — a supervised, vault-backed singleton. Started on first use and

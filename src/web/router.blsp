@@ -168,7 +168,7 @@
     (let (segs (path-segments path))
       (if (empty? segs)
         "Home"
-        (join " " (map string-capitalize segs))))))
+        (join " " (map capitalize segs))))))
 
 (defn plist-get (plist key)
   "Look `key` up in a flat keyword/value list `(:a 1 :b 2)`; nil if absent."

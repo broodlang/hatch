@@ -160,19 +160,19 @@
           (let (remaining (presence--without (first (rest kv)) pid))
             (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
-    (entries state)))
+    (map-pairs state)))
 
 (defn presence--has-pid? (entries pid)
   (not (empty? (filter (fn (e) (= (get e :pid) pid)) entries))))
 
 (defn presence--known? (state pid)
   "True if `pid` is tracked on any topic — used to monitor each session just once."
-  (not (empty? (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (entries state)))))
+  (not (empty? (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (map-pairs state)))))
 
 (defn presence--topics-of (state pid)
   "The topics `pid` is tracked on (so a death only refreshes those)."
   (map (fn (kv) (first kv))
-    (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (entries state))))
+    (filter (fn (kv) (presence--has-pid? (first (rest kv)) pid)) (map-pairs state))))
 
 (defn presence--roster (state topic)
   "The public roster for `topic`: a list of {:key :meta} (pids dropped)."
@@ -193,7 +193,7 @@
 
 (defn presence--remote-roster (remotes topic)
   "The concatenation of every peer's last-reported roster for `topic`."
-  (apply append (map (fn (kv) (get (first (rest kv)) topic (list))) (entries remotes))))
+  (apply append (map (fn (kv) (get (first (rest kv)) topic (list))) (map-pairs remotes))))
 
 (defn presence--merged (state remotes topic)
   "The full roster for `topic`: this node's local presences plus every peer's reported roster."
@@ -221,7 +221,7 @@
   "Send this node's full local rosters (every topic) to `target-node` — the one-time bootstrap
   when a peer is first seen, so it learns our already-tracked presences."
   (let (me (node-name))
-    (dolist (kv (entries state))
+    (dolist (kv (map-pairs state))
       (presence--sync-to target-node me (first kv) (presence--roster state (first kv))))))
 
 (defn presence--record-remote (remotes from topic roster)
@@ -237,13 +237,13 @@
 (defn presence--remote-topics-of (remotes node)
   "The topics a departed `node` had presences on (so a node-down only refreshes those)."
   (let (rr (get remotes node {}))
-    (map (fn (kv) (first kv)) (entries rr))))
+    (map (fn (kv) (first kv)) (map-pairs rr))))
 
 (defn presence--all-pids (state)
   "Every distinct tracked pid across all topics, as a set — for re-monitoring on recovery
   (already distinct, no O(n²) `member?` dedupe pass); `presence--boot` folds over it."
   (set/set (apply append
-             (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (entries state)))))
+             (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (map-pairs state)))))
 
 (defn presence ()
   "The presence registry pid — a supervised, vault-backed singleton. Started on first use
