@@ -29,7 +29,7 @@
   (:use web/registry)
   ; set/union — subscriber sets are first-class #{} sets (ADR-060), O(log n)
   ; add/remove/membership vs the old O(n) list scans on the subscribe/DOWN churn.
-  ; (`conj`/`disj` need no alias: they are polymorphic prelude fns — ADR-155.)
+  ; (`conj`/`disj` need no alias: they are polymorphic prelude fns — ADR-156.)
   (:alias set))
 
 (def vault-name :hatch-pubsub-vault)
