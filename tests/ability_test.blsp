@@ -1,0 +1,21 @@
+(defmodule ability-test (:use ability) (:use test))
+
+(defability Shout
+  "Shout a value."
+  (shout [v] :-> string))
+
+(impl Shout :int (shout [n] (str "INT:" n)))
+(impl Shout :string (shout [s] (upper s)))
+(impl Shout :default (shout [v] "?"))
+
+(describe "ability dispatch"
+  (test "dispatches on the first argument's runtime type"
+    (is (= (shout 7) "INT:7"))
+    (is (= (shout "hi") "HI")))
+  (test "falls back to the :default impl"
+    (is (= (shout :kw) "?")))
+  (test "is open — a new type can be added after the fact"
+    (impl Shout :vector (shout [v] (str "VEC:" (count v))))
+    (is (= (shout [1 2 3]) "VEC:3")))
+  (test "the ability descriptor is introspectable (the type-checker / LSP hook)"
+    (is (= (first (first (ability/ability-ops 'Shout))) 'shout))))
