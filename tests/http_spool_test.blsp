@@ -34,8 +34,8 @@
 
 (defn drain (sock acc)
   (receive
-    ([:tcp ~sock chunk] (drain sock (str acc (utf8-bytes->string chunk))))
-    ([:tcp-closed ~sock] acc)
+    ([:tcp ^sock chunk] (drain sock (str acc (utf8-bytes->string chunk))))
+    ([:tcp-closed ^sock] acc)
     (after 1500 acc)))
 
 ; a 20-byte body with 0xFF (invalid UTF-8) + CRLFs — proof the spool path is byte-faithful

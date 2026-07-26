@@ -75,12 +75,12 @@
   flush the last line, log, and stop (a dead watcher is usually a config error — restart to
   retry)."
   (receive
-    ([:proc ~handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
-    ([:proc-err ~handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
+    ([:proc ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
+    ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:stop] (do
                (try (proc-close handle) (catch _ nil))
                (log/log-info (str "[assets] stopped watching: " label))))
-    ([:proc-closed ~handle code] (do
+    ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
                                    (log/log-warn (str "[assets] watcher exited (code " code "): " label))))))
 

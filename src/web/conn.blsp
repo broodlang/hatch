@@ -167,7 +167,7 @@
   `:secure` (default false). Multiple cookies accumulate — each becomes its own header
   line (see http/response). The caller is responsible for any value encoding."
   (assoc conn
-    :resp-cookies (concat (get conn :resp-cookies (list))
+    :resp-cookies (append (get conn :resp-cookies (list))
                     (list (format-set-cookie name value opts)))))
 
 (defn delete-cookie (conn name &optional (opts {}))
@@ -209,7 +209,7 @@
   `conn->response`. Callbacks run in registration order. This is how a plug writes a value
   computed from the *finished* conn — e.g. the session/flash cookie, set after the handler
   has mutated the session (mirrors Plug's `register_before_send`)."
-  (assoc conn :before-send (concat (get conn :before-send (list)) (list f))))
+  (assoc conn :before-send (append (get conn :before-send (list)) (list f))))
 
 (defn run-before-send (conn)
   "Run the conn's registered before-send callbacks left-to-right, threading the conn."

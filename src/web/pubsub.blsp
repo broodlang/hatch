@@ -86,7 +86,7 @@
     ; durability web/live's route registry has. Without it, a vault restart (empty) followed by
     ; a registry restart before the next mirror would recover an empty table. Matched by the
     ; vault's ref, ahead of the subscriber-down clause below (receive is first-match).
-    ([:down ~vault-ref _ _] (do
+    ([:down ^vault-ref _ _] (do
                               (await vault-name 60)
                               (mirror vault-name subs)
                               (pubsub--loop subs refs (pubsub--watch-vault))))
@@ -214,5 +214,5 @@
   (let (r (ref))
     (send (pubsub) [:subscribers topic (self) r])
     (receive
-      ([:subscribers ~r pids] pids)
+      ([:subscribers ^r pids] pids)
       (after 1000 (list)))))

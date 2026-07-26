@@ -78,8 +78,8 @@
 (defn drain-bytes (sock acc)
   "Collect all response bytes until the server closes the connection."
   (receive
-    ([:tcp ~sock chunk] (drain-bytes sock (bytes-concat acc chunk)))
-    ([:tcp-closed ~sock] acc)
+    ([:tcp ^sock chunk] (drain-bytes sock (bytes-concat acc chunk)))
+    ([:tcp-closed ^sock] acc)
     (after 1500 acc)))
 
 (defn static-handler (dir)

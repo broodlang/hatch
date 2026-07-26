@@ -34,8 +34,8 @@
     ([:ok _opcode payload _rem] payload)
     ([:incomplete] (receive
                      ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
-                     ([:tcp ~sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
-                     ([:tcp-closed ~sock] :closed)
+                     ([:tcp ^sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
+                     ([:tcp-closed ^sock] :closed)
                      (after 2000 :timeout)))
     ([:error _m] :error)))
 
@@ -50,7 +50,7 @@
   (if (includes? buf "\r\n\r\n")
     buf
     (receive
-      ([:tcp ~sock chunk] (await-101 sock (str buf chunk)))
+      ([:tcp ^sock chunk] (await-101 sock (str buf chunk)))
       (after 2000 :timeout))))
 
 (defn ws-client-connect (port)
@@ -103,8 +103,8 @@
   "Collect everything `sock` sends until it goes idle (keep-alive leaves it open), so a
   test can assert on the whole response — headers and body."
   (receive
-    ([:tcp ~sock chunk] (drain sock (str buf chunk)))
-    ([:tcp-closed ~sock] buf)
+    ([:tcp ^sock chunk] (drain sock (str buf chunk)))
+    ([:tcp-closed ^sock] buf)
     (after 400 buf)))
 
 (defn get-response (port path)

@@ -91,7 +91,7 @@
   big-endian length, the 4-byte mask, then payload XORed with key[i%4]."
   (let (n (count payload-vals)
         masked (map (fn (i) (bit-xor (nth payload-vals i) (nth key (mod i 4)))) (range n)))
-    (bytes (concat [(+ 128 opcode) (+ 128 126) (quot n 256) (mod n 256)] key masked))))
+    (bytes (append [(+ 128 opcode) (+ 128 126) (quot n 256) (mod n 256)] key masked))))
 
 (defn feed-tcp (sock frame chunk)
   "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
