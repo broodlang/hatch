@@ -1,4 +1,4 @@
-; defprotocol / defimpl
+; defability / impl (value dispatch, ability)
 (defmodule web/live
   "LiveBrood: per-session WebSocket actor + deflive macro."
   (:use http/websocket)
@@ -10,6 +10,8 @@
   ; build — a read-only Conn from the WS upgrade request, for on-mount-guard
   (:use web/conn)
   (:use protocol)
+  ; defability Encode / impl — value dispatch for JSON wire encoding (ability, ADR)
+  (:use ability)
   ; apply-update / dispatch-event — this module's own session runtime calls these
   ; fully-qualified (web/component/…); declaring the dependency here — rather than
   ; relying entirely on deflive-expanded consumers to have loaded it — means it
@@ -25,7 +27,7 @@
   (:alias telemetry))
 ; ---- JSON encode via the Encode protocol -----------------------------------
 ; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
-; type has its own impl, and an app can add `(defimpl Encode :instant …)` for its
+; type has its own impl, and an app can add `(impl Encode :instant …)` for its
 ; own types without touching the framework. `encode` dispatches on the value's type.
 
 (def *json-hex* "0123456789abcdef")
@@ -55,20 +57,20 @@
       (range 32))
     "\""))
 
-(defprotocol Encode
+(defability Encode
   "JSON-encode a value to its wire string."
   (encode [v] :-> string))
 
-(defimpl Encode :nil (encode [_] "null"))
-(defimpl Encode :bool (encode [b] (if b "true" "false")))
-(defimpl Encode :int (encode [n] (str n)))
-(defimpl Encode :float (encode [n] (str n)))
-(defimpl Encode :string (encode [s] (json-str s)))
-(defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :map (encode [m] (str "{" (join "," (map encode--entry (map-pairs m))) "}")))
+(impl Encode :nil (encode [_] "null"))
+(impl Encode :bool (encode [b] (if b "true" "false")))
+(impl Encode :int (encode [n] (str n)))
+(impl Encode :float (encode [n] (str n)))
+(impl Encode :string (encode [s] (json-str s)))
+(impl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
+(impl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
+(impl Encode :map (encode [m] (str "{" (join "," (map encode--entry (map-pairs m))) "}")))
 ; keywords, symbols, …
-(defimpl Encode :default (encode [v] (json-str (str v))))
+(impl Encode :default (encode [v] (json-str (str v))))
 (defn encode--entry (kv)
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (name k) (str k))) ":" (encode val))))
