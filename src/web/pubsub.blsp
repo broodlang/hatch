@@ -27,8 +27,9 @@
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
   (:use web/registry)
-  ; set/conj / set/disj / set/union — subscriber sets are first-class #{} sets (ADR-060),
-  ; O(log n) add/remove/membership vs the old O(n) list scans on the subscribe/DOWN churn
+  ; set/union — subscriber sets are first-class #{} sets (ADR-060), O(log n)
+  ; add/remove/membership vs the old O(n) list scans on the subscribe/DOWN churn.
+  ; (`conj`/`disj` need no alias: they are polymorphic prelude fns — ADR-155.)
   (:alias set))
 
 (def vault-name :hatch-pubsub-vault)
@@ -142,19 +143,19 @@
 
 (defn pubsub--add (subs topic pid)
   "Add `pid` to `topic`'s subscriber set (idempotent — set membership dedupes)."
-  (assoc subs topic (set/conj (get subs topic #{}) pid)))
+  (assoc subs topic (conj (get subs topic #{}) pid)))
 
 (defn pubsub--remove (subs topic pid)
   "Remove `pid` from `topic`'s subscriber set, dropping the topic key entirely once it has
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
-  (let (remaining (set/disj (get subs topic #{}) pid))
+  (let (remaining (disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 
 (defn pubsub--remove-pid (subs pid)
   "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are
   dropped (not left as dead keys)."
   (fold (fn (m kv)
-          (let (remaining (set/disj (first (rest kv)) pid))
+          (let (remaining (disj (first (rest kv)) pid))
             (if (empty? remaining) m (assoc m (first kv) remaining))))
     {}
     (map-pairs subs)))
