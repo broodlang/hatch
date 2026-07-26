@@ -1,8 +1,6 @@
 (defmodule web-change-tracking-test
   ; deflive + live-spec + recompute-dynamics / slot-dirty?
   (:use web/live)
-  (:use web/parts)
-  (:use web/test)
   (:use test))
 
 ;; A view with two independent dynamic slots: a heading bound to :title and a counter bound
