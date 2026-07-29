@@ -11,7 +11,6 @@
   (:use web/conn)
   (:use protocol)
   ; defability Encode / impl — value dispatch for JSON wire encoding (ability, ADR)
-  (:use ability)
   ; apply-update / dispatch-event — this module's own session runtime calls these
   ; fully-qualified (web/component/…); declaring the dependency here — rather than
   ; relying entirely on deflive-expanded consumers to have loaded it — means it
