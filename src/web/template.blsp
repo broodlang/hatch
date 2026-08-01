@@ -17,13 +17,28 @@
    :track true
    :wbr true})
 
+;; A raw node is a RECORD, not a `{:__raw__ …}` map. `raw?` gates HTML escaping, so a
+;; shape test is a hole: any map that happens to carry a `:__raw__` key — an app's own
+;; model, a decoded JSON body — reached `render` as trusted, pre-escaped HTML. An identity
+;; cannot be forged. It also stops the representation leaking: `web/bml` used to hand-build
+;; the same literal map, so changing it here would silently break raw-text elements there.
+(defrecord raw-node (html))
+
 (defn raw (html)
   "Wrap a pre-built HTML string to bypass escaping in `render`."
-  {:__raw__ html})
+  (raw-node html))
 
 (defn raw? (v)
-  "True if `v` was produced by `raw`."
-  (and (map? v) (contains? v :__raw__)))
+  "True if `v` was produced by `raw` — by identity, not by shape."
+  (and (record? v) (= (record-id v) :web/template/raw-node)))
+
+;; So a raw node in a log line or a REPL result reads as what it is, rather than printing
+;; the wrapper map around it.
+(impl Display
+  web/template/raw-node (to-str [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+
+(impl Inspect
+  web/template/raw-node (inspect [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (defn escape-html (s)
   "Escape HTML special characters: & < > \" '."
@@ -78,6 +93,22 @@
   "Serialize an attribute map to an HTML attribute string."
   (join "" (map render-attr (map-pairs attrs))))
 
+;; The seam for an app's OWN type in a template. `render`'s `else` used to escape
+;; `(str node)`, which for a record is its internal map — `{:__id__ :app/money, :cents 250}`
+;; escaped into the page. That is never what the caller wanted, and the only ways out were
+;; to pre-stringify at every call site or to edit this file. An `impl` is the third way.
+;;
+;; The provided body IS the old `else`, so every type without an impl renders exactly as it
+;; did before. Dispatch also stays off the hot path: the concrete node kinds below keep
+;; their direct `cond` branches, and only the fallback goes through the ability.
+;;
+;; An impl returns FINAL HTML and owns its own escaping — the same power `raw` has. Pass any
+;; interpolated user data through `escape-html`.
+(defability Renderable
+  (render-html [self] :-> string (escape-html (str self))))
+
+(impl Renderable web/template/raw-node (render-html [r] (raw-node-html r)))
+
 (defn render (node)
   "Render a Hiccup node to an HTML string.
 
@@ -86,17 +117,17 @@
   - string / number           → HTML-escaped text
   - `(raw s)`                 → `s` verbatim (no escaping)
   - `[:tag attrs & children]` → HTML element
-  - list of any of the above  → concatenated"
+  - list of any of the above  → concatenated
+  - anything else             → its `Renderable` impl, else HTML-escaped `str`"
   (cond
     (nil? node) ""
-    (raw? node) (get node :__raw__)
     (string? node) (escape-html node)
     (int? node) (str node)
     (float? node) (str node)
     (bool? node) ""
     (vector? node) (render--element node)
     (pair? node) (join "" (map render node))
-    else (escape-html (str node))))
+    else (render-html node)))
 
 (defn render--element (node)
   (let (tag (first node)

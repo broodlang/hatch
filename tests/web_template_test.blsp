@@ -16,7 +16,35 @@
   (test "raw? predicate"
     (assert= (raw? (raw "x")) true))
   (test "plain string is not raw"
-    (assert= (raw? "x") false)))
+    (assert= (raw? "x") false))
+  (test "a look-alike map does NOT bypass escaping"
+    ;; raw is identified by record identity, so a map that merely carries the wrapper key
+    ;; (an app model, a decoded JSON body) is ordinary data and gets escaped.
+    (is (not (raw? {:__raw__ "<script>alert(1)</script>"})))
+    (is (includes? (render {:__raw__ "<script>alert(1)</script>"}) "&lt;script&gt;")))
+  (test "a raw node prints as itself, not as its wrapper"
+    (assert= (to-str (raw "<b>")) "#<raw \"<b>\">")))
+
+;; The extension seam: a type the framework has never heard of renders itself.
+(defrecord money (cents))
+
+(impl Renderable
+  web-template-test/money
+  (render-html [m] (str "<span class=\"money\">$" (quot (get m :cents) 100) "</span>")))
+
+(defrecord plain-thing (v))
+
+(describe "Renderable"
+  (test "a record with an impl renders as its own HTML"
+    (assert= (render (money 250)) "<span class=\"money\">$2</span>"))
+  (test "it composes inside an element and a list"
+    (assert= (render [:p "cost: " (money 500)])
+      "<p>cost: <span class=\"money\">$5</span></p>"))
+  (test "render-html is callable directly"
+    (assert= (render-html (money 100)) "<span class=\"money\">$1</span>"))
+  (test "a record with NO impl falls back to the escaped str, exactly as before"
+    ;; the provided default — unchanged behaviour for every type that has not opted in
+    (is (includes? (render (plain-thing "<x>")) "&lt;x&gt;"))))
 
 (describe "render: primitives"
   (test "nil is empty" (assert= (render nil) ""))

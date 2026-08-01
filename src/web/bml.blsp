@@ -34,8 +34,9 @@
   The parser is invoked at macro-expansion time; its only runtime dependency is
   web/template, from which it borrows the canonical void-element set."
   ; *void-tags* — the single source of truth for void elements, shared with the renderer
-  ; and the slot compiler so the three can never drift apart.
-  (:use web/template :only [*void-tags*]))
+  ; and the slot compiler so the three can never drift apart. `raw` builds the verbatim
+  ; child of a raw-text element (`<script>`/`<style>`).
+  (:use web/template :only [*void-tags* raw]))
 
 ; ---- void elements: no closing tag, no children ----
 ; The canonical set lives in web/template as `*void-tags*` (keyword keys). bml works with
@@ -308,7 +309,10 @@
 (defn raw-children (content)
   "The child list for a raw-text element: its content emitted verbatim (unescaped),
   or nil when empty."
-  (if (= content "") nil (list {:__raw__ content})))
+  ;; Build it through `raw` rather than hand-writing the wrapper: the representation is
+  ;; `web/template`'s to own, and a raw node is identified by identity now, so a literal
+  ;; map here would render as escaped text instead.
+  (if (= content "") nil (list (raw content))))
 
 (defn parse-raw-element (tag attrs directives after)
   "Parse the body of a raw-text element (`<script>`/`<style>`): everything up to the
