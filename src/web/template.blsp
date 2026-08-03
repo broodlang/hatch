@@ -24,13 +24,21 @@
 ;; the same literal map, so changing it here would silently break raw-text elements there.
 (defrecord raw-node (html))
 
+;; The record's id under whatever namespace this module actually loads as — bare
+;; `web/template` when hatch runs standalone, or `hatch/web/template` when hatch is a
+;; dependency (ADR-070 intra-package rooting). Captured from a sentinel instance at load
+;; so `raw?` compares against the real id in every context; a hardcoded `:web/template/…`
+;; keyword only matched the standalone case and silently made `raw?` false for every raw
+;; node once hatch was consumed as a package.
+(def raw-node-id (record-id (raw-node nil)))
+
 (defn raw (html)
   "Wrap a pre-built HTML string to bypass escaping in `render`."
   (raw-node html))
 
 (defn raw? (v)
   "True if `v` was produced by `raw` — by identity, not by shape."
-  (and (record? v) (= (record-id v) :web/template/raw-node)))
+  (and (record? v) (= (record-id v) raw-node-id)))
 
 ;; So a raw node in a log line or a REPL result reads as what it is, rather than printing
 ;; the wrapper map around it.
