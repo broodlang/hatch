@@ -23,8 +23,13 @@
   ; duplicating them.
   (:alias web/live)
   ; deflive--clause / deflive--clauses / deflive--render-expr / deflive--handle-event-body
-  ; are web/live internals (ADR-146 `--` names); reuse them here deliberately (see above)
-  (:use-internals web/live)
+  ; are web/live internals (ADR-146 `--` names); reuse them here deliberately (see above).
+  ; `:only` (not a refer-all) is required because web/live and web/component are mutually
+  ; dependent (web/live :alias web/component): a plain (:use-internals web/live) refers-all
+  ; into a still-loading web/live mid-cycle, which the loader rejects. A subset refer
+  ; resolves lazily and is cycle-safe.
+  (:use-internals web/live :only [deflive--clause deflive--clauses
+                                  deflive--render-expr deflive--handle-event-body])
   ; render — lowers a component's Hiccup to an HTML string for its opaque parent slot
   (:use web/template)
   ; defbehaviour — LiveComponentModule
