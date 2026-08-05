@@ -269,7 +269,7 @@
 (defn- presence-all-pids
   (state)
   "Every distinct tracked pid across all topics, as a set — for re-monitoring on recovery
-  (already distinct, no O(n²) `member?` dedupe pass); `presence--boot` folds over it."
+  (already distinct, no O(n²) `member?` dedupe pass); `presence-boot` folds over it."
   (set/set (apply append
              (map (fn (kv) (map (fn (e) (get e :pid)) (first (rest kv)))) (map-pairs state)))))
 

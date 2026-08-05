@@ -26,7 +26,7 @@
   case — same granularity (one opaque slot; a component doesn't yet get its own wire-level
   diff — v1 scope, see web/component's docstring) but a distinct compiled form so render-slot
   can thread the session's live component table through. Its change-tracking dependency is
-  always `:all` (see `deps-of`'s `live--components` case) — a component's own state can change
+  always `:all` (see `deps-of`'s `live-components` case) — a component's own state can change
   (via `web/component/send-update` or its own event) without any `model` key changing at all,
   so the slot must always be considered dirty; there's no way to pin it to specific keys.
 
@@ -84,7 +84,7 @@
   "The generated call for a `(component module assigns)` hole: resolves `module` to its
   `live-component-spec` thunk symbol at compile time — mirroring how web/router's
   compile-live resolves `module/live-spec` — and threads the session's live component
-  table (`live--components`, a free variable deflive's generated render-dynamic binds as
+  table (`live-components`, a free variable deflive's generated render-dynamic binds as
   an extra param) through to web/component/render-slot. Passes the quoted bare `module`
   symbol too, alongside the resolved spec-thunk: render-slot stores it next to a mounted
   component's state so a same-id-different-module collision can be detected by comparing
@@ -123,7 +123,7 @@
 
 (defn deps-of (form model-sym)
   "The model keys `form` reads, or `:all` for any opaque model use. See the section comment.
-  `live--components` (a component slot's free-variable reference to the session's live
+  `live-components` (a component slot's free-variable reference to the session's live
   component table — see `component-slot-form`) is always `:all`: a LiveComponent's own state
   can change via `web/component/send-update` or its own event handler without any `model` key
   changing, so a slot containing one can never be pinned to specific model keys — it must

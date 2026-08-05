@@ -20,7 +20,7 @@
   Cluster-aware: if the runtime is started as a distributed node (`node-start` plus
   `connect`/`ensure-link` to peers, wired once in the app's entry point), a broadcast fans
   out to subscribers on every connected node — each node keeps only its local subscribers and
-  a locally-published broadcast is replicated once per peer (see `pubsub--fanout-remote`).
+  a locally-published broadcast is replicated once per peer (see `pubsub-fanout-remote`).
   With no node started, `(nodes)` is empty and the replication is a no-op, so a single-node
   app behaves exactly as before."
   ; send-info — deliver a payload to a subscribed session

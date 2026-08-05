@@ -253,7 +253,7 @@
   ticker process posts a `[:tick]` (carrying the partial frame read so far, so the
   caller can resume reading after handling the tick).
 
-  Once the frame is incomplete but its size is known, `recv-frame--fill` gathers exactly the
+  Once the frame is incomplete but its size is known, `recv-frame-fill` gathers exactly the
   missing bytes into a list and joins once — O(n) — rather than re-`str`ing the whole buffer on
   every socket read (which was O(n²) up to the message-size cap)."
   (match (parse-frame buf)
@@ -270,11 +270,11 @@
 (defn- recv-frame-fill
   (sock buf pieces got need)
   "Gather socket reads (`bytes` `pieces`, newest-first; `got` bytes so far) until the current
-  frame's `need` more bytes are in hand, then `bytes-concat` once and re-enter `recv-frame--loop`.
+  frame's `need` more bytes are in hand, then `bytes-concat` once and re-enter `recv-frame-loop`.
   `need` nil means the frame isn't sized yet (header still arriving) — append one read and
   re-derive it (the header is tiny). The parser is bytes-native (ADR-141), so chunks accumulate
   as `bytes` with no carrier hop. The session-control messages are handled exactly as in
-  `recv-frame--loop` (keep the two in sync), carrying the bytes gathered so far so the caller
+  `recv-frame-loop` (keep the two in sync), carrying the bytes gathered so far so the caller
   can resume."
   (if (and (not (nil? need)) (>= got need))
     (recv-frame-loop sock (bytes-concat buf (reverse pieces)))
@@ -1204,7 +1204,7 @@
         render-args (first (rest render-clause))
         handle-body (deflive-handle-event-body on-clauses)
         ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
-        ; tick--model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
+        ; tick-model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
         tick-arms (map (fn (c)
                          (let (ms (first (rest c))
                                msym (first (first (rest (rest c))))
@@ -1246,7 +1246,7 @@
         ; `table`), which a `(component …)` hole (web/parts' component-form? case, or
         ; rewrite-components for a nested one) reads/writes via web/component/render-slot.
         ; Optional + defaulted so every existing view (no component holes) is unaffected —
-        ; only component holes ever reference `live--components`.
+        ; only component holes ever reference `live-components`.
         render-with-components-args (list (first render-dyn-args)
                                       '&optional
                                       (list 'live-components (list 'table)))
@@ -1278,7 +1278,7 @@
                     (first render-dyn-args)
                     nil)
         ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a
-        ; slot compiled from a `(component …)` hole references `live--components` as a free
+        ; slot compiled from a `(component …)` hole references `live-components` as a free
         ; variable (see web/parts' component-slot-form), so it must be bound as a parameter
         ; here too, exactly like render-dynamic itself.
         render-slots-defn (list 'def

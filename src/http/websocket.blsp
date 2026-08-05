@@ -299,7 +299,7 @@
   "Total byte length (header + payload) of the first WebSocket frame in `buf` once its length
   header is fully present, else nil — the header hasn't fully arrived (`buf` < 2, or < 4 for a
   16-bit length), or it's the unsupported 64-bit form (`parse-one-frame` raises on that anyway).
-  Mirrors `one-frame--sized`'s framing so a reader can gather exactly enough bytes for one frame
+  Mirrors `one-frame-sized`'s framing so a reader can gather exactly enough bytes for one frame
   in O(n) instead of re-scanning a growing buffer. Client frames are masked (+4 mask bytes)."
   (let (buflen (count buf))
     (if (< buflen 2)

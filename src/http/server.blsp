@@ -22,7 +22,7 @@
 ;                        hard-killing stragglers (stop first stops accepting new ones)
 ;   :tls               — nil (plaintext, default) or `{:cert <pem> :key <pem>}` to serve
 ;                        HTTPS/WSS: the listener terminates TLS (tls-listen) and accepted
-;                        sockets are transparent, so handlers/`worker--run` are unchanged
+;                        sockets are transparent, so handlers/`worker-run` are unchanged
 ;   :check-origin      — WebSocket upgrade Origin policy (CSWSH guard): true = same-origin
 ;                        only (default), false = allow any, or a list of allowed Origin
 ;                        header values (see websocket/origin-allowed?)
@@ -196,7 +196,7 @@
   (includes? buf "\r\n\r\n"))
 
 (defn tail3 (s)
-  "The last ≤3 characters of `s` — the overlap `worker--read-head` keeps between reads so a head
+  "The last ≤3 characters of `s` — the overlap `worker-read-head` keeps between reads so a head
   terminator split across a read boundary is still detected, without re-scanning the whole buffer."
   (let (n (string-length s))
     (if (<= n 3) s (substring s (- n 3) n))))
@@ -204,7 +204,7 @@
 (defn- worker-run
   (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head
-  in O(n) (`worker--read-head`), then hands off to `worker--dispatch`, which routes the body to
+  in O(n) (`worker-read-head`), then hands off to `worker-dispatch`, which routes the body to
   the spool / in-memory-drain / incremental-de-chunk path so no path re-buffers the body."
   (cond
     ; Request-size cap: a client streaming an unbounded request (or a huge body) would
