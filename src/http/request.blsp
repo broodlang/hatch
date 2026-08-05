@@ -198,7 +198,7 @@
     `[:ok body remainder]`  — the terminating 0-size chunk was reached; `body` is the joined
                               decoded bytes, `remainder` anything after the trailers.
     `[:more tail decoded dlen]` — need more bytes; `tail` is only the *undecoded* remainder (a
-                              partial chunk/size-line), so a streaming caller (server/chunked--drain)
+                              partial chunk/size-line), so a streaming caller (server/chunked-drain)
                               feeds the next read onto `tail` and resumes without re-scanning the
                               bytes already decoded — what makes streaming O(n).
     `[:error msg]`          — malformed framing.

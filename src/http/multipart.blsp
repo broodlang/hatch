@@ -29,7 +29,7 @@
 (defn split-parts (body delim)
   "The raw byte-segments between successive boundary delimiters. A real delimiter is
   `CRLF + \"--\" + boundary` (RFC 7578/2046); the first may sit at the body start (or after a
-  preamble). We find the first `--boundary`, then split on the CRLF-anchored `\r\n--boundary`,
+  preamble). We find the first `--boundary`, then split on the CRLF-anchored `\r\n-boundary`,
   so a bare `--boundary` occurring inside a part's binary content is not mistaken for a
   delimiter. The preamble and the closing `--boundary--` are naturally excluded."
   (let (first-at (bytes-index-of body delim 0))
@@ -60,7 +60,7 @@
 (defn part-trim (seg)
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
   body). The CRLF that precedes the next delimiter is already excluded from `seg` — it belongs
-  to the `\r\n--boundary` split delimiter — so only the leading CRLF is removed here."
+  to the `\r\n-boundary` split delimiter — so only the leading CRLF is removed here."
   (let (n (byte-length seg)
         start (if (crlf-at? seg 0) 2 0))
     (if (>= start n) (subbytes seg 0 0) (subbytes seg start n))))

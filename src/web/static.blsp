@@ -144,7 +144,7 @@
             tag))))))
 
 (defn cached-etag (path body)
-  "The cached strong ETag for a text file `body` at `path` (see `cached-etag--via`)."
+  "The cached strong ETag for a text file `body` at `path` (see `cached-etag-via`)."
   (cached-etag-via path (fn () (etag body))))
 
 (defn cached-bytes-etag (path body)

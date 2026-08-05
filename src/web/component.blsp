@@ -17,12 +17,12 @@
   state change re-sends that whole slot's HTML rather than a minimal patch. Independent
   wire-level component diffing is later work, the same 'coarser but correct' carve-out
   the roadmap already uses for `if`/`for`."
-  ; deflive--render-expr / deflive--handle-event-body — the macro-expansion deflive
+  ; deflive-render-expr / deflive-handle-event-body — the macro-expansion deflive
   ; already built for inline-vs-template render resolution and event-arm dispatch;
   ; deflive-component reuses both (called fully-qualified below) rather than
   ; duplicating them.
   (:alias web/live)
-  ; deflive--clause / deflive--clauses / deflive--render-expr / deflive--handle-event-body
+  ; deflive-clause / deflive-clauses / deflive-render-expr / deflive-handle-event-body
   ; are web/live internals (ADR-146 `--` names); reuse them here deliberately (see above).
   ; `:only` (not a refer-all) is required because web/live and web/component are mutually
   ; dependent (web/live :alias web/component): a plain (:use-internals web/live) refers-all
