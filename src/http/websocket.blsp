@@ -2,8 +2,7 @@
   "WebSocket (RFC 6455) handshake, frame encoder, and frame parser."
   (:use http/base64))
 
-(require 'hash)   ; the RFC 6455 accept-key is a SHA-1 of the client key + magic
-
+(require 'hash) ; the RFC 6455 accept-key is a SHA-1 of the client key + magic
 (def *ws-magic* "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
 
 ; Lookup table: position n holds the 1-char string for byte value n.
@@ -95,10 +94,12 @@
             unlisted Origin is rejected)."
   (cond
     (= policy false) true
-    (or (list? policy) (vector? policy)) (let (o (get-in request [:headers :origin]))
-                                           (if (nil? o) false (includes? policy o)))
-    else (let (o (get-in request [:headers :origin]))
-           (or (nil? o) (= (origin-host o) (get-in request [:headers :host]))))))
+    (or (list? policy) (vector? policy))
+      (let (o (get-in request [:headers :origin]))
+        (if (nil? o) false (includes? policy o)))
+    else
+      (let (o (get-in request [:headers :origin]))
+        (or (nil? o) (= (origin-host o) (get-in request [:headers :host]))))))
 
 ; ---- frame building (server → client, unmasked) ----
 
@@ -206,11 +207,22 @@
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
     ([:ok fin opcode payload rem] (cond
-                                    (not (= opcode 0)) [:error "websocket: expected continuation frame"]
-                                    (> (+ acclen (count payload)) maxm) [:error "websocket: message too large"]
-                                    (= fin 1) [:ok msg-opcode (bytes-concat (reverse (cons payload pieces))) rem]
-                                    else (reassemble rem msg-opcode (cons payload pieces)
-                                           (+ acclen (count payload)) maxf maxm)))))
+                                    (not (= opcode 0))
+                                      [:error "websocket: expected continuation frame"]
+                                    (> (+ acclen (count payload)) maxm)
+                                      [:error "websocket: message too large"]
+                                    (= fin 1)
+                                      [:ok
+                                        msg-opcode
+                                        (bytes-concat (reverse (cons payload pieces)))
+                                        rem]
+                                    else
+                                      (reassemble rem
+                                        msg-opcode
+                                        (cons payload pieces)
+                                        (+ acclen (count payload))
+                                        maxf
+                                        maxm)))))
 
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload
@@ -237,7 +249,7 @@
           (not (valid-opcode? opcode)) [:error "websocket: reserved opcode"]
           ; §5.5: control frames must not be fragmented (FIN must be 1).
           (and (control-opcode? opcode) (= fin 0)) [:error "websocket: fragmented control frame"]
-          else (one-frame--sized buf buflen fin opcode masked plen7 maxf))))))
+          else (one-frame-sized buf buflen fin opcode masked plen7 maxf))))))
 
 (defn control-opcode? (opcode)
   "True for a WebSocket control opcode (close 0x8, ping 0x9, pong 0xA). Control frames
@@ -249,24 +261,29 @@
   control opcodes close 0x8 / ping 0x9 / pong 0xA. Everything else is reserved."
   (includes? [0 1 2 8 9 10] opcode))
 
-(defn one-frame--sized (buf buflen fin opcode masked plen7 maxf)
+(defn- one-frame-sized
+  (buf buflen fin opcode masked plen7 maxf)
   (cond
     ; Control frames (close/ping/pong) must be ≤125 bytes — reject an extended length
     ; rather than let an oversized ping drive a huge unmask / overflow `pong-frame`.
-    (and (control-opcode? opcode) (>= plen7 126)) [:error "websocket: control frame too large (must be <= 125 bytes)"]
+    (and (control-opcode? opcode) (>= plen7 126))
+      [:error "websocket: control frame too large (must be <= 125 bytes)"]
     ; 16-bit extended length (ADR-140 bit-syntax: a big-endian u16 at offset 2)
-    (= plen7 126) (if (< buflen 4)
-                    [:incomplete]
-                    (let (plen (bytes-uint buf 2 2)
-                          hlen (if (= masked 1) 8 4))
-                      (one-frame--payload buf buflen fin opcode masked plen hlen maxf)))
+    (= plen7 126)
+      (if (< buflen 4)
+        [:incomplete]
+        (let (plen (bytes-uint buf 2 2)
+              hlen (if (= masked 1) 8 4))
+          (one-frame-payload buf buflen fin opcode masked plen hlen maxf)))
     ; 64-bit extended length — not supported (caps inbound frames at ~64 KB)
     (= plen7 127) [:error "websocket: 64-bit frame length not supported"]
     ; 7-bit length
-    else (let (hlen (if (= masked 1) 6 2))
-           (one-frame--payload buf buflen fin opcode masked plen7 hlen maxf))))
+    else
+      (let (hlen (if (= masked 1) 6 2))
+        (one-frame-payload buf buflen fin opcode masked plen7 hlen maxf))))
 
-(defn one-frame--payload (buf buflen fin opcode masked plen hlen maxf)
+(defn- one-frame-payload
+  (buf buflen fin opcode masked plen hlen maxf)
   (if (> plen maxf)
     [:error "websocket: frame too large"]
     (let (total (+ hlen plen))
@@ -303,10 +320,9 @@
   and the payload is built in one pass (a masked frame is the WS receive hot path; the old
   carrier-string form indexed with O(i) `char-at`, making this O(n²) — a cheap CPU DoS)."
   (let (key [(get buf key-offset)
-             (get buf (+ key-offset 1))
-             (get buf (+ key-offset 2))
-             (get buf (+ key-offset 3))]
+              (get buf (+ key-offset 1))
+              (get buf (+ key-offset 2))
+              (get buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (bytes
-      (map (fn (i) (bit-xor (get buf (+ data-start i)) (get key (mod i 4))))
-        (range plen)))))
+    (bytes (map (fn (i) (bit-xor (get buf (+ data-start i)) (get key (mod i 4))))
+             (range plen)))))

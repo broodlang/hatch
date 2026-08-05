@@ -78,7 +78,7 @@
   (test "remote-nodes is empty when the runtime isn't a distributed node"
     (assert= (remote-nodes) (list)))
   (test "pubsub--fanout-remote is a safe no-op with no peers"
-    (assert= (web/pubsub/pubsub--fanout-remote "room:noop" {:a 1}) nil))
+    (assert= (web/pubsub/pubsub-fanout-remote "room:noop" {:a 1}) nil))
   (test "a :remote-origin broadcast (as a peer replicates it) reaches local subscribers"
     (do
       (subscribe "room:xnode")
@@ -109,11 +109,11 @@
 (describe "pubsub--remove / pubsub--remove-pid drop emptied topics"
   ; subscriber collections are #{} sets (ADR-060)
   (test "removing the last subscriber drops the topic key"
-    (assert= (contains? (web/pubsub/pubsub--remove {"t" #{1}} "t" 1) "t") false))
+    (assert= (contains? (web/pubsub/pubsub-remove {"t" #{1}} "t" 1) "t") false))
   (test "removing one of several keeps the topic"
-    (assert= (web/pubsub/pubsub--remove {"t" #{1 2}} "t" 1) {"t" #{2}}))
+    (assert= (web/pubsub/pubsub-remove {"t" #{1 2}} "t" 1) {"t" #{2}}))
   (test "remove-pid drops the topics it empties and keeps the rest"
-    (assert= (web/pubsub/pubsub--remove-pid {"a" #{1} "b" #{1 2}} 1) {"b" #{2}})))
+    (assert= (web/pubsub/pubsub-remove-pid {"a" #{1} "b" #{1 2}} 1) {"b" #{2}})))
 
 ;; The [:sync …] barrier: a synchronous round-trip the registry answers only after processing
 ;; everything queued ahead of it (used by web/live to flush stale broadcasts on live-navigate).

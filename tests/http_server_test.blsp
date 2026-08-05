@@ -32,11 +32,12 @@
   or :timeout / :closed. Mirrors the live session's read loop, minus the dispatch."
   (match (parse-frame buf)
     ([:ok _opcode payload _rem] payload)
-    ([:incomplete] (receive
-                     ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
-                     ([:tcp ^sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
-                     ([:tcp-closed ^sock] :closed)
-                     (after 2000 :timeout)))
+    ([:incomplete]
+      (receive
+        ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
+        ([:tcp ^sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
+        ([:tcp-closed ^sock] :closed)
+        (after 2000 :timeout)))
     ([:error _m] :error)))
 
 (defn echo-one-frame (reporter)
@@ -59,9 +60,7 @@
   (let (sock (tcp-connect "127.0.0.1" port)
         _req (tcp-send sock
                (str "GET /ws HTTP/1.1\r\n"
-                 "Host: localhost\r\n"
-                 "Upgrade: websocket\r\n"
-                 "Connection: Upgrade\r\n"
+                 "Host: localhost\r\n" "Upgrade: websocket\r\n" "Connection: Upgrade\r\n"
                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
                  "Sec-WebSocket-Version: 13\r\n\r\n"))
         _ack (await-101 sock ""))
@@ -169,11 +168,13 @@
 (describe "Expect: 100-continue"
   (test "server sends an interim 100 before the body, then the final response"
     (let (port 54748
-          _sup (server/start port (fn (req) {:status 200 :headers {} :body (str "body=" (get req :body))}))
+          _sup (server/start port
+                 (fn (req) {:status 200 :headers {} :body (str "body=" (get req :body))}))
           sock (tcp-connect "127.0.0.1" port)
           ; send only the head (with Expect + Content-Length) — the body is withheld
-          _h (tcp-send sock (str "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
-                              "Expect: 100-continue\r\nConnection: close\r\n\r\n"))
+          _h (tcp-send sock
+               (str "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                 "Expect: 100-continue\r\nConnection: close\r\n\r\n"))
           interim (drain sock "")
           _b (tcp-send sock "hello")
           final (drain sock ""))

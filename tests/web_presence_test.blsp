@@ -143,21 +143,21 @@
 ;; pure merge logic and the single-node no-op.
 (describe "cross-node roster merge"
   (test "the merged roster is local presences plus every peer's reported roster"
-    (let (state (web/presence/presence--put {} "room" 1 "local-a" {})
+    (let (state (web/presence/presence-put {} "room" 1 "local-a" {})
           remotes {:nodeB {"room" (list {:key "remote-b" :meta {}})}
                    :nodeC {"room" (list {:key "remote-c" :meta {}})}}
-          keys (map (fn (e) (get e :key)) (web/presence/presence--merged state remotes "room")))
+          keys (map (fn (e) (get e :key)) (web/presence/presence-merged state remotes "room")))
       (assert= (member? "local-a" keys) true)
       (assert= (member? "remote-b" keys) true)
       (assert= (member? "remote-c" keys) true)
       (assert= (count keys) 3)))
   (test "a topic with only remote members still merges"
     (let (remotes {:nodeB {"room" (list {:key "b" :meta {}})}})
-      (assert= (map (fn (e) (get e :key)) (web/presence/presence--merged {} remotes "room"))
+      (assert= (map (fn (e) (get e :key)) (web/presence/presence-merged {} remotes "room"))
         (list "b"))))
   (test "remote-topics-of lists the topics a departed peer was on"
     (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}}
-          ts (web/presence/presence--remote-topics-of remotes :nodeB))
+          ts (web/presence/presence-remote-topics-of remotes :nodeB))
       (assert= (member? "r1" ts) true)
       (assert= (member? "r2" ts) true)
       (assert= (count ts) 2)))
@@ -166,15 +166,15 @@
 
 (describe "presence--record-remote: peer state doesn't leak empty rosters"
   (test "a non-empty roster is recorded"
-    (assert= (web/presence/presence--record-remote {} :nodeB "room" (list {:key "b" :meta {}}))
+    (assert= (web/presence/presence-record-remote {} :nodeB "room" (list {:key "b" :meta {}}))
       {:nodeB {"room" (list {:key "b" :meta {}})}}))
   (test "an empty roster drops the [node topic] entry"
     (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}})
-      (assert= (web/presence/presence--record-remote remotes :nodeB "r1" (list))
+      (assert= (web/presence/presence-record-remote remotes :nodeB "r1" (list))
         {:nodeB {"r2" (list {:key "b" :meta {}})}})))
   (test "emptying a peer's last topic drops the node entirely"
     (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}})}})
-      (assert= (web/presence/presence--record-remote remotes :nodeB "r1" (list)) {}))))
+      (assert= (web/presence/presence-record-remote remotes :nodeB "r1" (list)) {}))))
 
 ; Crash recovery is exercised non-destructively in web_registry_test (the durable vault
 ; primitive) — hard-killing the shared :hatch-presence singleton would race any concurrent
@@ -185,22 +185,22 @@
 ; difference (a missing topic and an empty one both read as the empty roster).
 (describe "presence--remove / presence--remove-pid drop emptied topics"
   (test "untracking the last member drops the topic key"
-    (let (state (web/presence/presence--put {} "t" 1 "k" {}))
-      (assert= (contains? (web/presence/presence--remove state "t" 1) "t") false)))
+    (let (state (web/presence/presence-put {} "t" 1 "k" {}))
+      (assert= (contains? (web/presence/presence-remove state "t" 1) "t") false)))
   (test "remove-pid drops the topics it empties and keeps the rest"
-    (let (state (web/presence/presence--put (web/presence/presence--put (web/presence/presence--put {}
-                                                                          "a"
-                                                                          1
-                                                                          "k"
-                                                                          {})
-                                              "b"
-                                              1
-                                              "k"
-                                              {})
+    (let (state (web/presence/presence-put (web/presence/presence-put (web/presence/presence-put {}
+                                                                        "a"
+                                                                        1
+                                                                        "k"
+                                                                        {})
+                                             "b"
+                                             1
+                                             "k"
+                                             {})
                   "b"
                   2
                   "k"
                   {})
-          out (web/presence/presence--remove-pid state 1))
+          out (web/presence/presence-remove-pid state 1))
       (assert= (contains? out "a") false)
       (assert= (count (get out "b")) 1))))

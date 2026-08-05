@@ -69,9 +69,10 @@
                 (if (= eq -1)
                   m
                   (assoc m
-                    (trim (substring pair 0 eq)) (trim (substring pair
-                                                         (+ eq 1)
-                                                         (string-length pair)))))))
+                    (trim (substring pair 0 eq))
+                      (trim (substring pair
+                              (+ eq 1)
+                              (string-length pair)))))))
         {}
         (string-split raw ";")))))
 
@@ -167,8 +168,9 @@
   `:secure` (default false). Multiple cookies accumulate — each becomes its own header
   line (see http/response). The caller is responsible for any value encoding."
   (assoc conn
-    :resp-cookies (append (get conn :resp-cookies (list))
-                    (list (format-set-cookie name value opts)))))
+    :resp-cookies
+      (append (get conn :resp-cookies (list))
+        (list (format-set-cookie name value opts)))))
 
 (defn delete-cookie (conn name &optional (opts {}))
   "Expire a cookie by name — a `Set-Cookie` with an empty value and `Max-Age=0`. Pass the

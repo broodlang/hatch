@@ -95,7 +95,7 @@
     (list 'quote (nth node 1))
     (symbol (str (name (nth node 1)) "/live-component-spec"))
     (nth node 2)
-    'live--components))
+    'live-components))
 
 ; ---- change tracking: which model keys each dynamic slot reads ----
 ; So the session can re-render only the slots a state change actually affects (Phoenix
@@ -130,13 +130,14 @@
   always be considered dirty, or its own state updates would never reach a diff."
   (cond
     (model-get-form? form model-sym)
-      ; the pinned key, plus deps in any args past the key (e.g. a default expression)
-      (deps-merge (list (first (rest (rest form))))
-        (deps-seq (rest (rest (rest form))) model-sym))
-    (= form model-sym) :all
-    (= form 'live--components) :all
-    (pair? form) (deps-seq form model-sym)
-    (vector? form) (deps-seq form model-sym)
+    ; the pinned key, plus deps in any args past the key (e.g. a default expression)
+    (deps-merge (list (first (rest (rest form))))
+      (deps-seq (rest (rest (rest form))) model-sym))
+      (= form model-sym)
+    :all (= form 'live-components)
+    :all (pair? form)
+    (deps-seq form model-sym) (vector? form)
+    (deps-seq form model-sym)
     ; a map literal in the form (e.g. an attrs map inside a comprehension body) — its keys
     ; and values can themselves read the model
     (map? form) (deps-merge (deps-seq (keys form) model-sym) (deps-seq (vals form) model-sym))
@@ -266,14 +267,15 @@
   "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn.
   Collects the pieces in a list and `join`s once — a per-slot `(str acc …)` fold re-copies the
   whole growing HTML each step, O(n²) in the slot count (and this runs on every re-render)."
-  (join "" (reverse (interleave--at statics dynamics 0 (count statics) (list)))))
+  (join "" (reverse (interleave-at statics dynamics 0 (count statics) (list)))))
 
-(defn interleave--at (statics dynamics i n acc)
+(defn- interleave-at
+  (statics dynamics i n acc)
   (if (>= i n)
     acc
     (let (acc (cons (nth statics i) acc)
           acc (if (< i (count dynamics)) (cons (slot->html (nth dynamics i)) acc) acc))
-      (interleave--at statics dynamics (+ i 1) n acc))))
+      (interleave-at statics dynamics (+ i 1) n acc))))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole
@@ -281,15 +283,19 @@
   (defensive), every new slot is reported. A changed comprehension slot carries a per-item
   diff (`slot-diff`) rather than its whole re-rendered list."
   (if (= (count old) (count new))
-    (diff--at old new 0 (count new) {})
-    (diff--at (list) new 0 (count new) {})))
+    (diff-at old new 0 (count new) {})
+    (diff-at (list) new 0 (count new) {})))
 
-(defn diff--at (old new i n acc)
+(defn- diff-at
+  (old new i n acc)
   (if (>= i n)
     acc
     (let (nv (nth new i)
           same (and (< i (count old)) (= (nth old i) nv)))
-      (diff--at old new (+ i 1) n
+      (diff-at old
+        new
+        (+ i 1)
+        n
         (if same
           acc
           (assoc acc i (slot-diff (if (< i (count old)) (nth old i) nil) nv)))))))
@@ -306,13 +312,17 @@
   "A per-item diff of a comprehension slot: `{:__cdiff__ {item-idx html} :n new-count}` —
   only the items whose HTML changed, plus the new item count so the client grows/shrinks the
   list. Items past the old length are all reported (they're new)."
-  {:__cdiff__ (comp-diff--at old-items new-items 0 (count new-items) {})
+  {:__cdiff__ (comp-diff-at old-items new-items 0 (count new-items) {})
    :n (count new-items)})
 
-(defn comp-diff--at (old new i n acc)
+(defn- comp-diff-at
+  (old new i n acc)
   (if (>= i n)
     acc
-    (comp-diff--at old new (+ i 1) n
+    (comp-diff-at old
+      new
+      (+ i 1)
+      n
       (if (and (< i (count old)) (= (nth old i) (nth new i)))
         acc
         (assoc acc i (nth new i))))))

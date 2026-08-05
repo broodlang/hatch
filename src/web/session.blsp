@@ -52,11 +52,13 @@
   (cond
     (and v (>= (string-length v) *min-secret-len*)) v
     dev? (or v *dev-secret*)
-    (nil? v) (error "web/session: HATCH_SECRET_KEY_BASE is not set. Refusing to sign sessions "
-               "with a default key outside dev — every cookie would be forgeable. Set a strong "
-               "(>= " *min-secret-len* "-char) secret.")
-    else (error "web/session: HATCH_SECRET_KEY_BASE is too weak (< " *min-secret-len*
-             " chars). Refusing to boot outside dev with a brute-forceable signing key.")))
+    (nil? v)
+      (error "web/session: HATCH_SECRET_KEY_BASE is not set. Refusing to sign sessions "
+        "with a default key outside dev — every cookie would be forgeable. Set a strong " "(>= "
+        *min-secret-len* "-char) secret.")
+    else
+      (error "web/session: HATCH_SECRET_KEY_BASE is too weak (< "
+        *min-secret-len* " chars). Refusing to boot outside dev with a brute-forceable signing key.")))
 
 (defn secret-from-env (&optional (var "HATCH_SECRET_KEY_BASE"))
   "The session signing secret, read from `$var` and validated by `check-secret`: a strong
@@ -129,9 +131,10 @@
   end to end (to match query/form params) — including nested maps like the flash store, so
   the normalization must be deep, not just top-level."
   (cond
-    (map? v) (fold (fn (acc kv) (assoc acc (name (first kv)) (stringify-keys (first (rest kv)))))
-               {}
-               (map-pairs v))
+    (map? v)
+      (fold (fn (acc kv) (assoc acc (name (first kv)) (stringify-keys (first (rest kv)))))
+        {}
+        (map-pairs v))
     (vector? v) (into [] (map stringify-keys v))
     else v))
 

@@ -48,7 +48,7 @@
                 (list 'quote 'web/components/like-button)
                 'web/components/like-button/live-component-spec
                 'assigns-var
-                'live--components))))))
+                'live-components))))))
 
 (describe "interleave"
   (test "one hole" (assert= (interleave ["a" "b"] ["X"]) "aXb"))
@@ -72,8 +72,8 @@
   (test "reads inside a map literal (attrs) are collected"
     (assert= (form-deps '(web/template/render [:li {:class (get model :c)} "x"]) 'model) [:c]))
   (test "a comprehension collects its collection's key"
-    (assert= (form-deps
-               '(web/parts/comp (for (x (get model :items)) (web/template/render [:li {} x])))
+    (assert= (form-deps '(web/parts/comp (for (x (get model :items))
+                                           (web/template/render [:li {} x])))
                'model)
       [:items]))
   (test "a default expression's reads are also collected"

@@ -41,36 +41,40 @@
 ; drops, so monitors don't pile up as a long-lived session subscribes/unsubscribes across
 ; live-navigations).
 
-(defn pubsub--watch-vault ()
+(defn- pubsub-watch-vault
+  ()
   "Monitor the vault so its death delivers a `[:down]` here, letting the registry re-mirror to
   the restarted vault. Returns the monitor ref, or nil if the vault isn't up yet."
   (let (v (whereis vault-name)) (if v (monitor v) nil)))
 
-(defn pubsub--boot ()
+(defn- pubsub-boot
+  ()
   "Start (or restart) the registry: recover subscriptions from the vault, re-establish a monitor
   on each restored pid (one that died during the crash window re-fires [:down] at once and is
   cleaned up), monitor the vault, then enter the loop."
   (await vault-name 60)
   (let (subs (pull-snapshot vault-name {})
-        refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (pubsub--all-pids subs)))
-    (pubsub--loop subs refs (pubsub--watch-vault))))
+        refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (pubsub-all-pids subs)))
+    (pubsub-loop subs refs (pubsub-watch-vault))))
 
-(defn pubsub--save (subs refs vault-ref)
+(defn- pubsub-save
+  (subs refs vault-ref)
   "Mirror the new subscriptions to the vault, then continue the loop."
   (mirror vault-name subs)
-  (pubsub--loop subs refs vault-ref))
+  (pubsub-loop subs refs vault-ref))
 
-(defn pubsub--loop (subs refs vault-ref)
+(defn- pubsub-loop
+  (subs refs vault-ref)
   (receive
     ([:subscribe topic pid] (let (refs2 (if (contains? refs pid)
                                           refs
                                           (assoc refs pid (monitor pid))))
-                              (pubsub--save (pubsub--add subs topic pid) refs2 vault-ref)))
-    ([:unsubscribe topic pid] (let (subs2 (pubsub--remove subs topic pid)
-                                    refs2 (if (pubsub--subscribed? subs2 pid)
+                              (pubsub-save (pubsub-add subs topic pid) refs2 vault-ref)))
+    ([:unsubscribe topic pid] (let (subs2 (pubsub-remove subs topic pid)
+                                    refs2 (if (pubsub-subscribed? subs2 pid)
                                             refs
-                                            (pubsub--drop-ref refs pid)))
-                                (pubsub--save subs2 refs2 vault-ref)))
+                                            (pubsub-drop-ref refs pid)))
+                                (pubsub-save subs2 refs2 vault-ref)))
     ; A broadcast. `origin` is `:local` (published on this node via the API) or `:remote`
     ; (replicated here from a peer node). Either way we fan out to this node's subscribers;
     ; only a *local*-origin broadcast is forwarded on to peer nodes, so a replicated message
@@ -79,9 +83,9 @@
       (do
         (dolist (p (get subs topic #{}))
           (when (not (= p except)) (send-info p payload)))
-        (when (= origin :local) (pubsub--fanout-remote topic payload))
+        (when (= origin :local) (pubsub-fanout-remote topic payload))
         ; broadcast doesn't change state — no mirror
-        (pubsub--loop subs refs vault-ref)))
+        (pubsub-loop subs refs vault-ref)))
     ; The vault we monitor died: wait for the supervisor to restart it, re-mirror the whole
     ; subscription table so the backup is whole again, and re-watch the fresh vault — the same
     ; durability web/live's route registry has. Without it, a vault restart (empty) followed by
@@ -90,22 +94,23 @@
     ([:down ^vault-ref _ _] (do
                               (await vault-name 60)
                               (mirror vault-name subs)
-                              (pubsub--loop subs refs (pubsub--watch-vault))))
+                              (pubsub-loop subs refs (pubsub-watch-vault))))
     ; a subscriber died — drop it from every topic; its monitor already fired, so just drop
     ; the ref ([:down ref pid reason])
-    ([:down _ pid _] (pubsub--save (pubsub--remove-pid subs pid) (dissoc refs pid) vault-ref))
+    ([:down _ pid _] (pubsub-save (pubsub-remove-pid subs pid) (dissoc refs pid) vault-ref))
     ; introspection, mostly for tests: reply with a topic's current subscriber list, keyed
     ; by the caller's ref `r` so a late reply can't be mismatched to another call
-    ([:subscribers topic from r] (do
-                                   ; convert the pid set → a list at the API boundary (the
-                                   ; public `subscribers` snapshot has always returned a list)
-                                   (send from [:subscribers r (into (list) (get subs topic #{}))])
-                                   (pubsub--loop subs refs vault-ref)))
+    ([:subscribers topic from r]
+      (do
+        ; convert the pid set → a list at the API boundary (the
+        ; public `subscribers` snapshot has always returned a list)
+        (send from [:subscribers r (into (list) (get subs topic #{}))])
+        (pubsub-loop subs refs vault-ref)))
     ; A synchronous barrier: reply once we've processed everything queued ahead of it. A caller
     ; that just unsubscribed uses this to know its unsubscribe is applied AND that any broadcast
     ; queued before it has already been delivered to the caller's mailbox — so a live-navigate
     ; can drain those stale deliveries before mounting the next view (see web/live's sync-registry).
-    ([:sync from r] (do (send from [:sync r]) (pubsub--loop subs refs vault-ref)))))
+    ([:sync from r] (do (send from [:sync r]) (pubsub-loop subs refs vault-ref)))))
 
 ; ---- cross-node fan-out ----
 ; PubSub is cluster-aware when the runtime is started as a distributed node (`node-start` +
@@ -121,7 +126,8 @@
   node (so cross-node fan-out is a safe no-op)."
   (or (try (nodes) (catch _e nil)) (list)))
 
-(defn pubsub--fanout-remote (topic payload)
+(defn- pubsub-fanout-remote
+  (topic payload)
   "Replicate a locally-originated broadcast to every peer node's registry — once each, marked
   `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
   O(nodes) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
@@ -131,27 +137,32 @@
       (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])
       (catch _e nil))))
 
-(defn pubsub--subscribed? (subs pid)
+(defn- pubsub-subscribed?
+  (subs pid)
   "True if `pid` is still subscribed to any topic (O(log n) per topic set)."
   (not (empty? (filter (fn (kv) (contains? (first (rest kv)) pid)) (map-pairs subs)))))
 
-(defn pubsub--drop-ref (refs pid)
+(defn- pubsub-drop-ref
+  (refs pid)
   "Demonitor `pid` (its last subscription is gone) and drop its ref."
   (let (ref (get refs pid))
     (when ref (demonitor ref)))
   (dissoc refs pid))
 
-(defn pubsub--add (subs topic pid)
+(defn- pubsub-add
+  (subs topic pid)
   "Add `pid` to `topic`'s subscriber set (idempotent — set membership dedupes)."
   (assoc subs topic (conj (get subs topic #{}) pid)))
 
-(defn pubsub--remove (subs topic pid)
+(defn- pubsub-remove
+  (subs topic pid)
   "Remove `pid` from `topic`'s subscriber set, dropping the topic key entirely once it has
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
   (let (remaining (disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 
-(defn pubsub--remove-pid (subs pid)
+(defn- pubsub-remove-pid
+  (subs pid)
   "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are
   dropped (not left as dead keys)."
   (fold (fn (m kv)
@@ -160,7 +171,8 @@
     {}
     (map-pairs subs)))
 
-(defn pubsub--all-pids (subs)
+(defn- pubsub-all-pids
+  (subs)
   "Every distinct subscriber pid across all topics, as a set — for re-monitoring on recovery
   (the union of every topic's subscriber set; already distinct, no dedupe pass)."
   (fold (fn (acc kv) (set/union acc (first (rest kv)))) #{} (map-pairs subs)))
@@ -175,7 +187,7 @@
         registry {:id :hatch-pubsub
                   :name :hatch-pubsub
                   :restart :permanent
-                  :start (fn () (spawn (pubsub--boot)))})
+                  :start (fn () (spawn (pubsub-boot)))})
     (ensure-supervised :hatch-pubsub-sup [vault registry] :hatch-pubsub)))
 
 ; ---- public API ----

@@ -21,29 +21,34 @@
 
 ;; ---- log formatters ---------------------------------------------------------
 
-(def application--labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
-(def application--lower  {:debug "debug" :info "info"  :warn "warn"  :error "error"})
-(def application--colors {:debug "\x1b[90m" :info "\x1b[36m" :warn "\x1b[33m" :error "\x1b[31m"})
-(def application--reset  "\x1b[0m")
+(def- application-labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
+(def- application-lower {:debug "debug" :info "info" :warn "warn" :error "error"})
+(def- application-colors {:debug "\x1b[90m" :info "\x1b[36m" :warn "\x1b[33m" :error "\x1b[31m"})
+(def- application-reset "\x1b[0m")
 
-(defn application--line-body (rec)
-  (str "[" (or (get application--labels (get rec :level)) "?") "] " (get rec :msg)))
+(defn- application-line-body
+  (rec)
+  (str "[" (or (get application-labels (get rec :level)) "?") "] " (get rec :msg)))
 
-(defn application--text-line (rec)
-  (str (application--line-body rec) "\n"))
+(defn- application-text-line
+  (rec)
+  (str (application-line-body rec) "\n"))
 
-(defn application--color-line (rec)
-  (str (or (get application--colors (get rec :level)) "")
-       (application--line-body rec)
-       application--reset "\n"))
+(defn- application-color-line
+  (rec)
+  (str (or (get application-colors (get rec :level)) "")
+    (application-line-body rec)
+    application-reset
+    "\n"))
 
-(defn application--json-line (rec)
+(defn- application-json-line
+  (rec)
   "One NDJSON object per record — compatible with Grafana Loki, Datadog, AppSignal."
   (str (json-encode (merge (get rec :meta)
                       {:timestamp (get rec :ts)
-                       :level     (or (get application--lower (get rec :level)) "info")
-                       :message   (get rec :msg)}))
-       "\n"))
+                       :level (or (get application-lower (get rec :level)) "info")
+                       :message (get rec :msg)}))
+    "\n"))
 
 ;; ---- public API -------------------------------------------------------------
 
@@ -53,7 +58,7 @@
   back to `:debug` rather than becoming an unknown keyword the logger backend would choke on
   (silently dropping every line). `nil`/unset → `:debug`."
   (let (lvl (keyword (or raw "debug")))
-    (if (contains? application--labels lvl) lvl :debug)))
+    (if (contains? application-labels lvl) lvl :debug)))
 
 (defn default-logger-opts ()
   "Logger opts derived from env vars:
@@ -62,10 +67,10 @@
   - `$LOG_FORMAT` — `\"json\"` for NDJSON (log shippers), else colored text
   - `$NO_COLOR`   — set to disable ANSI colors (the no-color.org convention)"
   (let (fmt (cond
-              (= (getenv "LOG_FORMAT") "json") application--json-line
-              (nil? (getenv "NO_COLOR"))       application--color-line
-              else                             application--text-line))
-    {:level    (valid-level (getenv "LOG_LEVEL"))
+              (= (getenv "LOG_FORMAT") "json") application-json-line
+              (nil? (getenv "NO_COLOR")) application-color-line
+              else application-text-line))
+    {:level (valid-level (getenv "LOG_LEVEL"))
      :backends [(fn-backend (fn (line) (print line)) {:format fmt})]}))
 
 (defn start (config)
@@ -79,7 +84,7 @@
 
   Parks with `(receive (:shutdown nil))` after all children have started."
   (let (logger-opts (get config :logger nil)
-        children    (get config :children []))
+        children (get config :children []))
     (when logger-opts
       (start-logger logger-opts))
     (start-children children 0)

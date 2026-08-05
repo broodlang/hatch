@@ -20,9 +20,11 @@
   (test "rejects nested .." (assert= (safe-segments "a/../b") nil))
   (test "rejects ." (assert= (safe-segments "./x") nil))
   ; percent-decode is per-segment, and traversal checks run on the DECODED value
-  (test "decodes %20 into the segment" (assert= (safe-segments "my%20file.css") (list "my file.css")))
+  (test "decodes %20 into the segment"
+    (assert= (safe-segments "my%20file.css") (list "my file.css")))
   (test "rejects encoded .. (%2e%2e)" (assert= (safe-segments "%2e%2e/secret") nil))
-  (test "rejects a decoded separator (%2f) merging segments" (assert= (safe-segments "..%2f..%2fetc") nil))
+  (test "rejects a decoded separator (%2f) merging segments"
+    (assert= (safe-segments "..%2f..%2fetc") nil))
   (test "rejects a NUL/control byte segment" (assert= (safe-segments "a%00b") nil)))
 
 (describe "serve"
@@ -36,7 +38,8 @@
     (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers) :content-type)
       "text/javascript; charset=utf-8"))
   (test "existing file revalidates (no stale cached copy)"
-    (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers) :cache-control)
+    (assert= (get (get (serve (conn-with {}) "static" "brood_live.js") :resp-headers)
+               :cache-control)
       "no-cache")))
 
 (describe "handler"
@@ -108,9 +111,11 @@
 
 (describe "parse-range"
   (test "bytes=a-b" (let ([s e] (parse-range "bytes=0-3" 10)) (assert= s 0) (assert= e 3)))
-  (test "bytes=a- runs to end" (let ([s e] (parse-range "bytes=5-" 10)) (assert= s 5) (assert= e 9)))
+  (test "bytes=a- runs to end"
+    (let ([s e] (parse-range "bytes=5-" 10)) (assert= s 5) (assert= e 9)))
   (test "bytes=-n suffix" (let ([s e] (parse-range "bytes=-3" 10)) (assert= s 7) (assert= e 9)))
-  (test "end clamped to last byte" (let ([s e] (parse-range "bytes=0-100" 10)) (assert= s 0) (assert= e 9)))
+  (test "end clamped to last byte"
+    (let ([s e] (parse-range "bytes=0-100" 10)) (assert= s 0) (assert= e 9)))
   (test "start past end is unsatisfiable" (assert= (parse-range "bytes=20-" 10) :unsatisfiable))
   (test "absent → nil" (assert= (parse-range nil 10) nil))
   (test "multi-range → nil (ignored)" (assert= (parse-range "bytes=0-1,5-7" 10) nil))

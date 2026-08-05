@@ -69,8 +69,7 @@
 
 ; ---- live views ------------------------------------------------------------
 
-(deflive
-  (mount (params) {:count (string->number (get params "start" "0"))})
+(deflive (mount (params) {:count (string->number (get params "start" "0"))})
   (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
   (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))

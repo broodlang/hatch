@@ -9,8 +9,7 @@
 
 ;; A live view whose render contains a `(for …)` comprehension — the case per-item diffing
 ;; targets. Each item renders to one <li>; the whole list is a single comprehension slot.
-(deflive
-  (mount (params) {:items ["a" "b" "c"]})
+(deflive (mount (params) {:items ["a" "b" "c"]})
   (render (model) [:ul {} (for (x (get model :items)) [:li {:data-key x} x])])
   (on "noop" (params model) model))
 
@@ -67,6 +66,8 @@
 ;; render). We assert on the compiled dynamic form.
 (describe "a (component …) inside a (for …) compiles to a render-slot call"
   (test "compile-parts rewrites the nested component (not a bare component call)"
-    (let (compiled (pr-str (web/parts/compile-parts
-                             '[:ul {} (for (x coll) [:li {} (component web/x {"id" x})])])))
+    (let (compiled (pr-str (web/parts/compile-parts '[:ul
+                                                       {}
+                                                       (for (x coll)
+                                                         [:li {} (component web/x {"id" x})])])))
       (assert= (includes? compiled "render-slot") true))))

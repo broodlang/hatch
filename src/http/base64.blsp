@@ -14,34 +14,38 @@
   ; Accumulate 4-char groups in a list (most-recent first), then reverse + join once.
   ; O(n): first/rest stepping, no per-step `count`, no per-step whole-string rebuild;
   ; the recursion stays in tail position.
-  (join "" (reverse (encode-bytes--acc bytes (list)))))
+  (join "" (reverse (encode-bytes-acc bytes (list)))))
 
-(defn encode-bytes--acc (bytes acc)
+(defn- encode-bytes-acc
+  (bytes acc)
   (cond
     (empty? bytes) acc
-    (empty? (rest bytes)) (let (a (first bytes))
-                            (cons (str (b64-char (bit-shift-right a 2))
-                                    (b64-char (bit-shift-left (bit-and a 3) 4))
-                                    "==")
-                              acc))
-    (empty? (rest (rest bytes))) (let (a (first bytes)
-                                       b (first (rest bytes)))
-                                   (cons (str (b64-char (bit-shift-right a 2))
-                                           (b64-char (bit-or (bit-shift-left (bit-and a 3) 4)
-                                                       (bit-shift-right b 4)))
-                                           (b64-char (bit-shift-left (bit-and b 15) 2))
-                                           "=")
-                                     acc))
-    else (let (a (first bytes)
-               b (first (rest bytes))
-               c (first (rest (rest bytes)))
-               tail (rest (rest (rest bytes))))
-           (encode-bytes--acc tail
-             (cons (str (b64-char (bit-shift-right a 2))
-                     (b64-char (bit-or (bit-shift-left (bit-and a 3) 4) (bit-shift-right b 4)))
-                     (b64-char (bit-or (bit-shift-left (bit-and b 15) 2) (bit-shift-right c 6)))
-                     (b64-char (bit-and c 63)))
-               acc)))))
+    (empty? (rest bytes))
+      (let (a (first bytes))
+        (cons (str (b64-char (bit-shift-right a 2))
+                (b64-char (bit-shift-left (bit-and a 3) 4))
+                "==")
+          acc))
+    (empty? (rest (rest bytes)))
+      (let (a (first bytes)
+            b (first (rest bytes)))
+        (cons (str (b64-char (bit-shift-right a 2))
+                (b64-char (bit-or (bit-shift-left (bit-and a 3) 4)
+                            (bit-shift-right b 4)))
+                (b64-char (bit-shift-left (bit-and b 15) 2))
+                "=")
+          acc))
+    else
+      (let (a (first bytes)
+            b (first (rest bytes))
+            c (first (rest (rest bytes)))
+            tail (rest (rest (rest bytes))))
+        (encode-bytes-acc tail
+          (cons (str (b64-char (bit-shift-right a 2))
+                  (b64-char (bit-or (bit-shift-left (bit-and a 3) 4) (bit-shift-right b 4)))
+                  (b64-char (bit-or (bit-shift-left (bit-and b 15) 2) (bit-shift-right c 6)))
+                  (b64-char (bit-and c 63)))
+            acc)))))
 
 (defn encode-sha1 (hex-sha1)
   "Base64-encode a 40-char hex SHA1 digest (as returned by `hash/sha1`)."

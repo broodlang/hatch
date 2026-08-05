@@ -13,12 +13,12 @@
   (test "only the first failing rule per field is recorded"
     (assert= (validate {"name" ""}
                [["name" required? "is required"]
-                ["name" (min-length? 2) "must be at least 2 characters"]])
+                 ["name" (min-length? 2) "must be at least 2 characters"]])
       [:error {"name" "is required"}]))
   (test "multiple fields collect independent errors"
     (assert= (validate {"name" "" "email" "nope"}
                [["name" required? "is required"]
-                ["email" email? "must be a valid email"]])
+                 ["email" email? "must be a valid email"]])
       [:error {"name" "is required" "email" "must be a valid email"}]))
   (test "a rule whose predicate closes over an external check composes fine"
     ; stands in for a storage-backed uniqueness check — web/form never depends on

@@ -28,8 +28,7 @@
   (test "obs-fold continuation line is rejected"
     (assert= (first (try-parse "GET / HTTP/1.1\r\nHost: x\r\n\tfolded: y\r\n\r\n")) :error))
   (test "duplicate Transfer-Encoding is rejected"
-    (assert= (first (try-parse
-                      "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n"))
+    (assert= (first (try-parse "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n"))
       :error)))
 
 (describe "try-parse: successful GET"
@@ -121,7 +120,8 @@
   (test "Cookie repeats join with '; '"
     (assert= (get (parse-headers (list "Cookie: a=1" "Cookie: b=2")) :cookie) "a=1; b=2"))
   (test "Content-Length keeps the first (identical dup collapses)"
-    (assert= (get (parse-headers (list "Content-Length: 5" "Content-Length: 5")) :content-length) "5")))
+    (assert= (get (parse-headers (list "Content-Length: 5" "Content-Length: 5")) :content-length)
+      "5")))
 
 (describe "try-parse: header-count cap"
   (test "a request with more than *max-header-count* header lines is rejected"
@@ -147,10 +147,9 @@
       (o (assert= o :more))))
   (test "resuming from a :more tail completes the body without re-decoding the first chunk"
     (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
-      ([:more tail decoded dlen]
-        (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
-          ([:ok body rem] (do (assert= body "helloabc") (assert= rem "")))
-          (o (assert= o :ok))))
+      ([:more tail decoded dlen] (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
+                                   ([:ok body rem] (do (assert= body "helloabc") (assert= rem "")))
+                                   (o (assert= o :ok))))
       (o (assert= o :more))))
   (test "an incomplete size line yields :more (needs the rest of the line)"
     (match (dechunk-step "5\r\nhello\r\n1" 0 (list) 0)

@@ -70,7 +70,7 @@
 
   (test "OPTIONS returns 204 with Allow header"
     (let (routes [(make-route "GET" "/" (fn (conn) (html-resp conn "ok")))
-                  (make-route "POST" "/" (fn (conn) (html-resp conn "ok")))]
+                   (make-route "POST" "/" (fn (conn) (html-resp conn "ok")))]
           resp (dispatch routes (conn-for "OPTIONS" "/")))
       (assert= (get resp :status) 204)
       (assert= (get-in resp [:resp-headers :allow]) "GET, POST, HEAD, OPTIONS")))
@@ -92,11 +92,12 @@
       (assert= (get resp :resp-body) "hello")))
 
   (test "first matching route wins"
-    (let (routes [(make-route "GET" "/x" (fn (conn) (html-resp conn "first"))) (make-route "GET"
-                                                                                 "/x"
-                                                                                 (fn (conn)
-                                                                                   (html-resp conn
-                                                                                     "second")))]
+    (let (routes [(make-route "GET" "/x" (fn (conn) (html-resp conn "first")))
+                   (make-route "GET"
+                     "/x"
+                     (fn (conn)
+                       (html-resp conn
+                         "second")))]
           resp (dispatch routes (conn-for "GET" "/x")))
       (assert= (get resp :resp-body) "first")))
 

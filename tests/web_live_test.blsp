@@ -12,11 +12,13 @@
 
 (describe "deflive--clause: a duplicate singular clause is rejected"
   (test "two render clauses error at expansion"
-    (assert-error (web/live/deflive--clause 'render (list (list 'render '(m) "a") (list 'render '(m) "b")))))
+    (assert-error (web/live/deflive-clause 'render
+                    (list (list 'render '(m) "a") (list 'render '(m) "b")))))
   (test "a single clause is returned"
-    (assert= (web/live/deflive--clause 'render (list (list 'render '(m) "a"))) (list 'render '(m) "a")))
+    (assert= (web/live/deflive-clause 'render (list (list 'render '(m) "a")))
+      (list 'render '(m) "a")))
   (test "no clause is nil"
-    (assert= (web/live/deflive--clause 'render (list (list 'mount '(p) 1))) nil)))
+    (assert= (web/live/deflive-clause 'render (list (list 'mount '(p) 1))) nil)))
 
 (describe "json-str: escapes all C0 control characters (RFC 8259)"
   (test "named escapes" (assert= (json-str "a\nb\tc") "\"a\\nb\\tc\""))
@@ -26,7 +28,8 @@
   (test "backspace → \\b" (assert= (json-str (utf8-bytes->string (bytes [8]))) "\"\\b\""))
   (test "ESC → \\u001b" (assert= (json-str (utf8-bytes->string (bytes [27]))) "\"\\u001b\""))
   (test "NUL → \\u0000" (assert= (json-str (utf8-bytes->string (bytes [0]))) "\"\\u0000\""))
-  (test "vertical tab → \\u000b" (assert= (json-str (utf8-bytes->string (bytes [11]))) "\"\\u000b\"")))
+  (test "vertical tab → \\u000b"
+    (assert= (json-str (utf8-bytes->string (bytes [11]))) "\"\\u000b\"")))
 
 (describe "client-script"
   (test "default src + defer"
@@ -77,9 +80,9 @@
 
 (describe "live--ws-path"
   (test "strips the /live/ws prefix"
-    (assert= (web/live/live--ws-path "/live/ws/counter") "/counter"))
-  (test "root live path" (assert= (web/live/live--ws-path "/live/ws/") "/"))
-  (test "passes non-ws paths through" (assert= (web/live/live--ws-path "/counter") "/counter")))
+    (assert= (web/live/live-ws-path "/live/ws/counter") "/counter"))
+  (test "root live path" (assert= (web/live/live-ws-path "/live/ws/") "/"))
+  (test "passes non-ws paths through" (assert= (web/live/live-ws-path "/counter") "/counter")))
 
 ; recv-frame--loop must reassemble a WebSocket message that arrives split across many TCP reads,
 ; in O(n): once the length header is in, `frame-size` sizes the frame and the reader gathers the
@@ -108,30 +111,29 @@
           frame (ws-masked-frame 1 payload [17 34 51 68])
           sock :sock
           _ (feed-tcp sock frame 50))
-      (match (web/live/recv-frame--loop sock (bytes []))
-        ([:ok opcode payload-out rem]
-          (do
-            (assert= opcode 1)
-            (assert= (count rem) 0)
-            (assert= (into [] (bytes->list payload-out)) payload)))
+      (match (web/live/recv-frame-loop sock (bytes []))
+        ([:ok opcode payload-out rem] (do
+                                        (assert= opcode 1)
+                                        (assert= (count rem) 0)
+                                        (assert= (into [] (bytes->list payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
     (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
           frame (ws-masked-frame 1 payload [9 88 200 3])
           sock :sock
           _ (feed-tcp sock frame 1))
-      (match (web/live/recv-frame--loop sock (bytes []))
-        ([:ok _opcode payload-out rem]
-          (do
-            (assert= (count rem) 0)
-            (assert= (into [] (bytes->list payload-out)) payload)))
+      (match (web/live/recv-frame-loop sock (bytes []))
+        ([:ok _opcode payload-out rem] (do
+                                         (assert= (count rem) 0)
+                                         (assert= (into [] (bytes->list payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; :isolated — registering and looking up both touch the shared :hatch-live-routes process,
 ; and running concurrently with other suites (especially the crash test below) would race its
 ; kill/restart window. Isolated units run alone, serially, first — mirroring production, where
 ; the router registers every route at load, before any connection looks a path up.
-(describe "live-route registry" :isolated
+(describe "live-route registry"
+  :isolated
   (test "register, look up, and miss"
     (do
       (register-live "/reg-test" (fn () {:ok true}) :admin)
@@ -144,7 +146,8 @@
 
 ; Tier-3 (docs/robustness.md): the route table survives the registry process crashing —
 ; it mirrors to a supervised vault and re-seeds from it on restart.
-(describe "live-route registry survives a crash" :isolated
+(describe "live-route registry survives a crash"
+  :isolated
   (test "a registered route is still there after the registry process is killed"
     (do
       (register-live "/crash-test" (fn () {:ok true}) :customer)
@@ -170,10 +173,10 @@
     (assert= (notify-reload) nil))
   (test "a registered session receives [:reload]"
     (do
-      (web/live/live--register (self))
+      (web/live/live-register (self))
       (notify-reload)
       (let (got (receive ([:reload] :got) (after 1000 :timeout)))
-        (web/live/live--unregister (self))
+        (web/live/live-unregister (self))
         (assert= got :got)))))
 
 (describe "reload-css broadcast"
@@ -185,10 +188,10 @@
     (assert= (notify-reload-css) nil))
   (test "a registered session receives [:reload-css]"
     (do
-      (web/live/live--register (self))
+      (web/live/live-register (self))
       (notify-reload-css)
       (let (got (receive ([:reload-css] :got) (after 1000 :timeout)))
-        (web/live/live--unregister (self))
+        (web/live/live-unregister (self))
         (assert= got :got)))))
 
 (describe "send-info"
@@ -245,8 +248,7 @@
   (test "push-event queues a client push-effect"
     (push-event "focus" {"id" "field"})
     (receive
-      ([:push-effect m]
-        (assert= (get m :event) "push")
+      ([:push-effect m] (assert= (get m :event) "push")
         (assert= (get m :name) "focus")
         (assert= (get m :payload) {"id" "field"}))
       (after 200 (assert= "no push-effect received" false))))

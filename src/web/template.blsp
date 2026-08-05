@@ -43,22 +43,20 @@
 ;; So a raw node in a log line or a REPL result reads as what it is, rather than printing
 ;; the wrapper map around it.
 (impl Display
-  web/template/raw-node (to-str [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+  web/template/raw-node
+  (to-str [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (impl Inspect
-  web/template/raw-node (inspect [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+  web/template/raw-node
+  (inspect [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (defn escape-html (s)
   "Escape HTML special characters: & < > \" '."
   (replace (replace (replace (replace (replace (str s) "&" "&amp;")
-                               "<"
-                               "&lt;")
-                      ">"
-                      "&gt;")
-             "\""
-             "&quot;")
-    "'"
-    "&#39;"))
+                               "<" "&lt;")
+                      ">" "&gt;")
+             "\"" "&quot;")
+    "'" "&#39;"))
 
 ; Attributes whose value is a URL — a `javascript:`/`vbscript:` value here executes script on
 ; click/load, which escaping does NOT stop (the scheme survives escaping). `render` neutralizes
@@ -66,7 +64,8 @@
 ; legitimate `data:` image URL still works).
 (def *url-attrs* {:href true :src true :action true :formaction true :poster true :ping true})
 
-(defn url--scheme-noise? (c)
+(defn- url-scheme-noise?
+  (c)
   "True for a leading char a browser strips before parsing a URL scheme (whitespace/controls)."
   (<= (char->int c) 32))
 
@@ -74,7 +73,7 @@
   "True if `v` is a URL whose scheme executes script (`javascript:` / `vbscript:`). Whitespace
   and control characters are removed first and case ignored, since browsers strip them before
   resolving the scheme (`  java\\tscript:…` is `javascript:`)."
-  (let (s (lower (join "" (filter (fn (c) (not (url--scheme-noise? c))) (string->list (str v))))))
+  (let (s (lower (join "" (filter (fn (c) (not (url-scheme-noise? c))) (string->list (str v))))))
     (or (starts-with? s "javascript:") (starts-with? s "vbscript:"))))
 
 (defn safe-url (v)
@@ -133,11 +132,12 @@
     (int? node) (str node)
     (float? node) (str node)
     (bool? node) ""
-    (vector? node) (render--element node)
+    (vector? node) (render-element node)
     (pair? node) (join "" (map render node))
     else (render-html node)))
 
-(defn render--element (node)
+(defn- render-element
+  (node)
   (let (tag (first node)
         tail (rest node)
         has-map (and (not (nil? tail)) (map? (first tail)))
@@ -151,12 +151,13 @@
         tag-name
         attr-str
         ">"
-        (render--children children)
+        (render-children children)
         "</"
         tag-name
         ">"))))
 
-(defn render--children (children)
+(defn- render-children
+  (children)
   (join "" (map render (flatten children))))
 
 (defn html (node)

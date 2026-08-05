@@ -103,13 +103,18 @@
   (test "whitespace-split javascript: scheme is neutralized"
     (assert= (safe-url "java\tscript:alert(1)") "#"))
   (test "a normal https href passes through"
-    (assert= (includes? (render [:a {:href "https://example.com/x"}]) "href=\"https://example.com/x\"") true))
+    (assert= (includes? (render [:a {:href "https://example.com/x"}])
+               "href=\"https://example.com/x\"")
+      true))
   (test "a relative href passes through"
     (assert= (includes? (render [:a {:href "/dashboard"}]) "href=\"/dashboard\"") true))
   (test "a legitimate data: image src passes through"
-    (assert= (includes? (render [:img {:src "data:image/png;base64,AAAA"}]) "src=\"data:image/png;base64,AAAA\"") true))
+    (assert= (includes? (render [:img {:src "data:image/png;base64,AAAA"}])
+               "src=\"data:image/png;base64,AAAA\"")
+      true))
   (test "a non-URL attribute is not treated as a URL"
-    (assert= (includes? (render [:div {:title "javascript:not-a-url"}]) "javascript:not-a-url") true)))
+    (assert= (includes? (render [:div {:title "javascript:not-a-url"}]) "javascript:not-a-url")
+      true)))
 
 (describe "render: lists of children"
   (test "list rendered as concatenation"

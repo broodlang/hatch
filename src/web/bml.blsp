@@ -76,16 +76,17 @@
 
 (defdyn *bml-source* "")
 
-(defn line-col--at (i off line col)
+(defn- line-col-at
+  (i off line col)
   (if (>= i off)
     [line col]
     (if (= (char-at *bml-source* i) "\n")
-      (line-col--at (+ i 1) off (+ line 1) 1)
-      (line-col--at (+ i 1) off line (+ col 1)))))
+      (line-col-at (+ i 1) off (+ line 1) 1)
+      (line-col-at (+ i 1) off line (+ col 1)))))
 
 (defn line-col (off)
   "1-based `[line col]` of byte offset `off` in *bml-source*."
-  (line-col--at 0 off 1 1))
+  (line-col-at 0 off 1 1))
 
 (defn bml-error (s & parts)
   "Raise a `bml:line:col: …` error located at the start of suffix `s` in the source."
@@ -119,31 +120,34 @@
 (defn expand-assigns (s)
   "Rewrite `@name` to `(get model :name)` in embedded Brood text `s`, leaving string
   literals (and `~@` splices) untouched."
-  (expand-assigns--at s 0 ""))
+  (expand-assigns-at s 0 ""))
 
-(defn expand-assigns--at (s i acc)
+(defn- expand-assigns-at
+  (s i acc)
   (if (>= i (string-length s))
     acc
     (let (c (char-at s i))
       (cond
-        (= c "\"") (let (j (string-lit-end s (+ i 1)))
-                     (expand-assigns--at s (+ j 1) (str acc (substring s i (+ j 1)))))
+        (= c "\"")
+          (let (j (string-lit-end s (+ i 1)))
+            (expand-assigns-at s (+ j 1) (str acc (substring s i (+ j 1)))))
         (and (= c "@")
           (not (and (> i 0) (= (char-at s (- i 1)) "~")))
           (< (+ i 1) (string-length s))
-          (ident-start? (char-at s (+ i 1)))) (let (end (ident-run s
-                                                                                                                                                                                   (+ i
-                                                                                                                                                                                     1)))
-                                                                                                                                                                         (expand-assigns--at s
-                                                                                                                                                                           end
-                                                                                                                                                                           (str acc
-                                                                                                                                                                             "(get model :"
-                                                                                                                                                                             (substring s
-                                                                                                                                                                               (+ i
-                                                                                                                                                                                 1)
-                                                                                                                                                                               end)
-                                                                                                                                                                             ")")))
-        else (expand-assigns--at s (+ i 1) (str acc c))))))
+          (ident-start? (char-at s (+ i 1))))
+          (let (end (ident-run s
+                      (+ i
+                        1)))
+            (expand-assigns-at s
+              end
+              (str acc
+                "(get model :"
+                (substring s
+                  (+ i
+                    1)
+                  end)
+                ")")))
+        else (expand-assigns-at s (+ i 1) (str acc c))))))
 
 (defn read-expr (s)
   "Read embedded Brood text into a form, expanding the `@name` assign shorthand first."
@@ -194,9 +198,10 @@
     (>= i (string-length s)) (bml-error s "unterminated attribute string")
     (= (char-at s i) "\\") (quote-end s (+ i 2))
     (= (char-at s i) "\"") i
-    (= (char-at s i) "{") (let (body (substring s (+ i 1) (string-length s))
-                                end (interp-end body 0 0 false false))
-                            (quote-end s (+ i end 2)))
+    (= (char-at s i) "{")
+      (let (body (substring s (+ i 1) (string-length s))
+            end (interp-end body 0 0 false false))
+        (quote-end s (+ i end 2)))
     else (quote-end s (+ i 1))))
 
 (defn read-quoted (s)
@@ -212,16 +217,18 @@
   `\\{`/`\\}` are literal braces."
   (cond
     (= (string-length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
-    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1))) (attr-parts (substring s
-                                                                                                   2
-                                                                                                   (string-length s))
-                                                                                       acc
-                                                                                       (str lit
-                                                                                         (char-at s
-                                                                                           1)))
-    (= (char-at s 0) "{") (let ([inner rest] (brace-inner s)
-                                acc2 (if (= lit "") acc (cons lit acc)))
-                            (attr-parts rest (cons (read-expr inner) acc2) ""))
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
+      (attr-parts (substring s
+                    2
+                    (string-length s))
+        acc
+        (str lit
+          (char-at s
+            1)))
+    (= (char-at s 0) "{")
+      (let ([inner rest] (brace-inner s)
+            acc2 (if (= lit "") acc (cons lit acc)))
+        (attr-parts rest (cons (read-expr inner) acc2) ""))
     else (attr-parts (substring s 1 (string-length s)) acc (str lit (char-at s 0)))))
 
 (defn attr-string-value (inner)
@@ -253,9 +260,10 @@
   (let (idx (index-of spec "<-"))
     (if (< idx 0)
       (error "bml: :for needs `x <- coll`, got: " spec)
-      [(read-expr (trim (substring spec 0 idx))) (read-expr (trim (substring spec
-                                                                    (+ idx 2)
-                                                                    (string-length spec))))])))
+      [(read-expr (trim (substring spec 0 idx)))
+        (read-expr (trim (substring spec
+                           (+ idx 2)
+                           (string-length spec))))])))
 
 (defn apply-directives (form directives)
   "Wrap an element form per its directive attributes. `:for` becomes a `for`
@@ -265,12 +273,14 @@
   (let (has-for (contains? directives ":for")
         has-if (contains? directives ":if"))
     (cond
-      (and has-for has-if) (let ([binder coll] (parse-for (get directives ":for")))
-                             (list 'for
-                               (list binder coll :when (read-expr (get directives ":if")))
-                               form))
-      has-for (let ([binder coll] (parse-for (get directives ":for")))
-                (list 'for (list binder coll) form))
+      (and has-for has-if)
+        (let ([binder coll] (parse-for (get directives ":for")))
+          (list 'for
+            (list binder coll :when (read-expr (get directives ":if")))
+            form))
+      has-for
+        (let ([binder coll] (parse-for (get directives ":for")))
+          (list 'for (list binder coll) form))
       has-if (list 'if (read-expr (get directives ":if")) form nil)
       else form)))
 
@@ -343,13 +353,16 @@
         [name s2] (read-while s1 name-char? "")
         [attrs directives s3] (parse-attrs s2 {} {}))
     (cond
-      (starts-with? s3 "/>") [(apply-directives (build-component name attrs nil) directives) (substring s3
-                                                                                               2
-                                                                                               (string-length s3))]
-      (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3))
-                                  [children s4] (parse-nodes after)
-                                  s5 (expect-close-component s4 name))
-                              [(apply-directives (build-component name attrs children) directives) s5])
+      (starts-with? s3 "/>")
+        [(apply-directives (build-component name attrs nil) directives)
+          (substring s3
+            2
+            (string-length s3))]
+      (starts-with? s3 ">")
+        (let (after (substring s3 1 (string-length s3))
+              [children s4] (parse-nodes after)
+              s5 (expect-close-component s4 name))
+          [(apply-directives (build-component name attrs children) directives) s5])
       else (bml-error s3 "malformed component <." name " …"))))
 
 (defn expect-close-component (s name)
@@ -360,12 +373,9 @@
           [nm s2] (read-while s1 name-char? "")
           s2 (skip-ws s2))
       (cond
-        (not (= nm name)) (bml-error s
-                            "</."
-                            nm
-                            "> closes the wrong component, expected </."
-                            name
-                            ">")
+        (not (= nm name))
+          (bml-error s
+            "</." nm "> closes the wrong component, expected </." name ">")
         (starts-with? s2 ">") (substring s2 1 (string-length s2))
         else (bml-error s2 "malformed component close </." name)))))
 
@@ -378,18 +388,24 @@
           [tag s2] (read-while s1 name-char? "")
           [attrs directives s3] (parse-attrs s2 {} {}))
       (cond
-        (starts-with? s3 "/>") [(apply-directives (build-elem tag attrs nil) directives) (substring s3
-                                                                                           2
-                                                                                           (string-length s3))]
-        (starts-with? s3 ">") (let (after (substring s3 1 (string-length s3)))
-                                (cond
-                                  (void-tag? tag) [(apply-directives (build-elem tag attrs nil)
-                                                     directives) after]
-                                  (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
-                                  else (let ([children s4] (parse-nodes after)
-                                             s5 (expect-close s4 tag))
-                                         [(apply-directives (build-elem tag attrs children)
-                                            directives) s5])))
+        (starts-with? s3 "/>")
+          [(apply-directives (build-elem tag attrs nil) directives)
+            (substring s3
+              2
+              (string-length s3))]
+        (starts-with? s3 ">")
+          (let (after (substring s3 1 (string-length s3)))
+            (cond
+              (void-tag? tag) [(apply-directives (build-elem tag attrs nil)
+                                 directives)
+                                after]
+              (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
+              else
+                (let ([children s4] (parse-nodes after)
+                      s5 (expect-close s4 tag))
+                  [(apply-directives (build-elem tag attrs children)
+                     directives)
+                    s5])))
         else (bml-error s3 "malformed tag <" tag " …")))))
 
 (defn expect-close (s tag)
@@ -411,39 +427,43 @@
 (defn parse-nodes (s)
   "Parse a run of sibling nodes until `</` or EOF; returns `[nodes rest]`.
   Whitespace-only text between tags is dropped."
-  (parse-nodes--acc s nil))
+  (parse-nodes-acc s nil))
 
-(defn parse-nodes--acc (s acc)
+(defn- parse-nodes-acc
+  (s acc)
   (cond
     (= (string-length s) 0) [(reverse acc) s]
     (starts-with? s "</") [(reverse acc) s]
-    (starts-with? s "<!--") (parse-nodes--acc (skip-comment s) acc)
+    (starts-with? s "<!--") (parse-nodes-acc (skip-comment s) acc)
     (starts-with? s "<") (let ([el rest] (parse-element s))
-                           (parse-nodes--acc rest (cons el acc)))
+                           (parse-nodes-acc rest (cons el acc)))
     (starts-with? s "{") (let ([form rest] (parse-interp s))
-                           (parse-nodes--acc rest (cons form acc)))
-    else (let ([txt rest] (parse-text s))
-           (if (blank? txt)
-             (parse-nodes--acc rest acc)
-             (parse-nodes--acc rest (cons txt acc))))))
+                           (parse-nodes-acc rest (cons form acc)))
+    else
+      (let ([txt rest] (parse-text s))
+        (if (blank? txt)
+          (parse-nodes-acc rest acc)
+          (parse-nodes-acc rest (cons txt acc))))))
 
 (defn parse-text (s)
   "Consume text up to the next `<` or `{`; returns `[text rest]`. `\\{`/`\\}` are
   literal braces (so a `{` need not start an interpolation)."
-  (parse-text--at s ""))
+  (parse-text-at s ""))
 
-(defn parse-text--at (s acc)
+(defn- parse-text-at
+  (s acc)
   (cond
     (= (string-length s) 0) [acc s]
     (= (char-at s 0) "<") [acc s]
     (= (char-at s 0) "{") [acc s]
-    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1))) (parse-text--at (substring s
-                                                                                                       2
-                                                                                                       (string-length s))
-                                                                                       (str acc
-                                                                                         (char-at s
-                                                                                           1)))
-    else (parse-text--at (substring s 1 (string-length s)) (str acc (char-at s 0)))))
+    (and (= (char-at s 0) "\\") (> (string-length s) 1) (brace-char? (char-at s 1)))
+      (parse-text-at (substring s
+                       2
+                       (string-length s))
+        (str acc
+          (char-at s
+            1)))
+    else (parse-text-at (substring s 1 (string-length s)) (str acc (char-at s 0)))))
 
 ; ---- entry point ----
 
