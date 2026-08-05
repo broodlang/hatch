@@ -44,7 +44,8 @@
         ; handler set, or a stray Content-Length desyncs a keep-alive client (it reads that
         ; many bytes of the next response as this body).
         headers (if bodyless
-                  (dissoc (dissoc (dissoc headers :content-length) :content-type) :transfer-encoding)
+                  (dissoc (dissoc (dissoc headers :content-length) :content-type)
+                    :transfer-encoding)
                   headers)
         headers (if (or bodyless (contains? headers :content-type))
                   headers

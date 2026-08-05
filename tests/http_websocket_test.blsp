@@ -107,7 +107,8 @@
 (describe "parse-frame: RFC 6455 framing is enforced"
   (test "an unmasked client frame is rejected (MUST)"
     ; 0x81 text, len 5, "hello" — no mask bit
-    (assert= (first (parse-frame (bytes-concat (bytes [129 5]) (string->utf8-bytes "hello")))) :error))
+    (assert= (first (parse-frame (bytes-concat (bytes [129 5]) (string->utf8-bytes "hello"))))
+      :error))
   (test "a set RSV bit is rejected"
     ; 0xC1 = FIN + RSV1 + text; byte1 0x80 = masked, len 0
     (assert= (first (parse-frame (bytes [193 128 0 0 0 0]))) :error))
@@ -239,6 +240,10 @@
   (test "policy false allows any origin"
     (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}} false) true))
   (test "allowlist permits listed, rejects unlisted and missing"
-    (assert= (origin-allowed? {:headers {:origin "https://ok.test" :host "app.test"}} (list "https://ok.test")) true)
-    (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}} (list "https://ok.test")) false)
+    (assert= (origin-allowed? {:headers {:origin "https://ok.test" :host "app.test"}}
+               (list "https://ok.test"))
+      true)
+    (assert= (origin-allowed? {:headers {:origin "https://evil.test" :host "app.test"}}
+               (list "https://ok.test"))
+      false)
     (assert= (origin-allowed? {:headers {:host "app.test"}} (list "https://ok.test")) false)))

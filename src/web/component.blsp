@@ -28,8 +28,10 @@
   ; dependent (web/live :alias web/component): a plain (:use-internals web/live) refers-all
   ; into a still-loading web/live mid-cycle, which the loader rejects. A subset refer
   ; resolves lazily and is cycle-safe.
-  (:use-internals web/live :only [deflive--clause deflive--clauses
-                                  deflive--render-expr deflive--handle-event-body])
+  (:use-internals web/live
+    :only
+    [deflive-clause
+      deflive-clauses deflive-render-expr deflive-handle-event-body])
   ; render — lowers a component's Hiccup to an HTML string for its opaque parent slot
   (:use web/template)
   ; defbehaviour — LiveComponentModule
@@ -63,15 +65,15 @@
   that keeps the same id does *not* re-mount; push new data in with `web/component/send-update`
   instead. `render` and `on` read exactly like `deflive`'s, with `state` standing in for a
   view's `model`."
-  (let (mount-clause (live/deflive--clause 'mount clauses)
-        render-clause (live/deflive--clause 'render clauses)
-        template-clause (live/deflive--clause 'template clauses)
-        on-clauses (live/deflive--clauses 'on clauses)
+  (let (mount-clause (live/deflive-clause 'mount clauses)
+        render-clause (live/deflive-clause 'render clauses)
+        template-clause (live/deflive-clause 'template clauses)
+        on-clauses (live/deflive-clauses 'on clauses)
         mount-args (first (rest mount-clause))
         mount-body (rest (rest mount-clause))
         render-args (first (rest render-clause))
-        handle-body (live/deflive--handle-event-body on-clauses)
-        render-expr (live/deflive--render-expr render-clause template-clause)
+        handle-body (live/deflive-handle-event-body on-clauses)
+        render-expr (live/deflive-render-expr render-clause template-clause)
         ; a (template …) clause's compiled body always references a variable literally
         ; named `model` (web/bml hardcodes `@field` -> `(get model :field)`, matching
         ; deflive's own template default) — *not* `state`, even though inline (render
@@ -83,7 +85,7 @@
       render-defn
       (list 'defn
         'handle-event
-        (list 'event--name 'event--params 'event--model)
+        (list 'event-name 'event-params 'event-model)
         handle-body)
       ; A 0-arg thunk, mirroring deflive's live-spec — re-resolves the component's
       ; functions by name each call, so hot-reloaded code is picked up.
@@ -168,7 +170,9 @@
     (when entry
       (table-put components-table
         cid
-        (component-entry (get entry :module) (get entry :spec-thunk) (merge (get entry :state) changes)))))
+        (component-entry (get entry :module)
+          (get entry :spec-thunk)
+          (merge (get entry :state) changes)))))
   nil)
 
 (defn send-update (session cid changes)

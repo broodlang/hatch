@@ -31,8 +31,7 @@
   (:alias web/static)
   (:alias log))
 
-(require 'hash)   ; content-addressed asset fingerprints are a SHA-256 prefix
-
+(require 'hash) ; content-addressed asset fingerprints are a SHA-256 prefix
 (def *default-reload-marker* "Done in")
 
 ; ---- dev watchers ----------------------------------------------------------
@@ -82,7 +81,8 @@
                (log/log-info (str "[assets] stopped watching: " label))))
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
-                                   (log/log-warn (str "[assets] watcher exited (code " code "): " label))))))
+                                   (log/log-warn (str "[assets] watcher exited (code "
+                                                   code "): " label))))))
 
 (defn on-output (buf marker)
   "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that

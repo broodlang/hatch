@@ -11,12 +11,14 @@
 (defn widget-mount (id assigns) {:n (get assigns "start" 0)})
 (defn widget-render (state) [:span {} (str (get state :n))])
 (defn widget-handle-event (name params state) state)
-(defn live-component-spec () {:mount widget-mount :render widget-render :handle-event widget-handle-event})
+(defn live-component-spec ()
+  {:mount widget-mount :render widget-render :handle-event widget-handle-event})
 
-(deflive
-  (mount (params) {:authed (= (get params "authed") "1") :n (string->number (get params "n" "5"))})
+(deflive (mount (params)
+           {:authed (= (get params "authed") "1") :n (string->number (get params "n" "5"))})
   (render (model)
-    [:div {}
+    [:div
+      {}
       [:span {} (str "n=" (get model :n))]
       (component web-live-component-integration-test {"id" "direct" "start" 1})
       (if (get model :authed)
@@ -75,7 +77,8 @@
                 :dynamics dyn1
                 :components components}
           entry (table-get components "direct")
-          bumped (web/component/component-entry (get entry :module) (get entry :spec-thunk)
+          bumped (web/component/component-entry (get entry :module)
+                   (get entry :spec-thunk)
                    (assoc (get entry :state) :n 99))
           _ (table-put components "direct" bumped)
           dyn2 (recompute-dynamics view dyn1 model))

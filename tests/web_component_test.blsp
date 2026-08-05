@@ -2,8 +2,7 @@
 
 ; ---- a fixture component to drive ----
 
-(deflive-component
-  (mount (id assigns) {:n (or (get assigns "start") 0)})
+(deflive-component (mount (id assigns) {:n (or (get assigns "start") 0)})
   (render (state) [:span {} (str (get state :n))])
   (on "bump" (params state) (assoc state :n (inc (get state :n))))
   (on "set" (params state) (assoc state :n (get params "value"))))

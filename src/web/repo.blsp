@@ -38,17 +38,18 @@
   (let (parent (self))
     (dolist (_ (range size))
       (spawn (fn ()
-        (send parent [:warmed (try (do (repo/exec r "SELECT 1" []) true) (catch _ false))]))))
-    (when (and (> size 0) (= (warmup--collect size 0) 0))
+               (send parent [:warmed (try (do (repo/exec r "SELECT 1" []) true) (catch _ false))]))))
+    (when (and (> size 0) (= (warmup-collect size 0) 0))
       (error "web/repo: warmup failed on every connection — the database is unreachable or "
         "rejecting queries; refusing to start with a dead pool"))))
 
-(defn warmup--collect (remaining ok)
+(defn- warmup-collect
+  (remaining ok)
   "Collect the `remaining` warmup replies, returning how many succeeded. Each wait is bounded
   by `*warmup-timeout-ms*`; a probe that never answers stops the collection with the count so
   far (so a wedged connection can't pin startup)."
   (if (= remaining 0)
     ok
     (receive
-      ([:warmed good] (warmup--collect (- remaining 1) (if good (+ ok 1) ok)))
+      ([:warmed good] (warmup-collect (- remaining 1) (if good (+ ok 1) ok)))
       (after *warmup-timeout-ms* ok))))

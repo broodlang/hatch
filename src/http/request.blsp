@@ -17,61 +17,64 @@
           ((req-line & header-lines)
             (if (> (count header-lines) *max-header-count*)
               [:error "too many headers"]
-            (match (parse-request-line req-line)
-              ([:error e] [:error e])
-              ([:ok method path query version]
-                (let (headers (parse-headers header-lines)
-                      buflen (string-length buf))
-                  (cond
-                    ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
-                    ; server must reject it in a request; folding disagreements are a header-
-                    ; desync / smuggling primitive. `parse-headers` would otherwise promote a
-                    ; continuation line to a standalone header.
-                    (obs-fold? header-lines) [:error "obs-fold header line"]
-                    ; More than one Transfer-Encoding header line is ambiguous framing: a
-                    ; proxy honoring a different occurrence than we do (we keep the last) is a
-                    ; smuggling vector. (A list value like "x, chunked" is already rejected
-                    ; below, since `chunked?` requires the value to be exactly "chunked".)
-                    (duplicate-transfer-encoding? header-lines) [:error "multiple Transfer-Encoding"]
-                    ; Transfer-Encoding *and* Content-Length is ambiguous framing
-                    ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
-                    (and (contains? headers :transfer-encoding)
-                      (contains? headers :content-length)) [:error "Transfer-Encoding with Content-Length"]
-                    ; Chunked Transfer-Encoding: de-chunk the body. Any other TE coding
-                    ; (gzip, …) we don't decode, so reject rather than mis-frame it.
-                    (contains? headers :transfer-encoding) (if (chunked? (get headers
-                                                                           :transfer-encoding))
-                                                             ; one decoder for both paths: `dechunk-step`
-                                                             ; (its `:more` = "need more bytes" = `:incomplete`
-                                                             ; for a single whole-buffer parse)
-                                                             (match (dechunk-step buf body-start (list) 0)
-                                                               ([:more _tail _decoded _dlen] [:incomplete])
-                                                               ([:error e] [:error e])
-                                                               ([:ok body remainder] [:ok (mk-request method
-                                                                                            path
-                                                                                            query
-                                                                                            version
-                                                                                            headers
-                                                                                            body)
-                                                                                       remainder]))
-                                                             [:error "unsupported transfer-encoding"])
-                    ; Conflicting Content-Length values → ambiguous framing.
-                    (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
-                    ; Content-Length, when present, must be a non-negative
-                    ; integer. Without this a negative value made body-end <
-                    ; body-start and `substring` threw, crashing the worker.
-                    (not (valid-content-length? (get headers :content-length))) [:error "invalid Content-Length"]
-                    else (let (clen (content-length-value (get headers :content-length))
-                               body-end (+ body-start clen))
-                           (if (< buflen body-end)
-                             [:incomplete]
-                             [:ok (mk-request method
-                                    path
-                                    query
-                                    version
-                                    headers
-                                    (substring buf body-start body-end))
-                               (substring buf body-end buflen)])))))))))))))
+              (match (parse-request-line req-line)
+                ([:error e] [:error e])
+                ([:ok method path query version]
+                  (let (headers (parse-headers header-lines)
+                        buflen (string-length buf))
+                    (cond
+                      ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
+                      ; server must reject it in a request; folding disagreements are a header-
+                      ; desync / smuggling primitive. `parse-headers` would otherwise promote a
+                      ; continuation line to a standalone header.
+                      (obs-fold? header-lines) [:error "obs-fold header line"]
+                      ; More than one Transfer-Encoding header line is ambiguous framing: a
+                      ; proxy honoring a different occurrence than we do (we keep the last) is a
+                      ; smuggling vector. (A list value like "x, chunked" is already rejected
+                      ; below, since `chunked?` requires the value to be exactly "chunked".)
+                      (duplicate-transfer-encoding? header-lines)
+                        [:error "multiple Transfer-Encoding"]
+                      ; Transfer-Encoding *and* Content-Length is ambiguous framing
+                      ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
+                      (and (contains? headers :transfer-encoding)
+                        (contains? headers :content-length))
+                        [:error "Transfer-Encoding with Content-Length"]
+                      ; Chunked Transfer-Encoding: de-chunk the body. Any other TE coding
+                      ; (gzip, …) we don't decode, so reject rather than mis-frame it.
+                      (contains? headers :transfer-encoding)
+                        (if (chunked? (get headers
+                                        :transfer-encoding))
+                          ; one decoder for both paths: `dechunk-step`
+                          ; (its `:more` = "need more bytes" = `:incomplete`
+                          ; for a single whole-buffer parse)
+                          (match (dechunk-step buf body-start (list) 0)
+                            ([:more _tail _decoded _dlen] [:incomplete])
+                            ([:error e] [:error e])
+                            ([:ok body remainder] [:ok
+                                                    (mk-request method
+                                                      path query version headers body)
+                                                    remainder]))
+                          [:error "unsupported transfer-encoding"])
+                      ; Conflicting Content-Length values → ambiguous framing.
+                      (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                      ; Content-Length, when present, must be a non-negative
+                      ; integer. Without this a negative value made body-end <
+                      ; body-start and `substring` threw, crashing the worker.
+                      (not (valid-content-length? (get headers :content-length)))
+                        [:error "invalid Content-Length"]
+                      else
+                        (let (clen (content-length-value (get headers :content-length))
+                              body-end (+ body-start clen))
+                          (if (< buflen body-end)
+                            [:incomplete]
+                            [:ok
+                              (mk-request method
+                                path
+                                query
+                                version
+                                headers
+                                (substring buf body-start body-end))
+                              (substring buf body-end buflen)])))))))))))))
 
 (defn try-parse-head (buf)
   "Parse a request's line + headers WITHOUT requiring the body to have arrived — for the
@@ -92,40 +95,47 @@
           ((req-line & header-lines)
             (if (> (count header-lines) *max-header-count*)
               [:error "too many headers"]
-            (match (parse-request-line req-line)
-              ([:error e] [:error e])
-              ([:ok method path query version]
-                (let (headers (parse-headers header-lines))
-                  (cond
-                    (obs-fold? header-lines) [:error "obs-fold header line"]
-                    (duplicate-transfer-encoding? header-lines) [:error "multiple Transfer-Encoding"]
-                    (and (contains? headers :transfer-encoding)
-                      (contains? headers :content-length)) [:error "Transfer-Encoding with Content-Length"]
-                    ; A chunked body has no Content-Length to size the spool by — defer to the
-                    ; incremental de-chunk drain rather than mis-frame it (carry the head and
-                    ; body offset so the drain doesn't re-parse them). Any OTHER coding (gzip,
-                    ; `chunked, gzip`, …) we don't decode — reject rather than mis-frame it, the
-                    ; same as `try-parse`; treating any TE as chunked is a smuggling surface.
-                    (and (contains? headers :transfer-encoding)
-                      (not (chunked? (get headers :transfer-encoding)))) [:error "unsupported transfer-encoding"]
-                    (contains? headers :transfer-encoding) [:chunked
-                                                            {:method method
-                                                             :path path
-                                                             :query query
-                                                             :params (parse-query query)
-                                                             :version version
-                                                             :headers headers}
-                                                            body-start]
-                    (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
-                    (not (valid-content-length? (get headers :content-length))) [:error "invalid Content-Length"]
-                    else [:head {:method method
-                                 :path path
-                                 :query query
-                                 :params (parse-query query)
-                                 :version version
-                                 :headers headers}
-                           body-start
-                           (content-length-value (get headers :content-length))])))))))))))
+              (match (parse-request-line req-line)
+                ([:error e] [:error e])
+                ([:ok method path query version]
+                  (let (headers (parse-headers header-lines))
+                    (cond
+                      (obs-fold? header-lines) [:error "obs-fold header line"]
+                      (duplicate-transfer-encoding? header-lines)
+                        [:error "multiple Transfer-Encoding"]
+                      (and (contains? headers :transfer-encoding)
+                        (contains? headers :content-length))
+                        [:error "Transfer-Encoding with Content-Length"]
+                      ; A chunked body has no Content-Length to size the spool by — defer to the
+                      ; incremental de-chunk drain rather than mis-frame it (carry the head and
+                      ; body offset so the drain doesn't re-parse them). Any OTHER coding (gzip,
+                      ; `chunked, gzip`, …) we don't decode — reject rather than mis-frame it, the
+                      ; same as `try-parse`; treating any TE as chunked is a smuggling surface.
+                      (and (contains? headers :transfer-encoding)
+                        (not (chunked? (get headers :transfer-encoding))))
+                        [:error "unsupported transfer-encoding"]
+                      (contains? headers :transfer-encoding)
+                        [:chunked
+                          {:method method
+                           :path path
+                           :query query
+                           :params (parse-query query)
+                           :version version
+                           :headers headers}
+                          body-start]
+                      (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                      (not (valid-content-length? (get headers :content-length)))
+                        [:error "invalid Content-Length"]
+                      else
+                        [:head
+                          {:method method
+                           :path path
+                           :query query
+                           :params (parse-query query)
+                           :version version
+                           :headers headers}
+                          body-start
+                          (content-length-value (get headers :content-length))])))))))))))
 
 (defn mk-request (method path query version headers body)
   "Build the request map shared by the Content-Length and chunked paths. `version` is the
@@ -171,7 +181,8 @@
       0
       (string->list s))))
 
-(defn dechunk--trailers (buf pos buflen)
+(defn- dechunk-trailers
+  (buf pos buflen)
   "Skip any trailer headers after the last (0-size) chunk; return the index past the
   terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
   (let (eol (idx-from buf "\r\n" pos))
@@ -179,7 +190,7 @@
       (= eol -1) -1
       (= eol pos) (+ eol 2)
       ; empty line → end of trailers
-      else (dechunk--trailers buf (+ eol 2) buflen))))
+      else (dechunk-trailers buf (+ eol 2) buflen))))
 
 (defn dechunk-step (buf pos decoded dlen)
   "Incremental de-chunk: decode every chunk that is *fully present* in `buf` from `pos`,
@@ -203,19 +214,23 @@
             size (parse-hex (trim size-tok)))
         (cond
           (nil? size) [:error "invalid chunk size"]
-          (= size 0) (let (end (dechunk--trailers buf (+ eol 2) buflen))
-                       (if (= end -1)
-                         [:more (substring buf pos buflen) decoded dlen]
-                         [:ok (join "" (reverse decoded)) (substring buf end buflen)]))
-          else (let (data-start (+ eol 2)
-                     data-end (+ data-start size)
-                     after (+ data-end 2))
-                 (if (< buflen after)
-                   [:more (substring buf pos buflen) decoded dlen]
-                   (if (= (substring buf data-end after) "\r\n")
-                     (dechunk-step buf after
-                       (cons (substring buf data-start data-end) decoded) (+ dlen size))
-                     [:error "malformed chunk"]))))))))
+          (= size 0)
+            (let (end (dechunk-trailers buf (+ eol 2) buflen))
+              (if (= end -1)
+                [:more (substring buf pos buflen) decoded dlen]
+                [:ok (join "" (reverse decoded)) (substring buf end buflen)]))
+          else
+            (let (data-start (+ eol 2)
+                  data-end (+ data-start size)
+                  after (+ data-end 2))
+              (if (< buflen after)
+                [:more (substring buf pos buflen) decoded dlen]
+                (if (= (substring buf data-end after) "\r\n")
+                  (dechunk-step buf
+                    after
+                    (cons (substring buf data-start data-end) decoded)
+                    (+ dlen size))
+                  [:error "malformed chunk"]))))))))
 
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
@@ -278,7 +293,8 @@
                                          v (http-version version))
                                      (if (= qi -1)
                                        [:ok (upper method) target "" v]
-                                       [:ok (upper method)
+                                       [:ok
+                                         (upper method)
                                          (substring target 0 qi)
                                          (substring target (+ qi 1) (string-length target))
                                          v])))
@@ -323,6 +339,7 @@
                               (assoc m k (cons v (get m k (list))))))))
                   {}
                   lines))
-    (fold (fn (m kv) (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
+    (fold (fn (m kv)
+            (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
       {}
       (map-pairs grouped))))

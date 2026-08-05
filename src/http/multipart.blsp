@@ -36,13 +36,14 @@
     (if (< first-at 0)
       (list)
       (let (crlf-delim (bytes-concat (string->utf8-bytes "\r\n") delim))
-        (split-parts--loop body crlf-delim (+ first-at (byte-length delim)) (list))))))
+        (split-parts-loop body crlf-delim (+ first-at (byte-length delim)) (list))))))
 
-(defn split-parts--loop (body crlf-delim pos acc)
+(defn- split-parts-loop
+  (body crlf-delim pos acc)
   (let (next-at (bytes-index-of body crlf-delim pos))
     (if (< next-at 0)
       (reverse acc)
-      (split-parts--loop body
+      (split-parts-loop body
         crlf-delim
         (+ next-at (byte-length crlf-delim))
         (cons (subbytes body pos next-at) acc)))))
@@ -51,8 +52,10 @@
 
 (defn crlf-at? (b i)
   "True if bytes `i`,`i+1` of `b` are CR,LF."
-  (and (>= i 0) (>= (byte-length b) (+ i 2))
-    (= (byte-at b i) 13) (= (byte-at b (+ i 1)) 10)))
+  (and (>= i 0)
+    (>= (byte-length b) (+ i 2))
+    (= (byte-at b i) 13)
+    (= (byte-at b (+ i 1)) 10)))
 
 (defn part-trim (seg)
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
@@ -86,7 +89,7 @@
               m
               (assoc m
                 (lower (trim (substring line 0 ci)))
-                (trim (substring line (+ ci 1) (string-length line)))))))
+                  (trim (substring line (+ ci 1) (string-length line)))))))
     {}
     (filter (fn (l) (not (blank? l))) (string-split s "\r\n"))))
 
@@ -96,7 +99,7 @@
   a parameter (not be preceded by a name char), so `cd-param disp \"name\"` on a part with only
   `filename=\"…\"` does not match the `name=\"` *inside* `filename=\"` and mis-file it."
   (let (needle (str key "=\"")
-        i (cd-param--find disposition needle 0))
+        i (cd-param-find disposition needle 0))
     (if (< i 0)
       nil
       (let (start (+ i (string-length needle))
@@ -112,14 +115,15 @@
       (and (>= cp 48) (<= cp 57))
       (= cp 45))))
 
-(defn cd-param--find (s needle from)
+(defn- cd-param-find
+  (s needle from)
   "Index of `needle` in `s` at/after `from` where it starts a parameter — i.e. at the string
   start or preceded by a non-name char (so `name=\"` inside `filename=\"` is skipped) — or -1."
   (let (i (index-of-from s needle from))
     (cond
       (< i 0) -1
       (or (= i 0) (not (param-name-char? (char-at s (- i 1))))) i
-      else (cd-param--find s needle (+ i 1)))))
+      else (cd-param-find s needle (+ i 1)))))
 
 (defn index-of-from (s needle from)
   "Index of `needle` in `s` at or after `from`, or -1."
@@ -133,9 +137,12 @@
     (cond
       (nil? name) acc
       (nil? (get part :filename)) (assoc-in acc [:fields name] (part-text (get part :bytes)))
-      else (assoc-in acc [:files name] {:filename (get part :filename)
-                                        :content-type (get part :content-type)
-                                        :bytes (get part :bytes)}))))
+      else
+        (assoc-in acc
+          [:files name]
+          {:filename (get part :filename)
+           :content-type (get part :content-type)
+           :bytes (get part :bytes)}))))
 
 (defn part-text (b)
   "Decode a text field's bytes to a string, safely (a field is text; fall back to empty on

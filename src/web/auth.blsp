@@ -26,8 +26,9 @@
   `username`:`password`. Uses a constant-time compare (`secure=?`), not `=`, so the response
   time can't be used as an oracle to recover the password byte-by-byte."
   (let (creds (basic-auth-creds conn))
-    (and creds (secure=? (string->utf8-bytes creds)
-                 (string->utf8-bytes (str username ":" password))))))
+    (and creds
+      (secure=? (string->utf8-bytes creds)
+        (string->utf8-bytes (str username ":" password))))))
 
 (defn basic-auth-creds (conn)
   "The decoded `user:pass` string from a `Basic <base64>` Authorization header, or nil
@@ -37,7 +38,8 @@
   (let (raw (header conn :authorization)
         prefix "Basic ")
     (if (and raw (starts-with? raw prefix))
-      (try (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
+      (try
+        (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
         (catch _e nil))
       nil)))
 

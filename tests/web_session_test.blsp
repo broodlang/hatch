@@ -92,7 +92,7 @@
 ; A weak or missing signing secret is fine in dev but a boot-stopping error in prod — a
 ; forgeable signature means forgeable sessions (auth bypass).
 (describe "check-secret (weak-secret guard)"
-  (def strong "0123456789abcdef0123456789abcdef")   ; 32 chars
+  (def strong "0123456789abcdef0123456789abcdef") ; 32 chars
   (test "a strong secret is accepted in every environment"
     (assert= (check-secret strong true) strong)
     (assert= (check-secret strong false) strong))
@@ -140,7 +140,8 @@
 
 (describe "session expiry (__exp__)"
   (test "an expired cookie decodes to an empty session"
-    (let (cookie (encode-session *secret* {"user" "x" "__exp__" 1})) ; exp = 1ms past epoch
+    (let (cookie (encode-session *secret* {"user" "x" "__exp__" 1}))
+      ; exp = 1ms past epoch
       (assert= (decode-session *secret* cookie) {})))
   (test "a live cookie decodes to the data with __exp__ stripped"
     (let (cookie (encode-session *secret* {"user" "x" "__exp__" (+ (now) 100000)}))

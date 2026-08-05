@@ -75,9 +75,7 @@
                                            :name (listener-name port)
                                            :start (fn ()
                                                     (spawn (listen-and-serve port
-                                                             handler
-                                                             ws-handler
-                                                             cfg)))
+                                                             handler ws-handler cfg)))
                                            :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
     (register (supervisor-name port) sup)
@@ -89,7 +87,7 @@
         lsock (bind-retry port 25 tls)
         scheme (if tls "https" "http"))
     (println (str "listening on " scheme "://localhost:" port))
-    (listener--loop lsock handler ws-handler config (list))))
+    (listener-loop lsock handler ws-handler config (list))))
 
 (defn bind-retry (port attempts tls)
   "Bind a listening socket on `port`, retrying briefly while the address is still in use.
@@ -137,15 +135,18 @@
 ; it on the worker's `[:down …]`, refuses (closes) a connection over `:max-connections`
 ; rather than spawning unboundedly, and on `:drain` (graceful `stop`) waits for those
 ; workers to finish before letting the process exit.
-(defn listener--without (workers pid)
+(defn- listener-without
+  (workers pid)
   "`workers` minus `pid` — order is irrelevant, it's a bag of in-flight worker pids."
   (fold (fn (acc w) (if (= w pid) acc (cons w acc))) (list) workers))
 
-(defn listener--kill-all (workers)
+(defn- listener-kill-all
+  (workers)
   "Hard-kill every worker in `workers` (drain deadline reached). Returns nil."
   (fold (fn (_ w) (exit w :kill) nil) nil workers))
 
-(defn listener--drain (workers deadline from)
+(defn- listener-drain
+  (workers deadline from)
   "Wait for the in-flight `workers` to finish, up to `deadline` (ms epoch); past it, hard-
   kill the stragglers. Either way reply `:drained` to `from` and let the listener exit.
   Late `[:tcp-accept]`s (a connection that slipped in as we closed the socket) are refused."
@@ -153,21 +154,22 @@
     (send from :drained)
     (let (remaining (- deadline (now)))
       (if (<= remaining 0)
-        (do (listener--kill-all workers) (send from :drained))
+        (do (listener-kill-all workers) (send from :drained))
         (receive
-          ([:down _ pid _] (listener--drain (listener--without workers pid) deadline from))
-          ([:tcp-accept _ client] (do (tcp-close client) (listener--drain workers deadline from)))
-          (after remaining (do (listener--kill-all workers) (send from :drained))))))))
+          ([:down _ pid _] (listener-drain (listener-without workers pid) deadline from))
+          ([:tcp-accept _ client] (do (tcp-close client) (listener-drain workers deadline from)))
+          (after remaining (do (listener-kill-all workers) (send from :drained))))))))
 
-(defn listener--loop (lsock handler ws-handler config workers)
+(defn- listener-loop
+  (lsock handler ws-handler config workers)
   (receive
     ([:tcp-accept ^lsock client]
       (if (>= (count workers) (get config :max-connections))
         (do
           ; over capacity — refuse without spawning a worker
           (tcp-close client)
-          (listener--loop lsock handler ws-handler config workers))
-        (let (worker (spawn (worker--run client handler ws-handler config "")))
+          (listener-loop lsock handler ws-handler config workers))
+        (let (worker (spawn (worker-run client handler ws-handler config "")))
           ; Read the connection in binary mode from the very first byte — set here, before
           ; the socket is handed to the worker, so there's no window where the reader would
           ; UTF-8-lossily decode (and corrupt) a binary request body (a file upload). The
@@ -176,15 +178,15 @@
           (tcp-set-binary client true)
           (monitor worker)
           (tcp-controlling-process client worker)
-          (listener--loop lsock handler ws-handler config (cons worker workers)))))
-    ([:down _ pid _] (listener--loop lsock
+          (listener-loop lsock handler ws-handler config (cons worker workers)))))
+    ([:down _ pid _] (listener-loop lsock
                        handler
                        ws-handler
                        config
-                       (listener--without workers pid)))
+                       (listener-without workers pid)))
     ([:drain from] (do
                      (tcp-close lsock)
-                     (listener--drain workers (+ (now) (get config :shutdown-grace-ms)) from)))
+                     (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)))
     (:stop (tcp-close lsock)
       (println "http/server: stopped"))))
 
@@ -199,7 +201,8 @@
   (let (n (string-length s))
     (if (<= n 3) s (substring s (- n 3) n))))
 
-(defn worker--run (sock handler ws-handler config buf)
+(defn- worker-run
+  (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head
   in O(n) (`worker--read-head`), then hands off to `worker--dispatch`, which routes the body to
   the spool / in-memory-drain / incremental-de-chunk path so no path re-buffers the body."
@@ -211,11 +214,13 @@
         (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
         (tcp-close sock))
     ; Head fully received → decide how to read the body.
-    (head-complete? buf) (worker--dispatch sock handler ws-handler config buf)
+    (head-complete? buf) (worker-dispatch sock handler ws-handler config buf)
     ; Head still arriving → accumulate reads in O(n) until the terminator lands.
-    else (worker--read-head sock handler ws-handler config (list buf) (tail3 buf) (string-length buf))))
+    else
+      (worker-read-head sock handler ws-handler config (list buf) (tail3 buf) (string-length buf))))
 
-(defn worker--read-head (sock handler ws-handler config chunks carry got)
+(defn- worker-read-head
+  (sock handler ws-handler config chunks carry got)
   "Accumulate socket reads until the request head is complete, in O(n): each read is consed onto
   `chunks` (O(1)) and only a 3-byte `carry` is re-scanned for the `\\r\\n\\r\\n` terminator — so a
   head split across many reads never re-copies or re-scans the whole buffer (the old `(str buf
@@ -224,19 +229,29 @@
   the accumulated size (→ 413)."
   (receive
     ; binary mode → `chunk` is a `bytes` value; bridge it to the byte-faithful carrier string.
-    ([:tcp ^sock chunk]
-      (let (piece (bytes->carrier chunk)
-            got (+ got (string-length piece)))
-        (cond
-          (> got (get config :max-request-bytes))
-            (do
-              (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-              (tcp-close sock))
-          (includes? (str carry piece) "\r\n\r\n")
-            (worker--run sock handler ws-handler config (join "" (reverse (cons piece chunks))))
-          else
-            (worker--read-head sock handler ws-handler config
-              (cons piece chunks) (tail3 (str carry piece)) got))))
+    ([:tcp ^sock chunk] (let (piece (bytes->carrier chunk)
+                              got (+ got (string-length piece)))
+                          (cond
+                            (> got (get config :max-request-bytes))
+                              (do
+                                (tcp-send sock
+                                  (format-response {:status 413
+                                                    :body "<h1>413 Payload Too Large</h1>"}))
+                                (tcp-close sock))
+                            (includes? (str carry piece) "\r\n\r\n")
+                              (worker-run sock
+                                handler
+                                ws-handler
+                                config
+                                (join "" (reverse (cons piece chunks))))
+                            else
+                              (worker-read-head sock
+                                handler
+                                ws-handler
+                                config
+                                (cons piece chunks)
+                                (tail3 (str carry piece))
+                                got))))
     ([:tcp-closed ^sock] nil)
     (after (get config :read-timeout-ms)
       (do
@@ -263,7 +278,8 @@
   (when (expects-continue? head)
     (try (tcp-send sock (string->utf8-bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
 
-(defn worker--dispatch (sock handler ws-handler config buf)
+(defn- worker-dispatch
+  (sock handler ws-handler config buf)
   "Dispatch a request whose head is fully buffered in `buf`. Parses the head ONCE, then routes
   the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
   so no path re-buffers the body. A body that already landed whole (and every WebSocket upgrade)
@@ -274,20 +290,22 @@
         ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
         ; in memory); the handler gets `:body-file` instead of `:body`. Off by default.
         (spool-body? config head clen ws-handler)
-          (do (maybe-continue sock head)
-            (spool--begin sock handler ws-handler config buf head body-start clen))
+          (do
+            (maybe-continue sock head)
+            (spool-begin sock handler ws-handler config buf head body-start clen))
         ; Body still arriving over several reads → drain by length in O(n) (collect reads in a
         ; list, join once) rather than re-`str`ing the whole buffer per read.
         (partial-body? buf head body-start clen ws-handler)
-          (do (maybe-continue sock head)
-            (buffered--begin sock handler ws-handler config buf head body-start clen))
+          (do
+            (maybe-continue sock head)
+            (buffered-begin sock handler ws-handler config buf head body-start clen))
         ; Body already complete/empty (or a WebSocket upgrade) → parse it whole and run it.
         else (dispatch-complete sock handler ws-handler config buf)))
     ; Chunked body → decode incrementally (only the newly-arrived bytes each read) instead of
     ; re-de-chunking the whole buffer on every read.
-    ([:chunked head body-start]
-      (do (maybe-continue sock head)
-        (chunked--begin sock handler ws-handler config buf head body-start)))
+    ([:chunked head body-start] (do
+                                  (maybe-continue sock head)
+                                  (chunked-begin sock handler ws-handler config buf head body-start)))
     ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
     ([:error msg] (bad-request-close sock msg))
     ; head-complete? gated us here, so :incomplete cannot occur; be defensive.
@@ -320,7 +338,10 @@
     ; With the head complete and every incomplete-body case routed above, this is only reached
     ; with a complete request; keep the incomplete recursion as a safety net.
     ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (worker--run sock handler ws-handler config
+                     ([:tcp ^sock chunk] (worker-run sock
+                                           handler
+                                           ws-handler
+                                           config
                                            (str buf (bytes->carrier chunk))))
                      ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
@@ -363,7 +384,7 @@
           response (assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
       (tcp-send sock (format-response response (= (get request :method) "HEAD")))
       (if ka
-        (worker--run sock handler ws-handler config remainder)
+        (worker-run sock handler ws-handler config remainder)
         (tcp-close sock)))))
 
 ; ---- O(n) in-memory body drain (non-chunked bodies that arrive over several reads) ----
@@ -383,7 +404,8 @@
     (< (string-length buf) (+ body-start clen))
     (not (and ws-handler (upgrade-request? head)))))
 
-(defn buffered--begin (sock handler ws-handler config buf head body-start clen)
+(defn- buffered-begin
+  (sock handler ws-handler config buf head body-start clen)
   "Start an O(n) in-memory body drain: reject if the declared request size blows the cap,
   else seed the drain with the body bytes already in `buf` and read the rest by length."
   (if (> (+ body-start clen) (get config :max-request-bytes))
@@ -391,10 +413,17 @@
       (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp-close sock))
     (let (already (substring buf body-start (string-length buf)))
-      (buffered--drain sock handler ws-handler config head
-        (list already) (string-length already) clen))))
+      (buffered-drain sock
+        handler
+        ws-handler
+        config
+        head
+        (list already)
+        (string-length already)
+        clen))))
 
-(defn buffered--drain (sock handler ws-handler config head chunks got clen)
+(defn- buffered-drain
+  (sock handler ws-handler config head chunks got clen)
   "Accumulate incoming body reads (carrier chunks, newest-first) in `chunks` until `clen`
   bytes are in hand, then `join` once, split off any pipelined `remainder`, and dispatch.
   Bounds the idle wait (slow-loris → 408) exactly like the fast path."
@@ -405,9 +434,14 @@
           request (assoc head :body body))
       (dispatch-buffered sock handler ws-handler config request remainder))
     (receive
-      ([:tcp ^sock chunk]
-        (buffered--drain sock handler ws-handler config head
-          (cons (bytes->carrier chunk) chunks) (+ got (count chunk)) clen))
+      ([:tcp ^sock chunk] (buffered-drain sock
+                            handler
+                            ws-handler
+                            config
+                            head
+                            (cons (bytes->carrier chunk) chunks)
+                            (+ got (count chunk))
+                            clen))
       ([:tcp-closed ^sock] nil)
       (after (get config :read-timeout-ms)
         (do
@@ -424,35 +458,54 @@
 ; Chunked bodies have no Content-Length (so they can't be spooled by size); this is their
 ; in-memory, memory-capped reader.
 
-(defn chunked--begin (sock handler ws-handler config buf head body-start)
+(defn- chunked-begin
+  (sock handler ws-handler config buf head body-start)
   "Start an incremental de-chunk drain, seeded with the body bytes already in `buf`."
-  (chunked--drain sock handler ws-handler config head
-    (substring buf body-start (string-length buf)) (list) 0))
+  (chunked-drain sock
+    handler
+    ws-handler
+    config
+    head
+    (substring buf body-start (string-length buf))
+    (list)
+    0))
 
-(defn chunked--drain (sock handler ws-handler config head pending decoded dlen)
+(defn- chunked-drain
+  (sock handler ws-handler config head pending decoded dlen)
   "Decode whatever chunks are fully present in `pending`, keep only the undecoded tail, and read
   more until the terminating 0-size chunk. `decoded` holds decoded pieces (newest-first), `dlen`
   their total length — capped at :max-request-bytes (a chunked body has no Content-Length, so this
   is its size bound). Bounds the idle wait (slow-loris → 408)."
   (match (dechunk-step pending 0 decoded dlen)
-    ([:ok body remainder]
-      (dispatch-buffered sock handler ws-handler config (assoc head :body body) remainder))
+    ([:ok body remainder] (dispatch-buffered sock
+                            handler
+                            ws-handler
+                            config
+                            (assoc head :body body)
+                            remainder))
     ([:error msg] (bad-request-close sock msg))
-    ([:more tail decoded dlen]
-      (if (> (+ dlen (string-length tail)) (get config :max-request-bytes))
-        (do
-          (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-          (tcp-close sock))
-        (receive
-          ([:tcp ^sock chunk]
-            (chunked--drain sock handler ws-handler config head
-              (str tail (bytes->carrier chunk)) decoded dlen))
-          ([:tcp-closed ^sock] nil)
-          (after (get config :read-timeout-ms)
-            (do
-              (tcp-send sock
-                (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-              (tcp-close sock))))))))
+    ([:more tail decoded dlen] (if (> (+ dlen (string-length tail)) (get config :max-request-bytes))
+                                 (do
+                                   (tcp-send sock
+                                     (format-response {:status 413
+                                                       :body "<h1>413 Payload Too Large</h1>"}))
+                                   (tcp-close sock))
+                                 (receive
+                                   ([:tcp ^sock chunk] (chunked-drain sock
+                                                         handler
+                                                         ws-handler
+                                                         config
+                                                         head
+                                                         (str tail (bytes->carrier chunk))
+                                                         decoded
+                                                         dlen))
+                                   ([:tcp-closed ^sock] nil)
+                                   (after (get config :read-timeout-ms)
+                                     (do
+                                       (tcp-send sock
+                                         (format-response {:status 408
+                                                           :body "<h1>408 Request Timeout</h1>"}))
+                                       (tcp-close sock))))))))
 
 ; ---- large-body streaming to disk (opt-in via :spool-threshold) ----
 
@@ -470,59 +523,71 @@
       (body-method? (get head :method))
       (not (and ws-handler (upgrade-request? head))))))
 
-(defn spool--path (config)
+(defn- spool-path
+  (config)
   "A fresh unique temp path under :spool-dir for one spooled request body."
   (str (get config :spool-dir "/tmp") "/hatch-upload-" (random-token 16)))
 
-(defn spool--begin (sock handler ws-handler config buf head body-start clen)
+(defn- spool-begin
+  (sock handler ws-handler config buf head body-start clen)
   "Start spooling: reject if the declared length blows the request cap, else write the body
   bytes already sitting in `buf` to a fresh temp file and stream the rest off the socket."
   (if (> clen (get config :max-request-bytes))
     (do
       (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp-close sock))
-    (let (path (spool--path config)
+    (let (path (spool-path config)
           already (substring buf body-start (string-length buf))
           alen (string-length already)
           take (min alen clen)
           prefix (if (= take alen) already (substring already 0 take)))
       ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
       ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
-      (spool--append path (carrier->bytes prefix))
-      (spool--drain sock handler ws-handler config head path take clen))))
+      (spool-append path (carrier->bytes prefix))
+      (spool-drain sock handler ws-handler config head path take clen))))
 
-(defn spool--drain (sock handler ws-handler config head path written clen)
+(defn- spool-drain
+  (sock handler ws-handler config head path written clen)
   "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
   the idle wait (slow-loris → 408) and deletes the partial spool on a stalled/closed socket."
   (if (>= written clen)
-    (spool--dispatch sock handler config head path clen)
+    (spool-dispatch sock handler config head path clen)
     (receive
-      ([:tcp ^sock chunk]
-        (let (n (count chunk)
-              take (min n (- clen written))
-              piece (if (= take n) chunk (subbytes chunk 0 take)))
-          (spool--append path piece)
-          (spool--drain sock handler ws-handler config head path (+ written take) clen)))
-      ([:tcp-closed ^sock] (do (spool--cleanup path) nil))
+      ([:tcp ^sock chunk] (let (n (count chunk)
+                                take (min n (- clen written))
+                                piece (if (= take n) chunk (subbytes chunk 0 take)))
+                            (spool-append path piece)
+                            (spool-drain sock
+                              handler
+                              ws-handler
+                              config
+                              head
+                              path
+                              (+ written take)
+                              clen)))
+      ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
       (after (get config :read-timeout-ms)
         (do
-          (spool--cleanup path)
+          (spool-cleanup path)
           (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
           (tcp-close sock))))))
 
-(defn spool--cleanup (path)
+(defn- spool-cleanup
+  (path)
   "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."
   (try (delete-file path) (catch _e nil)))
 
-(defn spool--append (path piece)
+(defn- spool-append
+  (path piece)
   "Append `piece` (bytes) to the spool file `path`; on a write error (disk full, a spool-dir
   that lost write permission) delete the partial temp file before re-raising, so a failed
   upload can't leak an abandoned `hatch-upload-*` file (repeated failures → disk exhaustion)."
   (try
     (append-bytes path piece)
-    (catch e (do (spool--cleanup path) (error (str "spool write failed: " (error-message e)))))))
+    (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
-(defn spool--dispatch (sock handler config head path clen)
+(defn- spool-dispatch
+  (sock handler config head path clen)
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
   remove the temp file unless the handler moved it. A spooled request always closes the
   connection afterwards — no keep-alive/pipelining bookkeeping across a multi-megabyte body."
@@ -545,7 +610,7 @@
        :path (get request :path)
        :status (get response :status 200)})
     (tcp-send sock (format-response response (= (get head :method) "HEAD")))
-    (spool--cleanup path)
+    (spool-cleanup path)
     (tcp-close sock)))
 
 (defn keep-alive? (request response)

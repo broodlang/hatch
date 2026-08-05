@@ -18,8 +18,8 @@
   (let (bp (get opts :body-params {})
         headers (if (empty? bp)
                   (get opts :headers {})
-                  (assoc (get opts :headers {}) :content-type
-                    "application/x-www-form-urlencoded")))
+                  (assoc (get opts :headers {})
+                    :content-type "application/x-www-form-urlencoded")))
     ((session/fetch-session secret) (build {:method method
                                             :path "/x"
                                             :query ""
@@ -40,28 +40,24 @@
       (assert= (nil? (token conn)) true)))
   (test "POST with the matching token (in the form body) passes"
     (let (conn (session/put-session (fresh "POST" {:body-params {"_csrf_token" "tok-123"}})
-                 "_csrf"
-                 "tok-123")
+                 "_csrf" "tok-123")
           out (protect-from-forgery conn))
       (assert= (halted? out) false)))
   (test "POST with a wrong token is rejected"
     (let (conn (session/put-session (fresh "POST" {:body-params {"_csrf_token" "wrong"}})
-                 "_csrf"
-                 "right")
+                 "_csrf" "right")
           out (protect-from-forgery conn))
       (assert= (halted? out) true)
       (assert= (get out :status) 403)))
   (test "a token supplied only in the query string is NOT accepted (would leak via the URL)"
     (let (conn (session/put-session (fresh "POST" {:params {"_csrf_token" "tok-123"}})
-                 "_csrf"
-                 "tok-123")
+                 "_csrf" "tok-123")
           out (protect-from-forgery conn))
       (assert= (halted? out) true)
       (assert= (get out :status) 403)))
   (test "the token may be supplied via the X-CSRF-Token header"
     (let (conn (session/put-session (fresh "POST" {:headers {:x-csrf-token "h-tok"}})
-                 "_csrf"
-                 "h-tok")
+                 "_csrf" "h-tok")
           out (protect-from-forgery conn))
       (assert= (halted? out) false)))
   (test "PUT/PATCH/DELETE are also protected"

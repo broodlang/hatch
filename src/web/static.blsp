@@ -21,8 +21,7 @@
   ; DECODED value of which the traversal checks run
   (:alias http/util))
 
-(require 'hash)   ; strong ETags are a SHA-256 prefix of the body
-
+(require 'hash) ; strong ETags are a SHA-256 prefix of the body
 ; ---- MIME types ----
 
 (def *mime-types*
@@ -128,7 +127,8 @@
 ; registry process would funnel every read through one mailbox).
 (def *etag-cache* (table))
 
-(defn cached-etag--via (path fresh-fn)
+(defn- cached-etag-via
+  (path fresh-fn)
   "The ETag for `path`, reusing the cached hash while the file's mtime+size are unchanged and
   recomputing it (via `fresh-fn`, called only on a miss) after an edit. One `file-stat` (a
   cheap syscall) replaces hashing the whole body on every hit. Shared by the text and binary
@@ -145,11 +145,11 @@
 
 (defn cached-etag (path body)
   "The cached strong ETag for a text file `body` at `path` (see `cached-etag--via`)."
-  (cached-etag--via path (fn () (etag body))))
+  (cached-etag-via path (fn () (etag body))))
 
 (defn cached-bytes-etag (path body)
   "The cached strong ETag for a binary (`bytes`) file `body` at `path`."
-  (cached-etag--via path (fn () (bytes-etag-hash body))))
+  (cached-etag-via path (fn () (bytes-etag-hash body))))
 
 (defn fingerprint-shaped? (path)
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
@@ -241,23 +241,26 @@
                   hi (trim (substring r (+ dash 1) (string-length r))))
               (cond
                 ; suffix: bytes=-n → final n bytes
-                (blank? lo) (let (n (range-int hi))
-                              (if (or (nil? n) (<= n 0))
-                                nil
-                                [(max 0 (- len n)) (- len 1)]))
+                (blank? lo)
+                  (let (n (range-int hi))
+                    (if (or (nil? n) (<= n 0))
+                      nil
+                      [(max 0 (- len n)) (- len 1)]))
                 ; bytes=a- → a..end
-                (blank? hi) (let (a (range-int lo))
-                              (cond
-                                (nil? a) nil
-                                (>= a len) :unsatisfiable
-                                else [a (- len 1)]))
+                (blank? hi)
+                  (let (a (range-int lo))
+                    (cond
+                      (nil? a) nil
+                      (>= a len) :unsatisfiable
+                      else [a (- len 1)]))
                 ; bytes=a-b
-                else (let (a (range-int lo)
-                           b (range-int hi))
-                       (cond
-                         (or (nil? a) (nil? b) (> a b)) nil
-                         (>= a len) :unsatisfiable
-                         else [a (min b (- len 1))]))))))))))
+                else
+                  (let (a (range-int lo)
+                        b (range-int hi))
+                    (cond
+                      (or (nil? a) (nil? b) (> a b)) nil
+                      (>= a len) :unsatisfiable
+                      else [a (min b (- len 1))]))))))))))
 
 (defn serve-range (conn content-type body tag cc len)
   "Honour a `Range` request when we safely can. Byte ranges are byte offsets, but the body
@@ -272,25 +275,26 @@
     (let (r (parse-range (get (get conn :headers) :range) len))
       (cond
         (nil? r) nil
-        (= r :unsatisfiable) (send-resp (with-resp-headers conn
-                                          {:content-type content-type
-                                           :etag tag
-                                           :cache-control cc
-                                           :accept-ranges "bytes"
-                                           :x-content-type-options "nosniff"
-                                           :content-range (str "bytes */" len)})
-                               416
-                               "")
-        else (let ([start end] r)
-               (send-resp (with-resp-headers conn
-                            {:content-type content-type
-                             :etag tag
-                             :cache-control cc
-                             :accept-ranges "bytes"
-                             :x-content-type-options "nosniff"
-                             :content-range (str "bytes " start "-" end "/" len)})
-                 206
-                 (substring body start (+ end 1))))))))
+        (= r :unsatisfiable)
+          (send-resp (with-resp-headers conn
+                       {:content-type content-type
+                        :etag tag
+                        :cache-control cc
+                        :accept-ranges "bytes"
+                        :x-content-type-options "nosniff"
+                        :content-range (str "bytes */" len)})
+            416 "")
+        else
+          (let ([start end] r)
+            (send-resp (with-resp-headers conn
+                         {:content-type content-type
+                          :etag tag
+                          :cache-control cc
+                          :accept-ranges "bytes"
+                          :x-content-type-options "nosniff"
+                          :content-range (str "bytes " start "-" end "/" len)})
+              206
+              (substring body start (+ end 1))))))))
 
 (defn serve-body (conn content-type body path &optional (dir "static") (tag nil))
   "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
@@ -302,15 +306,15 @@
         cc (cache-control path dir))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
-      else (or (serve-range conn content-type body tag cc (count (string->utf8-bytes body)))
-             (send-resp (with-resp-headers conn
-                          {:content-type content-type
-                           :etag tag
-                           :cache-control cc
-                           :accept-ranges "bytes"
-                           :x-content-type-options "nosniff"})
-               200
-               body)))))
+      else
+        (or (serve-range conn content-type body tag cc (count (string->utf8-bytes body)))
+          (send-resp (with-resp-headers conn
+                       {:content-type content-type
+                        :etag tag
+                        :cache-control cc
+                        :accept-ranges "bytes"
+                        :x-content-type-options "nosniff"})
+            200 body)))))
 
 (defn fresh-cached-etag (path)
   "The cached ETag for `path` if the file still matches the cached mtime+size — determined
@@ -371,15 +375,15 @@
         len (count body))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
-      else (or (serve-bytes-range conn content-type body tag cc len)
-             (send-resp (with-resp-headers conn
-                          {:content-type content-type
-                           :etag tag
-                           :cache-control cc
-                           :accept-ranges "bytes"
-                           :x-content-type-options "nosniff"})
-               200
-               body)))))
+      else
+        (or (serve-bytes-range conn content-type body tag cc len)
+          (send-resp (with-resp-headers conn
+                       {:content-type content-type
+                        :etag tag
+                        :cache-control cc
+                        :accept-ranges "bytes"
+                        :x-content-type-options "nosniff"})
+            200 body)))))
 
 (defn serve-bytes-range (conn content-type body tag cc len)
   "Honour a `Range` request against a `bytes` body: a 206 with the sliced bytes, a 416 for an
@@ -387,25 +391,26 @@
   (let (r (parse-range (get (get conn :headers) :range) len))
     (cond
       (nil? r) nil
-      (= r :unsatisfiable) (send-resp (with-resp-headers conn
-                                        {:content-type content-type
-                                         :etag tag
-                                         :cache-control cc
-                                         :accept-ranges "bytes"
-                                         :x-content-type-options "nosniff"
-                                         :content-range (str "bytes */" len)})
-                             416
-                             "")
-      else (let ([start end] r)
-             (send-resp (with-resp-headers conn
-                          {:content-type content-type
-                           :etag tag
-                           :cache-control cc
-                           :accept-ranges "bytes"
-                           :x-content-type-options "nosniff"
-                           :content-range (str "bytes " start "-" end "/" len)})
-               206
-               (subbytes body start (+ end 1)))))))
+      (= r :unsatisfiable)
+        (send-resp (with-resp-headers conn
+                     {:content-type content-type
+                      :etag tag
+                      :cache-control cc
+                      :accept-ranges "bytes"
+                      :x-content-type-options "nosniff"
+                      :content-range (str "bytes */" len)})
+          416 "")
+      else
+        (let ([start end] r)
+          (send-resp (with-resp-headers conn
+                       {:content-type content-type
+                        :etag tag
+                        :cache-control cc
+                        :accept-ranges "bytes"
+                        :x-content-type-options "nosniff"
+                        :content-range (str "bytes " start "-" end "/" len)})
+            206
+            (subbytes body start (+ end 1)))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the

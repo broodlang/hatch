@@ -28,19 +28,21 @@
   query outside any try, so an unguarded throw crashes the worker with no response (a
   trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
   (try
-    (utf8-bytes->string (into [] (reverse (url-decode--acc (string->list s) nil))))
+    (utf8-bytes->string (into [] (reverse (url-decode-acc (string->list s) nil))))
     (catch _e s)))
 
-(defn url-decode--acc (chars acc)
+(defn- url-decode-acc
+  (chars acc)
   (match chars
     (nil acc)
-    (("%" h l & rest) (url-decode--acc rest
+    (("%" h l & rest) (url-decode-acc rest
                         (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
-    (("+" & rest) (url-decode--acc rest (cons 32 acc)))
+    (("+" & rest) (url-decode-acc rest (cons 32 acc)))
     ((c & rest) (let (cp (char->int c))
                   (if (< cp 128)
-                    (url-decode--acc rest (cons cp acc))
-                    (url-decode--acc rest (fold (fn (a b) (cons b a)) acc (seq (string->utf8-bytes c)))))))))
+                    (url-decode-acc rest (cons cp acc))
+                    (url-decode-acc rest
+                      (fold (fn (a b) (cons b a)) acc (seq (string->utf8-bytes c)))))))))
 
 ;; ---- query-string parser ----
 
@@ -53,9 +55,10 @@
               (if (= eq -1)
                 (assoc m (url-decode pair) "")
                 (assoc m
-                  (url-decode (substring pair 0 eq)) (url-decode (substring pair
-                                                                   (+ eq 1)
-                                                                   (string-length pair)))))))
+                  (url-decode (substring pair 0 eq))
+                    (url-decode (substring pair
+                                  (+ eq 1)
+                                  (string-length pair)))))))
       {}
       (string-split s "&"))))
 
@@ -93,18 +96,20 @@
   (let (ct (get headers :content-type))
     (if (nil? ct)
       nil
-      (ct-param--find (rest (string-split ct ";")) (lower key)))))
+      (ct-param-find (rest (string-split ct ";")) (lower key)))))
 
-(defn ct-param--find (parts key)
+(defn- ct-param-find
+  (parts key)
   (if (empty? parts)
     nil
     (let (p (trim (first parts))
           eq (index-of p "="))
       (if (and (not (= eq -1)) (= (lower (trim (substring p 0 eq))) key))
-        (ct-param--unquote (trim (substring p (+ eq 1) (string-length p))))
-        (ct-param--find (rest parts) key)))))
+        (ct-param-unquote (trim (substring p (+ eq 1) (string-length p))))
+        (ct-param-find (rest parts) key)))))
 
-(defn ct-param--unquote (v)
+(defn- ct-param-unquote
+  (v)
   (if (and (>= (string-length v) 2) (starts-with? v "\"") (ends-with? v "\""))
     (substring v 1 (- (string-length v) 1))
     v))
@@ -137,9 +142,10 @@
   "Recursively replace every map key with its string name, descending through map values
   and vectors — so a parsed JSON body is string-keyed all the way down."
   (cond
-    (map? v) (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
-               {}
-               (map-pairs v))
+    (map? v)
+      (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
+        {}
+        (map-pairs v))
     (vector? v) (into [] (map stringify-keys v))
     else v))
 

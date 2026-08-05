@@ -31,7 +31,7 @@
   (test "calls each child thunk in order"
     (do
       (start-children [(fn () (send (self) :first))
-                       (fn () (send (self) :second))]
+                        (fn () (send (self) :second))]
         0)
       (assert= (receive (m m) (after 200 :timeout)) :first)
       (assert= (receive (m m) (after 200 :timeout)) :second)))
@@ -49,24 +49,26 @@
 
 (describe "application--text-line"
   (test "renders [LEVEL] msg with a trailing newline, no ANSI color"
-    (assert= (web/application/application--text-line (rec :debug "hello" {}))
+    (assert= (web/application/application-text-line (rec :debug "hello" {}))
       "[DEBUG] hello\n"))
   (test "each level gets its own label"
-    (assert= (web/application/application--text-line (rec :info "x" {})) "[INFO] x\n")
-    (assert= (web/application/application--text-line (rec :warn "x" {})) "[WARN] x\n")
-    (assert= (web/application/application--text-line (rec :error "x" {})) "[ERROR] x\n")))
+    (assert= (web/application/application-text-line (rec :info "x" {})) "[INFO] x\n")
+    (assert= (web/application/application-text-line (rec :warn "x" {})) "[WARN] x\n")
+    (assert= (web/application/application-text-line (rec :error "x" {})) "[ERROR] x\n")))
 
 (describe "application--color-line"
   (test "wraps the text-line body in the level's ANSI color + reset"
-    (let (line (web/application/application--color-line (rec :error "boom" {})))
+    (let (line (web/application/application-color-line (rec :error "boom" {})))
       (assert= (includes? line "\x1b[31m") true)
       (assert= (includes? line "[ERROR] boom") true)
       (assert= (includes? line "\x1b[0m") true))))
 
 (describe "application--json-line"
   (test "one NDJSON object per record, meta fields flattened alongside timestamp/level/message"
-    (let (line (web/application/application--json-line
-                 {:level :warn :msg "slow" :ts 1000 :meta {:request_id "r1" :duration_ms 4.2}})
+    (let (line (web/application/application-json-line {:level :warn
+                                                       :msg "slow"
+                                                       :ts 1000
+                                                       :meta {:request_id "r1" :duration_ms 4.2}})
           parsed (json-parse line))
       (assert= (get parsed :timestamp) 1000)
       (assert= (get parsed :level) "warn")
@@ -75,7 +77,10 @@
       (assert= (get parsed :duration_ms) 4.2)
       (assert= (includes? line "\n") true)))
   (test "an unrecognized level falls back to \"info\""
-    (assert= (get (json-parse (web/application/application--json-line {:level :bogus :msg "x" :ts 0 :meta {}}))
+    (assert= (get (json-parse (web/application/application-json-line {:level :bogus
+                                                                      :msg "x"
+                                                                      :ts 0
+                                                                      :meta {}}))
                :level)
       "info")))
 

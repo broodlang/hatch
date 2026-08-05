@@ -7,8 +7,7 @@
 ; render time. Fixed by defaulting the template render-arg to `model`, matching deflive.
 (defmodule web-component-template-test (:alias web/component) (:use test))
 
-(component/deflive-component
-  (mount (id assigns) {:n (get assigns "start" 0)})
+(component/deflive-component (mount (id assigns) {:n (get assigns "start" 0)})
   (template "component_widget.bml"))
 
 (describe "deflive-component's (template …) clause"

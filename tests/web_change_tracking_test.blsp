@@ -5,16 +5,16 @@
 
 ;; A view with two independent dynamic slots: a heading bound to :title and a counter bound
 ;; to :count. Change tracking must let a change to one skip re-rendering the other.
-(deflive
-  (mount (params) {:title "hi" :count 0})
+(deflive (mount (params) {:title "hi" :count 0})
   (render (model) [:div {} [:h1 {} (get model :title)] [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count)))))
 
 (defn view-from-spec (spec model)
   "A session-style view map primed as if push-full had just rendered `model`."
-  (merge spec {:model model
-               :dynamics ((get spec :render-dynamic) model)
-               :render-model model}))
+  (merge spec
+    {:model model
+     :dynamics ((get spec :render-dynamic) model)
+     :render-model model}))
 
 (describe "change tracking — slot deps"
   (test "each slot records exactly the model keys it reads"
@@ -47,9 +47,8 @@
           v (merge (view-from-spec spec {:title "hi" :count 0})
               {:dynamics ["SENTINEL-TITLE" "0"]})
           out (recompute-dynamics v (get v :dynamics) {:title "bye" :count 0}))
-      (assert= (nth out 0) "bye")     ; :title changed → re-rendered
-      (assert= (nth out 1) "0"))))    ; :count unchanged → reused
-
+      (assert= (nth out 0) "bye") ; :title changed → re-rendered
+      (assert= (nth out 1) "0")))) ; :count unchanged → reused
 (describe "slot-dirty?"
   (test ":all is always dirty" (assert= (slot-dirty? :all {:a 1} {:a 1}) true))
   (test "a changed dependency key is dirty" (assert= (slot-dirty? [:a] {:a 1} {:a 2}) true))

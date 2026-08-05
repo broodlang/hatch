@@ -10,8 +10,7 @@
 ;; prove the parser splits on the boundary (not on CRLF) and keeps binary content intact.
 (def png-bytes (bytes [137 80 78 71 0 255 13 10]))
 (def body
-  (bytes-concat
-    (b "--BOUND\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n")
+  (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n")
     (b (str "--BOUND\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n"
          "Content-Type: image/png\r\n\r\n"))
     png-bytes
@@ -45,8 +44,7 @@
 ;; A file part whose binary content contains a bare `--BOUND` (not CRLF-preceded) must NOT
 ;; be split there — the delimiter is CRLF-anchored (`\r\n--BOUND`).
 (def body-boundary-in-content
-  (bytes-concat
-    (b "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f.bin\"\r\n\r\n")
+  (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f.bin\"\r\n\r\n")
     (b "data--BOUNDstill-data")
     (b "\r\n--BOUND--\r\n")))
 
@@ -59,8 +57,7 @@
   (test "cd-param name does not match inside filename"
     (assert= (cd-param "form-data; filename=\"orphan.txt\"" "name") nil))
   (test "a nameless file part is dropped"
-    (assert= (parse (bytes-concat
-                      (b "--BOUND\r\nContent-Disposition: form-data; filename=\"orphan.txt\"\r\n\r\n")
+    (assert= (parse (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; filename=\"orphan.txt\"\r\n\r\n")
                       (b "content")
                       (b "\r\n--BOUND--\r\n"))
                "BOUND")
