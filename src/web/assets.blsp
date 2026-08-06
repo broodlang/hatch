@@ -155,7 +155,28 @@
         fp (fingerprint-name file (substring (hash/sha256-bytes body) 0 8)))
     (spit-bytes (str dir "/" fp) body)
     (log/log-info (str "[assets] fingerprint: " file " -> " fp))
+    (when (compressible? file)
+      (precompress (str dir "/" fp)))
     fp))
+
+(defn compressible? (file)
+  "True for text assets worth precompressing (CSS/JS/SVG/JSON/…), by MIME. Already-compressed
+  binaries (png/woff2/wasm/gz) barely shrink and are skipped."
+  (static/text-mime? (static/mime-type file)))
+
+(defn precompress (path)
+  "Best-effort: write `path.gz` with the `gzip` CLI so `web/static/serve-encoded` can serve a
+  precompressed variant to `Accept-Encoding: gzip` clients (~5-6x smaller CSS/JS). A missing
+  or failing gzip is logged and skipped — serving still works uncompressed — so a build/boot
+  host without gzip degrades rather than breaks. `-k` keeps the original, `-f` overwrites a
+  stale `.gz` from a previous build."
+  (try
+    (let (code (run-process "gzip" (list "-9" "-k" "-f" path)))
+      (if (= code 0)
+        (log/log-info (str "[assets] precompress: " path ".gz"))
+        (log/log-warn (str "[assets] gzip exit " code " for " path "; serving uncompressed"))))
+    (catch e
+      (log/log-warn (str "[assets] gzip unavailable (" (error-message e) "); serving uncompressed")))))
 
 (defn fingerprint-name (file digest)
   "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →
