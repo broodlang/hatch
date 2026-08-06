@@ -227,3 +227,52 @@
       ; clearing forces a fresh (now-empty) read
       (clear-manifest-cache)
       (assert= (load-manifest dir) {}))))
+
+(describe "accepts-gzip?"
+  (test "true when Accept-Encoding offers gzip"
+    (assert= (accepts-gzip? (conn-with {} {:accept-encoding "gzip, deflate, br"})) true))
+  (test "false when the header is absent"
+    (assert= (accepts-gzip? (conn-with {})) false)))
+
+(describe "serve-encoded (gzip content negotiation)"
+  ; The .gz bytes are opaque to serve — it never inflates them — so a plain-text stand-in is
+  ; a fine fixture; we assert on the negotiation, headers, and which body is chosen.
+  (test "Accept-Encoding: gzip + a .gz sibling → the gzip variant"
+    (let (dir "/tmp/hatch-gz-serve-test"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/x.css") "body{color:red}")
+          _ (spit (str dir "/x.css.gz") "PRECOMPRESSED-BYTES")
+          resp (serve (conn-with {} {:accept-encoding "gzip"}) dir "x.css")
+          headers (get resp :resp-headers))
+      (assert= (get resp :status) 200)
+      (assert= (get headers :content-encoding) "gzip")
+      (assert= (get headers :content-type) "text/css; charset=utf-8")
+      (assert= (get headers :vary) "Accept-Encoding")
+      ; the compressed representation is sent whole — no Range advertised
+      (assert= (get headers :accept-ranges) nil)
+      (assert= (> (count (get resp :resp-body)) 0) true)
+      (delete-file (str dir "/x.css.gz"))
+      (delete-file (str dir "/x.css"))))
+  (test "no Accept-Encoding → identity body, but still Vary: Accept-Encoding"
+    (let (dir "/tmp/hatch-gz-serve-test2"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/x.css") "body{color:red}")
+          _ (spit (str dir "/x.css.gz") "PRECOMPRESSED-BYTES")
+          resp (serve (conn-with {}) dir "x.css")
+          headers (get resp :resp-headers))
+      (assert= (get resp :status) 200)
+      (assert= (get headers :content-encoding) nil)
+      (assert= (get headers :vary) "Accept-Encoding")
+      (assert= (get resp :resp-body) "body{color:red}")
+      (delete-file (str dir "/x.css.gz"))
+      (delete-file (str dir "/x.css"))))
+  (test "Accept-Encoding: gzip but no .gz on disk → identity"
+    (let (dir "/tmp/hatch-gz-serve-test3"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/y.css") "body{color:blue}")
+          resp (serve (conn-with {} {:accept-encoding "gzip"}) dir "y.css")
+          headers (get resp :resp-headers))
+      (assert= (get resp :status) 200)
+      (assert= (get headers :content-encoding) nil)
+      (assert= (get resp :resp-body) "body{color:blue}")
+      (delete-file (str dir "/y.css")))))

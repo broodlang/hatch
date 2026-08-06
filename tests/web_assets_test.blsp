@@ -57,4 +57,33 @@
       (assert= (file-exists? (str dir "/cache-manifest.tmp")) false)
       (delete-file (str dir "/app.css"))
       (delete-file (str dir "/" fp))
+      ; fingerprinting a compressible asset also emits a best-effort .gz sibling
+      (when (file-exists? (str dir "/" fp ".gz")) (delete-file (str dir "/" fp ".gz")))
       (delete-file (str dir "/cache-manifest")))))
+
+(describe "compressible?"
+  (test "text assets are compressible"
+    (assert= (compressible? "app.css") true)
+    (assert= (compressible? "app.js") true)
+    (assert= (compressible? "icon.svg") true))
+  (test "already-compressed binaries are not"
+    (assert= (compressible? "logo.png") false)
+    (assert= (compressible? "font.woff2") false)
+    (assert= (compressible? "app.wasm") false)))
+
+(describe "fingerprint precompression"
+  ; precompress shells out to the `gzip` CLI, so it's best-effort — a build host without gzip
+  ; degrades to serving uncompressed. Assert the .gz's shape only when it was produced.
+  (test "a fingerprinted compressible asset gets a smaller .gz sibling (when gzip is present)"
+    (let (dir "/tmp/hatch-fp-gz-test"
+          _ (try (make-dir dir) (catch _ nil))
+          body (join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
+          _ (spit (str dir "/app.css") body)
+          fp (fingerprint-file dir "app.css")
+          gz (str dir "/" fp ".gz"))
+      (when (file-exists? gz)
+        (assert= (> (count (slurp-bytes gz)) 0) true)
+        (assert= (< (count (slurp-bytes gz)) (count (string->utf8-bytes body))) true))
+      (delete-file (str dir "/app.css"))
+      (delete-file (str dir "/" fp))
+      (when (file-exists? gz) (delete-file gz)))))
