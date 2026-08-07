@@ -534,41 +534,76 @@ a 4-rotation live-browser repro that failed before the fix and passed after).
 These are hatch-side follow-ups that only become worth doing once the matching
 Brood language/runtime change ships. We proposed all six upstream — they're at the
 top of [`brood/ROADMAP.md`](../../brood/ROADMAP.md) under *"Findings from hatch
-(2026-07-11)"*. Revisit each entry here when its upstream item lands. Context for the
-first three is `docs/tcp-http-audit.md` §16–§17 (the O(n²) class they retire).
+(2026-07-11)"*. Context for the first three is `docs/tcp-http-audit.md` §16–§17
+(the O(n²) class they retire).
 
-- ⬜ **Iolists → delete the manual list+`join` accumulation idiom.** Once the I/O +
-  join builtins (`tcp-send`, `spit`/`append-bytes`, `join`, `str`, `bytes-concat`)
-  accept arbitrarily nested lists flattened at the write boundary, rewrite the five
-  hand-rolled accumulators (`http/server` body drain + head reader, `http/request`
-  `dechunk-step`, `http/websocket` `reassemble`, `web/parts` `interleave`) to just
-  *describe* their structure and let the write flatten it — no more cons+`reverse`+
-  `join`. Also lets `web/parts` build the render tree as a nested iolist instead of
-  interleaving into one string.
-- ⬜ **`bytes`-native parsing → drop the carrier-string bridge.** When `bytes` grows a
-  fuller search/slice surface, port the HTTP/WebSocket parsers off the Latin-1
-  `(str buf (bytes->carrier chunk))` read buffer onto raw `bytes`. Removes the
-  text/binary mode-flip seam (root cause of the original U+FFFD live-nav bug) and the
-  O(n²) carrier conversions. Retires audit §16.
-- ⬜ **Growable read buffer → simplify the length-drain loops.** A transient append
-  buffer that freezes to immutable `bytes` on read would make `http/server`'s head
-  reader, chunked drain, and `web/live`'s WS frame gather trivially O(n) — deleting the
-  manual list+`join` and length-drain gymnastics those currently use. Also the clean fix
-  for the WS fragmented-message O(F²) residual noted in §17 (an incremental *message*
-  parser keeping decoded fragments across reads).
-- ⬜ **`mapv`/`filterv` → drop the `(into [] (map …))` wrappers.** Sweep the codebase
-  for `(into [] (map …))` / `(into [] (filter …))` (added wherever a vector was needed
-  because `map`/`filter` return lists) and collapse them once the vector-returning
-  variants exist.
-- ⬜ **Link-checked `--private` → catch cross-module misuse at compile time.** A private
-  `foo--bar` called from another module currently only fails at runtime (it bit us during
-  the audit work). Once the convention is link-checked upstream, no hatch code change is
-  needed — just confirm the suite stays green under the stricter check and drop any
-  workarounds.
-- ⬜ **`let` vector-destructure of a list value → remove the `first`/`rest` workarounds.**
-  We avoid `(let ([a b] some-list) …)` throughout (documented in CLAUDE.md's conventions)
-  and hand-expand to `first`/`rest`. If Brood makes vector-destructure work on lists (or
-  errors clearly), revisit those sites and the CLAUDE.md caveat.
+**All six upstream items have now shipped** (reviewed against brood 0.3.8,
+2026-08-07). Four are closed hatch-side; the two that remain are re-scoped below
+with what the shipped upstream feature actually gives us.
+
+- ✅ **Iolists — shipped upstream as ADR-139** (`tcp-send`/`bytes-concat`/`spit` take
+  arbitrarily nested trees of strings, `bytes` and byte ints, flattened once at the
+  write). Adopted where it applies: `http/websocket`'s frame builders now *describe*
+  each frame as an iolist (`(bytes-concat [129 n body])`) instead of concatenating
+  pairwise, and the hand-rolled `u64-be` shift-and-mask is gone in favour of the
+  prelude's `int->bytes`. The remaining accumulators (`http/server`'s head reader and
+  body drain, `http/request`'s `dechunk-step`) are *read*-side, not write-side — an
+  iolist doesn't help there; they are covered by the bytes port below.
+- ⬜ **`bytes`-native parsing → drop the carrier-string bridge.** Upstream shipped
+  ADR-141 (bytes-native `std/net`, carrier send rule deleted) and ADR-140 (bit syntax),
+  and hatch's **WebSocket half is done** — the inbound frame parser is bytes-native and
+  outbound frames are `bytes`. The **HTTP half is still open**: `http/server` bridges
+  every read with `bytes->carrier`, and `web/conn` converts straight back
+  (`carrier->bytes`), so a request body is walked twice for nothing. Finishing it means
+  porting `http/request`'s head/chunked parser off strings onto `bytes` — a rewrite of
+  the framework's core parser, not a sweep, so it stays its own piece of work. Retires
+  audit §16.
+- 🔶 **Framed reads — shipped upstream as `tcp-read-until` / `tcp-read-n`** (2026-07-25;
+  the transient read buffer this entry originally asked for was *rejected* upstream as an
+  immutability violation, and combinators shipped instead). Originally not adoptable —
+  neither combinator took a read timeout or a size cap, and `http/server`'s head reader
+  answers 408 on an idle client and 413 past `:max-request-bytes` (the slow-loris
+  hardening in `docs/robustness.md`). **Brood added both on 2026-08-07** in response:
+  `(tcp-read-until sock sep {:timeout-ms n :max-bytes n})`, returning `[:timeout acc]` /
+  `[:too-large acc]` alongside `[:closed acc]`; `tcp-read-n` refuses an over-cap declared
+  length before reading. **Now adoptable** — the remaining work is hatch-side and is the
+  same piece of work as the bytes port above (the head reader must be on `bytes` first),
+  so it is tracked there rather than duplicated here.
+- ✅ **`mapv`/`filterv` — shipped upstream 2026-07-18.** Swept: every
+  `(into [] (map …))` in `src/` is now `mapv`, and the `(into [] (reverse …))` sites are
+  `vec`. The CLAUDE.md convention notes the new spelling.
+- ✅ **Module privacy — shipped upstream as ADR-146** and went past "link-checked" to
+  enforced def-site privacy (`defn-`/`def-`). Migrated in `2366d07`; the `--`-infix
+  convention is gone from the tree.
+- ✅ **`let` vector-destructure of a list value — resolved upstream by erroring
+  clearly.** Verified on 0.3.8: `(let ([a b] (list 1 2)) …)` raises
+  `[:match-error :let (1 2) ([a b])]`. The `first`/`rest` idiom stays correct for lists;
+  the CLAUDE.md caveat now records that this is a clean error rather than a silent
+  misread.
+
+### New upstream findings (2026-08-07) — all three fixed in brood
+
+Filed back to brood from this review; hatch is the consumer that surfaced each. All three
+were fixed upstream the same day, so these need a brood ≥ the next release.
+
+- ✅ **A `table` global locked a project out of the ADR-218 startup image.** `nest check`
+  reported *"hatch cannot use a startup image … cannot image global
+  `hatch/web/static/*manifest-cache*`"*, so hatch (and every app depending on it) reloaded
+  from source on every start. `Value::Table` is the language's *only* sanctioned mutable
+  structure, and `web/static` uses two of them for exactly what tables are for (the
+  fingerprint-manifest and ETag caches). Reproduced on a bare `nest new` project plus one
+  `(def *cache* (table))` — upstream, not a hatch structure problem. **Fixed:** a table
+  global is imaged by value (its snapshot) and rebuilt as a fresh table on restore; image
+  format v4. No hatch change needed — `nest check` stops printing the note and hatch gets
+  imaged startup, so keep the two caches as tables.
+- ✅ **`tcp-read-until` / `tcp-read-n` needed a timeout and a byte cap** — see the
+  framed-reads entry above. **Fixed:** both take `{:timeout-ms n :max-bytes n}`.
+- ✅ **`nest format` descended into `_deps/`** — it counted and rewrote files in the
+  dependency cache (it reformatted `_deps/store/.brood-pkg.blsp` on first run here), so
+  "68 files considered" included source hatch does not own. **Fixed:** the formatter now
+  walks a whitelist (`:source-paths` + `:test-paths` + a new `:format-paths`), so hatch
+  reports 62 and never touches `_deps`. No hatch change needed — its Brood all lives under
+  `src/` and `tests/`, so it needs no `:format-paths` entry.
 
 ---
 

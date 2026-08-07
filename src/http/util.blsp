@@ -23,12 +23,15 @@
 
 (defn url-decode (s)
   "Percent-decode a URL-encoded string, correctly handling multi-byte UTF-8 sequences.
+
+  (hatch/http/util/url-decode \"a%20b%2Bc\") ;=> \"a b+c\"
+
   A `%`-escape can decode to an invalid UTF-8 byte sequence (`%ff`, `%c0`, `%e0%80`, …),
   on which `utf8-bytes->string` throws — and `parse-query` runs this on every request's
   query outside any try, so an unguarded throw crashes the worker with no response (a
   trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
   (try
-    (utf8-bytes->string (into [] (reverse (url-decode-acc (string->list s) nil))))
+    (utf8-bytes->string (vec (reverse (url-decode-acc (string->list s) nil))))
     (catch _e s)))
 
 (defn- url-decode-acc
@@ -47,7 +50,9 @@
 ;; ---- query-string parser ----
 
 (defn parse-query (s)
-  "Parse a URL query string (\"key=val&key2=val2\") into a string→string map."
+  "Parse a URL query string (\"key=val&key2=val2\") into a string→string map.
+
+  (hatch/http/util/parse-query \"a=1&b=two\") ;=> {\"a\" \"1\" \"b\" \"two\"}"
   (if (or (nil? s) (blank? s))
     {}
     (fold (fn (m pair)
@@ -146,13 +151,15 @@
       (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
         {}
         (map-pairs v))
-    (vector? v) (into [] (map stringify-keys v))
+    (vector? v) (mapv stringify-keys v)
     else v))
 
 ;; ---- status codes ----
 
 (defn status-text (code)
-  "Return the HTTP reason phrase for a numeric status code."
+  "Return the HTTP reason phrase for a numeric status code.
+
+  (hatch/http/util/status-text 404) ;=> \"Not Found\""
   (match code
     (100 "Continue")
     (101 "Switching Protocols")

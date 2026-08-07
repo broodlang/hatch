@@ -4,3 +4,7 @@ _deps/
 # Editor / OS cruft
 *.swp
 .DS_Store
+
+# Generated documentation site (`nest docs`) and the check/image cache
+doc/
+.brood/

@@ -135,7 +135,7 @@
       (fold (fn (acc kv) (assoc acc (name (first kv)) (stringify-keys (first (rest kv)))))
         {}
         (map-pairs v))
-    (vector? v) (into [] (map stringify-keys v))
+    (vector? v) (mapv stringify-keys v)
     else v))
 
 ; ---- the fetch-session plug ----

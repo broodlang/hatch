@@ -25,6 +25,8 @@ reaches users on the next `make install` of brood — not a hatch-side edit.
 # In hatch/ (the framework):
 nest test          # run the framework test suite
 nest format        # format all .blsp source
+nest doctest       # check every `expr ;=> result` example in a docstring still holds
+nest docs          # generate the HTML API site into doc/ (gitignored)
 
 # In ../hatch-demo/ (the demo app, consumes Hatch via :path):
 nest fetch         # resolve the :path dep → project.lock.blsp
@@ -143,13 +145,21 @@ docs/
   stdlib discovery; use `nest test` to verify code.
 - **No vector patterns with `&`** — vectors are fixed-length; use
   `first`/`rest` for dynamic-length sequences.
-- **No vector-destructure of list values** — `(let ([a b] some-list) ...)` 
-  fails; use `first`/`rest` or rewrite as `(let (a (first x) b (first (rest x))) ...)`.
+- **No vector-destructure of list values** — `(let ([a b] some-list) ...)` raises a
+  clean `[:match-error :let (1 2) ([a b])]` (verified on brood 0.3.8; it is an error,
+  not a silent misread). Destructuring a *vector* value works. For a list, use
+  `first`/`rest`: `(let (a (first x) b (first (rest x))) ...)`.
 - **`map`/`filter`/`fold` return lists** — don't assert against `[...]` vectors.
+  When you need a vector, use **`mapv`/`filterv`** rather than wrapping in
+  `(into [] ...)`.
 - **Macro params shadow builtins** — avoid naming macro params `name`,
   `type`, `count`, etc.
 - **`tcp-listen` inside spawned process** — accept messages go to the
   calling process mailbox; always call inside the listener green process.
+- **Document a pure public function with a doctest** — a docstring line of the form
+  `(hatch/mod/fn args) ;=> result` is executed by `nest doctest`, so the example can't
+  drift from behaviour. Name the function **fully qualified**: doctests are evaluated at
+  root scope, where the module's bare names aren't in scope.
 
 ## Writing Brood
 

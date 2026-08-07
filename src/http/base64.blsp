@@ -10,7 +10,9 @@
   (char-at *b64-table* n))
 
 (defn encode-bytes (bytes)
-  "Base64-encode a list or vector of byte integers (0-255)."
+  "Base64-encode a list or vector of byte integers (0-255).
+
+  (hatch/http/base64/encode-bytes (string->utf8-bytes \"hello\")) ;=> \"aGVsbG8=\""
   ; Accumulate 4-char groups in a list (most-recent first), then reverse + join once.
   ; O(n): first/rest stepping, no per-step `count`, no per-step whole-string rebuild;
   ; the recursion stays in tail position.
