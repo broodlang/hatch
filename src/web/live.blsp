@@ -232,8 +232,8 @@
   ; `(into vector [v])` per element would copy the vector each time — O(n²) for a big array.
   (let (cs (jp-skip-ws cs0))
     (match cs
-      (nil [(into [] (reverse acc)) nil])
-      (("]" & rest) [(into [] (reverse acc)) rest])
+      (nil [(vec (reverse acc)) nil])
+      (("]" & rest) [(vec (reverse acc)) rest])
       (("," & rest) (jp-arr-entries rest acc))
       (_ (let ([v cs1] (jp-value cs))
            (jp-arr-entries cs1 (cons v acc)))))))

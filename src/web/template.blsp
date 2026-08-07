@@ -51,7 +51,9 @@
   (inspect [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (defn escape-html (s)
-  "Escape HTML special characters: & < > \" '."
+  "Escape HTML special characters: & < > \" '.
+
+  (hatch/web/template/escape-html \"a<b&c\") ;=> \"a&lt;b&amp;c\""
   (replace (replace (replace (replace (replace (str s) "&" "&amp;")
                                "<" "&lt;")
                       ">" "&gt;")
@@ -125,7 +127,9 @@
   - `(raw s)`                 → `s` verbatim (no escaping)
   - `[:tag attrs & children]` → HTML element
   - list of any of the above  → concatenated
-  - anything else             → its `Renderable` impl, else HTML-escaped `str`"
+  - anything else             → its `Renderable` impl, else HTML-escaped `str`
+
+  (hatch/web/template/render [:p {:class \"x\"} \"hi\"]) ;=> \"<p class=\\\"x\\\">hi</p>\""
   (cond
     (nil? node) ""
     (string? node) (escape-html node)
@@ -161,7 +165,9 @@
   (join "" (map render (flatten children))))
 
 (defn html (node)
-  "Render a Hiccup node and prepend the HTML5 doctype declaration."
+  "Render a Hiccup node and prepend the HTML5 doctype declaration.
+
+  (hatch/web/template/html [:p {} \"hi\"]) ;=> \"<!DOCTYPE html><p>hi</p>\""
   (str "<!DOCTYPE html>" (render node)))
 
 (defn stylesheet (href)
