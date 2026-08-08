@@ -1,0 +1,70 @@
+(defmodule web/stream
+  "Server-Sent Events (SSE) over hatch's chunked streaming responses. An SSE endpoint holds the
+  connection open and pushes `text/event-stream` events to the browser's `EventSource`, which
+  reconnects automatically if the stream drops.
+
+  A handler returns `(sse-resp conn producer)`, where `producer` is `(fn (emit) …)`. It calls
+  `emit` to push events and blocks as long as it wants — the worker process is dedicated to this
+  connection, so a `receive` loop that forwards pubsub messages is the idiomatic shape:
+
+    (defn events (conn)
+      (stream/sse-resp conn
+        (fn (emit)
+          (pubsub/subscribe \"prices\")
+          (loop []
+            (receive
+              ([:price p] (do (emit (str \"price=\" p)) (recur))
+              (:done nil)))))))
+
+  `emit` accepts either a string (sent as a `data:` event) or a map
+  `{:data … :event … :id … :retry …}` for a named event, a last-event-id (resumption), or a
+  reconnect-delay hint. When `producer` returns, the stream's terminating chunk is sent and the
+  connection closes; the client's `EventSource` then reconnects unless the app closed it.
+
+  Sending a periodic comment/keepalive (`(emit-comment emit)`) keeps proxies from idling the
+  connection out."
+  ; stream-resp / put-resp-header — build the chunked streaming conn
+  (:use web/conn))
+
+(defn sse-field (name value)
+  "One SSE header line `name: value\\n`, or \"\" when `value` is nil (the field is omitted)."
+  (if (nil? value) "" (str name ": " value "\n")))
+
+(defn sse-data (data)
+  "The `data:` lines for a payload. Each embedded newline starts a new `data:` line, per the
+  SSE spec — so a multi-line payload arrives as one event with newlines preserved."
+  (join "" (map (fn (line) (str "data: " line "\n")) (string-split (str data) "\n"))))
+
+(defn sse-event (data &optional (opts {}))
+  "Format one SSE event frame from `data` and `opts` (`:event`, `:id`, `:retry`), terminated by
+  the blank line that dispatches the event. Field order is event/id/retry then the data lines,
+  matching common SSE producers."
+  (str (sse-field "event" (get opts :event))
+    (sse-field "id" (get opts :id))
+    (sse-field "retry" (get opts :retry))
+    (sse-data data)
+    "\n"))
+
+(defn emit-comment (emit &optional (text ""))
+  "Send an SSE comment line (`: text`) through `emit` — ignored by the client, but a cheap
+  keepalive that stops an idle proxy from closing the connection."
+  (emit {:raw (str ": " text "\n\n")}))
+
+(defn- format-message
+  (msg)
+  "Format one value passed to `emit`: a string is a plain `data:` event; a map may carry
+  `:data`/`:event`/`:id`/`:retry`, or `:raw` for a pre-formatted frame (comments/keepalives)."
+  (cond
+    (string? msg) (sse-event msg {})
+    (contains? msg :raw) (get msg :raw)
+    else (sse-event (get msg :data "") msg)))
+
+(defn sse-resp (conn producer)
+  "An SSE (`text/event-stream`) streaming response. `producer` is `(fn (emit) …)`: `emit` takes
+  a string (a `data:` event) or a `{:data … :event … :id … :retry …}` map. Sets the SSE
+  content-type and `Cache-Control: no-cache`; streams until `producer` returns. Built on
+  `web/conn/stream-resp`."
+  (let (conn (put-resp-header (put-resp-header conn :content-type "text/event-stream")
+               :cache-control "no-cache"))
+    (stream-resp conn
+      (fn (write) (producer (fn (msg) (write (format-message msg))))))))

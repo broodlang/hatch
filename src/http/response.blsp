@@ -69,6 +69,59 @@
           head-bytes
           [head-bytes body-bytes])))))
 
+; ---- chunked streaming (Transfer-Encoding: chunked) --------------------------
+; The write-side twin of http/request's chunked *reader*. A handler that returns a response
+; carrying a `:stream` function (see web/conn `stream-resp`, web/stream for SSE) is sent with
+; these: the head with `Transfer-Encoding: chunked` (no Content-Length), then one `chunk` per
+; blob the handler produces, then `last-chunk` to close the body. Lets a response be produced
+; incrementally (SSE, a large file read block-by-block) without buffering it whole.
+
+(defn- int->hex-acc
+  (n acc)
+  (if (= n 0)
+    acc
+    (let (d (rem n 16))
+      (int->hex-acc (quot n 16) (str (substring "0123456789abcdef" d (+ d 1)) acc)))))
+
+(defn int->hex (n)
+  "The lowercase hexadecimal string for a non-negative integer `n` (`0` → \"0\") — the size
+  prefix of a chunked-transfer chunk."
+  (if (= n 0) "0" (int->hex-acc n "")))
+
+(defn chunk (data)
+  "Encode `data` (a string, `bytes`, or ADR-139 iolist) as one HTTP/1.1 chunked-transfer chunk:
+  the payload's byte length in hex, CRLF, the payload bytes, CRLF — returned as an iolist that
+  `tcp-send` flattens. An empty payload returns nil (a 0-length chunk would prematurely end the
+  stream, so the caller skips a nil), keeping `last-chunk` the sole terminator."
+  (let (bs (bytes-concat data)
+        n (count bs))
+    (if (= n 0)
+      nil
+      [(string->utf8-bytes (str (int->hex n) "\r\n")) bs (string->utf8-bytes "\r\n")])))
+
+(defn last-chunk ()
+  "The terminating zero-length chunk that ends a chunked-transfer body: `0 CRLF CRLF`."
+  (string->utf8-bytes "0\r\n\r\n"))
+
+(defn format-stream-head (resp)
+  "Serialize the status line + headers for a chunked streaming response: `Transfer-Encoding:
+  chunked` is stamped and any `Content-Length` dropped (the chunk framing delimits the body).
+  Returns head `bytes` for `tcp-send`; the body follows as `chunk`s then `last-chunk`. An unset
+  content type defaults to text/html, as for a buffered response."
+  (let (status (get resp :status 200)
+        headers (get resp :headers {})
+        headers (assoc (dissoc headers :content-length) :transfer-encoding "chunked")
+        headers (if (contains? headers :content-type)
+                  headers
+                  (assoc headers :content-type "text/html; charset=utf-8")))
+    (string->utf8-bytes (str "HTTP/1.1 "
+                          status
+                          " "
+                          (status-text status)
+                          "\r\n"
+                          (join "" (map format-header (map-pairs headers)))
+                          "\r\n"))))
+
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect
   `Location`, a reflected header) can't inject extra headers or split the response
