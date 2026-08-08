@@ -166,23 +166,37 @@
   (static/text-mime? (static/mime-type file)))
 
 (defn precompress (path)
-  "Best-effort: write `path.gz`, a gzip copy of `path`, so `web/static/serve-encoded` can serve
-  a precompressed variant to `Accept-Encoding: gzip` clients (~5-6x smaller CSS/JS). Compresses
-  in-process with `zlib/gzip` (the `flate2` builtin, RFC 1952 `Content-Encoding: gzip`) at the
-  maximum level 9 — a one-time build cost paid to shrink a file served many times, so the best
-  ratio is the right trade. No external `gzip` binary is required, so a build/boot host without
-  one no longer degrades to uncompressed serving. Overwrites a stale `.gz` from a previous build.
-  A read/compress/write failure is logged and skipped, so serving still works uncompressed."
+  "Best-effort: write brotli (`path.br`) and gzip (`path.gz`) copies of `path` so
+  `web/static/serve-encoded` can serve a precompressed variant to `Accept-Encoding` clients
+  (brotli preferred, ~5-6x smaller CSS/JS). Compresses in-process at the maximum level —
+  `zlib/brotli` quality 11 (the `brotli` builtin, RFC 7932 `Content-Encoding: br`) and
+  `zlib/gzip` level 9 (the `flate2` builtin) — a one-time build cost paid to shrink a file served
+  many times, so the best ratio is the right trade. No external binary is required, so a
+  build/boot host without one no longer degrades to uncompressed serving. Overwrites stale
+  siblings from a previous build. A read/compress/write failure is logged and skipped, so serving
+  still works uncompressed."
+  (let (raw (try (slurp-bytes path) (catch e :error)))
+    (if (= raw :error)
+      (log/log-warn (str "[assets] precompress could not read " path "; serving uncompressed"))
+      (do
+        (precompress-variant (str path ".br") (fn () (zlib/brotli raw 11)) path)
+        (precompress-variant (str path ".gz") (fn () (zlib/gzip raw 9)) path)))))
+
+(defn precompress-variant (out encode path)
+  "Write one precompressed sibling `out` from `(encode)`, logging + skipping on failure so one
+  coding's problem never blocks the other or breaks serving."
   (try
-    (let (gz (str path ".gz"))
-      (spit-bytes gz (zlib/gzip (slurp-bytes path) 9))
-      (log/log-info (str "[assets] precompress: " gz)))
+    (do
+      (spit-bytes out (encode))
+      (log/log-info (str "[assets] precompress: " out)))
     (catch e
       (log/log-warn (str "[assets] precompress failed for "
                       path
+                      " -> "
+                      out
                       " ("
                       (error-message e)
-                      "); serving uncompressed")))))
+                      "); serving that coding uncompressed")))))
 
 (defn fingerprint-name (file digest)
   "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →

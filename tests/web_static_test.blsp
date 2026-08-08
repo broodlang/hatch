@@ -276,3 +276,42 @@
       (assert= (get headers :content-encoding) nil)
       (assert= (get resp :resp-body) "body{color:blue}")
       (delete-file (str dir "/y.css")))))
+
+(describe "serve-encoded (brotli content negotiation, preferred over gzip)"
+  (test "Accept-Encoding: br + a .br sibling → the brotli variant"
+    (let (dir "/tmp/hatch-br-serve-test"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/x.css") "body{color:red}")
+          _ (spit (str dir "/x.css.br") "BROTLI-BYTES")
+          resp (serve (conn-with {} {:accept-encoding "br, gzip"}) dir "x.css")
+          headers (get resp :resp-headers))
+      (assert= (get resp :status) 200)
+      (assert= (get headers :content-encoding) "br")
+      (assert= (get headers :vary) "Accept-Encoding")
+      (assert= (utf8-bytes->string (get resp :resp-body)) "BROTLI-BYTES")
+      (delete-file (str dir "/x.css.br"))
+      (delete-file (str dir "/x.css"))))
+  (test "br preferred over gzip when the client accepts both and both siblings exist"
+    (let (dir "/tmp/hatch-br-serve-test2"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/x.css") "body{color:red}")
+          _ (spit (str dir "/x.css.gz") "GZIP-BYTES")
+          _ (spit (str dir "/x.css.br") "BROTLI-BYTES")
+          resp (serve (conn-with {} {:accept-encoding "gzip, deflate, br"}) dir "x.css")
+          headers (get resp :resp-headers))
+      (assert= (get headers :content-encoding) "br")
+      (assert= (utf8-bytes->string (get resp :resp-body)) "BROTLI-BYTES")
+      (delete-file (str dir "/x.css.gz"))
+      (delete-file (str dir "/x.css.br"))
+      (delete-file (str dir "/x.css"))))
+  (test "Accept-Encoding: br but only a .gz on disk → falls back to gzip"
+    (let (dir "/tmp/hatch-br-serve-test3"
+          _ (try (make-dir dir) (catch _ nil))
+          _ (spit (str dir "/x.css") "body{color:red}")
+          _ (spit (str dir "/x.css.gz") "GZIP-BYTES")
+          resp (serve (conn-with {} {:accept-encoding "br, gzip"}) dir "x.css")
+          headers (get resp :resp-headers))
+      (assert= (get headers :content-encoding) "gzip")
+      (assert= (utf8-bytes->string (get resp :resp-body)) "GZIP-BYTES")
+      (delete-file (str dir "/x.css.gz"))
+      (delete-file (str dir "/x.css")))))
