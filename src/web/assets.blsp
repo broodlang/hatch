@@ -168,13 +168,14 @@
 (defn precompress (path)
   "Best-effort: write `path.gz`, a gzip copy of `path`, so `web/static/serve-encoded` can serve
   a precompressed variant to `Accept-Encoding: gzip` clients (~5-6x smaller CSS/JS). Compresses
-  in-process with `zlib/gzip` (the `flate2` builtin, RFC 1952 `Content-Encoding: gzip`), so no
-  external `gzip` binary is required — a build/boot host without one no longer degrades to
-  uncompressed serving. Overwrites a stale `.gz` from a previous build. A read/compress/write
-  failure is logged and skipped, so serving still works uncompressed."
+  in-process with `zlib/gzip` (the `flate2` builtin, RFC 1952 `Content-Encoding: gzip`) at the
+  maximum level 9 — a one-time build cost paid to shrink a file served many times, so the best
+  ratio is the right trade. No external `gzip` binary is required, so a build/boot host without
+  one no longer degrades to uncompressed serving. Overwrites a stale `.gz` from a previous build.
+  A read/compress/write failure is logged and skipped, so serving still works uncompressed."
   (try
     (let (gz (str path ".gz"))
-      (spit-bytes gz (zlib/gzip (slurp-bytes path)))
+      (spit-bytes gz (zlib/gzip (slurp-bytes path) 9))
       (log/log-info (str "[assets] precompress: " gz)))
     (catch e
       (log/log-warn (str "[assets] precompress failed for "
