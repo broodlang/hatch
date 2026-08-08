@@ -16,7 +16,9 @@
       (render (model) …))
 
   Roster updates go to the present members themselves (they are the audience). A non-present
-  observer that also wants live updates can pair this with web/pubsub on the same topic.
+  observer — a dashboard, a moderator view, a lobby count — that wants the live roster without
+  joining it uses `observe`/`unobserve`: it receives the same `{:presence roster}` at
+  `handle-info` on every join/leave but never appears in, or affects, the roster.
 
   Cluster-aware: when the runtime is a distributed node (`node-start` + `connect`/`ensure-link`
   to peers, wired once in the app's entry point), a topic's roster is the *merge* of every
@@ -28,6 +30,8 @@
   (:use web/live)
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
   (:use web/registry)
+  ; broadcast/subscribe — non-present observers ride pubsub (monitored + cross-node for free)
+  (:alias web/pubsub)
   ; set/set — distinct tracked pids as a first-class #{} set (ADR-060), no O(n²) dedupe
   (:alias set))
 
@@ -221,10 +225,24 @@
 
 (defn- presence-notify-merged
   (state remotes topic)
-  "Push the merged `topic` roster to every LOCAL member present on it. Remote members are
-  notified by their own node (their pid lives there), so we never send to a remote pid."
+  "Push the merged `topic` roster to every LOCAL member present on it, and to any non-present
+  observers (via pubsub). Remote members are notified by their own node (their pid lives there),
+  so we never send to a remote member's pid."
   (let (roster (presence-merged state remotes topic))
-    (dolist (e (presence-entries state topic)) (send-info (get e :pid) {:presence roster}))))
+    (dolist (e (presence-entries state topic)) (send-info (get e :pid) {:presence roster}))
+    (presence-notify-observers topic roster)))
+
+(defn- presence-notify-observers
+  (topic roster)
+  "Push the merged `topic` roster to non-present observers via pubsub — a no-op when none are
+  observing. Observers receive the same `[:info {:presence roster}]` a member does (pubsub
+  delivers through `send-info`)."
+  (pubsub/broadcast (observer-topic topic) {:presence roster}))
+
+(defn observer-topic (topic)
+  "The pubsub topic carrying roster updates for observers of presence `topic` — namespaced so it
+  can't collide with an application pubsub topic of the same name."
+  (str "hatch-presence-observers:" topic))
 
 (defn- presence-sync-to
   (target-node from-node topic roster)
@@ -310,3 +328,18 @@
     (receive
       ([:list ^rf roster] roster)
       (after 1000 (list)))))
+
+(defn observe (topic)
+  "Subscribe the current process to `topic`'s roster updates WITHOUT joining the roster — a
+  non-present observer (a dashboard, a moderator view, a lobby count). It then receives
+  `{:presence roster}` at `handle-info` on every join/leave, exactly as a tracked member does,
+  but never appears in the roster and never affects it. Seed the initial roster with
+  `(roster topic)` after observing (as a member seeds after `track`). Auto-unsubscribes when the
+  process dies. Returns nil."
+  (pubsub/subscribe (observer-topic topic))
+  nil)
+
+(defn unobserve (topic)
+  "Stop observing `topic`'s roster updates (also happens automatically on death). Returns nil."
+  (pubsub/unsubscribe (observer-topic topic))
+  nil)
