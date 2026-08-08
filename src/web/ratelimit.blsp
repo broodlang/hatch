@@ -1,0 +1,123 @@
+(defmodule web/ratelimit
+  "Token-bucket rate limiting — a plug that caps how fast a client may hit an endpoint. Each
+  key (by default the client IP from `X-Forwarded-For`/`X-Real-IP`, else one global bucket) owns
+  a bucket that holds up to `:burst` tokens and refills at `:rate` tokens per `:per` ms; a
+  request spends one token (`:cost`). An empty bucket answers `429 Too Many Requests` with a
+  `Retry-After` telling the client when a token frees up. State lives in one supervised counter
+  process (per-key buckets), so the read-refill-spend is serialized and race-free.
+
+  Wire it into a pipeline like any plug; put it early so a throttled request is rejected before
+  expensive work:
+
+    (through [(ratelimit/rate-limit {:rate 100 :per 60000 :burst 20})]
+      (post \"/login\" auth/login))
+
+  Options:
+    :rate    — tokens replenished per window (default 60)
+    :per     — the window in ms (default 60000, i.e. 60 req/min)
+    :burst   — bucket capacity / max instantaneous burst (default = :rate)
+    :cost    — tokens one request spends (default 1)
+    :key-fn  — `(fn (conn) -> key)` choosing the bucket; default `client-key`
+    :on-limit — `(fn (conn retry-after-seconds) -> conn)` for a custom 429 (default `limited`)"
+  ; halt / send-resp / put-resp-header / header — reject a throttled request
+  (:use web/conn)
+  ; ensure-supervised — the buckets live in a supervised singleton
+  (:use web/registry))
+
+; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
+
+(defn- refill
+  (bucket cfg dnow)
+  "Refill `bucket` to time `dnow`: add the tokens accrued since its timestamp, capped at the
+  bucket's capacity (`:burst`). A fresh key starts full."
+  (let (burst (get cfg :burst)
+        per-ms (/ (get cfg :rate) (* 1.0 (get cfg :per)))
+        tokens (get bucket :tokens (* 1.0 burst))
+        ts (get bucket :ts dnow)
+        refilled (+ tokens (* (- dnow ts) per-ms)))
+    {:tokens (min (* 1.0 burst) refilled) :ts dnow}))
+
+(defn- spend
+  (bucket cfg cost dnow)
+  "Try to spend `cost` tokens from a refilled `bucket`. Returns `[new-bucket :ok]` when it had
+  enough, else `[unchanged-bucket [:deny retry-ms]]` with the ms until `cost` tokens accrue."
+  (let (b (refill bucket cfg dnow)
+        tokens (get b :tokens))
+    (if (>= tokens cost)
+      [(assoc b :tokens (- tokens cost)) :ok]
+      (let (per-ms (/ (get cfg :rate) (* 1.0 (get cfg :per)))
+            deficit (- cost tokens)
+            retry-ms (ceil (/ deficit per-ms)))
+        [b [:deny retry-ms]]))))
+
+(defn- ratelimit-loop
+  (buckets)
+  "Serialize every bucket read-refill-spend. `[:take key cost cfg dnow from r]` replies
+  `[:take r :ok]` or `[:take r [:deny retry-ms]]`; `[:reset from r]` clears all buckets (tests)."
+  (receive
+    ([:take key cost cfg dnow from r] (let (result (spend (get buckets key {}) cfg cost dnow)
+                                            bucket (nth result 0)
+                                            decision (nth result 1))
+                                        (send from [:take r decision])
+                                        (ratelimit-loop (assoc buckets key bucket))))
+    ([:reset from r] (do (send from [:reset r]) (ratelimit-loop {})))))
+
+(defn limiter ()
+  "The rate-limit counter pid — a supervised singleton, started on first use. A crash resets the
+  buckets (ephemeral state; the worst case is one window of over-admission), then it recovers."
+  (ensure-supervised :hatch-ratelimit-sup
+    [{:id :hatch-ratelimit
+      :name :hatch-ratelimit
+      :restart :permanent
+      :start (fn () (spawn (ratelimit-loop {})))}]
+    :hatch-ratelimit))
+
+(defn take-token (key cost cfg)
+  "Ask the limiter to spend `cost` tokens from `key`'s bucket. Returns `:ok` or `[:deny
+  retry-ms]`. Fails OPEN (`:ok`) if the limiter doesn't answer within 1s — a limiter hiccup
+  must not take the endpoint down. `now` is read here (not in the process) so the caller's clock
+  drives refill."
+  (let (r (ref))
+    (send (limiter) [:take key cost cfg (now) (self) r])
+    (receive
+      ([:take ^r decision] decision)
+      (after 1000 :ok))))
+
+; ---- key selection ----
+
+(defn- first-hop
+  (xff)
+  "The first address in an `X-Forwarded-For` list (the original client), trimmed."
+  (if (or (nil? xff) (blank? xff)) nil (trim (first (string-split xff ",")))))
+
+(defn client-key (conn)
+  "The rate-limit key for `conn`: the client IP from `X-Forwarded-For` (first hop) or
+  `X-Real-IP` if a proxy set one, else the constant `\"global\"` (one shared bucket). Behind a
+  proxy, set one of those headers or every client shares the global bucket."
+  (let (headers (get conn :headers {}))
+    (or (first-hop (get headers :x-forwarded-for))
+      (get headers :x-real-ip)
+      "global")))
+
+; ---- the plug ----
+
+(defn limited (conn retry-after)
+  "The default throttled response: a halted `429 Too Many Requests` with a `Retry-After`
+  (whole seconds)."
+  (halt (send-resp (put-resp-header (put-resp-header conn :retry-after (str retry-after))
+                     :content-type "text/plain; charset=utf-8")
+          429 "429 Too Many Requests\n")))
+
+(defn rate-limit (&optional (opts {}))
+  "Plug factory: returns a plug that token-bucket rate-limits by `:key-fn` (default the client
+  IP). Under the limit the conn passes through; over it, the conn is halted with a 429 +
+  `Retry-After`. See the module docstring for `opts`."
+  (let (rate (get opts :rate 60)
+        cfg {:rate rate :per (get opts :per 60000) :burst (get opts :burst rate)}
+        cost (get opts :cost 1)
+        key-fn (get opts :key-fn client-key)
+        on-limit (get opts :on-limit limited))
+    (fn (conn)
+      (match (take-token (key-fn conn) cost cfg)
+        (:ok conn)
+        ([:deny retry-ms] (on-limit conn (max 1 (ceil (/ retry-ms 1000.0)))))))))

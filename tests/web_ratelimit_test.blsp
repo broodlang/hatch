@@ -1,0 +1,75 @@
+(defmodule web-ratelimit-test
+  (:use web/ratelimit)
+  (:use-internals web/ratelimit)
+  (:alias web/conn)
+  (:use test))
+
+(def cfg {:rate 1 :per 1000 :burst 2})
+
+(describe "refill"
+  (test "a fresh key starts full (capacity)"
+    (assert= (get (web/ratelimit/refill {} cfg 0) :tokens) 2.0))
+  (test "accrues tokens over elapsed time, capped at burst"
+    ; rate 1 / 1000ms → 0.001 tok/ms; 500ms from empty → 0.5
+    (assert= (get (web/ratelimit/refill {:tokens 0.0 :ts 0} cfg 500) :tokens) 0.5))
+  (test "never exceeds capacity"
+    (assert= (get (web/ratelimit/refill {:tokens 1.0 :ts 0} cfg 100000) :tokens) 2.0)))
+
+(describe "spend"
+  (test "spends a token when the bucket has one"
+    (let (result (web/ratelimit/spend {} cfg 1 0))
+      (assert= (nth result 1) :ok)
+      (assert= (get (nth result 0) :tokens) 1.0)))
+  (test "an empty bucket denies with the ms until a token frees"
+    (let (result (web/ratelimit/spend {:tokens 0.0 :ts 0} cfg 1 0))
+      (assert= (nth result 1) [:deny 1000])))
+  (test "the burst allows N immediate requests, then denies"
+    ; two tokens → two :ok, third denied (no time elapses between them)
+    (let (a (web/ratelimit/spend {} cfg 1 0)
+          b (web/ratelimit/spend (nth a 0) cfg 1 0)
+          c (web/ratelimit/spend (nth b 0) cfg 1 0))
+      (assert= (nth a 1) :ok)
+      (assert= (nth b 1) :ok)
+      (assert= (first (nth c 1)) :deny))))
+
+(describe "client-key"
+  (test "prefers the first X-Forwarded-For hop"
+    (assert= (client-key {:headers {:x-forwarded-for "1.2.3.4, 10.0.0.1"}}) "1.2.3.4"))
+  (test "falls back to X-Real-IP"
+    (assert= (client-key {:headers {:x-real-ip "9.9.9.9"}}) "9.9.9.9"))
+  (test "else a single global bucket"
+    (assert= (client-key {:headers {}}) "global")))
+
+(defn conn-for (key)
+  "A conn whose client-key resolves to `key` (via X-Real-IP)."
+  (conn/build {:method "GET"
+               :path "/"
+               :query ""
+               :params {}
+               :headers {:x-real-ip key}
+               :body ""}))
+
+; :isolated — the plug hits the shared :hatch-ratelimit singleton.
+(describe "rate-limit plug (end to end)"
+  :isolated
+  (test "passes the burst, then 429s with Retry-After"
+    (let (plug (rate-limit {:rate 1 :per 100000 :burst 2 :key-fn client-key})
+          ; a key unique to this test so other buckets can't interfere
+          k "e2e-burst-1"
+          r1 (plug (conn-for k))
+          r2 (plug (conn-for k))
+          r3 (plug (conn-for k)))
+      ; first two pass (not halted, no status set by the plug)
+      (assert= (conn/halted? r1) false)
+      (assert= (conn/halted? r2) false)
+      ; third is throttled
+      (assert= (conn/halted? r3) true)
+      (assert= (get r3 :status) 429)
+      (assert= (not (nil? (get-in r3 [:resp-headers :retry-after]))) true)))
+  (test "separate keys have separate buckets"
+    (let (plug (rate-limit {:rate 1 :per 100000 :burst 1 :key-fn client-key})
+          a1 (plug (conn-for "sep-A"))
+          b1 (plug (conn-for "sep-B")))
+      ; each key's first request passes despite burst 1
+      (assert= (conn/halted? a1) false)
+      (assert= (conn/halted? b1) false))))
