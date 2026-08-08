@@ -1,0 +1,85 @@
+(defmodule web/logger
+  "HTTP access logging. `http/server` emits a `[:hatch :request :stop]` telemetry event per
+  handled request (and `[:hatch :request :bad-request]` for a rejected one); this module turns
+  those into one structured log line each — method, path, status, and duration — through the
+  standard `log` system, so access lines share the app's level, format (text/JSON), and sinks.
+
+  Call `attach-access-log` once at startup, after the logger is running:
+
+    (web/application/start
+      {:logger     (web/application/default-logger-opts)
+       :children   [(fn () (logger/attach-access-log))
+                    (fn () (serve))]})
+
+  or just pass `:access-log true` to `web/application/start`. The line's level follows the
+  status — 2xx/3xx `:info`, 4xx `:warn`, 5xx `:error` — unless a fixed `:level` is given. The
+  structured `:meta` (`:method`/`:path`/`:status`/`:duration_ms`) rides into JSON log output for
+  a log shipper. Starting the access log also starts the telemetry listener if it isn't running,
+  since the events are otherwise dropped."
+  (:alias telemetry)
+  (:alias log))
+
+(defn level-for (status)
+  "The log level for a response `status`: 5xx → :error, 4xx → :warn, else :info."
+  (cond
+    (>= status 500) :error
+    (>= status 400) :warn
+    else :info))
+
+(defn format-line (measurements metadata)
+  "A concise one-line summary of a handled request: `METHOD path status Nms`."
+  (str (get metadata :method "?")
+    " "
+    (get metadata :path "?")
+    " "
+    (get metadata :status "?")
+    " "
+    (get measurements :duration 0)
+    "ms"))
+
+(defn- log-request
+  (fixed measurements metadata)
+  "Log one handled-request line at the fixed level or the status-derived one, carrying the
+  request fields as structured `:meta`."
+  (let (status (get metadata :status 200)
+        level (or fixed (level-for status)))
+    (log/log level
+      (format-line measurements metadata)
+      {:method (get metadata :method)
+       :path (get metadata :path)
+       :status status
+       :duration_ms (get measurements :duration 0)})))
+
+(defn- log-bad-request
+  (measurements metadata)
+  "Log a rejected (malformed) request at :warn — the head never parsed, so only the parser's
+  reason is known (method/path are unavailable)."
+  (log/log :warn
+    (str "400 bad request (" (get metadata :error "malformed") ")")
+    {:status 400 :error (get metadata :error)}))
+
+(defn attach-access-log (&optional (opts {}))
+  "Attach the access-log telemetry handlers and return the handler id. Starts the telemetry
+  listener if it isn't already running. `opts`:
+    :id     — handler id (default `:hatch-access-log`); re-attaching replaces it
+    :level  — a fixed log level for every request, or nil (default) to derive from the status
+    :log-bad-requests — also log rejected/malformed requests at :warn (default true)"
+  (when (nil? (telemetry/telemetry-pid))
+    (telemetry/start-telemetry))
+  (let (id (get opts :id :hatch-access-log)
+        fixed (get opts :level))
+    (telemetry/attach id
+      [:hatch :request :stop]
+      (fn (_event measurements metadata) (log-request fixed measurements metadata)))
+    (when (get opts :log-bad-requests true)
+      (telemetry/attach (keyword (str (name id) "-bad"))
+        [:hatch :request :bad-request]
+        (fn (_event measurements metadata) (log-bad-request measurements metadata))))
+    id))
+
+(defn detach-access-log (&optional (opts {}))
+  "Remove the access-log handlers attached by `attach-access-log` (matching `:id`)."
+  (let (id (get opts :id :hatch-access-log))
+    (telemetry/detach id)
+    (telemetry/detach (keyword (str (name id) "-bad")))
+    nil))

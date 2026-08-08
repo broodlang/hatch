@@ -1,0 +1,79 @@
+(defmodule web-logger-test
+  (:use web/logger)
+  (:alias telemetry)
+  (:alias log)
+  (:use test))
+
+(describe "level-for"
+  (test "2xx/3xx is info"
+    (assert= (level-for 200) :info)
+    (assert= (level-for 302) :info))
+  (test "4xx is warn" (assert= (level-for 404) :warn))
+  (test "5xx is error" (assert= (level-for 500) :error)))
+
+(describe "format-line"
+  (test "METHOD path status Nms"
+    (assert= (format-line {:duration 7} {:method "GET" :path "/x" :status 200})
+      "GET /x 200 7ms"))
+  (test "tolerates missing fields"
+    (assert= (format-line {} {}) "? ? ? 0ms")))
+
+; :isolated — starts the shared :telemetry and :logger processes, so it must run alone.
+(describe "access log — telemetry to structured log line"
+  :isolated
+  (test "a [:hatch :request :stop] event becomes one log line at the status-derived level"
+    (do
+      (let (me (self))
+        ; a capturing logger: the backend forwards each record's (level, msg, meta) to us
+        (log/start-logger {:level :debug
+                           :backends [(log/fn-backend (fn (line) (send me [:line line]))
+                                        {:format (fn (rec)
+                                                   [(get rec :level) (get rec :msg) (get rec :meta)])})]})
+        (attach-access-log)
+        (telemetry/emit [:hatch :request :stop]
+          {:duration 12}
+          {:method "GET" :path "/users" :status 200})
+        (telemetry/telemetry-sync)
+        (receive
+          ([:line line] (assert= (nth line 0) :info)
+            (assert= (nth line 1) "GET /users 200 12ms")
+            (assert= (get (nth line 2) :status) 200)
+            (assert= (get (nth line 2) :duration_ms) 12)
+            (assert= (get (nth line 2) :path) "/users"))
+          (after 2000 (assert= :got-a-line :timeout))))
+      (detach-access-log)
+      (telemetry/stop-telemetry)
+      (log/stop-logger)))
+  (test "a 5xx logs at :error"
+    (do
+      (let (me (self))
+        (log/start-logger {:level :debug
+                           :backends [(log/fn-backend (fn (line) (send me [:line line]))
+                                        {:format (fn (rec) (get rec :level))})]})
+        (attach-access-log)
+        (telemetry/emit [:hatch :request :stop]
+          {:duration 3}
+          {:method "POST" :path "/boom" :status 500})
+        (telemetry/telemetry-sync)
+        (receive
+          ([:line lvl] (assert= lvl :error))
+          (after 2000 (assert= :got-a-line :timeout))))
+      (detach-access-log)
+      (telemetry/stop-telemetry)
+      (log/stop-logger)))
+  (test "a rejected request logs a 400 line at :warn"
+    (do
+      (let (me (self))
+        (log/start-logger {:level :debug
+                           :backends [(log/fn-backend (fn (line) (send me [:line line]))
+                                        {:format (fn (rec) [(get rec :level) (get rec :msg)])})]})
+        (attach-access-log)
+        (telemetry/emit [:hatch :request :bad-request] {} {:error "bad framing"})
+        (telemetry/telemetry-sync)
+        (receive
+          ([:line line] (assert= (nth line 0) :warn)
+            (assert= (includes? (nth line 1) "400 bad request") true))
+          (after 2000 (assert= :got-a-line :timeout))))
+      (detach-access-log)
+      (telemetry/stop-telemetry)
+      (log/stop-logger))))
