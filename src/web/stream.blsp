@@ -22,10 +22,15 @@
   connection closes; the client's `EventSource` then reconnects unless the app closed it.
 
   Sending a periodic comment/keepalive (`(emit-comment emit)`) keeps proxies from idling the
-  connection out."
+  connection out.
+
+  Beyond SSE, `stream-bytes`/`stream-file` chunk a large body (a report, an export, a download)
+  onto the socket in fixed-size blocks so the framework never builds one giant response value,
+  with optional `Content-Encoding: gzip`."
   ; stream-resp / put-resp-header — build the chunked streaming conn
   (:use web/conn))
 
+(require 'zlib) ; optional gzip-over-chunked for stream-bytes/stream-file
 (defn sse-field (name value)
   "One SSE header line `name: value\\n`, or \"\" when `value` is nil (the field is omitted)."
   (if (nil? value) "" (str name ": " value "\n")))
@@ -68,3 +73,47 @@
                :cache-control "no-cache"))
     (stream-resp conn
       (fn (write) (producer (fn (msg) (write (format-message msg))))))))
+
+;; ---- byte / file streaming (chunked, optionally gzip) ------------------------
+
+(defn accepts-gzip? (conn)
+  "True if the request's `Accept-Encoding` offers gzip (a crude substring test — we only ever
+  advertise gzip)."
+  (let (ae (get (get conn :headers) :accept-encoding))
+    (and (string? ae) (includes? ae "gzip"))))
+
+(defn- write-blocks
+  (write data block-size offset)
+  "Write `data` (bytes) to the socket in `block-size`-byte chunks, from `offset` to the end."
+  (let (n (count data))
+    (when (< offset n)
+      (let (end (min n (+ offset block-size)))
+        (write (subbytes data offset end))
+        (write-blocks write data block-size end)))))
+
+(defn stream-bytes (conn data &optional (opts {}))
+  "Stream `data` (a string or `bytes`) as a chunked response, written to the socket in
+  `:block-size`-byte blocks (default 65536) so a large body reaches the client progressively.
+  `opts`: `:content-type` (default `application/octet-stream`), `:block-size`, and `:gzip` — when
+  set and the request accepts gzip, the bytes are gzip-compressed once and streamed with
+  `Content-Encoding: gzip` + `Vary: Accept-Encoding`. Returns a streaming conn."
+  (let (raw (bytes-concat data)
+        gzip? (and (get opts :gzip false) (accepts-gzip? conn))
+        body (if gzip? (zlib/gzip raw) raw)
+        block-size (get opts :block-size 65536)
+        conn (put-resp-header conn
+               :content-type
+               (get opts :content-type "application/octet-stream"))
+        conn (if gzip?
+               (put-resp-header (put-resp-header conn :content-encoding "gzip")
+                 :vary "Accept-Encoding")
+               conn))
+    (stream-resp conn (fn (write) (write-blocks write body block-size 0)))))
+
+(defn stream-file (conn path &optional (opts {}))
+  "Stream the file at `path` as a chunked response (see `stream-bytes` for `opts`). The file is
+  read once with `slurp-bytes` and then chunked onto the socket — this bounds the *response*
+  build, not the read (brood has no incremental file read yet), so it suits moderate downloads
+  and progressive delivery rather than arbitrarily large files. Guard the path (existence /
+  traversal) before calling; an unreadable path raises."
+  (stream-bytes conn (slurp-bytes path) opts))
