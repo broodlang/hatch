@@ -2,6 +2,8 @@
   (:use web/presence)
   ; presence--* registry internals are module-private (ADR-146 `--` names); tested directly here
   (:use-internals web/presence)
+  ; observer mode rides pubsub; the test barriers on a synchronous pubsub call
+  (:alias web/pubsub)
   (:use test))
 
 ;; Presence is process-level: a registry tracks {topic -> members} and pushes the roster to
@@ -204,3 +206,61 @@
           out (web/presence/presence-remove-pid state 1))
       (assert= (contains? out "a") false)
       (assert= (count (get out "b")) 1))))
+
+;; ---- observer mode (non-present observers) ----
+;; An observer subscribes to a topic's roster updates via `observe` without joining the roster:
+;; it gets the same [:info {:presence …}] pushes a member does, but never appears in `roster`.
+
+(defn observer-loop (topic parent)
+  "Forward each pushed roster's keys to parent; on `:stop-observing`, unobserve and idle."
+  (receive
+    ([:info m] (do
+                 (send parent [:roster (map (fn (e) (get e :key)) (get m :presence))])
+                 (observer-loop topic parent)))
+    (:stop-observing (do (unobserve topic) (snooze 100000)))
+    (after 15000 nil)))
+
+(defn observer-relay (topic parent)
+  "Observe `topic` (never tracked), barrier the subscribe, tell parent it's ready, then forward
+  each pushed roster's keys to parent."
+  (observe topic)
+  ; force the async subscribe to be registered before the test spawns a member (FIFO barrier)
+  (pubsub/subscribers (observer-topic topic))
+  (send parent :observing)
+  (observer-loop topic parent))
+
+(defn present-and-idle (topic key parent)
+  "Track on `topic` under `key`, tell parent, then stay alive/tracked until killed."
+  (track topic key {})
+  ; a synchronous roster call barriers until the registry has processed the track
+  (roster topic)
+  (send parent :tracked)
+  (snooze 100000))
+
+(describe "observe / unobserve"
+  :isolated
+  (test "an observer is pushed the roster but never joins it"
+    (let (me (self)
+          obs (spawn (observer-relay "obs:room" me)))
+      (receive (:observing nil) (after 2000 nil))
+      (let (m (spawn (present-and-idle "obs:room" "alice" me)))
+        (receive (:tracked nil) (after 2000 nil))
+        ; the observer received a roster push containing the new member
+        (receive
+          ([:roster keys] (assert= (member? "alice" keys) true))
+          (after 2000 (assert= :push :timeout)))
+        ; and the observer itself is NOT present in the roster — only alice is
+        (assert= (wait-key "obs:room" "alice" 20) true)
+        (assert= (roster-keys "obs:room") (list "alice"))
+        (exit m :kill))
+      (exit obs :kill)))
+  (test "unobserve stops the pushes (no longer a subscriber)"
+    (let (me (self)
+          obs (spawn (observer-relay "obs:leave" me)))
+      (receive (:observing nil) (after 2000 nil))
+      ; the observer subscribed; now have IT unobserve by sending it a directive
+      (send obs :stop-observing)
+      ; drain: after unobserve the observer must not be a subscriber of the observer topic
+      (snooze 100)
+      (assert= (empty? (pubsub/subscribers (observer-topic "obs:leave"))) true)
+      (exit obs :kill))))
