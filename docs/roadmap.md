@@ -281,9 +281,15 @@ and adding the missing API template.
 
 ### Phase 11 — Production hardening
 
-- **Supervisor tree** — `http/server` workers under a proper supervisor;
-  restart strategies; max-connections back-pressure
-- **Request timeout** — idle worker timeout; slow-read protection
+- **Supervisor tree** ✅ — `http/server` workers now run as `:temporary` children of a dynamic
+  supervisor registered by a port-derived name, so they're supervised and observable
+  (`nest observe` / `whereis` + `supervisor/count-children`) yet never restarted — a crashed
+  worker's socket and request context are gone and can't resume. The listener still monitors each
+  worker for the graceful drain and the max-connections back-pressure (both already done), so the
+  shutdown/cap behaviour is unchanged; the supervisor is torn down when the server stops.
+- **Request timeout** ✅ — idle read timeout (→ 408) and the slow-loris hardening are in
+  `http/server` (`:read-timeout-ms`, the O(n) head reader, 413 on oversize); see
+  `docs/robustness.md`.
 - **Chunked Transfer-Encoding** ✅ — for streaming responses (SSE, large file downloads). The
   runtime prerequisite (a streaming socket write) was already there: `tcp-send` writes an
   iolist to a per-connection socket and can be called repeatedly by the owning worker, so no
@@ -293,8 +299,10 @@ and adding the missing API template.
   `Transfer-Encoding: chunked`, drives the function, then the terminating chunk (and always
   closes — no keep-alive across an open-ended stream). `web/conn/stream-resp` is the conn-level
   API; **`web/stream`** wraps it as Server-Sent Events (`sse-resp` + `sse-event`, `text/
-  event-stream`). Tests: `tests/http_stream_test.blsp` (loopback chunked + SSE) and the encoder
-  units in `tests/http_response_test.blsp`.
+  event-stream`) and as `stream-bytes`/`stream-file`, which chunk a large body onto the socket in
+  fixed-size blocks with optional `Content-Encoding: gzip`. Tests: `tests/http_stream_test.blsp`
+  (loopback chunked + SSE + byte/file streaming) and the encoder units in
+  `tests/http_response_test.blsp`.
 - **Binary asset serving** ✅ — images, fonts, `.ico`, video, wasm. `web/static` reads binary
   types (`text-mime?` picks the path) via `slurp-bytes` and serves them as raw `bytes`;
   `http/response/format-response` returns the whole response as `bytes` for a binary body so it
@@ -310,10 +318,21 @@ and adding the missing API template.
   `Vary: Accept-Encoding`; and (2) `web/static` already serves pre-compressed `.gz` variants
   (`serve-encoded`), now written **in-process** — `web/assets/precompress` uses `zlib/gzip`
   instead of shelling out to the `gzip` CLI, so a build host without that binary no longer
-  degrades to uncompressed serving. Tests: `tests/web_compress_test.blsp`, and the round-trip in
-  `tests/web_assets_test.blsp`.
-- **Access logging** — structured log plug (method, path, status, ms)
-- **Rate limiting** — token-bucket plug backed by a `defprocess` counter
+  degrades to uncompressed serving. **Brotli too** (brood ≥ next release: `zlib/brotli`): the
+  plug and `serve-encoded` prefer `Content-Encoding: br` over gzip when the client accepts it,
+  and `precompress` emits both a `.br` (quality 11) and a `.gz` (level 9) sibling — brotli beats
+  gzip on text. Tests: `web_compress_test`, `web_static_test`, `web_assets_test`.
+- **Access logging** ✅ — **`web/logger`**: `attach-access-log` turns the
+  `[:hatch :request :stop]` / `:bad-request` telemetry `http/server` emits into one structured
+  log line per request (method, path, status, duration) through the standard log system, so
+  access lines share the app's level/format/sinks. Level follows the status (2xx/3xx info, 4xx
+  warn, 5xx error) unless fixed. `web/application/start` wires it with `:access-log true`. Tests:
+  `tests/web_logger_test.blsp`.
+- **Rate limiting** ✅ — **`web/ratelimit`**: a `(rate-limit)` plug, token-bucket per key (client
+  IP from `X-Forwarded-For`/`X-Real-IP`, else one global bucket), backed by a supervised counter
+  process so the read-refill-spend is serialized. Over the limit → `429` + `Retry-After`; fails
+  OPEN if the limiter doesn't answer, so a hiccup can't take the endpoint down. Tests:
+  `tests/web_ratelimit_test.blsp`.
 - **PubSub** ✅ (node-local) — `web/pubsub`: `subscribe`/`unsubscribe`/`broadcast`/
   `broadcast-from` over string topics, fanning out to subscribers via `send-info` (→ the
   view's `handle-info`). A named registry process holds `topic → pids` and monitors each
@@ -327,8 +346,10 @@ and adding the missing API template.
   `send-info`. Across a cluster the roster is a state-based CRDT: each node owns its local
   presences and replicates each topic's roster to peers, a joining node learns existing
   presences via a one-time bootstrap, and a departed node's presences drop on node-down.
-  Verified across two real OS-process nodes. Demo: `web/views/presence`. **Still to do:** a
-  non-present-observer mode (pair with PubSub).
+  Verified across two real OS-process nodes. Demo: `web/views/presence`. **Observer mode** ✅ —
+  `observe`/`unobserve` subscribe a non-present process (a dashboard, a moderator view, a lobby
+  count) to a topic's roster updates without joining the roster; it gets the same
+  `{:presence roster}` at `handle-info` a member does, built on pubsub (monitored + cross-node).
 
 ---
 
@@ -572,7 +593,14 @@ with what the shipped upstream feature actually gives us.
   (`carrier->bytes`), so a request body is walked twice for nothing. Finishing it means
   porting `http/request`'s head/chunked parser off strings onto `bytes` — a rewrite of
   the framework's core parser, not a sweep, so it stays its own piece of work. Retires
-  audit §16.
+  audit §16. **Deliberately deferred** as a dedicated, carefully-validated effort: the
+  parser is where the request-smuggling defenses live (obs-fold, duplicate
+  Transfer-Encoding, Content-Length conflicts, chunked edge cases), and the port is a
+  performance/cleanliness change to *correct* code — not a bug fix — so the bar is a
+  **differential fuzz** (identical inputs through the old string parser and the new bytes
+  parser, asserting identical verdicts) before it lands, not a fast rewrite bolted onto a
+  feature batch. This is the one item where rushing trades a real smuggling risk for a
+  marginal double-walk win.
 - 🔶 **Framed reads — shipped upstream as `tcp-read-until` / `tcp-read-n`** (2026-07-25;
   the transient read buffer this entry originally asked for was *rejected* upstream as an
   immutability violation, and combinators shipped instead). Originally not adoptable —
