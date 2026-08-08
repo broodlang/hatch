@@ -32,6 +32,7 @@
   (:alias log))
 
 (require 'hash) ; content-addressed asset fingerprints are a SHA-256 prefix
+(require 'zlib) ; in-process gzip for precompressed static variants (no `gzip` CLI needed)
 (def *default-reload-marker* "Done in")
 
 ; ---- dev watchers ----------------------------------------------------------
@@ -165,18 +166,22 @@
   (static/text-mime? (static/mime-type file)))
 
 (defn precompress (path)
-  "Best-effort: write `path.gz` with the `gzip` CLI so `web/static/serve-encoded` can serve a
-  precompressed variant to `Accept-Encoding: gzip` clients (~5-6x smaller CSS/JS). A missing
-  or failing gzip is logged and skipped — serving still works uncompressed — so a build/boot
-  host without gzip degrades rather than breaks. `-k` keeps the original, `-f` overwrites a
-  stale `.gz` from a previous build."
+  "Best-effort: write `path.gz`, a gzip copy of `path`, so `web/static/serve-encoded` can serve
+  a precompressed variant to `Accept-Encoding: gzip` clients (~5-6x smaller CSS/JS). Compresses
+  in-process with `zlib/gzip` (the `flate2` builtin, RFC 1952 `Content-Encoding: gzip`), so no
+  external `gzip` binary is required — a build/boot host without one no longer degrades to
+  uncompressed serving. Overwrites a stale `.gz` from a previous build. A read/compress/write
+  failure is logged and skipped, so serving still works uncompressed."
   (try
-    (let (code (run-process "gzip" (list "-9" "-k" "-f" path)))
-      (if (= code 0)
-        (log/log-info (str "[assets] precompress: " path ".gz"))
-        (log/log-warn (str "[assets] gzip exit " code " for " path "; serving uncompressed"))))
+    (let (gz (str path ".gz"))
+      (spit-bytes gz (zlib/gzip (slurp-bytes path)))
+      (log/log-info (str "[assets] precompress: " gz)))
     (catch e
-      (log/log-warn (str "[assets] gzip unavailable (" (error-message e) "); serving uncompressed")))))
+      (log/log-warn (str "[assets] precompress failed for "
+                      path
+                      " ("
+                      (error-message e)
+                      "); serving uncompressed")))))
 
 (defn fingerprint-name (file digest)
   "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →

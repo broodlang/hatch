@@ -1,0 +1,83 @@
+(defmodule web-compress-test (:use web/compress) (:use web/conn) (:use test))
+(require 'zlib)
+
+; A body comfortably over the 1024-byte floor so the size gate never masks a behaviour test.
+(def big-body (join "" (map (fn (_) "Hello, compression! ") (range 0 200))))
+
+(defn req (&optional (headers {:accept-encoding "gzip"}))
+  "A GET conn-request map with the given request headers."
+  {:method "GET" :path "/" :query "" :params {} :headers headers :body ""})
+
+(defn respond (request body &optional (opts {}) (ct nil))
+  "Run the compress plug over `request`, set a 200 `body` (optionally a `:content-type`), and
+  serialize — returning the final `{:status :headers :body}` the server would send."
+  (let (conn ((compress opts) (build request))
+        conn (if ct (put-resp-header conn :content-type ct) conn))
+    (conn->response (send-resp conn 200 body))))
+
+(describe "compressible-type?"
+  (test "text/* is compressible" (assert= (compressible-type? "text/css" #{}) true))
+  (test "text/html with charset is compressible"
+    (assert= (compressible-type? "text/html; charset=utf-8" #{}) true))
+  (test "a listed application type is compressible"
+    (assert= (compressible-type? "application/json" default-compressible-types) true))
+  (test "a missing content-type counts as compressible (defaults to text/html)"
+    (assert= (compressible-type? nil default-compressible-types) true))
+  (test "an image type is not compressible"
+    (assert= (compressible-type? "image/png" default-compressible-types) false)))
+
+(describe "base-type"
+  (test "strips parameters" (assert= (base-type "text/html; charset=utf-8") "text/html"))
+  (test "lowercases and trims" (assert= (base-type "  Application/JSON ") "application/json")))
+
+(describe "add-vary"
+  (test "sets Accept-Encoding when absent"
+    (assert= (get-in (add-vary (build (req)) "Accept-Encoding") [:resp-headers :vary])
+      "Accept-Encoding"))
+  (test "appends to an existing Vary"
+    (let (conn (put-resp-header (build (req)) :vary "Cookie"))
+      (assert= (get-in (add-vary conn "Accept-Encoding") [:resp-headers :vary])
+        "Cookie, Accept-Encoding")))
+  (test "does not duplicate an already-present token"
+    (let (conn (put-resp-header (build (req)) :vary "Accept-Encoding"))
+      (assert= (get-in (add-vary conn "Accept-Encoding") [:resp-headers :vary])
+        "Accept-Encoding"))))
+
+(describe "compress plug — gzips a compressible response"
+  (test "sets Content-Encoding: gzip and Vary"
+    (let (r (respond (req) big-body))
+      (assert= (get-in r [:headers :content-encoding]) "gzip")
+      (assert= (get-in r [:headers :vary]) "Accept-Encoding")))
+  (test "the body is valid gzip that round-trips to the original"
+    (let (r (respond (req) big-body))
+      (assert= (utf8-bytes->string (zlib/gunzip (get r :body))) big-body)))
+  (test "the compressed body is smaller than the original"
+    (let (r (respond (req) big-body))
+      (assert= (< (count (get r :body)) (count (string->utf8-bytes big-body))) true))))
+
+(describe "compress plug — when it must NOT compress"
+  (test "no Accept-Encoding → identity body, no Content-Encoding"
+    (let (r (respond (req {}) big-body))
+      (assert= (get r :body) big-body)
+      (assert= (contains? (get r :headers) :content-encoding) false)))
+  (test "a body under the size floor is left uncompressed"
+    (let (r (respond (req) "tiny"))
+      (assert= (get r :body) "tiny")
+      (assert= (contains? (get r :headers) :content-encoding) false)))
+  (test "a non-compressible content-type is left alone"
+    (let (r (respond (req) big-body {} "image/png"))
+      (assert= (get r :body) big-body)
+      (assert= (contains? (get r :headers) :content-encoding) false)))
+  (test "an already-encoded response is not double-compressed"
+    (let (conn (put-resp-header ((compress) (build (req))) :content-encoding "gzip")
+          r (conn->response (send-resp conn 200 big-body)))
+      ; body stays the identity string; the pre-set encoding is untouched
+      (assert= (get r :body) big-body)
+      (assert= (get-in r [:headers :content-encoding]) "gzip")))
+  (test "a bodyless 304 is never compressed"
+    (let (conn ((compress) (build (req)))
+          r (conn->response (send-resp conn 304 "")))
+      (assert= (contains? (get r :headers) :content-encoding) false)))
+  (test "honours a custom :min-bytes floor"
+    (let (r (respond (req) "small-but-over-floor" {:min-bytes 4}))
+      (assert= (get-in r [:headers :content-encoding]) "gzip"))))

@@ -1,6 +1,6 @@
 (defmodule web-assets-test (:use web/assets) (:alias web/static) (:use test))
 (require 'hash)
-
+(require 'zlib) ; round-trip the in-process precompressed `.gz`
 (describe "proc-opts"
   (test "empty when no cwd/env"
     (assert= (proc-opts {:cmd ["x"]}) {}))
@@ -72,18 +72,20 @@
     (assert= (compressible? "app.wasm") false)))
 
 (describe "fingerprint precompression"
-  ; precompress shells out to the `gzip` CLI, so it's best-effort — a build host without gzip
-  ; degrades to serving uncompressed. Assert the .gz's shape only when it was produced.
-  (test "a fingerprinted compressible asset gets a smaller .gz sibling (when gzip is present)"
+  ; precompress compresses in-process via `zlib/gzip` (no external `gzip` CLI), so the .gz is
+  ; always produced — assert it exists, is smaller, and round-trips back to the original bytes.
+  (test "a fingerprinted compressible asset gets a smaller .gz sibling"
     (let (dir "/tmp/hatch-fp-gz-test"
           _ (try (make-dir dir) (catch _ nil))
           body (join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
           _ (spit (str dir "/app.css") body)
           fp (fingerprint-file dir "app.css")
           gz (str dir "/" fp ".gz"))
-      (when (file-exists? gz)
-        (assert= (> (count (slurp-bytes gz)) 0) true)
-        (assert= (< (count (slurp-bytes gz)) (count (string->utf8-bytes body))) true))
+      (assert= (file-exists? gz) true)
+      (assert= (> (count (slurp-bytes gz)) 0) true)
+      (assert= (< (count (slurp-bytes gz)) (count (string->utf8-bytes body))) true)
+      ; the .gz is valid gzip: gunzip recovers the exact source bytes
+      (assert= (utf8-bytes->string (zlib/gunzip (slurp-bytes gz))) body)
       (delete-file (str dir "/app.css"))
       (delete-file (str dir "/" fp))
       (when (file-exists? gz) (delete-file gz)))))

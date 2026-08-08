@@ -1,0 +1,97 @@
+(defmodule web/compress
+  "Response compression — a plug that gzips a compressible response body when the client sent
+  `Accept-Encoding: gzip`, negotiated per RFC 7231 §5.3.4. Compression runs in-process via
+  `zlib/gzip` (the `flate2` builtin), so no reverse proxy or external `gzip` binary is needed.
+
+  Wire the plug into a pipeline; it registers a before-send callback, so it acts on the
+  *finished* response body — after the handler and any live-view render have produced it:
+
+    (through [(compress/compress)]
+      (get \"/\" pages/home)
+      (get \"/api/data\" api/data))
+
+  Only text-ish bodies above a size floor are compressed (`:min-bytes`, default 1024): tiny
+  bodies gain nothing once the gzip header/checksum is added, and already-compressed media
+  (images, fonts, video, a `.gz`) would only grow. A response that already carries a
+  `Content-Encoding` (e.g. a precompressed static asset from `web/static/serve-encoded`) is
+  left untouched, so nothing is ever double-encoded. A `Vary: Accept-Encoding` is added when we
+  compress so a shared cache keys the identity and gzip representations apart.
+
+  Options (all optional):
+    :min-bytes  — don't compress a body smaller than this many bytes (default 1024)
+    :types      — the set of compressible base media types to override the built-in text-ish
+                  set (`text/*` is always compressible regardless)"
+  ; register-before-send / put-resp-body / put-resp-header / get-in — act on the finished conn
+  (:use web/conn)
+  ; bodyless-status? — 1xx/204/304 carry no body, so never compress one
+  (:alias http/response))
+
+(require 'zlib) ; in-process gzip (RFC 1952, `Content-Encoding: gzip`)
+; The default text-ish media types worth compressing. `text/*` is handled by prefix in
+; `compressible-type?`; this set is the compressible `application/*` and `image/svg+xml` cases.
+(def default-compressible-types
+  #{"application/json"
+    "application/javascript" "application/xml" "application/xhtml+xml" "application/rss+xml"
+    "application/atom+xml" "application/manifest+json" "application/ld+json"
+    "application/vnd.api+json" "image/svg+xml"})
+
+(defn accepts-gzip? (conn)
+  "True if the request's `Accept-Encoding` offers gzip. A crude substring test is enough here —
+  we only ever advertise gzip, so a `gzip;q=0` opt-out is the only false positive and is
+  vanishingly rare."
+  (let (accept-encoding (get (get conn :headers) :accept-encoding))
+    (and (string? accept-encoding) (includes? accept-encoding "gzip"))))
+
+(defn base-type (ctype)
+  "The media type of a `Content-Type` value, lowercased and without parameters:
+  `\"text/html; charset=utf-8\"` → `\"text/html\"`."
+  (lower (trim (first (string-split ctype ";")))))
+
+(defn compressible-type? (ctype types)
+  "True if a response with `Content-Type` `ctype` is worth gzipping — any `text/*`, or a base
+  type in `types`. A missing `ctype` counts as compressible: http/response defaults an unset
+  content type to `text/html; charset=utf-8`, which is text."
+  (if (nil? ctype)
+    true
+    (let (base (base-type ctype))
+      (or (starts-with? base "text/") (contains? types base)))))
+
+(defn add-vary (conn token)
+  "Add `token` to the response `Vary` header, preserving (and not duplicating) any existing
+  value — so `Vary: Accept-Encoding` marks the response cacheable-by-encoding without clobbering
+  a `Vary` an upstream plug already set."
+  (let (existing (get-in conn [:resp-headers :vary]))
+    (cond
+      (nil? existing) (put-resp-header conn :vary token)
+      (includes? (lower existing) (lower token)) conn
+      else (put-resp-header conn :vary (str existing ", " token)))))
+
+(defn maybe-gzip (conn opts)
+  "gzip the finished conn's response body when the client accepts gzip and the body is a
+  compressible, large-enough, not-already-encoded, body-bearing response; otherwise return the
+  conn unchanged. Registered as a before-send callback by `compress`."
+  (let (min-bytes (get opts :min-bytes 1024)
+        types (get opts :types default-compressible-types)
+        status (or (get conn :status) 200)
+        headers (get conn :resp-headers {}))
+    (if (and (accepts-gzip? conn)
+          (not (http/response/bodyless-status? status))
+          (not (contains? headers :content-encoding))
+          (compressible-type? (get headers :content-type) types))
+      ; Flatten the body to bytes once (a string, `bytes`, or an ADR-139 iolist) — its length
+      ; gates the size floor and its bytes are what we compress, so there's no second pass.
+      (let (raw (bytes-concat (get conn :resp-body "")))
+        (if (< (count raw) min-bytes)
+          conn
+          (-> conn
+            (put-resp-body (zlib/gzip raw))
+            (put-resp-header :content-encoding "gzip")
+            (add-vary "Accept-Encoding"))))
+      conn)))
+
+(defn compress (&optional (opts {}))
+  "Plug factory: returns a plug that gzips a compressible response body when the request sent
+  `Accept-Encoding: gzip`. The plug registers a before-send callback (via `register-before-send`)
+  so it compresses the *finished* body, after the handler and any downstream render have run.
+  See the module docstring for `opts` (`:min-bytes`, `:types`) and wiring."
+  (fn (conn) (register-before-send conn (fn (finished) (maybe-gzip finished opts)))))
