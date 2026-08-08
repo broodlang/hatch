@@ -1,7 +1,8 @@
 (defmodule web/compress
-  "Response compression — a plug that gzips a compressible response body when the client sent
-  `Accept-Encoding: gzip`, negotiated per RFC 7231 §5.3.4. Compression runs in-process via
-  `zlib/gzip` (the `flate2` builtin), so no reverse proxy or external `gzip` binary is needed.
+  "Response compression — a plug that compresses a compressible response body, preferring brotli
+  (`Content-Encoding: br`) over gzip and choosing whichever the client's `Accept-Encoding`
+  offers (RFC 7231 §5.3.4). Compression runs in-process via `zlib/brotli` / `zlib/gzip` (the
+  `brotli` / `flate2` builtins), so no reverse proxy or external binary is needed.
 
   Wire the plug into a pipeline; it registers a before-send callback, so it acts on the
   *finished* response body — after the handler and any live-view render have produced it:
@@ -11,11 +12,11 @@
       (get \"/api/data\" api/data))
 
   Only text-ish bodies above a size floor are compressed (`:min-bytes`, default 1024): tiny
-  bodies gain nothing once the gzip header/checksum is added, and already-compressed media
-  (images, fonts, video, a `.gz`) would only grow. A response that already carries a
-  `Content-Encoding` (e.g. a precompressed static asset from `web/static/serve-encoded`) is
-  left untouched, so nothing is ever double-encoded. A `Vary: Accept-Encoding` is added when we
-  compress so a shared cache keys the identity and gzip representations apart.
+  bodies gain nothing once the coding's header is added, and already-compressed media (images,
+  fonts, video, a `.gz`) would only grow. A response that already carries a `Content-Encoding`
+  (e.g. a precompressed static asset from `web/static/serve-encoded`) is left untouched, so
+  nothing is ever double-encoded. A `Vary: Accept-Encoding` is added when we compress so a shared
+  cache keys the identity, gzip, and brotli representations apart.
 
   Options (all optional):
     :min-bytes  — don't compress a body smaller than this many bytes (default 1024)
@@ -26,7 +27,7 @@
   ; bodyless-status? — 1xx/204/304 carry no body, so never compress one
   (:alias http/response))
 
-(require 'zlib) ; in-process gzip (RFC 1952, `Content-Encoding: gzip`)
+(require 'zlib) ; in-process brotli/gzip (RFC 7932 `br` / RFC 1952 gzip)
 ; The default text-ish media types worth compressing. `text/*` is handled by prefix in
 ; `compressible-type?`; this set is the compressible `application/*` and `image/svg+xml` cases.
 (def default-compressible-types
@@ -35,12 +36,25 @@
     "application/atom+xml" "application/manifest+json" "application/ld+json"
     "application/vnd.api+json" "image/svg+xml"})
 
-(defn accepts-gzip? (conn)
-  "True if the request's `Accept-Encoding` offers gzip. A crude substring test is enough here —
-  we only ever advertise gzip, so a `gzip;q=0` opt-out is the only false positive and is
-  vanishingly rare."
+(defn accepts? (conn coding)
+  "True if the request's `Accept-Encoding` offers `coding` (a crude substring test — a
+  `coding;q=0` opt-out is the only false positive and is vanishingly rare)."
   (let (accept-encoding (get (get conn :headers) :accept-encoding))
-    (and (string? accept-encoding) (includes? accept-encoding "gzip"))))
+    (and (string? accept-encoding) (includes? accept-encoding coding))))
+
+(defn chosen-encoding (conn)
+  "The content-coding to compress with, preferring brotli (`\"br\"`) over gzip (`\"gzip\"`) when
+  the client accepts it — brotli beats gzip on text and every modern browser advertises `br`.
+  Returns nil when the client accepts neither."
+  (cond
+    (accepts? conn "br") "br"
+    (accepts? conn "gzip") "gzip"
+    else nil))
+
+(defn encode-body (coding raw)
+  "Compress `raw` bytes with `coding` (`\"br\"` or `\"gzip\"`) — the default level for each,
+  tuned for per-request work (brotli 5, gzip 6)."
+  (if (= coding "br") (zlib/brotli raw) (zlib/gzip raw)))
 
 (defn base-type (ctype)
   "The media type of a `Content-Type` value, lowercased and without parameters:
@@ -66,15 +80,17 @@
       (includes? (lower existing) (lower token)) conn
       else (put-resp-header conn :vary (str existing ", " token)))))
 
-(defn maybe-gzip (conn opts)
-  "gzip the finished conn's response body when the client accepts gzip and the body is a
-  compressible, large-enough, not-already-encoded, body-bearing response; otherwise return the
-  conn unchanged. Registered as a before-send callback by `compress`."
+(defn maybe-compress (conn opts)
+  "Compress the finished conn's response body when the client accepts a coding (brotli preferred,
+  else gzip) and the body is a compressible, large-enough, not-already-encoded, body-bearing
+  response; otherwise return the conn unchanged. Registered as a before-send callback by
+  `compress`."
   (let (min-bytes (get opts :min-bytes 1024)
         types (get opts :types default-compressible-types)
         status (or (get conn :status) 200)
-        headers (get conn :resp-headers {}))
-    (if (and (accepts-gzip? conn)
+        headers (get conn :resp-headers {})
+        coding (chosen-encoding conn))
+    (if (and coding
           (not (http/response/bodyless-status? status))
           (not (contains? headers :content-encoding))
           (compressible-type? (get headers :content-type) types))
@@ -84,8 +100,8 @@
         (if (< (count raw) min-bytes)
           conn
           (-> conn
-            (put-resp-body (zlib/gzip raw))
-            (put-resp-header :content-encoding "gzip")
+            (put-resp-body (encode-body coding raw))
+            (put-resp-header :content-encoding coding)
             (add-vary "Accept-Encoding"))))
       conn)))
 
@@ -94,4 +110,4 @@
   `Accept-Encoding: gzip`. The plug registers a before-send callback (via `register-before-send`)
   so it compresses the *finished* body, after the handler and any downstream render have run.
   See the module docstring for `opts` (`:min-bytes`, `:types`) and wiring."
-  (fn (conn) (register-before-send conn (fn (finished) (maybe-gzip finished opts)))))
+  (fn (conn) (register-before-send conn (fn (finished) (maybe-compress finished opts)))))

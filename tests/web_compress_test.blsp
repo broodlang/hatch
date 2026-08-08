@@ -81,3 +81,22 @@
   (test "honours a custom :min-bytes floor"
     (let (r (respond (req) "small-but-over-floor" {:min-bytes 4}))
       (assert= (get-in r [:headers :content-encoding]) "gzip"))))
+
+(describe "content negotiation (brotli preferred over gzip)"
+  (test "accepts? detects a coding in Accept-Encoding"
+    (assert= (accepts? (req {:accept-encoding "br, gzip"}) "br") true)
+    (assert= (accepts? (req {:accept-encoding "gzip"}) "br") false))
+  (test "chosen-encoding prefers br, then gzip, else nil"
+    (assert= (chosen-encoding (req {:accept-encoding "br, gzip"})) "br")
+    (assert= (chosen-encoding (req {:accept-encoding "gzip"})) "gzip")
+    (assert= (chosen-encoding (req {:accept-encoding "identity"})) nil)
+    (assert= (chosen-encoding (req {})) nil))
+  (test "a br-capable client gets Content-Encoding: br, and the body round-trips"
+    (let (r (respond (req {:accept-encoding "br, gzip"}) big-body))
+      (assert= (get-in r [:headers :content-encoding]) "br")
+      (assert= (get-in r [:headers :vary]) "Accept-Encoding")
+      (assert= (utf8-bytes->string (zlib/unbrotli (get r :body))) big-body)))
+  (test "a gzip-only client still gets gzip"
+    (let (r (respond (req {:accept-encoding "gzip"}) big-body))
+      (assert= (get-in r [:headers :content-encoding]) "gzip")
+      (assert= (utf8-bytes->string (zlib/gunzip (get r :body))) big-body))))

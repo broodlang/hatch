@@ -57,8 +57,9 @@
       (assert= (file-exists? (str dir "/cache-manifest.tmp")) false)
       (delete-file (str dir "/app.css"))
       (delete-file (str dir "/" fp))
-      ; fingerprinting a compressible asset also emits a best-effort .gz sibling
+      ; fingerprinting a compressible asset also emits best-effort .br and .gz siblings
       (when (file-exists? (str dir "/" fp ".gz")) (delete-file (str dir "/" fp ".gz")))
+      (when (file-exists? (str dir "/" fp ".br")) (delete-file (str dir "/" fp ".br")))
       (delete-file (str dir "/cache-manifest")))))
 
 (describe "compressible?"
@@ -72,20 +73,24 @@
     (assert= (compressible? "app.wasm") false)))
 
 (describe "fingerprint precompression"
-  ; precompress compresses in-process via `zlib/gzip` (no external `gzip` CLI), so the .gz is
-  ; always produced — assert it exists, is smaller, and round-trips back to the original bytes.
-  (test "a fingerprinted compressible asset gets a smaller .gz sibling"
+  ; precompress compresses in-process (no external CLI), writing both a brotli .br and a gzip .gz
+  ; sibling — assert each exists, is smaller, and round-trips back to the original bytes.
+  (test "a fingerprinted compressible asset gets smaller .br and .gz siblings"
     (let (dir "/tmp/hatch-fp-gz-test"
           _ (try (make-dir dir) (catch _ nil))
           body (join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
           _ (spit (str dir "/app.css") body)
           fp (fingerprint-file dir "app.css")
-          gz (str dir "/" fp ".gz"))
+          gz (str dir "/" fp ".gz")
+          br (str dir "/" fp ".br"))
       (assert= (file-exists? gz) true)
-      (assert= (> (count (slurp-bytes gz)) 0) true)
+      (assert= (file-exists? br) true)
       (assert= (< (count (slurp-bytes gz)) (count (string->utf8-bytes body))) true)
-      ; the .gz is valid gzip: gunzip recovers the exact source bytes
+      (assert= (< (count (slurp-bytes br)) (count (string->utf8-bytes body))) true)
+      ; each variant is valid and recovers the exact source bytes
       (assert= (utf8-bytes->string (zlib/gunzip (slurp-bytes gz))) body)
+      (assert= (utf8-bytes->string (zlib/unbrotli (slurp-bytes br))) body)
       (delete-file (str dir "/app.css"))
       (delete-file (str dir "/" fp))
-      (when (file-exists? gz) (delete-file gz)))))
+      (when (file-exists? gz) (delete-file gz))
+      (when (file-exists? br) (delete-file br)))))

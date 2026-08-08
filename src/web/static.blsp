@@ -331,41 +331,55 @@
           (get hit :etag)
           nil)))))
 
-(defn accepts-gzip? (conn)
-  "True if the request's `Accept-Encoding` offers gzip. A crude substring test is enough
-  here — we only ever advertise gzip, so a `gzip;q=0` opt-out is the only false positive and
-  is vanishingly rare in practice."
+(defn accepts? (conn coding)
+  "True if the request's `Accept-Encoding` offers `coding`. A crude substring test is enough —
+  a `coding;q=0` opt-out is the only false positive and is vanishingly rare in practice."
   (let (accept-encoding (get (get conn :headers) :accept-encoding))
-    (and (string? accept-encoding) (includes? accept-encoding "gzip"))))
+    (and (string? accept-encoding) (includes? accept-encoding coding))))
+
+(defn accepts-gzip? (conn)
+  "True if the request's `Accept-Encoding` offers gzip."
+  (accepts? conn "gzip"))
+
+(defn negotiated-variant (conn path)
+  "The best precompressed sibling of `path` to serve as `[coding sibling-path]` — brotli
+  (`path.br`) preferred over gzip (`path.gz`), each offered only when the client accepts that
+  coding AND the sibling exists on disk (both written by `web/assets/fingerprint`). nil when
+  neither applies (fall through to the identity representation)."
+  (cond
+    (and (accepts? conn "br") (file-exists? (str path ".br"))) ["br" (str path ".br")]
+    (and (accepts? conn "gzip") (file-exists? (str path ".gz"))) ["gzip" (str path ".gz")]
+    else nil))
 
 (defn serve-encoded (conn path root)
-  "Content-negotiated compression: when the client sent `Accept-Encoding: gzip` and a
-  precompressed `path.gz` sibling exists (written by `web/assets/fingerprint`), serve those
-  bytes with `Content-Encoding: gzip` — a ~5-6x smaller transfer for CSS/JS. Returns the
-  response conn, or nil to fall through to the identity representation (gzip not accepted, or
-  no `.gz` on disk). The compressed body is sent whole — a `Range` over gzip bytes isn't
-  offered — with a representation-specific ETag (hashed from the `.gz`) and `Vary:
-  Accept-Encoding` so a shared cache keys the two encodings apart. Cache-Control follows the
-  *logical* path, so a fingerprinted asset's gzip stays `immutable`."
-  (when (accepts-gzip? conn)
-    (let (gz (str path ".gz"))
-      (when (file-exists? gz)
-        (let (body (try (slurp-bytes gz) (catch _ nil)))
-          (when body
-            (let (tag (cached-bytes-etag gz body)
-                  cc (cache-control path root))
-              (if (if-none-match? conn tag)
-                (send-resp (with-resp-headers conn
-                             {:etag tag :cache-control cc :vary "Accept-Encoding"})
-                  304 "")
-                (send-resp (with-resp-headers conn
-                             {:content-type (mime-type path)
-                              :content-encoding "gzip"
-                              :vary "Accept-Encoding"
-                              :etag tag
-                              :cache-control cc
-                              :x-content-type-options "nosniff"})
-                  200 body)))))))))
+  "Content-negotiated compression: when the client accepts a coding and a matching precompressed
+  sibling exists (`path.br` for brotli, preferred; else `path.gz` for gzip), serve those bytes
+  with the matching `Content-Encoding` — a ~5-6x smaller transfer for CSS/JS. Returns the
+  response conn, or nil to fall through to the identity representation (no accepted coding, or no
+  sibling on disk). The compressed body is sent whole — a `Range` over compressed bytes isn't
+  offered — with a representation-specific ETag (hashed from the sibling) and `Vary:
+  Accept-Encoding` so a shared cache keys the encodings apart. Cache-Control follows the *logical*
+  path, so a fingerprinted asset's compressed variant stays `immutable`."
+  (let (variant (negotiated-variant conn path))
+    (when variant
+      (let (coding (first variant)
+            sibling (nth variant 1)
+            body (try (slurp-bytes sibling) (catch _ nil)))
+        (when body
+          (let (tag (cached-bytes-etag sibling body)
+                cc (cache-control path root))
+            (if (if-none-match? conn tag)
+              (send-resp (with-resp-headers conn
+                           {:etag tag :cache-control cc :vary "Accept-Encoding"})
+                304 "")
+              (send-resp (with-resp-headers conn
+                           {:content-type (mime-type path)
+                            :content-encoding coding
+                            :vary "Accept-Encoding"
+                            :etag tag
+                            :cache-control cc
+                            :x-content-type-options "nosniff"})
+                200 body))))))))
 
 (defn serve (conn root rel)
   "Serve `rel` under `root` into `conn`: 200 with the file's MIME type on success, a bodyless
