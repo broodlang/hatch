@@ -158,3 +158,39 @@
     (let (r (rtext (format-response (redirect "/ok\r\nSet-Cookie: x=1"))))
       ; the bytes survive inside the Location value, but never after a CRLF (a new header)
       (assert= (includes? r "\r\nSet-Cookie:") false))))
+
+; ---- chunked streaming encoders (Transfer-Encoding: chunked) ----
+(describe "int->hex"
+  (test "zero" (assert= (int->hex 0) "0"))
+  (test "small" (assert= (int->hex 15) "f"))
+  (test "255" (assert= (int->hex 255) "ff"))
+  (test "256" (assert= (int->hex 256) "100"))
+  (test "4095" (assert= (int->hex 4095) "fff")))
+
+(describe "chunk"
+  (test "encodes size-in-hex CRLF data CRLF"
+    (assert= (rtext (chunk "hello")) "5\r\nhello\r\n"))
+  (test "sizes by BYTE length, not codepoints (multibyte)"
+    ; "é" is 2 UTF-8 bytes, so a 1-char string is a 2-byte chunk
+    (assert= (rtext (chunk "é")) "2\r\né\r\n"))
+  (test "an empty payload is nil (never a premature 0-length chunk)"
+    (assert= (chunk "") nil)))
+
+(describe "last-chunk"
+  (test "is the zero-length terminator"
+    (assert= (rtext (last-chunk)) "0\r\n\r\n")))
+
+(describe "format-stream-head"
+  (test "sets Transfer-Encoding: chunked and no Content-Length"
+    (let (r (rtext (format-stream-head {:status 200 :headers {:content-type "text/plain"}})))
+      (assert= (includes? r "HTTP/1.1 200 OK\r\n") true)
+      (assert= (includes? r "Transfer-Encoding: chunked\r\n") true)
+      (assert= (includes? r "Content-Length") false)
+      (assert= (includes? r "Content-Type: text/plain\r\n") true)
+      (assert= (ends-with? r "\r\n\r\n") true)))
+  (test "drops any Content-Length the caller set"
+    (let (r (rtext (format-stream-head {:status 200 :headers {:content-length "9"}})))
+      (assert= (includes? r "Content-Length") false)))
+  (test "defaults an unset content-type to text/html"
+    (let (r (rtext (format-stream-head {:status 200})))
+      (assert= (includes? r "Content-Type: text/html; charset=utf-8\r\n") true))))

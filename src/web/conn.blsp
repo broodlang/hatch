@@ -226,14 +226,26 @@
   "Serialize a finished conn into the `{:status :headers :body}` map http/server sends.
   Runs any registered before-send callbacks first, then folds accumulated `:resp-cookies`
   into a list-valued `:set-cookie` header (http/response emits one line per cookie). Status
-  defaults to 200; headers and body come from the conn's resp fields."
+  defaults to 200; headers and body come from the conn's resp fields. A conn carrying a
+  `:stream` function (see `stream-resp`) passes it through so http/server sends the response
+  chunked."
   (let (conn (run-before-send conn)
         cookies (get conn :resp-cookies (list))
         headers (get conn :resp-headers {})
-        headers (if (empty? cookies) headers (assoc headers :set-cookie cookies)))
-    {:status (or (get conn :status) 200)
-     :headers headers
-     :body (get conn :resp-body "")}))
+        headers (if (empty? cookies) headers (assoc headers :set-cookie cookies))
+        base {:status (or (get conn :status) 200)
+              :headers headers
+              :body (get conn :resp-body "")})
+    (if (contains? conn :stream) (assoc base :stream (get conn :stream)) base)))
+
+(defn stream-resp (conn stream-fn &optional (status 200))
+  "Produce a chunked streaming response from `conn`. `stream-fn` is a one-argument function
+  `(fn (write) …)`; it calls `write` — passing a string, `bytes`, or an iolist — as many times
+  as it likes, and each call sends one Transfer-Encoding chunk. The connection is chunked-encoded
+  and closed once `stream-fn` returns. Set any response headers (e.g. `:content-type`) with
+  `put-resp-header` before calling. For Server-Sent Events, use `web/stream/sse-resp`, which wraps
+  this with the SSE content-type and an event-formatting `emit`."
+  (assoc conn :status status :stream stream-fn))
 
 (defn html-resp (conn body)
   "200 OK HTML response (conn)."

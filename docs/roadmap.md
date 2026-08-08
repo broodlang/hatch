@@ -284,19 +284,34 @@ and adding the missing API template.
 - **Supervisor tree** — `http/server` workers under a proper supervisor;
   restart strategies; max-connections back-pressure
 - **Request timeout** — idle worker timeout; slow-read protection
-- **Chunked Transfer-Encoding** — for streaming responses (SSE, large file
-  downloads). ⛔ **needs a runtime builtin:** responses serialize as one string today; a
-  streaming/binary socket write is the prerequisite (pairs with binary serving below).
+- **Chunked Transfer-Encoding** ✅ — for streaming responses (SSE, large file downloads). The
+  runtime prerequisite (a streaming socket write) was already there: `tcp-send` writes an
+  iolist to a per-connection socket and can be called repeatedly by the owning worker, so no
+  brood builtin was needed. `http/response` now has the chunk encoders (`chunk`/`last-chunk`/
+  `format-stream-head`, the write-side twin of the chunked *reader*); a handler returns a
+  response carrying a `:stream` function `(fn (write) …)` and `http/server` sends the head with
+  `Transfer-Encoding: chunked`, drives the function, then the terminating chunk (and always
+  closes — no keep-alive across an open-ended stream). `web/conn/stream-resp` is the conn-level
+  API; **`web/stream`** wraps it as Server-Sent Events (`sse-resp` + `sse-event`, `text/
+  event-stream`). Tests: `tests/http_stream_test.blsp` (loopback chunked + SSE) and the encoder
+  units in `tests/http_response_test.blsp`.
 - **Binary asset serving** ✅ — images, fonts, `.ico`, video, wasm. `web/static` reads binary
   types (`text-mime?` picks the path) via `slurp-bytes` and serves them as raw `bytes`;
   `http/response/format-response` returns the whole response as `bytes` for a binary body so it
   reaches the wire byte-for-byte. Full ETag/304, Cache-Control, nosniff, and byte ranges
   (206/416) apply, and an unknown extension is served as `application/octet-stream` bytes
   rather than being UTF-8-mangled.
-- **Compression** — gzip response middleware plug + `Content-Encoding`/`Accept-Encoding`
-  negotiation (and pre-compressed `.gz` static variants). ⛔ **needs a runtime builtin:** no
-  gzip/deflate/brotli exists in `brood` (no `flate2`/`brotli` dep) — add a `gzip`/`gunzip`
-  builtin first. Until then, terminate compression at a reverse proxy.
+- **Compression** ✅ — gzip response middleware plug + `Content-Encoding`/`Accept-Encoding`
+  negotiation (and pre-compressed `.gz` static variants). The runtime builtin shipped upstream
+  as `zlib/gzip`/`zlib/gunzip` (the `flate2`-backed `%gzip`/`%gunzip` prims, brood ≥ 0.3.3), so
+  no reverse proxy is needed. Two pieces: (1) **`web/compress`** — a `(compress)` plug that
+  registers a before-send callback and gzips a compressible (`text/*` + the JSON/XML/SVG set),
+  large-enough, not-already-encoded response body, adding `Content-Encoding: gzip` +
+  `Vary: Accept-Encoding`; and (2) `web/static` already serves pre-compressed `.gz` variants
+  (`serve-encoded`), now written **in-process** — `web/assets/precompress` uses `zlib/gzip`
+  instead of shelling out to the `gzip` CLI, so a build host without that binary no longer
+  degrades to uncompressed serving. Tests: `tests/web_compress_test.blsp`, and the round-trip in
+  `tests/web_assets_test.blsp`.
 - **Access logging** — structured log plug (method, path, status, ms)
 - **Rate limiting** — token-bucket plug backed by a `defprocess` counter
 - **PubSub** ✅ (node-local) — `web/pubsub`: `subscribe`/`unsubscribe`/`broadcast`/

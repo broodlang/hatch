@@ -1,0 +1,138 @@
+(defmodule http-stream-test
+  ; server/start, server/stop
+  (:alias http/server)
+  ; build / conn->response / stream-resp — the conn-level streaming path
+  (:use web/conn)
+  ; sse-resp / sse-event — Server-Sent Events on top of chunked streaming
+  (:alias web/stream)
+  (:use test))
+
+; ---- client helpers (a real loopback socket, text mode; framing is ASCII) ----
+
+(defn drain (sock buf)
+  "Collect everything `sock` sends until it closes (a streamed response ends by closing)."
+  (receive
+    ([:tcp ^sock chunk] (drain sock (str buf chunk)))
+    ([:tcp-closed ^sock] buf)
+    (after 2000 buf)))
+
+(defn get-raw (port path)
+  "Send one GET and return the full raw response string (head + chunked body)."
+  (let (sock (tcp-connect "127.0.0.1" port)
+        _ (tcp-send sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+        resp (drain sock ""))
+    (tcp-close sock)
+    resp))
+
+(defn body-of (resp)
+  "The body (everything past the head terminator) of a raw response."
+  (let (i (index-of resp "\r\n\r\n"))
+    (if (= i -1) "" (substring resp (+ i 4) (string-length resp)))))
+
+(defn unchunk (s acc)
+  "Decode a chunked-transfer body string back to its payload (ASCII framing/payload — chunk
+  sizes are byte lengths, which equal codepoint counts for ASCII). Stops at the 0-size chunk."
+  (let (nl (index-of s "\r\n"))
+    (if (= nl -1)
+      acc
+      (let (size (parse-hex (substring s 0 nl))
+            after-size (substring s (+ nl 2) (string-length s)))
+        (if (or (nil? size) (= size 0))
+          acc
+          (unchunk (substring after-size (+ size 2) (string-length after-size))
+            (str acc (substring after-size 0 size))))))))
+
+(defn parse-hex (s)
+  "Parse a lowercase/uppercase hex string to an int (small helper for the chunk-size line)."
+  (fold (fn (acc c)
+          (let (d (cond
+                    (and (>= (char->int c) 48) (<= (char->int c) 57)) (- (char->int c) 48)
+                    (and (>= (char->int c) 97) (<= (char->int c) 102)) (- (char->int c) 87)
+                    (and (>= (char->int c) 65) (<= (char->int c) 70)) (- (char->int c) 55)
+                    else nil))
+            (if (nil? d) acc (+ (* acc 16) d))))
+    0
+    (string->list (trim s))))
+
+; ---- handlers ----
+
+(defn count-stream (_request)
+  "A raw chunked streaming handler: writes three chunks, then ends."
+  {:status 200
+   :headers {:content-type "text/plain; charset=utf-8"}
+   :stream (fn (write) (write "one|") (write "two|") (write "three|"))})
+
+(defn conn-stream-handler (request)
+  "The conn-level path: build a conn, stream via stream-resp."
+  (conn->response (stream-resp (build request)
+                    (fn (write) (write "alpha") (write "beta")))))
+
+(defn sse-handler (request)
+  "An SSE endpoint: emit a plain event, a named event, then finish."
+  (conn->response (stream/sse-resp (build request)
+                    (fn (emit)
+                      (emit "hello")
+                      (emit {:data "world" :event "greeting" :id "42"})))))
+
+; ---- tests ----
+
+(describe "chunked streaming response"
+  (test "sends Transfer-Encoding: chunked and no Content-Length"
+    (let (port 54811
+          _ (server/start port count-stream)
+          resp (get-raw port "/"))
+      (server/stop port)
+      (assert= (includes? resp "Transfer-Encoding: chunked\r\n") true)
+      (assert= (includes? resp "Content-Length") false)
+      (assert= (includes? resp "Connection: close\r\n") true)))
+  (test "the chunked body decodes back to the concatenated writes"
+    (let (port 54812
+          _ (server/start port count-stream)
+          resp (get-raw port "/"))
+      (server/stop port)
+      (assert= (unchunk (body-of resp) "") "one|two|three|")))
+  (test "the body ends with the zero-length terminating chunk"
+    (let (port 54813
+          _ (server/start port count-stream)
+          resp (get-raw port "/"))
+      (server/stop port)
+      (assert= (ends-with? (body-of resp) "0\r\n\r\n") true))))
+
+(describe "conn-level stream-resp"
+  (test "streams the writes through the conn path"
+    (let (port 54814
+          _ (server/start port conn-stream-handler)
+          resp (get-raw port "/"))
+      (server/stop port)
+      (assert= (includes? resp "Transfer-Encoding: chunked\r\n") true)
+      (assert= (unchunk (body-of resp) "") "alphabeta"))))
+
+(describe "Server-Sent Events (sse-resp)"
+  (test "sets the event-stream content-type and no-cache"
+    (let (port 54815
+          _ (server/start port sse-handler)
+          resp (get-raw port "/"))
+      (server/stop port)
+      (assert= (includes? resp "Content-Type: text/event-stream\r\n") true)
+      (assert= (includes? resp "Cache-Control: no-cache\r\n") true)))
+  (test "emits well-formed SSE frames (data, and a named event with id)"
+    (let (port 54816
+          _ (server/start port sse-handler)
+          resp (get-raw port "/")
+          payload (unchunk (body-of resp) ""))
+      (server/stop port)
+      ; a plain string → a data event terminated by a blank line
+      (assert= (includes? payload "data: hello\n\n") true)
+      ; a map → event:/id: header lines then the data line
+      (assert= (includes? payload "event: greeting\n") true)
+      (assert= (includes? payload "id: 42\n") true)
+      (assert= (includes? payload "data: world\n\n") true))))
+
+(describe "sse-event (unit)"
+  (test "a plain payload is one data line + blank terminator"
+    (assert= (stream/sse-event "hi") "data: hi\n\n"))
+  (test "a multi-line payload becomes multiple data lines"
+    (assert= (stream/sse-event "a\nb") "data: a\ndata: b\n\n"))
+  (test "opts add event/id/retry header lines before the data"
+    (assert= (stream/sse-event "x" {:event "e" :id "1" :retry 3000})
+      "event: e\nid: 1\nretry: 3000\ndata: x\n\n")))

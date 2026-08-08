@@ -378,14 +378,37 @@
       {:method (get request :method)
        :path (get request :path)
        :status (get response :status 200)})
-    ; Decide keep-alive once, then stamp the Connection header to match what we do with the
-    ; socket. HEAD suppresses the body while keeping the equivalent GET's headers.
-    (let (ka (keep-alive? request response)
-          response (assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
-      (tcp-send sock (format-response response (= (get request :method) "HEAD")))
-      (if ka
-        (worker-run sock handler ws-handler config remainder)
-        (tcp-close sock)))))
+    ; A response carrying a `:stream` function is sent chunked (Transfer-Encoding: chunked) and
+    ; always closes the connection — no keep-alive across an open-ended stream (SSE, a long
+    ; download). Everything else is a buffered response: decide keep-alive once, then stamp the
+    ; Connection header to match what we do with the socket. HEAD suppresses the body while
+    ; keeping the equivalent GET's headers.
+    (if (get response :stream)
+      (stream-response sock request response)
+      (let (ka (keep-alive? request response)
+            response (assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
+        (tcp-send sock (format-response response (= (get request :method) "HEAD")))
+        (if ka
+          (worker-run sock handler ws-handler config remainder)
+          (tcp-close sock))))))
+
+(defn- stream-response
+  (sock request response)
+  "Send a chunked (Transfer-Encoding: chunked) streaming response: the head, then the handler's
+  `:stream` function driving a `write` callback (each call sends one chunk), then the terminating
+  chunk. `write` takes a string/`bytes`/iolist. A HEAD request gets the head only. The connection
+  always closes afterwards. A mid-stream failure — a client disconnect breaking `tcp-send`, or the
+  stream function raising — stops the stream; the socket is closed either way."
+  (let (response (assoc-in response [:headers :connection] "close")
+        head? (= (get request :method) "HEAD"))
+    (tcp-send sock (format-stream-head response))
+    (when (not head?)
+      (try
+        (do
+          ((get response :stream) (fn (data) (let (c (chunk data)) (when c (tcp-send sock c)))))
+          (tcp-send sock (last-chunk)))
+        (catch _e nil)))
+    (tcp-close sock)))
 
 ; ---- O(n) in-memory body drain (non-chunked bodies that arrive over several reads) ----
 ; The fast path re-`str`s the whole growing buffer on every socket read, which is O(n²) in
