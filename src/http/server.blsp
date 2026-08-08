@@ -55,6 +55,12 @@
   "The registered name of the listener process on `port` (see `supervisor-name`)."
   (keyword (str "http-listener-" port)))
 
+(defn worker-supervisor-name (port)
+  "The registered name of the dynamic supervisor that owns the per-connection workers on
+  `port`. Observable via `nest observe` / `whereis`; `(supervisor/count-children …)` reports the
+  live connection count."
+  (keyword (str "http-workers-" port)))
+
 (defn start (port handler &optional (ws-handler nil) (config {}))
   "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
   Optional `ws-handler` receives `(sock request)` on WebSocket upgrades. Optional
@@ -85,9 +91,17 @@
 (defn listen-and-serve (port handler ws-handler config)
   (let (tls (get config :tls)
         lsock (bind-retry port 25 tls)
-        scheme (if tls "https" "http"))
+        scheme (if tls "https" "http")
+        ; Per-connection workers run under a dynamic supervisor as :temporary children —
+        ; supervised and observable (registered by name, visible to `nest observe`), yet never
+        ; restarted, since a crashed worker's socket/request context is gone and can't resume.
+        ; The listener still monitors each worker itself (for the graceful drain and the
+        ; max-connections cap), so the supervisor adds supervision/observability without changing
+        ; the shutdown or back-pressure behaviour.
+        sup (supervisor/start-supervisor []
+              {:name (worker-supervisor-name port) :strategy :one-for-one}))
     (println (str "listening on " scheme "://localhost:" port))
-    (listener-loop lsock handler ws-handler config (list))))
+    (listener-loop lsock handler ws-handler config (list) sup)))
 
 (defn bind-retry (port attempts tls)
   "Bind a listening socket on `port`, retrying briefly while the address is still in use.
@@ -161,15 +175,18 @@
           (after remaining (do (listener-kill-all workers) (send from :drained))))))))
 
 (defn- listener-loop
-  (lsock handler ws-handler config workers)
+  (lsock handler ws-handler config workers sup)
   (receive
     ([:tcp-accept ^lsock client]
       (if (>= (count workers) (get config :max-connections))
         (do
           ; over capacity — refuse without spawning a worker
           (tcp-close client)
-          (listener-loop lsock handler ws-handler config workers))
-        (let (worker (spawn (worker-run client handler ws-handler config "")))
+          (listener-loop lsock handler ws-handler config workers sup))
+        (let (worker (supervisor/start-child sup
+                       {:id (ref)
+                        :restart :temporary
+                        :start (fn () (spawn (worker-run client handler ws-handler config "")))}))
           ; Read the connection in binary mode from the very first byte — set here, before
           ; the socket is handed to the worker, so there's no window where the reader would
           ; UTF-8-lossily decode (and corrupt) a binary request body (a file upload). The
@@ -178,17 +195,21 @@
           (tcp-set-binary client true)
           (monitor worker)
           (tcp-controlling-process client worker)
-          (listener-loop lsock handler ws-handler config (cons worker workers)))))
+          (listener-loop lsock handler ws-handler config (cons worker workers) sup))))
     ([:down _ pid _] (listener-loop lsock
                        handler
                        ws-handler
                        config
-                       (listener-without workers pid)))
+                       (listener-without workers pid)
+                       sup))
     ([:drain from] (do
                      (tcp-close lsock)
-                     (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)))
-    (:stop (tcp-close lsock)
-      (println "http/server: stopped"))))
+                     (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)
+                     (supervisor/stop-supervisor sup)))
+    (:stop (do
+             (tcp-close lsock)
+             (supervisor/stop-supervisor sup)
+             (println "http/server: stopped")))))
 
 (defn head-complete? (buf)
   "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` — i.e. the head can

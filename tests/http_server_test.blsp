@@ -256,3 +256,33 @@
       (sleep 100)
       (server/stop port)
       (assert= (nil? sup) false))))
+
+; Phase 11 — per-connection workers run under a dynamic supervisor (observable via
+; `nest observe` / whereis), as :temporary children (a dead socket can't resume, so never
+; restarted). The listener's own monitor still drives drain + the max-connections cap.
+(require 'proc/supervisor)
+
+(describe "connection workers are supervised and observable"
+  (test "a live keep-alive connection shows up as a supervised worker"
+    (let (port 54771
+          _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
+          ; open a keep-alive connection, read the response, leave the socket OPEN so the
+          ; worker is still alive (looping for the next request) when we introspect
+          sock (tcp-connect "127.0.0.1" port)
+          _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          _resp (drain sock "")
+          sup (whereis (server/worker-supervisor-name port))
+          n (proc/supervisor/count-children sup))
+      (tcp-close sock)
+      (server/stop port)
+      (assert= (pid? sup) true)
+      (assert= (>= n 1) true)))
+  (test "the worker supervisor is torn down when the server stops"
+    (let (port 54772
+          _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
+          up? (pid? (whereis (server/worker-supervisor-name port)))
+          _ (server/stop port)
+          _ (sleep 50)
+          down? (nil? (whereis (server/worker-supervisor-name port))))
+      (assert= up? true)
+      (assert= down? true))))
