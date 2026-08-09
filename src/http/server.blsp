@@ -13,6 +13,10 @@
   (:alias telemetry))
 ; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
 ;   :read-timeout-ms   — idle wait for request bytes before answering 408 and closing
+;   :head-timeout-ms   — TOTAL wall-clock budget for the request head (line + headers) to
+;                        arrive, before answering 408. :read-timeout-ms alone re-arms on every
+;                        byte, so a client dribbling one byte per (timeout-1)s holds a worker
+;                        open indefinitely (a slow-loris drip); this caps the whole head read.
 ;   :max-request-bytes — accumulated request bytes before answering 413 and closing
 ;   :max-connections   — concurrent connections; the listener refuses any over this
 ;   :error-handler     — (fn (request err-message) -> response) for a handler that raises;
@@ -37,6 +41,7 @@
 ;                        handler returns unless it moved it (see web/conn `save-body`)
 (def default-config
   {:read-timeout-ms 30000
+   :head-timeout-ms 15000
    :max-request-bytes 8388608
    :max-connections 1024
    :error-handler (fn (request err) (server-error-resp))
@@ -236,18 +241,28 @@
         (tcp-close sock))
     ; Head fully received → decide how to read the body.
     (head-complete? buf) (worker-dispatch sock handler ws-handler config buf)
-    ; Head still arriving → accumulate reads in O(n) until the terminator lands.
+    ; Head still arriving → accumulate reads in O(n) until the terminator lands. Stamp a total
+    ; head deadline now (start of this request's head) so a byte-per-read dribble can't re-arm
+    ; the idle timeout forever.
     else
-      (worker-read-head sock handler ws-handler config (list buf) (tail3 buf) (string-length buf))))
+      (worker-read-head sock
+        handler
+        ws-handler
+        config
+        (list buf)
+        (tail3 buf)
+        (string-length buf)
+        (+ (now) (get config :head-timeout-ms)))))
 
 (defn- worker-read-head
-  (sock handler ws-handler config chunks carry got)
+  (sock handler ws-handler config chunks carry got deadline)
   "Accumulate socket reads until the request head is complete, in O(n): each read is consed onto
   `chunks` (O(1)) and only a 3-byte `carry` is re-scanned for the `\\r\\n\\r\\n` terminator — so a
   head split across many reads never re-copies or re-scans the whole buffer (the old `(str buf
   chunk)` + full `index-of` per read was O(n²), a cheap slow-loris CPU amplifier). Once the
-  terminator lands the chunks are joined once and dispatched. Bounds the idle wait (→ 408) and
-  the accumulated size (→ 413)."
+  terminator lands the chunks are joined once and dispatched. Bounds the idle wait AND the total
+  head time (both → 408, whichever comes first) and the accumulated size (→ 413). `deadline` is
+  the absolute epoch-ms by which the whole head must arrive."
   (receive
     ; binary mode → `chunk` is a `bytes` value; bridge it to the byte-faithful carrier string.
     ([:tcp ^sock chunk] (let (piece (bytes->carrier chunk)
@@ -272,9 +287,13 @@
                                 config
                                 (cons piece chunks)
                                 (tail3 (str carry piece))
-                                got))))
+                                got
+                                deadline))))
     ([:tcp-closed ^sock] nil)
-    (after (get config :read-timeout-ms)
+    ; Wait no longer than the idle timeout AND no later than the total head deadline — so a
+    ; dribble that keeps re-arming the idle timer still hits the deadline (remaining ≤ 0 →
+    ; fires at once → 408). Both expiries share the same 408-and-close arm.
+    (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
       (do
         (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
         (tcp-close sock)))))
