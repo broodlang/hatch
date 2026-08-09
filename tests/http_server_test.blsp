@@ -286,3 +286,24 @@
           down? (nil? (whereis (server/worker-supervisor-name port))))
       (assert= up? true)
       (assert= down? true))))
+
+; Slow-loris drip: :read-timeout-ms re-arms on every byte, so a client dribbling one byte per
+; (timeout-1)s never trips it. :head-timeout-ms caps the TOTAL time the head may take. Here the
+; idle timeout is a comfortable 5s while the head deadline is 250ms, and the client sends a
+; partial head then one more byte mid-window (resetting the idle timer but not the deadline) —
+; the deadline still fires 408.
+(describe "head-timeout bounds a dribbled request head"
+  (test "a head that never completes is cut off with 408 at the total deadline"
+    (let (port 24781
+          _ (server/start port
+              (fn (_r) {:status 200 :headers {} :body "ok"})
+              nil
+              {:head-timeout-ms 250 :read-timeout-ms 5000})
+          sock (tcp-connect "127.0.0.1" port)
+          _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n")
+          _ (sleep 150)
+          _ (tcp-send sock "X: y\r\n")
+          resp (drain sock ""))
+      (tcp-close sock)
+      (server/stop port)
+      (assert= (includes? resp "408") true))))

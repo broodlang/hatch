@@ -49,3 +49,29 @@ identity/focus stability on reorder, not wrong output.
 Granularity (not correctness) follow-ups for the diff renderer: `:for`/`(map …)` is one
 opaque slot today (per-item comprehension diffing later); a multi-form `(do …)` render body
 collapses to one opaque slot.
+
+---
+
+## Second review pass
+
+A follow-up adversarial sweep of the http + web layers. The cores held again (session
+crypto, CSRF, static path-safety, chunked/CL·TE framing, the render escaping). New findings:
+
+### Fixed
+
+| # | Finding | Sev | Fix |
+|---|---------|-----|-----|
+| L1 | `web/live` session-dispatch called `(get msg "event")` on the raw `json-decode` result; a WS frame whose body is a bare scalar/array/bool (`5`, `true`, `[1,2,3]`) made `get` throw in the dispatch head, which runs OUTSIDE the per-hook guards. The throw killed the session actor before `close-session`, leaking its registry entry + component table per connection — an unauthenticated memory-leak DoS from repeated connect→send. | HIGH | `parse-client-frame` coerces a non-object message (and non-object `params`) to `{}` before any `get` (+tests) |
+| L2 | Two header-desync smuggling primitives survived the parser (same class as the fixed obs-fold/dup-TE): whitespace before the field-name colon (`Transfer-Encoding : chunked`, trimmed → honored) and a bare CR/LF inside the head (survives the CRLF-only split → a proxy splitting on it frames differently). | MED | `try-parse`/`try-parse-head` reject `any-ws-before-colon?` and `bare-line-break?` before any framing decision (+tests) |
+| L3 | `web/template` passed `data:` URLs through `href`/`src`/… unchanged, so `data:text/html,<script>` (or `data:image/svg+xml`) executed script in the origin. | MED | `dangerous-url?` allows only whitelisted raster-image `data:` URLs, neutralizing the rest to `#` (+tests) |
+| L4 | `render-attr` escaped attribute *values* but emitted attribute *names* verbatim — an app that derives a key from user input (`(keyword (str "data-" user))`) could break out of the attribute list. | LOW | `safe-attr-name?` drops a name carrying whitespace/quote/`=`/`<`/`>`/`/`/`&`/backtick (+test) |
+| L5 | `head-timeout`: `:read-timeout-ms` re-arms on every byte, so a client dribbling one byte per (timeout−1)s held a worker open indefinitely (slow-loris drip). | MED | new `:head-timeout-ms` (default 15s) caps the TOTAL head read; `worker-read-head` waits `min(idle, deadline−now)` (+test) |
+| L6 | `web/form` `email?` rejected spaces but not tabs/CR/LF — a false sense of completeness for a value that might later flow into a mail header. | LOW | rejects the whole control range (≤ 0x20) (+tests) |
+
+### Still pending
+
+| # | Finding | Sev | Plan |
+|---|---------|-----|------|
+| P1 | The body-drain loops (`buffered-drain`/`chunked-drain`/`spool-drain`) still use only the per-read idle timeout, so a body dribbled after a complete head is bounded by `:max-request-bytes` but not by wall-clock. Lower risk than the head dribble (needs a valid head first, capped by size), but a full fix threads the `:head-timeout-ms` deadline (or a separate body deadline) through those loops too. | MED | thread an absolute deadline through the body-drain recursions |
+| P2 | `http/websocket` accepts a close frame with a 1-byte payload (RFC 6455 §5.5.1: 0 or ≥2) and does not validate close codes (reserved/invalid pass through). Framing is correct; only close *semantics* are unchecked. | LOW | validate close-frame length + code in `parse-one-frame` |
+| P3 | A header line with no colon is silently dropped rather than rejected, and an HTTP/1.1 request with no `Host` is accepted (RFC 7230 §5.4 MUST reject). | LOW | reject a colon-less header line and a Host-less HTTP/1.1 request |
