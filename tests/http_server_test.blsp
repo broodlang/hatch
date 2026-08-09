@@ -83,7 +83,7 @@
   ; reports the decoded payload back to this (the test) process.
   (test "a client frame's high byte arrives byte-faithful (not U+FFFD)"
     (let (me (self)
-          port 54731
+          port 24731
           _sup (server/start port
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
@@ -133,7 +133,7 @@
 ; leaking internals; the detail is left to telemetry / the :error-handler knob.
 (describe "a raising handler doesn't leak internals (default :error-handler)"
   (test "answers a generic 500 with the exception text NOT in the body"
-    (let (port 54741
+    (let (port 24741
           _sup (server/start port (fn (_req) (error "SECRET-internal-detail")))
           resp (get-response port "/"))
       (server/stop port)
@@ -142,7 +142,7 @@
 
 (describe "a custom :error-handler overrides the 500 response"
   (test "the configured handler's response is sent"
-    (let (port 54742
+    (let (port 24742
           _sup (server/start port
                  (fn (_req) (error "boom"))
                  nil
@@ -156,7 +156,7 @@
 ; request line back into the body.
 (describe "a malformed request doesn't reflect attacker bytes"
   (test "answers a generic 400 with the request line NOT in the body"
-    (let (port 54743
+    (let (port 24743
           _sup (server/start port (fn (_req) {:status 200 :headers {} :body "ok"}))
           resp (raw-response port "ZZ-REFLECT-TOKEN\r\nConnection: close\r\n\r\n"))
       (server/stop port)
@@ -167,7 +167,7 @@
 ; gets an interim 100 — without which it stalls until the read timeout answers 408.
 (describe "Expect: 100-continue"
   (test "server sends an interim 100 before the body, then the final response"
-    (let (port 54748
+    (let (port 24748
           _sup (server/start port
                  (fn (req) {:status 200 :headers {} :body (str "body=" (get req :body))}))
           sock (tcp-connect "127.0.0.1" port)
@@ -187,7 +187,7 @@
 (describe "graceful stop lets an in-flight request finish"
   (test "a request already running when stop is called still gets its response"
     (let (me (self)
-          port 54743
+          port 24743
           _sup (server/start port
                  (fn (_req) (do (sleep 200) {:status 200 :headers {} :body "done"})))
           _c (spawn (report-response port me))
@@ -202,7 +202,7 @@
 (describe "graceful stop kills a straggler past :shutdown-grace-ms"
   (test "a request still running after the grace window is cut off"
     (let (me (self)
-          port 54744
+          port 24744
           _sup (server/start port
                  (fn (_req) (do (sleep 1000) {:status 200 :headers {} :body "done"}))
                  nil
@@ -227,7 +227,7 @@
 (describe "websocket reassembles a fragmented message end-to-end"
   (test "three frames (FIN=0 text, FIN=0 cont, FIN=1 cont) arrive as one payload"
     (let (me (self)
-          port 54751
+          port 24751
           _sup (server/start port
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
@@ -248,7 +248,7 @@
 (describe "server/start serves TLS with a self-signed cert"
   (test "a :tls config binds (tls-listen) and stops without error"
     (let ([cert key] (tls-self-signed "localhost")
-          port 54761
+          port 24761
           sup (server/start port
                 (fn (_req) {:status 200 :headers {} :body "ok"})
                 nil
@@ -264,7 +264,7 @@
 
 (describe "connection workers are supervised and observable"
   (test "a live keep-alive connection shows up as a supervised worker"
-    (let (port 54771
+    (let (port 24771
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
           ; open a keep-alive connection, read the response, leave the socket OPEN so the
           ; worker is still alive (looping for the next request) when we introspect
@@ -278,7 +278,7 @@
       (assert= (pid? sup) true)
       (assert= (>= n 1) true)))
   (test "the worker supervisor is torn down when the server stops"
-    (let (port 54772
+    (let (port 24772
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
           up? (pid? (whereis (server/worker-supervisor-name port)))
           _ (server/stop port)

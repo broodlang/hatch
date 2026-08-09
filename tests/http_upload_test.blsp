@@ -52,7 +52,7 @@
 (describe "multipart file upload end-to-end through the server"
   (test "a binary file POSTed over a real socket reaches the handler byte-for-byte"
     (let (me (self)
-          port 54739
+          port 24739
           _sup (server/start port (upload-handler me))
           client (tcp-connect "127.0.0.1" port))
       (tcp-set-binary client true)
@@ -85,7 +85,7 @@
 (describe "large non-chunked body streamed over several reads"
   (test "the body is reassembled byte-for-byte when it arrives in many small writes"
     (let (me (self)
-          port 54746
+          port 24746
           ; a 20 000-byte body: big enough that it cannot land in one packet, and its bytes
           ; cycle 0..99 so a dropped/duplicated/mis-ordered read changes the checksum
           n 20000
@@ -125,7 +125,7 @@
 (describe "chunked request body decoded incrementally over several reads"
   (test "chunks arriving in separate reads de-chunk to the right body byte-for-byte"
     (let (me (self)
-          port 54747
+          port 24747
           reps 50
           part "abcdefghij"
           head (b (str "POST /c HTTP/1.1\r\nHost: x\r\n"

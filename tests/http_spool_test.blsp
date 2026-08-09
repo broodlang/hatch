@@ -58,7 +58,7 @@
     (let (me (self)
           dest "/tmp/hatch-spool-dest.bin"
           _ (try (delete-file dest) (catch _ nil))
-          port 54743
+          port 24743
           _sup (server/start port
                  (spool-save-handler dest me)
                  nil
@@ -80,7 +80,7 @@
           (assert= saved (into [] (bytes->list raw-body)))))))
   (test "a body under the threshold takes the buffered path (in-memory :body, no :body-file)"
     (let (me (self)
-          port 54744
+          port 24744
           _sup (server/start port
                  (fn (request)
                    (let (conn (build request))
@@ -125,7 +125,7 @@
   (test "parse-upload-file reads the spooled body and recovers the file bytes"
     (let (me (self)
           file-bytes (bytes [137 80 78 71 13 10 0 255 60 62])
-          port 54745
+          port 24745
           _sup (server/start port
                  (fn (request)
                    (let (conn (build request)
