@@ -23,6 +23,12 @@
                   (let (headers (parse-headers header-lines)
                         buflen (string-length buf))
                     (cond
+                      ; A bare CR or LF in the head (only CRLF was split away) lets a proxy that
+                      ; splits on it see a different header set — a smuggling primitive (§3.5).
+                      (bare-line-break? lines) [:error "bare CR or LF in header block"]
+                      ; Whitespace before a field-name colon — we'd trim it and honor the header,
+                      ; a strict proxy wouldn't; a CL.TE desync (§3.2.4), same class as obs-fold.
+                      (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
                       ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
                       ; server must reject it in a request; folding disagreements are a header-
                       ; desync / smuggling primitive. `parse-headers` would otherwise promote a
@@ -100,6 +106,8 @@
                 ([:ok method path query version]
                   (let (headers (parse-headers header-lines))
                     (cond
+                      (bare-line-break? lines) [:error "bare CR or LF in header block"]
+                      (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
                       (obs-fold? header-lines) [:error "obs-fold header line"]
                       (duplicate-transfer-encoding? header-lines)
                         [:error "multiple Transfer-Encoding"]
@@ -252,6 +260,27 @@
                          (and (> (string-length line) 0)
                            (let (c (substring line 0 1)) (or (= c " ") (= c "\t")))))
                  header-lines))))
+
+(defn ws-before-colon? (line)
+  "True when a header `line` has a space or tab immediately before its field-name colon.
+  RFC 7230 §3.2.4 forbids whitespace between the field-name and the colon; `parse-headers`
+  would `trim` it away and recognise `Transfer-Encoding : chunked` as a real
+  Transfer-Encoding, while a strict proxy treats the malformed line as unknown — that
+  disagreement is a CL.TE desync primitive, the same class as obs-fold."
+  (let (ci (index-of line ":"))
+    (and (> ci 0)
+      (let (before (substring line (- ci 1) ci)) (or (= before " ") (= before "\t"))))))
+
+(defn any-ws-before-colon? (header-lines)
+  "True if any header line puts whitespace before its colon (see `ws-before-colon?`)."
+  (not (empty? (filter ws-before-colon? header-lines))))
+
+(defn bare-line-break? (lines)
+  "True if any already-CRLF-split `lines` (the request-line or a header line) still holds a
+  bare CR or bare LF. RFC 7230 §3.5: only CRLF terminates a line, so a bare LF/CR embedded in
+  the head means a proxy that DOES split on it parses a different header set — a smuggling
+  primitive. Every legitimate CRLF was consumed by the split, so a leftover CR/LF is bare."
+  (not (empty? (filter (fn (l) (or (includes? l "\r") (includes? l "\n"))) lines))))
 
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing

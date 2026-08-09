@@ -60,10 +60,10 @@
              "\"" "&quot;")
     "'" "&#39;"))
 
-; Attributes whose value is a URL — a `javascript:`/`vbscript:` value here executes script on
-; click/load, which escaping does NOT stop (the scheme survives escaping). `render` neutralizes
-; those schemes on these attributes; `data:`/`http(s)`/`mailto`/relative pass through (so a
-; legitimate `data:` image URL still works).
+; Attributes whose value is a URL — a `javascript:`/`vbscript:` value (or a `data:` document)
+; here executes script on click/load, which escaping does NOT stop (the scheme survives
+; escaping). `render` neutralizes those on these attributes; `http(s)`/`mailto`/relative and a
+; raster-image `data:` URL pass through (so a legitimate inline image still works).
 (def *url-attrs* {:href true :src true :action true :formaction true :poster true :ping true})
 
 (defn- url-scheme-noise?
@@ -71,12 +71,31 @@
   "True for a leading char a browser strips before parsing a URL scheme (whitespace/controls)."
   (<= (char->int c) 32))
 
+(defn- safe-data-image?
+  (s)
+  "True when normalized `s` is a `data:` URL declaring a raster image type we allow inline
+  (png/apng/jpeg/gif/webp/bmp/x-icon). Deliberately EXCLUDES `image/svg+xml` (SVG can carry
+  script) and every text/*, application/*, or type-less `data:` URL (those default to a
+  text document and are trivially abused as `data:text/html`)."
+  (or (starts-with? s "data:image/png")
+    (starts-with? s "data:image/apng")
+    (starts-with? s "data:image/jpeg")
+    (starts-with? s "data:image/jpg")
+    (starts-with? s "data:image/gif")
+    (starts-with? s "data:image/webp")
+    (starts-with? s "data:image/bmp")
+    (starts-with? s "data:image/x-icon")))
+
 (defn dangerous-url? (v)
-  "True if `v` is a URL whose scheme executes script (`javascript:` / `vbscript:`). Whitespace
-  and control characters are removed first and case ignored, since browsers strip them before
-  resolving the scheme (`  java\\tscript:…` is `javascript:`)."
+  "True if `v` is a URL that executes script in a URL attribute: a `javascript:`/`vbscript:`
+  scheme, or a `data:` URL that isn't a whitelisted raster image (so `data:text/html,…` and
+  `data:image/svg+xml,…` are caught). Whitespace and control characters are removed first and
+  case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
+  `javascript:`)."
   (let (s (lower (join "" (filter (fn (c) (not (url-scheme-noise? c))) (string->list (str v))))))
-    (or (starts-with? s "javascript:") (starts-with? s "vbscript:"))))
+    (or (starts-with? s "javascript:")
+      (starts-with? s "vbscript:")
+      (and (starts-with? s "data:") (not (safe-data-image? s))))))
 
 (defn safe-url (v)
   "A URL safe to place in a URL attribute: a script-executing scheme (`javascript:`/`vbscript:`)
@@ -84,13 +103,32 @@
   `href`/`src`/`action`/… in `render`; use it explicitly for a URL in another context."
   (if (dangerous-url? v) "#" v))
 
+(defn- unsafe-attr-name-cp?
+  (cp)
+  "True for a codepoint that must never appear in an HTML attribute name — whitespace/control
+  (≤ 32) or a delimiter that could break out of the attribute list (`\"` `'` `/` `&` `<` `=`
+  `>` backtick)."
+  (or (<= cp 32) (= cp 34) (= cp 38) (= cp 39) (= cp 47) (= cp 60) (= cp 61) (= cp 62) (= cp 96)))
+
+(defn- safe-attr-name?
+  (n)
+  "True when `n` is a non-empty attribute name with no character that could escape the
+  attribute list. Hiccup keys are normally compile-time literals; this guards the case where
+  an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
+  value path already defends but the name path otherwise emits verbatim."
+  (and (> (string-length n) 0)
+    (not (any? (fn (c) (unsafe-attr-name-cp? (char->int c))) (string->list n)))))
+
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.
   Boolean `true` emits the bare attribute name; `false`/`nil` omits it. A URL attribute's
-  value is passed through `safe-url` first, so a `javascript:` value can't smuggle script."
+  value is passed through `safe-url` first, so a `javascript:` value can't smuggle script. An
+  attribute whose NAME contains an unsafe character is dropped entirely (an unsafe name can't
+  be escaped the way a value can)."
   (let ([k v] kv
         n (name k))
     (cond
+      (not (safe-attr-name? n)) ""
       (= v true) (str " " n)
       (= v false) ""
       (nil? v) ""
