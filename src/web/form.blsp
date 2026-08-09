@@ -50,12 +50,20 @@
 
 (defn required? (v) (not (blank? v)))
 
+(defn- no-space-or-control?
+  (v)
+  "True when `v` holds no space, tab, CR, LF, or other control character (any codepoint
+  ≤ 32). Rejecting the whole control range — not just the space — keeps a validated address
+  from smuggling a CR/LF into a downstream mail header (header injection)."
+  (not (any? (fn (c) (<= (char->int c) 32)) (string->list v))))
+
 (defn email? (v)
   "A deliberately simple email check: one `@` with text before it and a dotted domain
-  after (the dot not last), and no spaces. Enough for demo/basic use, not RFC 5322."
+  after (the dot not last), and no spaces, tabs, or control characters (so a validated
+  address can't carry a CR/LF into a mail header). Enough for demo/basic use, not RFC 5322."
   (let (at (index-of v "@"))
     (and (> at 0)
-      (= (index-of v " ") -1)
+      (no-space-or-control? v)
       (let (domain (substring v (+ at 1) (string-length v)))
         (and (= (index-of domain "@") -1)
           (> (index-of domain ".") 0)

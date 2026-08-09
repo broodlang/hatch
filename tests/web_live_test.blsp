@@ -262,3 +262,21 @@
     (receive
       ([:push-effect m] (assert= (get m :event) "redirect") (assert= (get m :path) "/logout"))
       (after 200 (assert= "no redirect effect received" false)))))
+
+(describe "parse-client-frame: a non-object frame can't crash the session actor"
+  (test "a bare scalar decodes to an empty event (no throw)"
+    (assert= (parse-client-frame (string->utf8-bytes "5")) {:event "" :params {}}))
+  (test "a bare bool decodes to an empty event"
+    (assert= (parse-client-frame (string->utf8-bytes "true")) {:event "" :params {}}))
+  (test "a bare string decodes to an empty event"
+    (assert= (parse-client-frame (string->utf8-bytes "\"x\"")) {:event "" :params {}}))
+  (test "a JSON array decodes to an empty event"
+    (assert= (parse-client-frame (string->utf8-bytes "[1,2,3]")) {:event "" :params {}}))
+  (test "unparseable garbage decodes to an empty event"
+    (assert= (parse-client-frame (string->utf8-bytes "}{not json")) {:event "" :params {}}))
+  (test "a well-formed object keeps its event and params"
+    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"tick\",\"params\":{\"n\":1}}"))
+      {:event "tick" :params {"n" 1}}))
+  (test "a non-object params is coerced to an empty map"
+    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"go\",\"params\":5}"))
+      {:event "go" :params {}})))

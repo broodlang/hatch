@@ -39,7 +39,10 @@
   (test "a plausible email is valid" (assert= (email? "ada@example.com") true))
   (test "no @ is invalid" (assert= (email? "notanemail") false))
   (test "no domain dot is invalid" (assert= (email? "a@b") false))
-  (test "a space is invalid" (assert= (email? "a b@example.com") false)))
+  (test "a space is invalid" (assert= (email? "a b@example.com") false))
+  (test "a tab is invalid" (assert= (email? "a\tb@example.com") false))
+  ; a CR/LF must be rejected so a validated address can't inject a mail header
+  (test "a CRLF is invalid" (assert= (email? "ada@example.com\r\nBcc: evil@x.com") false)))
 
 (describe "min-length? / max-length?"
   (test "min-length? rejects a too-short value"

@@ -112,9 +112,24 @@
     (assert= (includes? (render [:img {:src "data:image/png;base64,AAAA"}])
                "src=\"data:image/png;base64,AAAA\"")
       true))
+  (test "a data:text/html href (script document) is neutralized to #"
+    (assert= (includes? (render [:a {:href "data:text/html,<script>alert(1)</script>"}])
+               "href=\"#\"")
+      true))
+  (test "a data:image/svg+xml URL (SVG can carry script) is neutralized to #"
+    (assert= (safe-url "data:image/svg+xml,<svg onload=alert(1)>") "#"))
+  (test "a type-less data: URL is neutralized to #"
+    (assert= (safe-url "data:,hello") "#"))
+  (test "an obfuscated data:text/html (leading space, mixed case) is neutralized"
+    (assert= (safe-url "  DaTa:text/html,<script>alert(1)</script>") "#"))
   (test "a non-URL attribute is not treated as a URL"
     (assert= (includes? (render [:div {:title "javascript:not-a-url"}]) "javascript:not-a-url")
-      true)))
+      true))
+  ; an attribute NAME derived from untrusted input that tries to break out is dropped
+  (test "an attribute name containing a quote/space is dropped entirely"
+    (assert= (render [:div {(keyword "x\" onmouseover=\"alert(1)") "y"}]) "<div></div>"))
+  (test "a normal hyphenated data- attribute name is kept"
+    (assert= (includes? (render [:div {:data-cid "c1"}]) "data-cid=\"c1\"") true)))
 
 (describe "render: lists of children"
   (test "list rendered as concatenation"

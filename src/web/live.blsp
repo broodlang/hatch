@@ -736,12 +736,30 @@
     ([:closed] (close-session sock view) nil)
     ([:error _] (close-session sock view))))
 
+(defn parse-client-frame (payload)
+  "Decode a client WebSocket frame `payload` (a `bytes` value of UTF-8 JSON) into
+  `{:event :params}`. A bare scalar, array, or bool is valid JSON, so the decoded message —
+  and its `params` — can be a non-map; both are coerced to `{}` rather than left as-is,
+  because the dispatch head that consumes this runs OUTSIDE the per-hook guards and `get`
+  THROWS on a non-collection. Without the coercion a single crafted frame (body `5`, `true`,
+  `\"x\"`, or `[1,2,3]`) would kill the session actor before `close-session` runs, leaking its
+  registry entry and component table per connection.
+
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {}}
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {}}"
+  (let (decoded (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
+        msg (if (map? decoded) decoded {})
+        raw-params (get msg "params" {}))
+    {:event (get msg "event" "")
+     :params (if (map? raw-params) raw-params {})}))
+
 (defn session-dispatch (sock view buf payload)
   ; `payload` is a `bytes` value (bytes-native parser) holding the client's UTF-8 JSON —
-  ; decode it to text before parsing.
-  (let (msg (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
-        event (get msg "event" "")
-        params (get msg "params" {}))
+  ; `parse-client-frame` decodes it and hardens a non-object message against the throw that
+  ; would otherwise crash this (unguarded) dispatch head.
+  (let (frame (parse-client-frame payload)
+        event (get frame :event)
+        params (get frame :params))
     (match event
       ; The first client frame: mount (exactly once, with the real URL params), start this
       ; view's tickers, mark the view mounted, and push the initial render. `mount` runs
