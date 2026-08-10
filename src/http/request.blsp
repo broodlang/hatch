@@ -150,7 +150,9 @@
 
 (defn mk-request (method path query version headers body)
   "Build the request map shared by the Content-Length and chunked paths. `version` is the
-  request line's HTTP version ('1.1' or '1.0'), which drives keep-alive defaulting."
+  request line's HTTP version ('1.1' or '1.0'), which drives keep-alive defaulting. `body` may
+  be a carrier string (legacy path) or a `bytes` value (the bytes-native path); the map is
+  otherwise identical."
   {:method method
    :path path
    :query query
@@ -158,6 +160,114 @@
    :version version
    :headers headers
    :body body})
+
+;; ---- bytes-native parsing (the carrier-bridge-free path) --------------------------------------
+;; `try-parse` / `try-parse-head` / `dechunk-step` above take a *carrier* string — one codepoint
+;; per wire byte — so the server had to `bytes->carrier` every read and `web/conn` had to
+;; `carrier->bytes` the body straight back: a whole-buffer double-walk, quadratic in the body for
+;; a large upload (audit §16). These byte-native twins parse a `bytes` buffer directly. Only the
+;; small, bounded, ASCII/Latin-1 request HEAD is decoded to a carrier (once, via `head-carrier`)
+;; so the proven, security-critical head parsing (`parse-request-line`/`parse-headers` and the
+;; obs-fold / duplicate-Transfer-Encoding / Content-Length-conflict rejections) is reused
+;; VERBATIM — the byte twins differ from their carrier originals only in how they slice the BODY
+;; (`subbytes` not `substring`, `bytes-concat` not `join`). The carrier originals are kept as the
+;; oracle for `tests/http_request_bytes_test.blsp`, a differential fuzz that runs a broad corpus
+;; through both and asserts identical verdicts — HTTP parsing is exactly where a smuggling bug
+;; hides, so the equivalence is guarded live, not by inspection.
+
+(def crlf-crlf-bytes (string->utf8-bytes "\r\n\r\n"))
+(def crlf-bytes (string->utf8-bytes "\r\n"))
+
+(defn head-carrier (b)
+  "Decode head-block `bytes` to a Latin-1 carrier string (one codepoint 0-255 per byte), so the
+  string-based head parser runs byte-faithfully. Applied only to the request HEAD, which is
+  bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`."
+  (join "" (map int->char (bytes->list b))))
+
+(defn try-parse-bytes (buf)
+  "Bytes-native `try-parse`: `buf` is a `bytes` value. Returns `[:ok request remainder]`,
+  `[:incomplete]`, or `[:error msg]` — the SAME verdicts as `try-parse`, but the request `:body`
+  and the `remainder` are raw `bytes`, and no carrier bridge is walked over the body. Head
+  CLASSIFICATION (the request line + every smuggling rejection) is delegated to `try-parse-head`
+  on the carrier-decoded head, so the two paths can never drift; only the body is sliced natively
+  from `buf` (Content-Length) or de-chunked (`dechunk-step-bytes`)."
+  (let (sep (bytes-index-of buf crlf-crlf-bytes))
+    (if (= sep -1)
+      [:incomplete]
+      (let (buflen (count buf))
+        (match (try-parse-head (head-carrier (subbytes buf 0 (+ sep 4))))
+          ([:error e] [:error e])
+          ([:head head body-start clen] (let (body-end (+ body-start clen))
+                                          (if (< buflen body-end)
+                                            [:incomplete]
+                                            [:ok
+                                              (assoc head :body (subbytes buf body-start body-end))
+                                              (subbytes buf body-end buflen)])))
+          ([:chunked head body-start] (match (dechunk-step-bytes buf body-start (list) 0)
+                                        ([:more _tail _decoded _dlen] [:incomplete])
+                                        ([:error e] [:error e])
+                                        ([:ok body remainder] [:ok
+                                                                (assoc head :body body)
+                                                                remainder]))))))))
+
+(defn try-parse-head-bytes (buf)
+  "Bytes-native `try-parse-head`: parse a request's line + headers from a `bytes` buffer WITHOUT
+  requiring the body. Same verdicts/shape as `try-parse-head` (`[:head head body-start clen]` /
+  `[:chunked head body-start]` / `[:incomplete]` / `[:error msg]`); `body-start` is a byte offset
+  into `buf`. The head map's fields are strings/keywords exactly as before (only the body is
+  bytes downstream)."
+  (let (sep (bytes-index-of buf crlf-crlf-bytes))
+    (if (= sep -1)
+      [:incomplete]
+      ; reuse the proven carrier head classifier on just the head + its terminator; body-start
+      ; (sep+4) is the same offset in the byte buffer, so the caller reads the body from `buf`.
+      (try-parse-head (head-carrier (subbytes buf 0 (+ sep 4)))))))
+
+(defn dechunk-step-bytes (buf pos decoded dlen)
+  "Bytes-native `dechunk-step`: `buf` is `bytes`, `decoded` a list of decoded chunk `bytes`
+  (newest-first) with running length `dlen`. Same verdicts as `dechunk-step`; `[:ok body …]`'s
+  body and every `[:more tail …]`'s tail are `bytes`. The chunk SIZE line is ASCII, so it is
+  Latin-1-decoded for the hex parse; the chunk DATA is sliced with `subbytes`, never decoded."
+  (let (buflen (count buf)
+        eol (bytes-index-of buf crlf-bytes pos))
+    (if (= eol -1)
+      [:more (subbytes buf pos buflen) decoded dlen]
+      (let (size-line (head-carrier (subbytes buf pos eol))
+            semi (index-of size-line ";")
+            size-tok (if (= semi -1) size-line (substring size-line 0 semi))
+            size (parse-hex (trim size-tok)))
+        (cond
+          (nil? size) [:error "invalid chunk size"]
+          (= size 0)
+            (let (end (dechunk-trailers-bytes buf (+ eol 2) buflen))
+              (if (= end -1)
+                [:more (subbytes buf pos buflen) decoded dlen]
+                [:ok (bytes-concat (reverse decoded)) (subbytes buf end buflen)]))
+          else
+            (let (data-start (+ eol 2)
+                  data-end (+ data-start size)
+                  after (+ data-end 2))
+              (if (< buflen after)
+                [:more (subbytes buf pos buflen) decoded dlen]
+                (if (crlf-at? buf data-end)
+                  (dechunk-step-bytes buf
+                    after
+                    (cons (subbytes buf data-start data-end) decoded)
+                    (+ dlen size))
+                  [:error "malformed chunk"]))))))))
+
+(defn crlf-at? (buf i)
+  "True if the two bytes at index `i` of `buf` are CR LF. Assumes `i+1` is in bounds."
+  (and (= (byte-at buf i) 13) (= (byte-at buf (+ i 1)) 10)))
+
+(defn dechunk-trailers-bytes (buf pos buflen)
+  "Bytes-native `dechunk-trailers`: skip trailer headers after the 0-size chunk; return the index
+  past the terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
+  (let (eol (bytes-index-of buf crlf-bytes pos))
+    (cond
+      (= eol -1) -1
+      (= eol pos) (+ eol 2)
+      else (dechunk-trailers-bytes buf (+ eol 2) buflen))))
 
 ;; ---- chunked Transfer-Encoding (RFC 7230 §4.1) ------------------------------
 (defn chunked? (te)
