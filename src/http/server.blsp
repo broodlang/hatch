@@ -17,6 +17,11 @@
 ;                        arrive, before answering 408. :read-timeout-ms alone re-arms on every
 ;                        byte, so a client dribbling one byte per (timeout-1)s holds a worker
 ;                        open indefinitely (a slow-loris drip); this caps the whole head read.
+;   :body-timeout-ms   — TOTAL wall-clock budget for the request BODY to arrive once the head is
+;                        in, before answering 408. Same drip defense as :head-timeout-ms, applied
+;                        to the in-memory / chunked / spool body drains; more generous by default
+;                        since a large legit upload takes longer than a head. Still bounded in
+;                        SIZE by :max-request-bytes independently.
 ;   :max-request-bytes — accumulated request bytes before answering 413 and closing
 ;   :max-connections   — concurrent connections; the listener refuses any over this
 ;   :error-handler     — (fn (request err-message) -> response) for a handler that raises;
@@ -42,6 +47,7 @@
 (def default-config
   {:read-timeout-ms 30000
    :head-timeout-ms 15000
+   :body-timeout-ms 60000
    :max-request-bytes 8388608
    :max-connections 1024
    :error-handler (fn (request err) (server-error-resp))
@@ -483,13 +489,15 @@
         head
         (list already)
         (string-length already)
-        clen))))
+        clen
+        (+ (now) (get config :body-timeout-ms))))))
 
 (defn- buffered-drain
-  (sock handler ws-handler config head chunks got clen)
+  (sock handler ws-handler config head chunks got clen deadline)
   "Accumulate incoming body reads (carrier chunks, newest-first) in `chunks` until `clen`
   bytes are in hand, then `join` once, split off any pipelined `remainder`, and dispatch.
-  Bounds the idle wait (slow-loris → 408) exactly like the fast path."
+  Bounds the idle wait AND the total body time (both slow-loris → 408) and the size (→ 413,
+  at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by."
   (if (>= got clen)
     (let (all (join "" (reverse chunks))
           body (substring all 0 clen)
@@ -504,9 +512,10 @@
                             head
                             (cons (bytes->carrier chunk) chunks)
                             (+ got (count chunk))
-                            clen))
+                            clen
+                            deadline))
       ([:tcp-closed ^sock] nil)
-      (after (get config :read-timeout-ms)
+      (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
           (tcp-send sock
             (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
@@ -531,14 +540,16 @@
     head
     (substring buf body-start (string-length buf))
     (list)
-    0))
+    0
+    (+ (now) (get config :body-timeout-ms))))
 
 (defn- chunked-drain
-  (sock handler ws-handler config head pending decoded dlen)
+  (sock handler ws-handler config head pending decoded dlen deadline)
   "Decode whatever chunks are fully present in `pending`, keep only the undecoded tail, and read
   more until the terminating 0-size chunk. `decoded` holds decoded pieces (newest-first), `dlen`
   their total length — capped at :max-request-bytes (a chunked body has no Content-Length, so this
-  is its size bound). Bounds the idle wait (slow-loris → 408)."
+  is its size bound). Bounds the idle wait AND the total body time (both slow-loris → 408);
+  `deadline` is the absolute epoch-ms the whole body must arrive by."
   (match (dechunk-step pending 0 decoded dlen)
     ([:ok body remainder] (dispatch-buffered sock
                             handler
@@ -561,9 +572,11 @@
                                                          head
                                                          (str tail (bytes->carrier chunk))
                                                          decoded
-                                                         dlen))
+                                                         dlen
+                                                         deadline))
                                    ([:tcp-closed ^sock] nil)
-                                   (after (get config :read-timeout-ms)
+                                   (after (min (get config :read-timeout-ms)
+                                            (max 1 (- deadline (now))))
                                      (do
                                        (tcp-send sock
                                          (format-response {:status 408
@@ -607,12 +620,22 @@
       ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
       ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
       (spool-append path (carrier->bytes prefix))
-      (spool-drain sock handler ws-handler config head path take clen))))
+      (spool-drain sock
+        handler
+        ws-handler
+        config
+        head
+        path
+        take
+        clen
+        (+ (now) (get config :body-timeout-ms))))))
 
 (defn- spool-drain
-  (sock handler ws-handler config head path written clen)
+  (sock handler ws-handler config head path written clen deadline)
   "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
-  the idle wait (slow-loris → 408) and deletes the partial spool on a stalled/closed socket."
+  the idle wait AND the total body time (both slow-loris → 408, whichever comes first) and
+  deletes the partial spool on a stalled/closed socket. `deadline` is the absolute epoch-ms the
+  whole body must arrive by."
   (if (>= written clen)
     (spool-dispatch sock handler config head path clen)
     (receive
@@ -627,9 +650,10 @@
                               head
                               path
                               (+ written take)
-                              clen)))
+                              clen
+                              deadline)))
       ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
-      (after (get config :read-timeout-ms)
+      (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
           (spool-cleanup path)
           (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))

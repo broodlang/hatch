@@ -247,3 +247,25 @@
                (list "https://ok.test"))
       false)
     (assert= (origin-allowed? {:headers {:host "app.test"}} (list "https://ok.test")) false)))
+
+; RFC 6455 §5.5.1 / §7.4 — close-frame body semantics. Frames are masked (0x88 = FIN+close),
+; mask key 0, so the 2-byte status code passes through as-is (big-endian): 1000 = 0x03E8.
+(describe "parse-frame: close-frame validation"
+  (test "an empty close (no status) is accepted"
+    ; 0x88 close, 0x80 masked len 0, mask 0000
+    (assert= (first (parse-frame (bytes [136 128 0 0 0 0]))) :ok))
+  (test "a close with a valid code (1000) is accepted"
+    ; len 2, payload 0x03 0xE8 = 1000
+    (assert= (first (parse-frame (bytes [136 130 0 0 0 0 3 232]))) :ok))
+  (test "a 1-byte close body is rejected"
+    ; len 1 — a status code must be 0 or >=2 bytes
+    (assert= (first (parse-frame (bytes [136 129 0 0 0 0 42]))) :error))
+  (test "a reserved no-code close (1005) is rejected"
+    ; 1005 = 0x03 0xED — MUST NOT appear on the wire
+    (assert= (first (parse-frame (bytes [136 130 0 0 0 0 3 237]))) :error))
+  (test "a close code below 1000 (999) is rejected"
+    ; 999 = 0x03 0xE7
+    (assert= (first (parse-frame (bytes [136 130 0 0 0 0 3 231]))) :error))
+  (test "an application-range close code (3000) is accepted"
+    ; 3000 = 0x0B 0xB8
+    (assert= (first (parse-frame (bytes [136 130 0 0 0 0 11 184]))) :ok)))

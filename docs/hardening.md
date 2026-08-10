@@ -67,11 +67,12 @@ crypto, CSRF, static path-safety, chunked/CL·TE framing, the render escaping). 
 | L4 | `render-attr` escaped attribute *values* but emitted attribute *names* verbatim — an app that derives a key from user input (`(keyword (str "data-" user))`) could break out of the attribute list. | LOW | `safe-attr-name?` drops a name carrying whitespace/quote/`=`/`<`/`>`/`/`/`&`/backtick (+test) |
 | L5 | `head-timeout`: `:read-timeout-ms` re-arms on every byte, so a client dribbling one byte per (timeout−1)s held a worker open indefinitely (slow-loris drip). | MED | new `:head-timeout-ms` (default 15s) caps the TOTAL head read; `worker-read-head` waits `min(idle, deadline−now)` (+test) |
 | L6 | `web/form` `email?` rejected spaces but not tabs/CR/LF — a false sense of completeness for a value that might later flow into a mail header. | LOW | rejects the whole control range (≤ 0x20) (+tests) |
+| L7 (was P1) | The body-drain loops (`buffered-drain`/`chunked-drain`/`spool-drain`) used only the per-read idle timeout, so a body dribbled after a complete head was bounded by `:max-request-bytes` but not by wall-clock (the body half of the slow-loris drip). | MED | new `:body-timeout-ms` (default 60s, generous for a large legit upload) threaded through all three drains, same `min(idle, deadline−now)` pattern as the head (+test) |
+| L8 (was P2) | `http/websocket` accepted a close frame with a 1-byte payload (RFC 6455 §5.5.1: 0 or ≥2) and did not validate close codes (reserved/invalid passed through). | LOW | `valid-close-payload?`/`valid-close-code?` reject a 1-byte body and an illegal code (< 1000, 1004/1005/1006/1015, 1012-2999) in `one-frame-payload` → fail the connection (+tests) |
+| L9 (part of P3) | A header line with no colon was silently dropped rather than rejected — a mild desync surface if a proxy parses it. | LOW | `colonless-header?` rejects it before framing (+test) |
 
-### Still pending
+### Still pending / deliberate
 
-| # | Finding | Sev | Plan |
-|---|---------|-----|------|
-| P1 | The body-drain loops (`buffered-drain`/`chunked-drain`/`spool-drain`) still use only the per-read idle timeout, so a body dribbled after a complete head is bounded by `:max-request-bytes` but not by wall-clock. Lower risk than the head dribble (needs a valid head first, capped by size), but a full fix threads the `:head-timeout-ms` deadline (or a separate body deadline) through those loops too. | MED | thread an absolute deadline through the body-drain recursions |
-| P2 | `http/websocket` accepts a close frame with a 1-byte payload (RFC 6455 §5.5.1: 0 or ≥2) and does not validate close codes (reserved/invalid pass through). Framing is correct; only close *semantics* are unchecked. | LOW | validate close-frame length + code in `parse-one-frame` |
-| P3 | A header line with no colon is silently dropped rather than rejected, and an HTTP/1.1 request with no `Host` is accepted (RFC 7230 §5.4 MUST reject). | LOW | reject a colon-less header line and a Host-less HTTP/1.1 request |
+| # | Finding | Sev | Decision |
+|---|---------|-----|----------|
+| P3-Host | An HTTP/1.1 request with no `Host` header is accepted (RFC 7230 §5.4 says a server MUST reject). | LOW | **Deliberately not enforced by default.** Hatch routes by *path*, not virtual host, so a missing `Host` carries no routing-confusion risk here, and enforcing it would break the parser's intentional leniency (≈25 internal/synthetic requests across the test suite omit `Host`, as do many programmatic clients). An app that needs strict validation can reject `(nil? (header conn :host))` in a one-line plug. Revisit if Hatch ever grows Host-based routing. |

@@ -44,7 +44,10 @@
     (assert= (first (try-parse "GET / HTTP/1.1\r\nHost: x\rSmuggled: 1\r\n\r\n")) :error))
   ; A normal value with no space after the colon still parses (no regression).
   (test "a colon with no following space still parses"
-    (assert= (first (try-parse "GET / HTTP/1.1\r\nHost:localhost\r\n\r\n")) :ok)))
+    (assert= (first (try-parse "GET / HTTP/1.1\r\nHost:localhost\r\n\r\n")) :ok))
+  ; A header line with no colon at all is malformed — rejected, not silently dropped.
+  (test "a header line without a colon is rejected"
+    (assert= (first (try-parse "GET / HTTP/1.1\r\nHost: x\r\nGarbageHeaderNoColon\r\n\r\n")) :error)))
 
 (describe "try-parse: successful GET"
   (test "returns :ok"

@@ -265,6 +265,25 @@
   control opcodes close 0x8 / ping 0x9 / pong 0xA. Everything else is reserved."
   (includes? [0 1 2 8 9 10] opcode))
 
+(defn valid-close-code? (code)
+  "True for a WebSocket close status code an endpoint may put on the wire (RFC 6455 §7.4):
+  1000-1003, 1007-1011, or the application (3000-3999) / private (4000-4999) ranges. Everything
+  else is reserved or a no-code sentinel that MUST NOT appear (< 1000, 1004, 1005, 1006, the
+  1012-2999 reserved band, 1015)."
+  (or (and (>= code 1000) (<= code 1003))
+    (and (>= code 1007) (<= code 1011))
+    (and (>= code 3000) (<= code 4999))))
+
+(defn valid-close-payload? (payload)
+  "RFC 6455 §5.5.1: a Close frame body is EMPTY (no status) or AT LEAST 2 bytes — a big-endian
+  u16 status code, optionally followed by a UTF-8 reason. A 1-byte body is malformed, and a
+  present code must be a legal one (`valid-close-code?`)."
+  (let (n (count payload))
+    (cond
+      (= n 0) true
+      (= n 1) false
+      else (valid-close-code? (bytes-uint payload 0 2)))))
+
 (defn- one-frame-sized
   (buf buflen fin opcode masked plen7 maxf)
   (cond
@@ -297,7 +316,11 @@
                         (unmask buf (- hlen 4) plen)
                         (subbytes buf hlen (+ hlen plen)))
               remainder (subbytes buf total buflen))
-          [:ok fin opcode payload remainder])))))
+          ; §5.5.1: a close frame's body must be 0 or ≥2 bytes with a legal status code — a
+          ; 1-byte body or a reserved code is a protocol error, so fail the connection.
+          (if (and (= opcode 8) (not (valid-close-payload? payload)))
+            [:error "websocket: malformed close frame"]
+            [:ok fin opcode payload remainder]))))))
 
 (defn frame-size (buf)
   "Total byte length (header + payload) of the first WebSocket frame in `buf` once its length
