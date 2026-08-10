@@ -585,22 +585,26 @@ with what the shipped upstream feature actually gives us.
   prelude's `int->bytes`. The remaining accumulators (`http/server`'s head reader and
   body drain, `http/request`'s `dechunk-step`) are *read*-side, not write-side — an
   iolist doesn't help there; they are covered by the bytes port below.
-- ⬜ **`bytes`-native parsing → drop the carrier-string bridge.** Upstream shipped
+- 🔶 **`bytes`-native parsing → drop the carrier-string bridge.** Upstream shipped
   ADR-141 (bytes-native `std/net`, carrier send rule deleted) and ADR-140 (bit syntax),
   and hatch's **WebSocket half is done** — the inbound frame parser is bytes-native and
-  outbound frames are `bytes`. The **HTTP half is still open**: `http/server` bridges
-  every read with `bytes->carrier`, and `web/conn` converts straight back
-  (`carrier->bytes`), so a request body is walked twice for nothing. Finishing it means
-  porting `http/request`'s head/chunked parser off strings onto `bytes` — a rewrite of
-  the framework's core parser, not a sweep, so it stays its own piece of work. Retires
-  audit §16. **Deliberately deferred** as a dedicated, carefully-validated effort: the
-  parser is where the request-smuggling defenses live (obs-fold, duplicate
-  Transfer-Encoding, Content-Length conflicts, chunked edge cases), and the port is a
-  performance/cleanliness change to *correct* code — not a bug fix — so the bar is a
-  **differential fuzz** (identical inputs through the old string parser and the new bytes
-  parser, asserting identical verdicts) before it lands, not a fast rewrite bolted onto a
-  feature batch. This is the one item where rushing trades a real smuggling risk for a
-  marginal double-walk win.
+  outbound frames are `bytes`. The HTTP half was: `http/server` bridges every read with
+  `bytes->carrier`, and `web/conn` converts straight back (`carrier->bytes`), so a request
+  body is walked twice for nothing (audit §16). **The parser is now ported** —
+  `http/request/try-parse-bytes` / `try-parse-head-bytes` / `dechunk-step-bytes` parse a
+  `bytes` buffer directly and keep the body as `bytes`. Because the parser is where the
+  request-smuggling defenses live and the port is a *performance* change to *correct* code,
+  it was gated on a **differential fuzz** (`tests/http_request_bytes_test.blsp`): a broad
+  corpus (every framing/smuggling branch + binary bodies) and a truncation sweep (every
+  byte-prefix of several requests) run through both the carrier parser and the byte parser,
+  asserting identical verdicts, plus golden output checks. The fuzz earned its keep — it
+  caught a hand-mirrored `cond` that had dropped three freshly-added smuggling checks; the
+  byte parser now delegates head *classification* to `try-parse-head` verbatim, so the two
+  can never drift, and slices only the body natively. **Remaining (mechanical):** rewire
+  `http/server`'s read loop and `web/conn` off the carrier bridge onto the byte parser — I/O
+  plumbing, not parsing logic, so no fuzz needed; its own focused pass gated on the
+  server/spool/upload/stream suite, done once the read loop's slow-loris timeout hardening
+  has settled. The carrier parser stays as the fuzz oracle.
 - 🔶 **Framed reads — shipped upstream as `tcp-read-until` / `tcp-read-n`** (2026-07-25;
   the transient read buffer this entry originally asked for was *rejected* upstream as an
   immutability violation, and combinators shipped instead). Originally not adoptable —
