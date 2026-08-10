@@ -264,19 +264,31 @@
       (after 200 (assert= "no redirect effect received" false)))))
 
 (describe "parse-client-frame: a non-object frame can't crash the session actor"
+  ; the frame carries every dispatch field (:event/:params/:name/:cid/:path); absent ones default
   (test "a bare scalar decodes to an empty event (no throw)"
-    (assert= (parse-client-frame (string->utf8-bytes "5")) {:event "" :params {}}))
+    (assert= (parse-client-frame (string->utf8-bytes "5"))
+      {:event "" :params {} :name "" :cid nil :path ""}))
   (test "a bare bool decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "true")) {:event "" :params {}}))
+    (assert= (parse-client-frame (string->utf8-bytes "true"))
+      {:event "" :params {} :name "" :cid nil :path ""}))
   (test "a bare string decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "\"x\"")) {:event "" :params {}}))
+    (assert= (parse-client-frame (string->utf8-bytes "\"x\""))
+      {:event "" :params {} :name "" :cid nil :path ""}))
   (test "a JSON array decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "[1,2,3]")) {:event "" :params {}}))
+    (assert= (parse-client-frame (string->utf8-bytes "[1,2,3]"))
+      {:event "" :params {} :name "" :cid nil :path ""}))
   (test "unparseable garbage decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "}{not json")) {:event "" :params {}}))
+    (assert= (parse-client-frame (string->utf8-bytes "}{not json"))
+      {:event "" :params {} :name "" :cid nil :path ""}))
   (test "a well-formed object keeps its event and params"
     (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"tick\",\"params\":{\"n\":1}}"))
-      {:event "tick" :params {"n" 1}}))
+      {:event "tick" :params {"n" 1} :name "" :cid nil :path ""}))
   (test "a non-object params is coerced to an empty map"
     (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"go\",\"params\":5}"))
-      {:event "go" :params {}})))
+      {:event "go" :params {} :name "" :cid nil :path ""}))
+  (test "a component-targeted event carries its name, cid, and params"
+    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"event\",\"name\":\"click\",\"cid\":\"3\",\"params\":{\"x\":1}}"))
+      {:event "event" :params {"x" 1} :name "click" :cid "3" :path ""}))
+  (test "a navigate frame carries its path"
+    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
+      {:event "navigate" :params {} :name "" :cid nil :path "/next"})))

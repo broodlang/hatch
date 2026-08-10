@@ -745,13 +745,19 @@
   `\"x\"`, or `[1,2,3]`) would kill the session actor before `close-session` runs, leaking its
   registry entry and component table per connection.
 
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {}}
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {}}"
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\"}
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\"}"
   (let (decoded (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
         msg (if (map? decoded) decoded {})
         raw-params (get msg "params" {}))
+    ; The frame carries every field the dispatcher routes on: `:event` (the frame type) and
+    ; `:params`, plus `:name`/`:cid` (a component-targeted event) and `:path` (a live navigate).
+    ; Decoding them ALL here is what keeps `session-dispatch` from reaching back to the raw map.
     {:event (get msg "event" "")
-     :params (if (map? raw-params) raw-params {})}))
+     :params (if (map? raw-params) raw-params {})
+     :name (get msg "name" "")
+     :cid (get msg "cid" nil)
+     :path (get msg "path" "")}))
 
 (defn session-dispatch (sock view buf payload)
   ; `payload` is a `bytes` value (bytes-native parser) holding the client's UTF-8 JSON —
@@ -785,8 +791,8 @@
       ; ancestor's data-cid) — route it to that component's own handle-event instead of
       ; the parent's, and re-render with the parent's :model unchanged (the component's
       ; slot picks up its fresh state on the next render-dynamic pass).
-      ("event" (let (name (get msg "name" "")
-                     cid (get msg "cid" nil)
+      ("event" (let (name (get frame :name)
+                     cid (get frame :cid)
                      model (get view :model))
                  (if cid
                    (do
@@ -817,7 +823,7 @@
       ; updates the URL). A path with no registered live view → tell the client to do
       ; a normal navigation (full load), the dead-view fallback.
       ("navigate"
-        (let (path (get msg "path" "")
+        (let (path (get frame :path)
               entry (lookup-live path))
           (if (and entry (= (get entry :session) (get view :session)))
             ; same live-session group → run the target's on-mount-guard (against the Conn
