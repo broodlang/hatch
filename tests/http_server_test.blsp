@@ -307,3 +307,23 @@
       (tcp-close sock)
       (server/stop port)
       (assert= (includes? resp "408") true))))
+
+; The same drip defense for the request BODY: :body-timeout-ms caps the total time the body may
+; take once the head is in. Idle timeout a comfortable 5s, body deadline 250ms; the client sends
+; a complete head declaring Content-Length: 10 with only part of the body, then dribbles one more
+; byte mid-window (resetting the idle timer, not the deadline) — the deadline still fires 408.
+(describe "body-timeout bounds a dribbled request body"
+  (test "a body that never completes is cut off with 408 at the total deadline"
+    (let (port 24782
+          _ (server/start port
+              (fn (_r) {:status 200 :headers {} :body "ok"})
+              nil
+              {:body-timeout-ms 250 :read-timeout-ms 5000})
+          sock (tcp-connect "127.0.0.1" port)
+          _ (tcp-send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
+          _ (sleep 150)
+          _ (tcp-send sock "C")
+          resp (drain sock ""))
+      (tcp-close sock)
+      (server/stop port)
+      (assert= (includes? resp "408") true))))

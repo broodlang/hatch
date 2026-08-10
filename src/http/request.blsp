@@ -29,6 +29,8 @@
                       ; Whitespace before a field-name colon — we'd trim it and honor the header,
                       ; a strict proxy wouldn't; a CL.TE desync (§3.2.4), same class as obs-fold.
                       (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
+                      ; A header line with no colon is malformed — reject rather than silently drop.
+                      (colonless-header? header-lines) [:error "header line without a colon"]
                       ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
                       ; server must reject it in a request; folding disagreements are a header-
                       ; desync / smuggling primitive. `parse-headers` would otherwise promote a
@@ -108,6 +110,7 @@
                     (cond
                       (bare-line-break? lines) [:error "bare CR or LF in header block"]
                       (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
+                      (colonless-header? header-lines) [:error "header line without a colon"]
                       (obs-fold? header-lines) [:error "obs-fold header line"]
                       (duplicate-transfer-encoding? header-lines)
                         [:error "multiple Transfer-Encoding"]
@@ -281,6 +284,15 @@
   the head means a proxy that DOES split on it parses a different header set — a smuggling
   primitive. Every legitimate CRLF was consumed by the split, so a leftover CR/LF is bare."
   (not (empty? (filter (fn (l) (or (includes? l "\r") (includes? l "\n"))) lines))))
+
+(defn colonless-header? (header-lines)
+  "True if any header line has no colon at all — a malformed field with no name/value split.
+  `parse-headers` silently DROPS such a line; rejecting it instead keeps a proxy that does parse
+  it (as a bare field, or by joining it to a neighbour) from disagreeing with us, the same
+  desync posture as the other malformed-header rejections. Obs-fold continuation lines start
+  with SP/HTAB and are caught by `obs-fold?` first, so this only fires on a non-folded line."
+  (not (empty? (filter (fn (line) (and (> (string-length line) 0) (= (index-of line ":") -1)))
+                 header-lines))))
 
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
