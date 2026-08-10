@@ -1,0 +1,225 @@
+(defmodule http-request-bytes-test
+  (:use http/request)
+  ; carrier->bytes — recover the bytes of the OLD parser's carrier-string body for comparison
+  (:use http/util)
+  ; bytes->carrier — feed the OLD parser the whole request as a carrier, as the server used to
+  (:alias http/websocket)
+  ; int->hex — build chunk size lines
+  (:alias http/response)
+  (:use test))
+
+;; Differential fuzz: the bytes-native parser (`try-parse-bytes`) must agree, verdict for verdict,
+;; with the proven carrier parser (`try-parse` fed `bytes->carrier`) on every input. The head
+;; classification is literally the same code (the byte twin reuses `parse-request-line`/
+;; `parse-headers` and the smuggling rejections verbatim), so any divergence can only be in body
+;; slicing or de-chunking — exactly the new code. Golden assertions below also pin the new
+;; parser's actual output, so a bug shared by both parsers can't pass unseen.
+
+(defn verdicts-equal? (old new)
+  "True if the OLD (carrier) and NEW (bytes) verdicts are equivalent: same tag; same error
+  message; for :ok the same request map (body aside) with body/remainder equal AS BYTES."
+  (let (t1 (first old)
+        t2 (first new))
+    (cond
+      (not (= t1 t2)) false
+      (= t1 :incomplete) true
+      (= t1 :error) (= (nth old 1) (nth new 1))
+      (= t1 :ok)
+        (let (r1 (nth old 1)
+              rem1 (nth old 2)
+              r2 (nth new 1)
+              rem2 (nth new 2))
+          (and (= (dissoc r1 :body) (dissoc r2 :body))
+            (= (carrier->bytes (get r1 :body)) (get r2 :body))
+            (= (carrier->bytes rem1) rem2)))
+      else false)))
+
+(defn agree? (buf)
+  "Run `buf` (a bytes value) through both parsers; true if the verdicts are equivalent."
+  (verdicts-equal? (try-parse (websocket/bytes->carrier buf)) (try-parse-bytes buf)))
+
+;; ---- request builders (produce raw `bytes`) ----
+
+(defn build (line headers body)
+  "A raw request `bytes`: request `line`, `headers` (a list of \"Name: Value\"), CRLF, then `body`
+  (a string or bytes)."
+  (bytes-concat [(str line "\r\n")
+                  (join "" (map (fn (h) (str h "\r\n")) headers))
+                  "\r\n"
+                  body]))
+
+(defn chunk-of (data)
+  "One chunked-transfer chunk for `data` (string or bytes): <hexlen>CRLF data CRLF."
+  (let (n (count (bytes-concat [data])))
+    (bytes-concat [(str (response/int->hex n) "\r\n") data "\r\n"])))
+
+(defn chunked-body (datas &optional (trailer ""))
+  "A chunked body: one chunk per `data`, then the 0-chunk, an optional `trailer` line, and the
+  terminating CRLF."
+  (bytes-concat (append (map chunk-of datas)
+                  (list "0\r\n" trailer "\r\n"))))
+
+; a binary body with bytes the carrier must round-trip exactly (NUL, high bytes, a bare CR/LF)
+(def bin-body (bytes [0 1 255 13 10 200 127 128 0]))
+
+;; ---- the corpus: one named raw request per interesting branch ----
+
+(def corpus
+  [["GET no body" (build "GET /x HTTP/1.1" ["Host: localhost"] "")]
+    ["GET with query" (build "GET /x?a=1&b=2 HTTP/1.1" ["Host: localhost"] "")]
+    ["Host without a space after colon" (build "GET / HTTP/1.1" ["Host:localhost"] "")]
+    ["HTTP/1.0" (build "GET / HTTP/1.0" ["Host: x"] "")]
+    ["HEAD" (build "HEAD / HTTP/1.1" ["Host: x"] "")]
+    ["POST CL text" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 5"] "hello")]
+    ["POST CL zero" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 0"] "")]
+    ["POST CL binary body" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body)]
+    ["multi-value header (XFF)"
+      (build "GET / HTTP/1.1" ["Host: x" "X-Forwarded-For: 1.1.1.1" "X-Forwarded-For: 2.2.2.2"] "")]
+    ["cookie combine"
+      (build "GET / HTTP/1.1" ["Host: x" "Cookie: a=1" "Cookie: b=2"] "")]
+    ["pipelined (a 2nd request in the remainder)"
+      (bytes-concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
+                      (build "GET /next HTTP/1.1" ["Host: x"] "")])]
+    ; chunked
+    ["chunked one chunk"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (chunked-body ["hello"]))]
+    ["chunked multi chunk"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (chunked-body ["Wiki" "pedia" " in\r\nchunks."]))]
+    ["chunked binary data"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (chunked-body [bin-body]))]
+    ["chunked with a trailer"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (chunked-body ["data"] "X-Checksum: abc"))]
+    ["chunked with a chunk extension"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (bytes-concat ["5;name=value\r\nhello\r\n0\r\n\r\n"]))]
+    ["chunked then pipelined"
+      (bytes-concat [(build "POST /c HTTP/1.1"
+                       ["Host: x" "Transfer-Encoding: chunked"]
+                       (chunked-body ["ab"]))
+                      (build "GET /after HTTP/1.1" ["Host: x"] "")])]
+    ; incomplete
+    ["incomplete: no terminator" (string->utf8-bytes "GET / HTTP/1.1\r\nHost: x\r\n")]
+    ["incomplete: CL body short" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 10"] "abc")]
+    ["incomplete: chunked not terminated"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (bytes-concat ["5\r\nhello\r\n"]))]
+    ["incomplete: chunked partial data"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (bytes-concat ["5\r\nhel"]))]
+    ; errors / smuggling
+    ["error: bad request line" (build "GET" ["Host: x"] "")]
+    ["error: obs-fold" (bytes-concat ["GET / HTTP/1.1\r\nHost: x\r\n\tfolded: y\r\n\r\n"])]
+    ["error: duplicate Transfer-Encoding"
+      (build "POST / HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked" "Transfer-Encoding: chunked"]
+        "0\r\n\r\n")]
+    ["error: TE + CL"
+      (build "POST / HTTP/1.1" ["Host: x" "Transfer-Encoding: chunked" "Content-Length: 5"] "")]
+    ["error: unsupported TE (gzip)"
+      (build "POST / HTTP/1.1" ["Host: x" "Transfer-Encoding: gzip"] "")]
+    ["error: conflicting Content-Length"
+      (build "POST / HTTP/1.1" ["Host: x" "Content-Length: 5" "Content-Length: 6"] "hello")]
+    ["error: negative Content-Length"
+      (build "POST / HTTP/1.1" ["Host: x" "Content-Length: -1"] "")]
+    ["error: non-numeric Content-Length"
+      (build "POST / HTTP/1.1" ["Host: x" "Content-Length: abc"] "")]
+    ["error: invalid chunk size"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (bytes-concat ["zz\r\nhello\r\n0\r\n\r\n"]))]
+    ["error: malformed chunk (bad trailing bytes)"
+      (build "POST /c HTTP/1.1"
+        ["Host: x" "Transfer-Encoding: chunked"]
+        (bytes-concat ["5\r\nhelloXX0\r\n\r\n"]))]
+    ; the smuggling rejections added in the header-hardening pass — the byte parser must inherit
+    ; every one, so the corpus exercises each (a missing check here is exactly what a bare
+    ; hand-copied cond would drop)
+    ["error: bare CR in the header block"
+      (bytes-concat ["GET / HTTP/1.1\r\nHost: x\rEvil: y\r\n\r\n"])]
+    ["error: bare LF in the header block"
+      (bytes-concat ["GET / HTTP/1.1\r\nHost: x\nEvil: y\r\n\r\n"])]
+    ["error: whitespace before the header colon"
+      (build "GET / HTTP/1.1" ["Host : x"] "")]
+    ["error: header line without a colon"
+      (build "GET / HTTP/1.1" ["Host: x" "NoColonHere"] "")]
+    ["error: too many headers"
+      (build "GET / HTTP/1.1" (map (fn (i) (str "H" i ": v")) (range 0 101)) "")]])
+
+(describe "bytes parser agrees with the carrier parser across the corpus"
+  ; one named test per case, so a divergence names the exact request that failed
+  (dolist (entry corpus)
+    (test (str "agrees: " (first entry))
+      (is (agree? (nth entry 1))))))
+
+;; A truncation sweep: for a few complete requests, EVERY byte-prefix must yield the same verdict
+;; from both parsers (mostly :incomplete, some :error). This is the fuzz's breadth — hundreds of
+;; partial inputs, exactly the boundary conditions a hand-written case list misses.
+
+(defn fdp (buf i n)
+  "Tail-recursive scan for the shortest prefix length where the parsers disagree; nil if none."
+  (cond
+    (> i n) nil
+    (not (agree? (subbytes buf 0 i))) i
+    else (fdp buf (+ i 1) n)))
+
+(defn first-divergent-prefix (buf)
+  "The shortest prefix length at which the two parsers disagree, or nil if they agree on all
+  prefixes `buf[0..i)`, i in [1, (count buf)]."
+  (fdp buf 1 (count buf)))
+
+(describe "bytes parser agrees on every truncated prefix (boundary fuzz)"
+  (dolist (entry [["CL text" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 5"] "hello")]
+                   ["CL binary" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body)]
+                   ["chunked multi"
+                     (build "POST /c HTTP/1.1"
+                       ["Host: x" "Transfer-Encoding: chunked"]
+                       (chunked-body ["ab" "cde"]))]
+                   ["chunked+trailer"
+                     (build "POST /c HTTP/1.1"
+                       ["Host: x" "Transfer-Encoding: chunked"]
+                       (chunked-body ["x"] "T: 1"))]
+                   ["pipelined"
+                     (bytes-concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
+                                     (build "GET /n HTTP/1.1" ["Host: x"] "")])]])
+    (test (str "all prefixes agree: " (first entry))
+      (assert= (first-divergent-prefix (nth entry 1)) nil))))
+
+;; Golden checks — pin the NEW parser's actual output, so a bug BOTH parsers share can't slip
+;; through the differential comparison.
+
+(describe "bytes parser — golden output"
+  (test "Content-Length body is returned as the exact bytes"
+    (match (try-parse-bytes (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body))
+      ([:ok req rem] (assert= (get req :body) bin-body)
+        (assert= (get req :method) "POST")
+        (assert= (count rem) 0))
+      (_ (is false))))
+  (test "chunked body decodes to the concatenated chunk bytes"
+    (match (try-parse-bytes (build "POST /c HTTP/1.1"
+                              ["Host: x" "Transfer-Encoding: chunked"]
+                              (chunked-body ["Wiki" "pedia"])))
+      ([:ok req _] (assert= (utf8-bytes->string (get req :body)) "Wikipedia"))
+      (_ (is false))))
+  (test "the pipelined remainder is the exact trailing bytes"
+    (match (try-parse-bytes (bytes-concat [(build "POST /f HTTP/1.1"
+                                             ["Host: x" "Content-Length: 3"]
+                                             "abc")
+                                            (string->utf8-bytes "GET /n HTTP/1.1\r\n")]))
+      ([:ok _ rem] (assert= (utf8-bytes->string rem) "GET /n HTTP/1.1\r\n"))
+      (_ (is false))))
+  (test "try-parse-head-bytes classifies a chunked head without the body"
+    (assert= (first (try-parse-head-bytes (build "POST /c HTTP/1.1"
+                                            ["Host: x" "Transfer-Encoding: chunked"]
+                                            "")))
+      :chunked)))
