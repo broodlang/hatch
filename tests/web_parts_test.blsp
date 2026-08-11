@@ -50,10 +50,10 @@
                 'assigns-var
                 'live-components))))))
 
-(describe "interleave"
-  (test "one hole" (assert= (interleave ["a" "b"] ["X"]) "aXb"))
-  (test "no holes" (assert= (interleave ["only"] []) "only"))
-  (test "two holes" (assert= (interleave ["a" "b" "c"] ["X" "Y"]) "aXbYc")))
+(describe "weave"
+  (test "one hole" (assert= (weave ["a" "b"] ["X"]) "aXb"))
+  (test "no holes" (assert= (weave ["only"] []) "only"))
+  (test "two holes" (assert= (weave ["a" "b" "c"] ["X" "Y"]) "aXbYc")))
 
 (describe "diff-dynamics"
   (test "one slot changed" (assert= (diff-dynamics ["a" "b"] ["a" "c"]) {1 "c"}))
@@ -72,8 +72,8 @@
   (test "reads inside a map literal (attrs) are collected"
     (assert= (form-deps '(web/template/render [:li {:class (get model :c)} "x"]) 'model) [:c]))
   (test "a comprehension collects its collection's key"
-    (assert= (form-deps '(web/parts/comp (for (x (get model :items))
-                                           (web/template/render [:li {} x])))
+    (assert= (form-deps '(web/parts/comp-slot (for (x (get model :items))
+                                                (web/template/render [:li {} x])))
                'model)
       [:items]))
   (test "a default expression's reads are also collected"
@@ -93,34 +93,34 @@
     (let (p (compile-parts '[:ul {} (for (x coll) [:li {} x])]))
       (assert= (get p :statics) ["<ul>" "</ul>"])
       (assert= (count (get p :dynamics)) 1)
-      ; the dynamic is (web/parts/comp (for (x coll) (web/template/render [:li {} x])))
-      (assert= (first (first (get p :dynamics))) 'web/parts/comp)
+      ; the dynamic is (web/parts/comp-slot (for (x coll) (web/template/render [:li {} x])))
+      (assert= (first (first (get p :dynamics))) 'web/parts/comp-slot)
       (assert= (first (first (rest (first (get p :dynamics))))) 'for))))
 
 (describe "comprehension slots"
   (test "comp tags a list of item HTML"
-    (assert= (comp? (comp ["a" "b"])) true)
+    (assert= (comp? (comp-slot ["a" "b"])) true)
     (assert= (comp? "plain") false)
-    (assert= (comp-items (comp ["a" "b"])) ["a" "b"]))
+    (assert= (comp-items (comp-slot ["a" "b"])) ["a" "b"]))
   (test "slot->html joins comp items, leaves scalars alone"
-    (assert= (slot->html (comp ["a" "b" "c"])) "abc")
+    (assert= (slot->html (comp-slot ["a" "b" "c"])) "abc")
     (assert= (slot->html "plain") "plain"))
-  (test "interleave joins a comprehension slot inline (full HTML unchanged)"
-    (assert= (interleave ["<ul>" "</ul>"] [(comp ["<li>a</li>" "<li>b</li>"])])
+  (test "weave joins a comprehension slot inline (full HTML unchanged)"
+    (assert= (weave ["<ul>" "</ul>"] [(comp-slot ["<li>a</li>" "<li>b</li>"])])
       "<ul><li>a</li><li>b</li></ul>")))
 
 ;; A changed comprehension slot ships a per-item diff, not the whole list.
 (describe "diff-dynamics — comprehensions"
   (test "one changed item → a per-item cdiff carrying just that item"
-    (assert= (diff-dynamics [(comp ["a" "b" "c"])] [(comp ["a" "X" "c"])])
+    (assert= (diff-dynamics [(comp-slot ["a" "b" "c"])] [(comp-slot ["a" "X" "c"])])
       {0 {:__cdiff__ {1 "X"} :n 3}}))
   (test "an appended item is reported with the new count"
-    (assert= (diff-dynamics [(comp ["a" "b"])] [(comp ["a" "b" "c"])])
+    (assert= (diff-dynamics [(comp-slot ["a" "b"])] [(comp-slot ["a" "b" "c"])])
       {0 {:__cdiff__ {2 "c"} :n 3}}))
   (test "a removed item shrinks the count, no item payload"
-    (assert= (diff-dynamics [(comp ["a" "b" "c"])] [(comp ["a" "b"])])
+    (assert= (diff-dynamics [(comp-slot ["a" "b" "c"])] [(comp-slot ["a" "b"])])
       {0 {:__cdiff__ {} :n 2}}))
   (test "an unchanged comprehension yields no diff"
-    (assert= (diff-dynamics [(comp ["a" "b"])] [(comp ["a" "b"])]) {}))
+    (assert= (diff-dynamics [(comp-slot ["a" "b"])] [(comp-slot ["a" "b"])]) {}))
   (test "a scalar slot beside a comprehension still diffs scalar-wise"
-    (assert= (diff-dynamics ["x" (comp ["a"])] ["y" (comp ["a"])]) {0 "y"})))
+    (assert= (diff-dynamics ["x" (comp-slot ["a"])] ["y" (comp-slot ["a"])]) {0 "y"})))

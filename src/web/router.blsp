@@ -104,14 +104,14 @@
 (defn path-methods (routes segments)
   "The distinct declared methods of every route whose *path* matches `segments`
   (regardless of HTTP method) — the raw material for a 405 `Allow` header."
-  (dedupe (map (fn (r) (get r :method))
-            (filter (fn (r) (match-path (get r :pattern) segments)) routes))))
+  (uniq (map (fn (r) (get r :method))
+          (filter (fn (r) (match-path (get r :pattern) segments)) routes))))
 
 (defn mem? (x xs)
   "True if `x` is `=` to some element of list `xs`."
   (not (empty? (filter (fn (y) (= y x)) xs))))
 
-(defn dedupe (xs)
+(defn uniq (xs)
   "`xs` with later duplicates removed, order preserved."
   (reverse (fold (fn (acc x) (if (mem? x acc) acc (cons x acc))) (list) xs)))
 
@@ -119,7 +119,7 @@
   "The `Allow` header value for a path serving `methods`: the declared methods, plus
   `HEAD` wherever `GET` is served, plus `OPTIONS` (which we answer automatically)."
   (let (with-head (if (mem? "GET" methods) (append methods (list "HEAD")) methods))
-    (join ", " (dedupe (append with-head (list "OPTIONS"))))))
+    (join ", " (uniq (append with-head (list "OPTIONS"))))))
 
 (defn- dispatch-no-match
   (routes conn method segments)

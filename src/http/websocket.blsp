@@ -45,7 +45,7 @@
   `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
   (join "" (map byte->char (bytes->list b))))
 
-(defn byte-at (s i)
+(defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
   frame/request parser's form) or a first-class `bytes` value (an outbound frame)."
   (if (bytes? s)
@@ -127,7 +127,7 @@
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
   `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
-  `char-at`/`byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
+  `char-at`/`carrier-byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
   per-index walk was O(n²) on every inbound frame payload."
   (utf8-bytes->string (bytes (string->codepoints s))))
 
@@ -176,7 +176,7 @@
 
 ; The inbound frame parser is bytes-native (ADR-141): `buf` is a `bytes` value delivered by the
 ; binary-mode socket, and a frame's payload/remainder are `bytes` — no Latin-1 carrier-string
-; hop, and `byte-at`/`bytes-uint`/`subbytes` index it in O(1). The masking key and length fields
+; hop, and `carrier-byte-at`/`bytes-uint`/`subbytes` index it in O(1). The masking key and length fields
 ; are read with ADR-140 bit-syntax helpers (`bytes-uint`).
 (defn parse-frame (buf)
   "Parse one complete WebSocket *message* from the `bytes` `buf`, reassembling a fragmented
@@ -237,8 +237,8 @@
   (let (buflen (count buf))
     (if (< buflen 2)
       [:incomplete]
-      (let (byte0 (byte-at buf 0)
-            byte1 (byte-at buf 1)
+      (let (byte0 (carrier-byte-at buf 0)
+            byte1 (carrier-byte-at buf 1)
             fin (bit-shift-right byte0 7)
             rsv (bit-and (bit-shift-right byte0 4) 7)
             opcode (bit-and byte0 15)
@@ -331,7 +331,7 @@
   (let (buflen (count buf))
     (if (< buflen 2)
       nil
-      (let (byte1 (byte-at buf 1)
+      (let (byte1 (carrier-byte-at buf 1)
             masked (bit-shift-right byte1 7)
             plen7 (bit-and byte1 127))
         (cond

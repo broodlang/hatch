@@ -1,7 +1,7 @@
 (defmodule web-parts-for-test
   ; deflive + live-spec for a comprehension view
   (:use web/live)
-  ; interleave / diff-dynamics / comp? — the runtime split helpers
+  ; weave / diff-dynamics / comp? — the runtime split helpers
   (:use web/parts)
   ; live-render / live-spec drivers
   (:use web/test)
@@ -14,17 +14,17 @@
   (on "noop" (params model) model))
 
 (describe "comprehension view — invariant"
-  ; interleave(static, dynamic(model)) must still reproduce the full render exactly, now
-  ; that the `(for …)` slot renders per-item and interleave joins the items.
-  (test "interleave(static, dynamic) == full render, for several item lists"
+  ; weave(static, dynamic(model)) must still reproduce the full render exactly, now
+  ; that the `(for …)` slot renders per-item and weave joins the items.
+  (test "weave(static, dynamic) == full render, for several item lists"
     (let (spec (live-spec))
-      (assert= (interleave (get spec :render-static)
+      (assert= (weave (get spec :render-static)
                  ((get spec :render-dynamic) {:items ["a" "b" "c"]}))
         (live-render spec {:items ["a" "b" "c"]}))
-      (assert= (interleave (get spec :render-static)
+      (assert= (weave (get spec :render-static)
                  ((get spec :render-dynamic) {:items []}))
         (live-render spec {:items []}))
-      (assert= (interleave (get spec :render-static)
+      (assert= (weave (get spec :render-static)
                  ((get spec :render-dynamic) {:items ["only"]}))
         (live-render spec {:items ["only"]}))))
   (test "the for slot renders as a comprehension slot, not one opaque string"

@@ -46,7 +46,7 @@
 
 (describe "render-dynamic (the live-session path) still works the same way"
   (test "direct-child and nested components both appear in one full render"
-    (let (html (web/parts/interleave render-static (render-dynamic {:authed true :n 5})))
+    (let (html (web/parts/weave render-static (render-dynamic {:authed true :n 5})))
       (assert= (includes? html "data-cid=\"direct\"") true)
       (assert= (includes? html "data-cid=\"nested\"") true))))
 
