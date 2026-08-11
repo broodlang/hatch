@@ -109,11 +109,11 @@
 (describe "static/dynamic parts (minimal diffs)"
   ; The invariant the wire protocol relies on: assembling the static skeleton with the
   ; rendered dynamic slots reproduces the full render exactly, for any model.
-  (test "interleave(static, dynamic(model)) == full render"
+  (test "weave(static, dynamic(model)) == full render"
     (let (spec (live-spec))
-      (assert= (web/parts/interleave (get spec :render-static)
+      (assert= (web/parts/weave (get spec :render-static)
                  ((get spec :render-dynamic) {:count 7}))
         (live-render spec {:count 7}))
-      (assert= (web/parts/interleave (get spec :render-static)
+      (assert= (web/parts/weave (get spec :render-static)
                  ((get spec :render-dynamic) {:count -3}))
         (live-render spec {:count -3})))))

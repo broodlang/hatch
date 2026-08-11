@@ -8,7 +8,7 @@
     runtime (with `model` in scope).
 
   Invariant: the live view's HTML equals `s0 + d0 + s1 + d1 + … + sn`, where the statics
-  interleave with the rendered dynamics and `(count statics) = (count dynamics) + 1`. The
+  weave with the rendered dynamics and `(count statics) = (count dynamics) + 1`. The
   statics never change, so on join the server sends statics + dynamics, and on every update
   only the *changed* dynamic slots — the client re-interleaves and morphs.
 
@@ -30,7 +30,7 @@
   (via `web/component/send-update` or its own event) without any `model` key changing at all,
   so the slot must always be considered dirty; there's no way to pin it to specific keys.
 
-  `interleave` and `diff-dynamics` are the runtime helpers the session actor uses."
+  `weave` and `diff-dynamics` are the runtime helpers the session actor uses."
   ; render / render-attr / escape-html / *void-tags* — reused at compile time and in the
   ; emitted dynamic forms
   (:use web/template))
@@ -62,9 +62,9 @@
 
 (defn comp-form (node)
   "Transform `(for spec body…)` into the dynamic form for its comprehension slot:
-  `(web/parts/comp (for spec (web/template/render <body>)))`. The `for` yields one HTML
-  string per item; `comp` tags that list so interleave/diff treat it per item. The per-item
-  HTML concatenated equals a whole-list render, so the interleave invariant still holds."
+  `(web/parts/comp-slot (for spec (web/template/render <body>)))`. The `for` yields one HTML
+  string per item; `comp` tags that list so weave/diff treat it per item. The per-item
+  HTML concatenated equals a whole-list render, so the weave invariant still holds."
   (let (spec (first (rest node))
         body-forms (rest (rest node))
         body (if (= (count body-forms) 1) (first body-forms) (cons 'do body-forms)))
@@ -72,7 +72,8 @@
     ; compiled to its render-slot call — without this it stays literal `(component …)` and
     ; raises "unbound component" at render (a list of stateful components is a mainstream
     ; pattern), and its change-tracking deps would be empty (never re-rendering).
-    (list 'web/parts/comp (list 'for spec (list 'web/template/render (rewrite-components body))))))
+    (list 'web/parts/comp-slot
+      (list 'for spec (list 'web/template/render (rewrite-components body))))))
 
 (defn component-form? (node)
   "True for a literal `(component module assigns)` form — a LiveComponent slot
@@ -238,12 +239,12 @@
 
 ; ---- comprehension slots (per-item diffing) ----
 ; A `:for`/`(for …)` renders to a *list* of per-item HTML strings tagged by `comp`, rather
-; than one opaque string. interleave joins them (so the full HTML is unchanged), and the
+; than one opaque string. weave joins them (so the full HTML is unchanged), and the
 ; diff compares item-by-item — so editing one row of a 1000-row list ships that one row, not
 ; the whole list. On the wire a comp slot is `{"__comp__":[…items…]}` on join and
 ; `{"__cdiff__":{idx:html},"n":count}` on update; brood_live.js patches the item array.
 
-(defn comp (items)
+(defn comp-slot (items)
   "Tag a comprehension's per-item HTML strings as one slot value so the runtime diffs the
   list per item instead of treating the whole thing as one opaque string."
   {:__comp__ (into [] items)})
@@ -263,19 +264,19 @@
 
 ; ---- runtime: assemble HTML and diff dynamic slots ----
 
-(defn interleave (statics dynamics)
+(defn weave (statics dynamics)
   "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn.
   Collects the pieces in a list and `join`s once — a per-slot `(str acc …)` fold re-copies the
   whole growing HTML each step, O(n²) in the slot count (and this runs on every re-render)."
-  (join "" (reverse (interleave-at statics dynamics 0 (count statics) (list)))))
+  (join "" (reverse (weave-at statics dynamics 0 (count statics) (list)))))
 
-(defn- interleave-at
+(defn- weave-at
   (statics dynamics i n acc)
   (if (>= i n)
     acc
     (let (acc (cons (nth statics i) acc)
           acc (if (< i (count dynamics)) (cons (slot->html (nth dynamics i)) acc) acc))
-      (interleave-at statics dynamics (+ i 1) n acc))))
+      (weave-at statics dynamics (+ i 1) n acc))))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole

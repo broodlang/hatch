@@ -7,11 +7,12 @@
   "Flatten a format-response iolist (or bytes) and decode to text for assertions."
   (utf8-bytes->string (bytes-concat out)))
 
-(describe "capitalize"
-  (test "lowercase word" (assert= (capitalize "content") "Content"))
-  (test "already upper" (assert= (capitalize "Content") "Content"))
-  (test "empty string" (assert= (capitalize "") ""))
-  (test "single char" (assert= (capitalize "x") "X")))
+(describe "capitalize-first"
+  (test "lowercase word" (assert= (capitalize-first "content") "Content"))
+  (test "already upper" (assert= (capitalize-first "Content") "Content"))
+  (test "preserves the tail (unlike prelude capitalize)" (assert= (capitalize-first "WWW") "WWW"))
+  (test "empty string" (assert= (capitalize-first "") ""))
+  (test "single char" (assert= (capitalize-first "x") "X")))
 
 (describe "format-header"
   (test "scalar value → one line"

@@ -27,22 +27,22 @@
     (let (req {:headers {:connection "upgrade" :upgrade "WebSocket"}})
       (assert= (upgrade-request? req) true))))
 
-(describe "byte->char / byte-at"
+(describe "byte->char / carrier-byte-at"
   (test "round-trip 0"
-    (assert= (byte-at (byte->char 0) 0) 0))
+    (assert= (carrier-byte-at (byte->char 0) 0) 0))
   (test "round-trip 65"
-    (assert= (byte-at (byte->char 65) 0) 65))
+    (assert= (carrier-byte-at (byte->char 65) 0) 65))
   (test "round-trip 128"
-    (assert= (byte-at (byte->char 128) 0) 128))
+    (assert= (carrier-byte-at (byte->char 128) 0) 128))
   (test "round-trip 255"
-    (assert= (byte-at (byte->char 255) 0) 255)))
+    (assert= (carrier-byte-at (byte->char 255) 0) 255)))
 
 ; lo byte: 300 mod 256 = 44
 (describe "text-frame"
   (test "small frame first byte is 0x81"
-    (assert= (byte-at (text-frame "hello") 0) 129))
+    (assert= (carrier-byte-at (text-frame "hello") 0) 129))
   (test "small frame second byte is payload length"
-    (assert= (byte-at (text-frame "hello") 1) 5))
+    (assert= (carrier-byte-at (text-frame "hello") 1) 5))
   (test "text-frame returns a bytes value (sent verbatim by tcp-send, not re-encoded)"
     (assert= (bytes? (text-frame "hello")) true))
   (test "small frame payload"
@@ -51,27 +51,27 @@
     (assert= (count (text-frame "")) 2))
   (test "125-byte max small frame"
     (let (payload (string-repeat "x" 125))
-      (assert= (byte-at (text-frame payload) 1) 125)))
+      (assert= (carrier-byte-at (text-frame payload) 1) 125)))
   (test "medium frame second byte is 0x7e"
     (let (payload (string-repeat "x" 200))
-      (assert= (byte-at (text-frame payload) 1) 126)))
+      (assert= (carrier-byte-at (text-frame payload) 1) 126)))
   (test "medium frame length bytes"
     (let (payload (string-repeat "x" 300))
       ; hi byte: 300 / 256 = 1
-      (assert= (* (byte-at (text-frame payload) 2) 256)
+      (assert= (* (carrier-byte-at (text-frame payload) 2) 256)
         (* 1 256))
-      (assert= (byte-at (text-frame payload) 3) 44))))
+      (assert= (carrier-byte-at (text-frame payload) 3) 44))))
 (describe "text-frame: multibyte uses UTF-8 byte length, not codepoint count"
   (test "− (U+2212) contributes 3 bytes to the length field"
-    (assert= (byte-at (text-frame "−") 1) 3))
+    (assert= (carrier-byte-at (text-frame "−") 1) 3))
   ; 0x92
   (test "payload bytes are the UTF-8 encoding of −"
     (let (f (text-frame "−"))
       ; 0xE2
-      (assert= (byte-at f 2) 226)
+      (assert= (carrier-byte-at f 2) 226)
       ; 0x88
-      (assert= (byte-at f 3) 136)
-      (assert= (byte-at f 4) 146)))
+      (assert= (carrier-byte-at f 3) 136)
+      (assert= (carrier-byte-at f 4) 146)))
   (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
     (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓"))
   ; Regression: the frame's payload must be single-UTF-8-encoded (each multibyte char
@@ -81,7 +81,7 @@
     (let (text "café − ✓"
           f (text-frame text)
           expected (count (string->utf8-bytes text)))
-      (assert= (byte-at f 1) expected)
+      (assert= (carrier-byte-at f 1) expected)
       (assert= (utf8-bytes->string (bytes (drop 2 (bytes->list f)))) text))))
 
 ; The inbound parser is bytes-native (ADR-141): frames are `bytes` and a parsed payload/rem
@@ -126,14 +126,14 @@
     (let (payload (string-repeat "x" 70000)
           f (text-frame payload))
       ; 0x81 FIN+text, 0x7f extended-64 marker
-      (assert= (byte-at f 0) 129)
-      (assert= (byte-at f 1) 127)
+      (assert= (carrier-byte-at f 0) 129)
+      (assert= (carrier-byte-at f 1) 127)
       ; 70000 = 0x0000000000011170, big-endian over bytes 2..9
-      (assert= (byte-at f 2) 0)
-      (assert= (byte-at f 6) 0)
-      (assert= (byte-at f 7) 1)
-      (assert= (byte-at f 8) 17)
-      (assert= (byte-at f 9) 112)
+      (assert= (carrier-byte-at f 2) 0)
+      (assert= (carrier-byte-at f 6) 0)
+      (assert= (carrier-byte-at f 7) 1)
+      (assert= (carrier-byte-at f 8) 17)
+      (assert= (carrier-byte-at f 9) 112)
       ; 2 header + 8 length + 70000 payload
       (assert= (count f) 70010))))
 
@@ -152,7 +152,7 @@
 (describe "pong-frame: control-frame size cap"
   (test "truncates a payload over 125 bytes"
     (let (f (pong-frame (string-repeat "x" 200)))
-      (assert= (byte-at f 1) 125)
+      (assert= (carrier-byte-at f 1) 125)
       (assert= (count f) 127)))
   (test "small payload echoed verbatim"
     ; 0x8a pong, 0x02 len, "hi" = 104 105
