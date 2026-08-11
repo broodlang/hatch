@@ -1,6 +1,6 @@
 (defmodule web/conn
   "Request/response context value — the Conn."
-  ; parse-body-params / carrier->bytes / content-type-param — body parsing + byte-faithful bodies
+  ; parse-body-params / content-type-param — body parsing
   (:use http/util)
   ; parse — multipart/form-data (file upload) body parsing
   (:use http/multipart))
@@ -11,11 +11,11 @@
   a key clash; the router later merges path params on top. Request cookies are parsed from
   the `Cookie` header into `:cookies`.
 
-  The request `:body` arrives as a byte-faithful *carrier* string (one codepoint per wire
-  byte, from the binary-mode reader). The conn exposes it two ways: `:body` (decoded to UTF-8
-  text, for form/JSON/text handlers) and `:body-bytes` (the raw bytes, for binary payloads).
-  A `multipart/form-data` upload is parsed here: its text fields merge into `:params`, and its
-  file parts land in `:files` as `{name → {:filename :content-type :bytes}}`.
+  The request `:body` arrives as raw `bytes` (from the bytes-native request parser). The conn
+  exposes it two ways: `:body` (decoded to UTF-8 text, for form/JSON/text handlers) and
+  `:body-bytes` (the raw bytes, for binary payloads). A `multipart/form-data` upload is parsed
+  here: its text fields merge into `:params`, and its file parts land in `:files` as
+  `{name → {:filename :content-type :bytes}}`.
 
   A large body the server streamed to disk (http/server `:spool-threshold`) arrives with an
   empty `:body` and a `:body-file` path instead; the conn carries `:body-file` through, and the
@@ -24,8 +24,10 @@
   (let (headers (get request :headers {})
         query-params (get request :params {})
         raw (get request :body "")
-        body-bytes (carrier->bytes raw)
-        body-text (carrier->text raw)
+        ; `:body` is `bytes` from the parser (empty `bytes` for no body); a spooled request carries
+        ; the empty string "" — coerce either to bytes, then decode text for form/JSON handlers.
+        body-bytes (if (bytes? raw) raw (string->utf8-bytes raw))
+        body-text (try (utf8-bytes->string body-bytes) (catch _e ""))
         parsed (parse-conn-body headers body-text body-bytes)
         body-params (get parsed :params))
     {:method (get request :method)

@@ -169,7 +169,12 @@
   (test "server sends an interim 100 before the body, then the final response"
     (let (port 24748
           _sup (server/start port
-                 (fn (req) {:status 200 :headers {} :body (str "body=" (get req :body))}))
+                 ; the bytes-native parser gives a raw handler the body as `bytes`; decode it
+                 (fn (req)
+                   {:status 200
+                    :headers {}
+                    :body (str "body="
+                            (utf8-bytes->string (get req :body)))}))
           sock (tcp-connect "127.0.0.1" port)
           ; send only the head (with Expect + Content-Length) — the body is withheld
           _h (tcp-send sock
