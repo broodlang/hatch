@@ -75,10 +75,11 @@
 (defn body-echo-handler (reporter)
   "Reports the received body's length + a byte checksum so we can prove every read landed."
   (fn (request)
-    (let (bytes (string->utf8-bytes (get request :body)))
+    ; the bytes-native parser hands the handler the body as raw `bytes`
+    (let (bytes (get request :body))
       (send reporter
         [:body
-          {:len (byte-length bytes)
+          {:len (count bytes)
            :sum (fold + 0 (bytes->list bytes))}])
       {:status 200 :headers {} :body "ok"})))
 
@@ -147,5 +148,6 @@
       (let (info (receive ([:chunked d] d) (after 5000 :timeout)))
         (tcp-close client)
         (server/stop port)
-        (assert= (string-length (get info :body)) (* reps 10))
-        (assert= (get info :body) (join "" (map (fn (_) part) (range 0 reps))))))))
+        (assert= (count (get info :body)) (* reps 10))
+        (assert= (utf8-bytes->string (get info :body))
+          (join "" (map (fn (_) part) (range 0 reps))))))))

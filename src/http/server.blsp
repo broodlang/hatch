@@ -7,7 +7,6 @@
   (:use http/request)
   (:use http/response)
   (:use http/websocket)
-  ; carrier->bytes — bridge the already-buffered body prefix back to raw bytes for spooling
   (:use http/util)
   (:alias proc/supervisor)
   (:alias telemetry))
@@ -197,12 +196,13 @@
         (let (worker (supervisor/start-child sup
                        {:id (ref)
                         :restart :temporary
-                        :start (fn () (spawn (worker-run client handler ws-handler config "")))}))
+                        :start (fn ()
+                                 (spawn (worker-run client handler ws-handler config (bytes []))))}))
           ; Read the connection in binary mode from the very first byte — set here, before
           ; the socket is handed to the worker, so there's no window where the reader would
           ; UTF-8-lossily decode (and corrupt) a binary request body (a file upload). The
-          ; worker bridges each `bytes` chunk to a byte-faithful carrier string (one codepoint
-          ; per byte), on which the text-based request parser is exactly byte-correct.
+          ; worker accumulates each `bytes` chunk verbatim and parses it with the bytes-native
+          ; request parser (`try-parse-bytes`); the body reaches the handler as raw `bytes`.
           (tcp-set-binary client true)
           (monitor worker)
           (tcp-controlling-process client worker)
@@ -223,15 +223,15 @@
              (println "http/server: stopped")))))
 
 (defn head-complete? (buf)
-  "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` — i.e. the head can
-  be parsed and we can decide how to handle the body."
-  (includes? buf "\r\n\r\n"))
+  "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` (a `bytes` value) —
+  i.e. the head can be parsed and we can decide how to handle the body."
+  (not (= -1 (bytes-index-of buf crlf-crlf-bytes))))
 
-(defn tail3 (s)
-  "The last ≤3 characters of `s` — the overlap `worker-read-head` keeps between reads so a head
+(defn tail3 (b)
+  "The last ≤3 bytes of `b` — the overlap `worker-read-head` keeps between reads so a head
   terminator split across a read boundary is still detected, without re-scanning the whole buffer."
-  (let (n (string-length s))
-    (if (<= n 3) s (substring s (- n 3) n))))
+  (let (n (count b))
+    (if (<= n 3) b (subbytes b (- n 3) n))))
 
 (defn- worker-run
   (sock handler ws-handler config buf)
@@ -241,7 +241,7 @@
   (cond
     ; Request-size cap: a client streaming an unbounded request (or a huge body) would
     ; otherwise grow `buf` until OOM. Reject once the accumulated bytes exceed the cap.
-    (> (string-length buf) (get config :max-request-bytes))
+    (> (count buf) (get config :max-request-bytes))
       (do
         (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
         (tcp-close sock))
@@ -257,7 +257,7 @@
         config
         (list buf)
         (tail3 buf)
-        (string-length buf)
+        (count buf)
         (+ (now) (get config :head-timeout-ms)))))
 
 (defn- worker-read-head
@@ -270,9 +270,9 @@
   head time (both → 408, whichever comes first) and the accumulated size (→ 413). `deadline` is
   the absolute epoch-ms by which the whole head must arrive."
   (receive
-    ; binary mode → `chunk` is a `bytes` value; bridge it to the byte-faithful carrier string.
-    ([:tcp ^sock chunk] (let (piece (bytes->carrier chunk)
-                              got (+ got (string-length piece)))
+    ; binary mode → `chunk` is a `bytes` value; accumulate it verbatim (no carrier bridge).
+    ([:tcp ^sock chunk] (let (piece chunk
+                              got (+ got (count piece)))
                           (cond
                             (> got (get config :max-request-bytes))
                               (do
@@ -280,19 +280,20 @@
                                   (format-response {:status 413
                                                     :body "<h1>413 Payload Too Large</h1>"}))
                                 (tcp-close sock))
-                            (includes? (str carry piece) "\r\n\r\n")
+                            (not (= -1
+                                   (bytes-index-of (bytes-concat [carry piece]) crlf-crlf-bytes)))
                               (worker-run sock
                                 handler
                                 ws-handler
                                 config
-                                (join "" (reverse (cons piece chunks))))
+                                (bytes-concat (reverse (cons piece chunks))))
                             else
                               (worker-read-head sock
                                 handler
                                 ws-handler
                                 config
                                 (cons piece chunks)
-                                (tail3 (str carry piece))
+                                (tail3 (bytes-concat [carry piece]))
                                 got
                                 deadline))))
     ([:tcp-closed ^sock] nil)
@@ -330,7 +331,7 @@
   the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
   so no path re-buffers the body. A body that already landed whole (and every WebSocket upgrade)
   falls through to `dispatch-complete`; malformed framing answers 400."
-  (match (try-parse-head buf)
+  (match (try-parse-head-bytes buf)
     ([:head head body-start clen]
       (cond
         ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
@@ -360,7 +361,7 @@
 (defn dispatch-complete (sock handler ws-handler config buf)
   "Fast path: the request (head + any body) is fully buffered. Parse it whole and either perform
   the WebSocket upgrade or run the handler."
-  (match (try-parse buf)
+  (match (try-parse-bytes buf)
     ([:ok request remainder]
       (if (and ws-handler (upgrade-request? request))
         ; CSWSH guard: a WebSocket upgrade isn't bound by the same-origin policy, yet the browser
@@ -388,7 +389,7 @@
                                            handler
                                            ws-handler
                                            config
-                                           (str buf (bytes->carrier chunk))))
+                                           (bytes-concat [buf chunk])))
                      ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
                        (do
@@ -470,7 +471,7 @@
   case the fast path would drain with O(n²) `str`ing. False for empty bodies, WebSocket upgrades,
   and already-complete requests (all handled by the fast path)."
   (and (> clen 0)
-    (< (string-length buf) (+ body-start clen))
+    (< (count buf) (+ body-start clen))
     (not (and ws-handler (upgrade-request? head)))))
 
 (defn- buffered-begin
@@ -481,27 +482,27 @@
     (do
       (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp-close sock))
-    (let (already (substring buf body-start (string-length buf)))
+    (let (already (subbytes buf body-start (count buf)))
       (buffered-drain sock
         handler
         ws-handler
         config
         head
         (list already)
-        (string-length already)
+        (count already)
         clen
         (+ (now) (get config :body-timeout-ms))))))
 
 (defn- buffered-drain
   (sock handler ws-handler config head chunks got clen deadline)
-  "Accumulate incoming body reads (carrier chunks, newest-first) in `chunks` until `clen`
+  "Accumulate incoming body reads (`bytes` chunks, newest-first) in `chunks` until `clen`
   bytes are in hand, then `join` once, split off any pipelined `remainder`, and dispatch.
   Bounds the idle wait AND the total body time (both slow-loris → 408) and the size (→ 413,
   at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by."
   (if (>= got clen)
-    (let (all (join "" (reverse chunks))
-          body (substring all 0 clen)
-          remainder (substring all clen (string-length all))
+    (let (all (bytes-concat (reverse chunks))
+          body (subbytes all 0 clen)
+          remainder (subbytes all clen (count all))
           request (assoc head :body body))
       (dispatch-buffered sock handler ws-handler config request remainder))
     (receive
@@ -510,7 +511,7 @@
                             ws-handler
                             config
                             head
-                            (cons (bytes->carrier chunk) chunks)
+                            (cons chunk chunks)
                             (+ got (count chunk))
                             clen
                             deadline))
@@ -538,7 +539,7 @@
     ws-handler
     config
     head
-    (substring buf body-start (string-length buf))
+    (subbytes buf body-start (count buf))
     (list)
     0
     (+ (now) (get config :body-timeout-ms))))
@@ -550,7 +551,7 @@
   their total length — capped at :max-request-bytes (a chunked body has no Content-Length, so this
   is its size bound). Bounds the idle wait AND the total body time (both slow-loris → 408);
   `deadline` is the absolute epoch-ms the whole body must arrive by."
-  (match (dechunk-step pending 0 decoded dlen)
+  (match (dechunk-step-bytes pending 0 decoded dlen)
     ([:ok body remainder] (dispatch-buffered sock
                             handler
                             ws-handler
@@ -558,7 +559,7 @@
                             (assoc head :body body)
                             remainder))
     ([:error msg] (bad-request-close sock msg))
-    ([:more tail decoded dlen] (if (> (+ dlen (string-length tail)) (get config :max-request-bytes))
+    ([:more tail decoded dlen] (if (> (+ dlen (count tail)) (get config :max-request-bytes))
                                  (do
                                    (tcp-send sock
                                      (format-response {:status 413
@@ -570,7 +571,7 @@
                                                          ws-handler
                                                          config
                                                          head
-                                                         (str tail (bytes->carrier chunk))
+                                                         (bytes-concat [tail chunk])
                                                          decoded
                                                          dlen
                                                          deadline))
@@ -613,13 +614,13 @@
       (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp-close sock))
     (let (path (spool-path config)
-          already (substring buf body-start (string-length buf))
-          alen (string-length already)
+          already (subbytes buf body-start (count buf))
+          alen (count already)
           take (min alen clen)
-          prefix (if (= take alen) already (substring already 0 take)))
-      ; the prefix came in via the carrier buffer; bridge it back to raw bytes. Later
-      ; chunks arrive as `bytes` off the binary socket and are appended verbatim.
-      (spool-append path (carrier->bytes prefix))
+          prefix (if (= take alen) already (subbytes already 0 take)))
+      ; the prefix is already `bytes` (the read loop keeps the buffer as bytes end to end).
+      ; Later chunks arrive as `bytes` off the binary socket and are appended verbatim.
+      (spool-append path prefix)
       (spool-drain sock
         handler
         ws-handler
