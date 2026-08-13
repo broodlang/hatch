@@ -1,0 +1,129 @@
+(defmodule web/upload
+  "Live upload progress — a progress bar for a large file upload, driven from the server as
+  the bytes actually land.
+
+  An upload is an ordinary HTTP POST, on a different connection from the live view's
+  WebSocket, so the two have to be introduced. The introduction is a **token**: the view mints
+  one, subscribes to it, and puts it in the form's action URL; `http/server` reads it off the
+  query string (the head is parsed before any body byte arrives, so a query param is the only
+  part of the request visible in time) and emits a `[:hatch :upload :progress]` telemetry
+  event as the body streams in. `attach-progress` — started once, like the access log — turns
+  those events into `web/pubsub` broadcasts, which reach the subscribed session at its
+  `handle-info` as `{:upload {…}}`.
+
+  In a view:
+
+    (deflive
+      (mount (params) (let (tok (upload/watch)) {:token tok :percent 0}))
+      (handle-info (msg model)
+        (let (up (get msg :upload))
+          (if up (assoc model :percent (get up :percent)) model)))
+      (render (model)
+        [:form {:method \"post\"
+                :enctype \"multipart/form-data\"
+                :action (upload/action \"/upload\" (get model :token))}
+          [:input {:type \"file\" :name \"file\"}]
+          [:progress {:value (get model :percent) :max 100}]]))
+
+  and once at startup, alongside the other telemetry consumers:
+
+    (web/application/start {:upload-progress true :children [(fn () (serve))]})
+
+  Progress is entirely opt-in: a request with no token emits nothing, so ordinary traffic
+  pays only a `get` on the parsed query map. Events are throttled server-side (see
+  `:progress-interval-ms`), and the final event is always sent unthrottled, so a bar reliably
+  lands on 100%.
+
+  Only Content-Length bodies report — a `Transfer-Encoding: chunked` upload has no declared
+  total to be a fraction of. Progress is reported for *both* the in-memory and the spool-to-
+  disk body paths, but a large upload is exactly what `:spool-threshold` is for, so a view
+  showing a progress bar usually wants spooling configured too."
+  ; subscribe / broadcast — delivery to the session's handle-info
+  (:alias web/pubsub)
+  ; upload-token-param — the query-param name http/server reads, so the two can't drift
+  (:alias http/server)
+  (:alias telemetry))
+
+(defn topic (token)
+  "The pubsub topic carrying one upload's progress.
+
+  (hatch/web/upload/topic \"abc\") ;=> \"upload:abc\""
+  (str "upload:" token))
+
+(defn new-token ()
+  "Mint a fresh, unguessable upload token. A token is a capability — anyone who knows it can
+  watch (and, with `attach-progress`, be told about) that upload's progress — so it is random
+  rather than derived from anything about the request."
+  (random-token 16))
+
+(defn watch (&optional (token nil))
+  "Subscribe the current process to an upload's progress and return the token, minting one if
+  none is given. Call it from a live view's `mount`, where `(self)` is the session pid; the
+  view then receives `{:upload {…}}` at `handle-info`. The subscription is dropped
+  automatically when the session dies (web/pubsub monitors its subscribers)."
+  (let (tok (or token (new-token)))
+    (pubsub/subscribe (topic tok))
+    tok))
+
+(defn unwatch (token)
+  "Stop watching an upload — e.g. once it has completed and the bar is gone. Returns nil."
+  (pubsub/unsubscribe (topic token))
+  nil)
+
+(defn action (path token)
+  "`path` with the upload token appended as a query param — the URL a progress-reporting form
+  posts to. Appends with `&` when `path` already carries a query string.
+
+  (hatch/web/upload/action \"/upload\" \"abc\") ;=> \"/upload?upload_token=abc\"
+  (hatch/web/upload/action \"/upload?x=1\" \"abc\") ;=> \"/upload?x=1&upload_token=abc\""
+  (str path
+    (if (= -1 (index-of path "?")) "?" "&")
+    server/upload-token-param
+    "="
+    token))
+
+(defn percent (got total)
+  "`got`/`total` as a whole percent, clamped to 0–100. Zero when the total is unknown or zero,
+  rather than dividing by it.
+
+  (hatch/web/upload/percent 512 1024) ;=> 50
+  (hatch/web/upload/percent 0 0) ;=> 0"
+  (if (or (nil? total) (<= total 0))
+    0
+    (min 100 (max 0 (quot (* got 100) total)))))
+
+(defn progress-message (measurements metadata)
+  "The `handle-info` payload for one progress event: `{:upload {:token :got :total :percent
+  :done?}}`. `:done?` marks the final event (the body is fully read), which is the one a view
+  uses to swap the bar for a result — the *handler* hasn't run yet at that point, so a
+  completed upload is not yet a saved file."
+  (let (got (get measurements :got 0)
+        total (get measurements :total 0))
+    {:upload {:token (get metadata :token)
+              :got got
+              :total total
+              :percent (percent got total)
+              :done? (and (> total 0) (>= got total))}}))
+
+(defn attach-progress (&optional (opts {}))
+  "Attach the upload-progress telemetry handler and return its id. Starts the telemetry
+  listener if it isn't already running. `opts`:
+    :id — handler id (default `:hatch-upload-progress`); re-attaching replaces it
+
+  The handler runs in the telemetry listener process, so a broadcast can never slow the HTTP
+  worker reading the body."
+  (when (nil? (telemetry/telemetry-pid))
+    (telemetry/start-telemetry))
+  (let (id (get opts :id :hatch-upload-progress))
+    (telemetry/attach id
+      [:hatch :upload :progress]
+      (fn (_event measurements metadata)
+        (let (tok (get metadata :token))
+          (when tok
+            (pubsub/broadcast (topic tok) (progress-message measurements metadata))))))
+    id))
+
+(defn detach-progress (&optional (opts {}))
+  "Remove the handler attached by `attach-progress` (matching `:id`). Returns nil."
+  (telemetry/detach (get opts :id :hatch-upload-progress))
+  nil)
