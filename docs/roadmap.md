@@ -53,16 +53,14 @@ several of which document non-obvious Brood behaviour.
 With Phases 1–11 done, this is the actual backlog. Nothing here blocks anything else; pick by
 appetite.
 
-- 🔴 **Repeated `nest test` runs go red (upstream image bug)** — a `defdyn` global loses its
-  dynamic-variable registration when restored from the startup image, so the third and later
-  runs on an unchanged tree fail 38 `web/bml` tests. Not a hatch bug and not caused by any
-  hatch change; `rm .brood/image.bin` clears it. Needs filing upstream — full reproduction
-  under *New upstream findings (2026-08-13)* below.
-- **Framed reads (`tcp-read-until`) — blocked again, on a newly-found upstream gap.** Adopting
-  the combinators would *regress* hatch's slow-loris hardening, because their `:timeout-ms` is an
-  **idle** timeout (reset per chunk, by explicit upstream design) and all four of hatch's read
-  loops enforce an idle timeout *and* a total deadline. See *Blocked on Brood language changes*
-  below for the full finding; it needs a `:deadline-ms` option upstream first.
+- **Framed reads (`tcp-read-until`) — now genuinely adoptable (brood ≥ 0.3.10).**
+  Adopting them would have *regressed* hatch's slow-loris hardening, because `:timeout-ms` is an
+  **idle** timeout (reset per chunk, by design) while all four of hatch's read loops enforce an
+  idle timeout *and* a total deadline. Filed and fixed upstream the same day (2026-08-13):
+  both combinators now take **`:deadline-ms`**, a total budget resolved once at the call, and it
+  shipped in brood **0.3.10**. `worker-read-head` and the three body drains can each now drop
+  their hand-rolled `receive` loop for a single call. Still only a line-count win — the loops
+  are already O(n) and already answer 408/413 — so it is cleanup, not a fix.
 - **A live view cannot mint a CSRF token** — found while building the `/upload-progress` demo
   (2026-08-13). `csrf/token`/`csrf-input` both take a Conn, and a live view's `render` has none
   (`mount` takes only `(params)` — the deliberate Phase 7 carve-out). So any live view that
@@ -107,9 +105,9 @@ top of [`brood/ROADMAP.md`](../../brood/ROADMAP.md) under *"Findings from hatch
 **All six upstream items have now shipped** (reviewed against brood 0.3.8,
 2026-08-07). **Five are now closed hatch-side** — the bytes-native port, the last of them,
 finished in `d119f20` (2026-08-11, released as 0.4.1). The sixth (framed reads) cleared its
-original blocker and immediately hit a new one, found by attempting the adoption on 2026-08-13;
-it needs one more upstream option (`:deadline-ms`) before it can be taken. Details in its entry
-below.
+original blocker and immediately hit a new one, found by attempting the adoption on 2026-08-13
+— which was itself filed and fixed upstream the same day (`:deadline-ms`), so it is now waiting
+only on a brood release. Details in its entry below.
 
 - ✅ **Iolists — shipped upstream as ADR-139** (`tcp-send`/`bytes-concat`/`spit` take
   arbitrarily nested trees of strings, `bytes` and byte ints, flattened once at the
@@ -167,13 +165,13 @@ below.
   delimiter straddling two calls would be missed unless the caller re-scans the join, which is
   the hand-rolled loop again.
 
-  So the adoption is **blocked on a `:deadline-ms` (absolute, non-resetting) option** alongside
-  `:timeout-ms`, returning the same `[:timeout acc]`. That is a small change to `std/net/tcp.blsp`
-  (the loop already computes an `after`; it needs a `min` against a deadline threaded through) and
-  should be filed upstream the same way the `:timeout-ms`/`:max-bytes` gap was. Worth noting the
+  **Filed and fixed upstream the same day.** Both combinators now take **`:deadline-ms`** — an
+  absolute, non-resetting total budget resolved once in `tcp-read-limits`, with the per-chunk
+  wait becoming `(min idle remaining)` and sharing the existing `[:timeout acc]` return. So the
+  adoption is unblocked as of brood 0.3.10. Worth restating that the
   value even then is only line count: `worker-read-head` is already O(n) (cons chunks, re-scan a
   3-byte carry) and already enforces the 408 and 413 caps, so this buys clarity, not speed.
-  **Not urgent — do not adopt without `:deadline-ms`; doing so silently reopens the drip hole.**
+  **Do not adopt on a brood without `:deadline-ms`; doing so silently reopens the drip hole.**
 - ✅ **`mapv`/`filterv` — shipped upstream 2026-07-18.** Swept: every
   `(into [] (map …))` in `src/` is now `mapv`, and the `(into [] (reverse …))` sites are
   `vec`. The CLAUDE.md convention notes the new spelling.
@@ -210,29 +208,22 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
   reports 62 and never touches `_deps`. No hatch change needed — its Brood all lives under
   `src/` and `tests/`, so it needs no `:format-paths` entry.
 
-### New upstream findings (2026-08-13) — open, not yet filed
+### New upstream findings (2026-08-13)
 
-- 🔴 **A `defdyn` global loses its dynamic-variable registration when restored from the
-  ADR-218 startup image.** Symptom: `nest test` on a clean checkout is green twice and then
-  fails 38 tests on the third run and every run after, all in `web/bml` (plus the one
-  component-template test that renders a `.bml`), with
-  `binding: *bml-source* is not a dynamic variable (declare it with defdyn)` (E0099) raised
-  from `hatch/web/bml/parse`. `web/bml.blsp:77` declares `(defdyn *bml-source* "")` and
-  `parse` wraps its work in `(binding (*bml-source* src) …)`; after an image restore the
-  global is present but no longer *registered as dynamic*, so `binding` refuses it.
+- ✅ **A `defdyn` global loses its dynamic-variable registration when restored from the
+  ADR-218 startup image** — **fixed upstream** in `83151776` (image format v5: the dynamic-var
+  names are recorded in the image and re-marked on open) and **released in brood 0.3.10**. We
+  re-derived it here before spotting the fix, which was a fair outcome: it landed after the
+  v0.3.9 tag, so an installed 0.3.9 toolchain still had it.
 
-  **Reproduction (pristine `1ca8418`, no local changes):** `rm -f .brood/image.bin`, then
-  `nest test` four times — green, green, red, red. The image is written on the first run and
-  never rewritten (same mtime throughout), so the trigger is a *restore* path, not a rebuild;
-  `rm .brood/image.bin` restores green immediately. Verified in a throwaway `git worktree` to
-  rule out local state.
-
-  This is the same class as the `table`-global finding above (image round-tripping loses a
-  property of a global that isn't part of its value) and wants the same fix shape: carry the
-  dynamic-variable flag through the image, or re-register on restore. **Nothing to do
-  hatch-side** — `defdyn` is used correctly. Workaround until it lands: `rm .brood/image.bin`
-  (it is gitignored) when a run fails this way. Note the failure is invisible on a first run,
-  so CI that starts from a clean checkout will not catch it.
+  Symptom, for searchability: `nest test` on a pristine checkout was green twice, then failed
+  38 tests on every run after — all in `web/bml`, plus the one component-template test that
+  renders a `.bml` — with `binding: *bml-source* is not a dynamic variable (declare it with
+  defdyn)` (E0099) from `hatch/web/bml/parse`. The image is written on the first run and never
+  rewritten, so the trigger was the *restore* path. **Verified fixed:** four consecutive
+  `nest test` runs from a cleared image are 932/932 on 0.3.10, where 0.3.9 reddened on the
+  third. Nothing to do hatch-side — `defdyn` was used correctly throughout, and the failure was
+  invisible on a first run, which is why CI starting from a clean checkout never caught it.
 
 ---
 
