@@ -84,10 +84,12 @@ src/
     page.blsp       — plain (non-live) page render helper: (page conn hiccup)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
-    csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input)
+    csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input);
+                      live-token/live-csrf-input read the token off web/live/live-conn
     auth.blsp       — HTTP Basic-auth plug for router through groups (basic-auth)
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
+                      live-conn (the connection's read-only Conn, bound per session),
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
                       page-chrome
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
@@ -125,6 +127,7 @@ tests/
   web_session_test.blsp
   web_static_test.blsp
   web_live_test.blsp
+  web_live_conn_test.blsp
   web_parts_test.blsp
   web_component_test.blsp
   web_component_template_test.blsp

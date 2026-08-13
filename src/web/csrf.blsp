@@ -23,6 +23,8 @@
   (:alias web/session)
   ; param / header / halt / send-resp — read the submitted token, reject on mismatch
   (:use web/conn)
+  ; live-conn — the WebSocket connection's read-only Conn, for the live-view accessors
+  (:alias web/live)
   ; secure=? — constant-time token comparison
   (:use crypto))
 
@@ -82,3 +84,43 @@
   "A hidden form field carrying the session's CSRF token — drop it inside every POST form:
   `(csrf-input conn)`."
   [:input {:type "hidden" :name field-name :value (token conn)}])
+
+;; ---- the live-view case --------------------------------------------------------------
+;; A live view's `render` has no Conn, so `token`/`csrf-input` above are unreachable from it
+;; — yet a live view that posts a form (or `fetch`es) to a protected route needs the token
+;; just as much as a plain page does. `web/live/live-conn` now exposes the connection's
+;; read-only Conn, which carries the browser's cookies from the WebSocket upgrade request,
+;; so the token can be read from the signed session the same way `on-mount-guard` already
+;; reads the session: by running the session decode explicitly, since no plug pipeline runs
+;; on a WebSocket.
+;;
+;; READ-ONLY, and that is a real limit rather than an oversight: `ensure-token` mints into
+;; the session and marks it dirty, which only reaches the browser as a `Set-Cookie` on an
+;; HTTP response. A WebSocket has no response to carry one, so a token minted here could
+;; never be stored, and the POST it was embedded in would fail the check. `live-token`
+;; therefore returns what is already there, or nil.
+
+(defn live-token (secret &optional (opts {}))
+  "The CSRF token for the current live session's connection, or nil if there isn't one.
+
+  Call it from a live view's `render` (or any hook) and embed the result the way a plain
+  page embeds `csrf-input`. `secret` and `opts` are the same values passed to
+  `session/fetch-session` in the router — the WebSocket ran no plug pipeline, so the signed
+  session cookie is decoded here explicitly.
+
+  Returns nil when there is no token to read, which is the case worth understanding: a token
+  is minted by `protect-from-forgery` on an HTTP request and stored via `Set-Cookie`, and a
+  WebSocket can't set cookies. So the live page's own mount request must have gone through
+  the CSRF pipeline for a token to exist by the time the socket opens — put the live route
+  inside the same `through` group as your other protected routes and it will have. A view
+  that might render before that should treat nil as \"no token yet\" rather than emitting an
+  empty field that will be rejected."
+  (let (conn (web/live/live-conn))
+    (if (nil? conn) nil (token ((session/fetch-session secret opts) conn)))))
+
+(defn live-csrf-input (secret &optional (opts {}))
+  "`csrf-input` for a live view: a hidden `_csrf_token` field carrying `live-token`. Returns
+  nil (rendering nothing) when no token is available, rather than a field with an empty value
+  that would be rejected on submit — see `live-token` on when that happens."
+  (let (t (live-token secret opts))
+    (if (nil? t) nil [:input {:type "hidden" :name field-name :value t}])))

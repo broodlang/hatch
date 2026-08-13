@@ -42,6 +42,11 @@ trade-offs behind them — is archived in
 | Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
+Since 0.4.2, `web/live/live-conn` also exposes the connection's read-only Conn to view code
+(a dynamic binding set once per session, so no hook signature changed), and `web/csrf` grew
+`live-token`/`live-csrf-input` on top of it — closing the gap where a live view had no way to
+render a CSRF token for a POST to a protected route.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
@@ -61,16 +66,6 @@ appetite.
   shipped in brood **0.3.10**. `worker-read-head` and the three body drains can each now drop
   their hand-rolled `receive` loop for a single call. Still only a line-count win — the loops
   are already O(n) and already answer 408/413 — so it is cleanup, not a fix.
-- **A live view cannot mint a CSRF token** — found while building the `/upload-progress` demo
-  (2026-08-13). `csrf/token`/`csrf-input` both take a Conn, and a live view's `render` has none
-  (`mount` takes only `(params)` — the deliberate Phase 7 carve-out). So any live view that
-  needs to POST to a CSRF-protected route has no way to render a token, even though the token
-  is minted from the signed session cookie the socket's upgrade request carried. The demo works
-  around it with an SPA-style bootstrap endpoint (`GET /csrf-token`, inside the router's CSRF
-  pipeline, read by `fetch` before the POST) — correct, but boilerplate every app would rewrite.
-  Options: a `csrf-token` accessor keyed off the live session's stored Conn (`on-mount-guard`
-  already proves one is available and carried across navigations), or revisiting the decision to
-  keep `mount` at one argument. Related to Q8.
 - **Per-item `:for` diffing** — a comprehension is one opaque dynamic slot today, so changing one
   row re-sends every row. The "coarser but correct" carve-out from Phase 6.
 - **Component-level wire diffs** — same shape, from Phase 8: a component's state change re-sends
@@ -79,18 +74,19 @@ appetite.
   re-receiving them (Phase 6, "Option A++").
 - **Q10, still undecided** — head updates: a `[:set-title]` effect, or a `<head>` slot in the
   layout? (See *Open design questions*.)
-- 🟡 **Three stale `bytes` type-signature warnings** — analysed as harmless; see *Known issues*.
 
 ---
 
 ## Known issues
 
-- 🟡 **Bytes-migration type warnings** — `count`/`fold` called directly on `bytes` values raise
-  checker warnings at `http/response.blsp:10`, `http/util.blsp:37`, `web/static.blsp:235`.
-  All three were analysed and are stale type signatures, not hidden perf bugs (`count` on
-  `bytes` dispatches to the O(1) native `byte-length`; the `http/util` fold is over at most 4
-  bytes). Safe to leave, or fix the signatures at leisure. Full analysis in
-  [`_archive/fixed-issues.md`](_archive/fixed-issues.md).
+None open. The three stale `bytes` type-signature warnings recorded here (`count`/`fold`
+called directly on `bytes` at `http/response.blsp`, `http/util.blsp`, `web/static.blsp`) are
+**gone as of 2026-08-13** — `nest check` reports zero warnings across `src/` and `tests/`.
+They were never real perf bugs (analysed at the time: `count` on `bytes` dispatches to the
+O(1) native `byte-length`, and the `http/util` fold ran over at most 4 bytes); they cleared
+without a dedicated fix, partly from the bytes-native port routing that fold through `seq`,
+partly from brood 0.3.10's checker. The original analysis is in
+[`_archive/fixed-issues.md`](_archive/fixed-issues.md).
 
 ---
 
