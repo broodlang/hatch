@@ -27,8 +27,9 @@ Rust — TLS is handled by a reverse proxy.*
 
 ## What shipped
 
-Phases 1–11 are all complete as of **0.4.1** (2026-08-11), plus `web/upload` (live upload
-progress) on top. The per-phase record — what each one built, and the scope calls and
+Phases 1–11 are all complete as of **0.4.1** (2026-08-11); **0.4.2** added `web/upload`
+(live upload progress) and **0.4.3** the live-view Conn, per-component wire diffs, reconnect
+statics-caching, and the framed-read adoption described below. **0.4.3 requires brood ≥ 0.3.11.** The per-phase record — what each one built, and the scope calls and
 trade-offs behind them — is archived in
 [`_archive/shipped-phases.md`](_archive/shipped-phases.md).
 
