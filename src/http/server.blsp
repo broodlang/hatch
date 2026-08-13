@@ -8,6 +8,9 @@
   (:use http/response)
   (:use http/websocket)
   (:use http/util)
+  ; tcp-read-until — the framed head read (brood >= 0.3.11 for its :seed/:deadline-ms opts).
+  ; :only, not a refer-all: net/tcp also exports names this module has its own senses of.
+  (:use net/tcp :only [tcp-read-until])
   (:alias proc/supervisor)
   (:alias telemetry))
 ; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
@@ -241,74 +244,47 @@
 (defn- worker-run
   (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head
-  in O(n) (`worker-read-head`), then hands off to `worker-dispatch`, which routes the body to
-  the spool / in-memory-drain / incremental-de-chunk path so no path re-buffers the body."
-  (cond
-    ; Request-size cap: a client streaming an unbounded request (or a huge body) would
-    ; otherwise grow `buf` until OOM. Reject once the accumulated bytes exceed the cap.
-    (> (count buf) (get config :max-request-bytes))
-      (do
-        (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-        (tcp-close sock))
-    ; Head fully received → decide how to read the body.
-    (head-complete? buf) (worker-dispatch sock handler ws-handler config buf)
-    ; Head still arriving → accumulate reads in O(n) until the terminator lands. Stamp a total
-    ; head deadline now (start of this request's head) so a byte-per-read dribble can't re-arm
-    ; the idle timeout forever.
-    else
-      (worker-read-head sock
-        handler
-        ws-handler
-        config
-        (list buf)
-        (tail3 buf)
-        (count buf)
-        (+ (now) (get config :head-timeout-ms)))))
+  with `tcp-read-until` — seeded with whatever `buf` already holds from a pipelined request —
+  then hands off to `worker-dispatch`, which routes the body to the spool / in-memory-drain /
+  incremental-de-chunk path so no path re-buffers the body.
 
-(defn- worker-read-head
-  (sock handler ws-handler config chunks carry got deadline)
-  "Accumulate socket reads until the request head is complete, in O(n): each read is consed onto
-  `chunks` (O(1)) and only a 3-byte `carry` is re-scanned for the `\\r\\n\\r\\n` terminator — so a
-  head split across many reads never re-copies or re-scans the whole buffer (the old `(str buf
-  chunk)` + full `index-of` per read was O(n²), a cheap slow-loris CPU amplifier). Once the
-  terminator lands the chunks are joined once and dispatched. Bounds the idle wait AND the total
-  head time (both → 408, whichever comes first) and the accumulated size (→ 413). `deadline` is
-  the absolute epoch-ms by which the whole head must arrive."
-  (receive
-    ; binary mode → `chunk` is a `bytes` value; accumulate it verbatim (no carrier bridge).
-    ([:tcp ^sock chunk] (let (piece chunk
-                              got (+ got (count piece)))
-                          (cond
-                            (> got (get config :max-request-bytes))
-                              (do
-                                (tcp-send sock
-                                  (format-response {:status 413
-                                                    :body "<h1>413 Payload Too Large</h1>"}))
-                                (tcp-close sock))
-                            (not (= -1
-                                   (bytes-index-of (bytes-concat [carry piece]) crlf-crlf-bytes)))
-                              (worker-run sock
-                                handler
-                                ws-handler
-                                config
-                                (bytes-concat (reverse (cons piece chunks))))
-                            else
-                              (worker-read-head sock
-                                handler
-                                ws-handler
-                                config
-                                (cons piece chunks)
-                                (tail3 (bytes-concat [carry piece]))
-                                got
-                                deadline))))
-    ([:tcp-closed ^sock] nil)
-    ; Wait no longer than the idle timeout AND no later than the total head deadline — so a
-    ; dribble that keeps re-arming the idle timer still hits the deadline (remaining ≤ 0 →
-    ; fires at once → 408). Both expiries share the same 408-and-close arm.
-    (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
-      (do
-        (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-        (tcp-close sock)))))
+  All three of the head's bounds are the combinator's (brood ≥ 0.3.11), and each maps to the
+  answer this server already gave:
+    :timeout-ms   idle wait for the next chunk        → [:timeout] → 408
+    :deadline-ms  TOTAL budget for the whole head     → [:timeout] → 408
+    :max-bytes    accumulated size                    → [:too-large] → 413
+  The deadline is the slow-loris drip defense: :read-timeout-ms alone re-arms on every byte, so
+  a client dribbling one byte per (timeout-1)s would hold a worker open indefinitely. Both
+  expiries answer 408, which is why they share one arm here as they did in the hand-rolled loop.
+
+  `:seed` is what made this adoptable at all: the keep-alive path re-enters with the leftover of
+  the previous request, which can be a *partial* head, and a `\r\n\r\n` straddling that leftover
+  and the next chunk has to be found. Passing it in means the delimiter arithmetic (the subtle
+  part, and the reason this was hand-rolled through several O(n²) fixes) now lives in one
+  place, upstream, tested there."
+  (match (tcp-read-until sock
+           crlf-crlf-bytes
+           {:seed buf
+            :timeout-ms (get config :read-timeout-ms)
+            :deadline-ms (get config :head-timeout-ms)
+            :max-bytes (get config :max-request-bytes)})
+    ; idle timeout or the total head deadline — the peer never finished its head
+    ([:timeout _acc] (do
+                       (tcp-send sock
+                         (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+                       (tcp-close sock)))
+    ; the head grew past the request cap without a terminator
+    ([:too-large _acc] (do
+                         (tcp-send sock
+                           (format-response {:status 413
+                                             :body "<h1>413 Payload Too Large</h1>"}))
+                         (tcp-close sock)))
+    ; peer hung up mid-head (or between keep-alive requests) — nothing to answer
+    ([:closed _acc] nil)
+    ; `head` includes the terminator; `rest` is whatever arrived past it (a pipelined
+    ; request, or the start of this one's body). worker-dispatch parses the head out of the
+    ; whole buffer and slices the body itself, so rejoin them and leave it unchanged.
+    ([head rest] (worker-dispatch sock handler ws-handler config (bytes-concat [head rest])))))
 
 (defn bad-request-close (sock msg)
   "Answer a generic 400 and close. Doesn't reflect the parser message (it echoes attacker-
@@ -360,7 +336,8 @@
                                   (chunked-begin sock handler ws-handler config buf head body-start)))
     ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
     ([:error msg] (bad-request-close sock msg))
-    ; head-complete? gated us here, so :incomplete cannot occur; be defensive.
+    ; tcp-read-until only returns a head once the terminator has landed, so :incomplete
+    ; cannot occur here; be defensive.
     (_ (dispatch-complete sock handler ws-handler config buf))))
 
 (defn dispatch-complete (sock handler ws-handler config buf)

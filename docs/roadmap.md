@@ -42,7 +42,10 @@ trade-offs behind them — is archived in
 | Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
-Per-item `:for` diffing, per-component wire diffs and reconnect statics-caching are all in: a
+`http/server`'s request-head read is `tcp-read-until` (brood ≥ 0.3.11), so the delimiter
+arithmetic — hand-rolled here through several O(n²) fixes — now lives upstream, in one place,
+tested there. Per-item `:for` diffing, per-component wire diffs and reconnect statics-caching
+are all in: a
 changed row ships that row, a changed component ships only its own changed inner slots, and a
 reconnecting client that still holds the page skeleton is not sent it again. Since 0.4.2,
 `web/live/live-conn` also exposes the connection's read-only Conn to view code
@@ -61,14 +64,13 @@ several of which document non-obvious Brood behaviour.
 With Phases 1–11 done, this is the actual backlog. Nothing here blocks anything else; pick by
 appetite.
 
-- **Framed reads (`tcp-read-until`) — now genuinely adoptable (brood ≥ 0.3.10).**
-  Adopting them would have *regressed* hatch's slow-loris hardening, because `:timeout-ms` is an
-  **idle** timeout (reset per chunk, by design) while all four of hatch's read loops enforce an
-  idle timeout *and* a total deadline. Filed and fixed upstream the same day (2026-08-13):
-  both combinators now take **`:deadline-ms`**, a total budget resolved once at the call, and it
-  shipped in brood **0.3.10**. `worker-read-head` and the three body drains can each now drop
-  their hand-rolled `receive` loop for a single call. Still only a line-count win — the loops
-  are already O(n) and already answer 408/413 — so it is cleanup, not a fix.
+- **The three body drains stay hand-rolled, on purpose** — the leftover of the framed-read
+  adoption (the head reader took it; see *What shipped*). `tcp-read-n` reads to a length and
+  returns the bytes, with no per-chunk hook, and each body reader needs one: `spool-drain`
+  appends each chunk to disk (buffering the whole body in memory is the exact thing spooling
+  exists to avoid), `buffered-drain` emits upload-progress telemetry per read, and
+  `chunked-drain` decodes incrementally with no declared length at all. So this is closed as
+  "not applicable", not "not yet done".
 - **No component-level `tick`** — the remaining half of the Phase 8 carve-out (the wire-diff
   half shipped 2026-08-13). A parent's own tick can `send-update` if a component needs periodic
   refresh, which covers most of it.
@@ -102,11 +104,10 @@ top of [`brood/ROADMAP.md`](../../brood/ROADMAP.md) under *"Findings from hatch
 (the O(n²) class they retire).
 
 **All six upstream items have now shipped** (reviewed against brood 0.3.8,
-2026-08-07). **Five are now closed hatch-side** — the bytes-native port, the last of them,
-finished in `d119f20` (2026-08-11, released as 0.4.1). The sixth (framed reads) cleared its
-original blocker and immediately hit a new one, found by attempting the adoption on 2026-08-13
-— which was itself filed and fixed upstream the same day (`:deadline-ms`), so it is now waiting
-only on a brood release. Details in its entry below.
+2026-08-07), and **all six are now closed hatch-side**. The last of them, framed reads, took
+three further upstream fixes to become usable at all (`:timeout-ms`/`:max-bytes`,
+`:deadline-ms`, `:seed`) — each found by trying the adoption and hitting a wall the previous
+fix hadn't cleared. It is adopted as of 2026-08-13; details in its entry below.
 
 - ✅ **Iolists — shipped upstream as ADR-139** (`tcp-send`/`bytes-concat`/`spit` take
   arbitrarily nested trees of strings, `bytes` and byte ints, flattened once at the
@@ -139,38 +140,19 @@ only on a brood release. Details in its entry below.
   `web/conn`'s `carrier->bytes` round-trip — the quadratic-in-upload-size double walk of audit
   §16 — are both gone from the hot path. The one behaviour change: a RAW handler's `:body` is
   now `bytes`. The carrier parser stays in `http/request` purely as the fuzz oracle.
-- 🔶 **Framed reads — shipped upstream as `tcp-read-until` / `tcp-read-n`** (2026-07-25;
-  the transient read buffer this entry originally asked for was *rejected* upstream as an
-  immutability violation, and combinators shipped instead). Originally not adoptable —
-  neither combinator took a read timeout or a size cap, and `http/server`'s head reader
-  answers 408 on an idle client and 413 past `:max-request-bytes` (the slow-loris
-  hardening in `docs/robustness.md`). **Brood added both on 2026-08-07** in response:
-  `(tcp-read-until sock sep {:timeout-ms n :max-bytes n})`, returning `[:timeout acc]` /
-  `[:too-large acc]` alongside `[:closed acc]`; `tcp-read-n` refuses an over-cap declared
-  length before reading. Its stated prerequisite (the head reader being on `bytes`) shipped in
-  `d119f20` — but on actually attempting the adoption (2026-08-13) it turns out **still not to be
-  adoptable**, for a second reason neither side had spotted:
-
-  **`:timeout-ms` is an *idle* timeout, and hatch needs a *total deadline* as well.** Upstream
-  chose idle deliberately ("a large legitimate body is slow for honest reasons; what marks an
-  attack is silence"), and for a *body* that reasoning is right. But `30493f5` added a total
-  head deadline to hatch precisely because idle-alone is defeated by a drip: a client sending one
-  byte every `(idle - 1)`ms re-arms the idle timer forever and holds a worker open indefinitely.
-  All four of hatch's read loops therefore recompute `(min idle (- deadline (now)))` on *every*
-  receive — `worker-read-head` (server.blsp:303) plus `buffered-drain`, `chunked-drain` and
-  `spool-drain`. A single `tcp-read-until` call cannot express that: the idle timer resets per
-  chunk *inside* the call, so whatever value is passed, a dripper resets it. Splitting it across
-  several calls doesn't rescue it either — the combinator only scans its own accumulator, so a
-  delimiter straddling two calls would be missed unless the caller re-scans the join, which is
-  the hand-rolled loop again.
-
-  **Filed and fixed upstream the same day.** Both combinators now take **`:deadline-ms`** — an
-  absolute, non-resetting total budget resolved once in `tcp-read-limits`, with the per-chunk
-  wait becoming `(min idle remaining)` and sharing the existing `[:timeout acc]` return. So the
-  adoption is unblocked as of brood 0.3.10. Worth restating that the
-  value even then is only line count: `worker-read-head` is already O(n) (cons chunks, re-scan a
-  3-byte carry) and already enforces the 408 and 413 caps, so this buys clarity, not speed.
-  **Do not adopt on a brood without `:deadline-ms`; doing so silently reopens the drip hole.**
+- ✅ **Framed reads — `tcp-read-until` / `tcp-read-n`**, and the three upstream gaps that had to
+  close before hatch could use them. Shipped 2026-07-25 with neither a timeout nor a size cap,
+  so adopting would have dropped this server's 408/413; `:timeout-ms` and `:max-bytes` were
+  added 2026-08-07 on our report. Attempting the adoption on 2026-08-13 found two more, both
+  filed and fixed the same day: **`:deadline-ms`** (brood 0.3.10) — `:timeout-ms` is an *idle*
+  timeout that a drip-feeder re-arms forever, while `:max-bytes` bounds only the size that drip
+  reaches and never the time, so all four of hatch's read loops enforced a total deadline the
+  combinator could not express; and **`:seed`** (brood 0.3.11) — the keep-alive path re-enters
+  the head read holding the leftover of a pipelined request, which can be a *partial* head, and
+  a `\r\n\r\n` straddling that leftover and the next chunk has to be found. **Adopted** in
+  `http/server`'s `worker-read-head`, which is gone: the read is one `tcp-read-until` call whose
+  three bounds map onto the same 408/408/413 answers. The body drains deliberately stay
+  hand-rolled — see *Still open*.
 - ✅ **`mapv`/`filterv` — shipped upstream 2026-07-18.** Swept: every
   `(into [] (map …))` in `src/` is now `mapv`, and the `(into [] (reverse …))` sites are
   `vec`. The CLAUDE.md convention notes the new spelling.
