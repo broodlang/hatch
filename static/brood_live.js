@@ -29,6 +29,11 @@ const BroodLive = (() => {
       this.connected = false;
       this.reconnectDelay = 250;
       this.reconnectTimer = null;
+      // statics + their server-issued fingerprint, kept across a reconnect so the server can
+      // skip re-sending the skeleton (see onopen / the "join" handler)
+      this.statics = [];
+      this.dynamics = [];
+      this.staticsFingerprint = null;
       sessions.add(this);
       navSession = this; // this page's live view, for navigation
       refreshStatus();
@@ -44,9 +49,17 @@ const BroodLive = (() => {
         this.reconnectDelay = 250;
         this.connected = true;
         refreshStatus();
-        // Send join with current URL params
+        // Send join with current URL params, plus the fingerprint of the statics we still
+        // hold from a previous connection. On a reconnect to the same view the server sees
+        // a match and omits the statics from its join frame — they are the bulk of it (the
+        // page's whole literal skeleton), so a flaky link stops re-downloading its own
+        // markup on every drop. On a first connect there is nothing to claim, and after a
+        // navigate or a hot-reloaded template the fingerprints differ and the server sends
+        // them as usual, so we can never weave against a stale skeleton.
         const params = Object.fromEntries(new URLSearchParams(location.search));
-        this._send({ event: "join", params });
+        const join = { event: "join", params };
+        if (this.staticsFingerprint) join.f = this.staticsFingerprint;
+        this._send(join);
       };
 
       this.socket.onmessage = (e) => {
@@ -87,7 +100,21 @@ const BroodLive = (() => {
       if (msg.event === "join") {
         // Full render: the static skeleton plus every dynamic slot. We keep both, so a
         // later "diff" only needs to carry the slots that changed.
-        this.statics = msg.s || [];
+        //
+        // `s` is ABSENT when the server accepted the fingerprint we sent — it is telling us
+        // our cached statics are still current, so keep them. Guard on the fingerprint
+        // actually matching rather than on `s` being absent alone: without that, a frame
+        // that omitted the statics for any other reason would leave us weaving dynamics
+        // into whatever skeleton we happened to be holding.
+        if (msg.s) {
+          this.statics = msg.s;
+          this.staticsFingerprint = msg.f || null;
+        } else if (!msg.f || msg.f !== this.staticsFingerprint) {
+          // No statics and no matching claim — we have nothing coherent to render against.
+          // A full page load re-fetches the server-rendered HTML and starts clean.
+          location.reload();
+          return;
+        }
         this.dynamics = msg.d || [];
         this._patch(this._assemble());
       } else if (msg.event === "diff") {
