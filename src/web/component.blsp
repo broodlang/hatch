@@ -12,11 +12,16 @@
   component from anywhere (a sibling event, a PubSub handler, a parent tick) and triggers
   a re-render.
 
-  v1 scope: a component's rendered HTML is one opaque slot in the parent's existing
-  static/dynamic split (`web/parts`) — it doesn't yet get its own wire-level diff, so a
-  state change re-sends that whole slot's HTML rather than a minimal patch. Independent
-  wire-level component diffing is later work, the same 'coarser but correct' carve-out
-  the roadmap already uses for `if`/`for`."
+  A component gets its **own wire-level diff**: `deflive-component` compiles its render into
+  the same statics/dynamics split `deflive` does, and `render-slot` hands the parent a
+  component slot value (`web/parts/component-slot`) rather than an opaque string. So a state
+  change ships only that component's changed inner slots, and a parent re-render that leaves
+  the component alone ships nothing for it at all.
+
+  Two things stay coarse, deliberately: a component nested inside an `(if …)`/`(for …)` is part
+  of its enclosing opaque dynamic and re-sends whole (the same carve-out that applies to
+  anything in a conditional), and there is still no component-level `tick` — a parent's tick can
+  `send-update` if a component needs periodic refresh."
   ; deflive-render-expr / deflive-handle-event-body — the macro-expansion deflive
   ; already built for inline-vs-template render resolution and event-arm dispatch;
   ; deflive-component reuses both (called fully-qualified below) rather than
@@ -32,8 +37,12 @@
     :only
     [deflive-clause
       deflive-clauses deflive-render-expr deflive-handle-event-body])
-  ; render — lowers a component's Hiccup to an HTML string for its opaque parent slot
+  ; render — lowers a component's Hiccup to HTML (the wrapper open tag, and the fallback
+  ; whole-component render for a spec with no static/dynamic split)
   (:use web/template)
+  ; compile-parts / component-slot / slot->html — the component's own static/dynamic split
+  ; and the tagged slot value the parent diffs it as
+  (:alias web/parts)
   ; defbehaviour — LiveComponentModule
   (:use protocol))
 
@@ -79,10 +88,26 @@
         ; deflive's own template default) — *not* `state`, even though inline (render
         ; (state) …) is the idiomatic name elsewhere in this module.
         render-dyn-args (if render-clause render-args (list 'model))
-        render-defn (list 'defn 'render render-dyn-args render-expr))
+        render-defn (list 'defn 'render render-dyn-args render-expr)
+        ; The component's own static/dynamic split, so it can be diffed independently of its
+        ; parent (see render-slot). Same shape and same fallback as deflive's: a form the
+        ; compiler can't split becomes one opaque dynamic — correct, just not granular.
+        parts (try
+                (web/parts/compile-parts render-expr)
+                (catch _e
+                  {:statics ["" ""]
+                   :dynamics (list (list 'web/template/render
+                                     (web/parts/rewrite-components render-expr)))}))
+        render-static-defn (list 'def 'render-static (get parts :statics))
+        render-dynamic-defn (list 'defn
+                              'render-dynamic
+                              render-dyn-args
+                              (cons 'vector (get parts :dynamics))))
     (list 'do
       (list 'defn 'mount mount-args (cons 'do mount-body))
       render-defn
+      render-static-defn
+      render-dynamic-defn
       (list 'defn
         'handle-event
         (list 'event-name 'event-params 'event-model)
@@ -94,6 +119,8 @@
         (list)
         {:mount 'mount
          :render 'render
+         :render-static 'render-static
+         :render-dynamic 'render-dynamic
          :handle-event 'handle-event}))))
 
 ; ---- the components table: {id -> {:module 'mod :spec-thunk spec-thunk :state state}} ----
@@ -112,37 +139,89 @@
 
 ; ---- render-slot: called from a parent's render-dynamic for a (component …) hole ----
 
-(defn render-slot (module spec-thunk assigns components-table)
-  "Render one `(component module assigns)` hole to an HTML string, for the parent's
-  opaque dynamic slot. `components-table` is the session's live per-id state table
-  (a `table`): first time `(get assigns \"id\")` is seen, calls the component's `mount`
-  and stores the result; thereafter reuses the stored state as-is (the parent's `assigns`
-  are only consulted on first mount — see the module docstring). Returns just the HTML —
-  v1 has no independent wire diff, so this slot re-renders whenever the *parent*
-  re-renders, exactly like any other opaque dynamic already does.
+(defn- slot-state
+  (module spec-thunk assigns components-table)
+  "The component's current state for this id, mounting it on first sight. Shared by both
+  render entry points below.
 
-  Wraps the component's own Hiccup in one `[:div {:data-cid id} …]` — brood_live.js reads
-  the nearest ancestor `data-cid` off a client event's target and sends it along, which is
-  how `web/live/session-dispatch` knows to route that event to this component's own
-  `handle-event` instead of the parent's. The wrapper guarantees exactly one tagged root
-  regardless of what the component's `render` returns (one element, a list, …) — the same
-  reason Phoenix's LiveComponent requires a single HTML root.
-
-  Ids aren't namespaced per parent view — the components table is session-wide, and
-  persists across live-navigate. If a stored entry's `:module` doesn't match this call's
-  (two different component modules reused the same id string, or a different view swapped
-  in via live-navigate happens to reuse it), that's not the same component: treat it as
-  unmounted and mount fresh rather than rendering a foreign module's state through this
-  one's `render`."
+  Ids aren't namespaced per parent view — the components table is session-wide, and persists
+  across live-navigate. If a stored entry's `:module` doesn't match this call's (two different
+  component modules reused the same id string, or a different view swapped in via
+  live-navigate happens to reuse it), that's not the same component: treat it as unmounted and
+  mount fresh rather than rendering a foreign module's state through this one's `render`."
   (let (id (get assigns "id")
         entry (table-get components-table id)
-        same-component? (and entry (= (get entry :module) module))
-        state (if same-component?
-                (get entry :state)
-                (let (initial ((get (spec-thunk) :mount) id assigns))
-                  (table-put components-table id (component-entry module spec-thunk initial))
-                  initial)))
-    (web/template/render [:div {:data-cid id} ((get (spec-thunk) :render) state)])))
+        same-component? (and entry (= (get entry :module) module)))
+    (if same-component?
+      (get entry :state)
+      (let (initial ((get (spec-thunk) :mount) id assigns))
+        (table-put components-table id (component-entry module spec-thunk initial))
+        initial))))
+
+(defn wrapper-statics (id statics)
+  "`statics` with the component's `[:div {:data-cid id} …]` wrapper folded into its first and
+  last entries, so weaving the pair alone reproduces the wrapped HTML.
+
+  Baking the wrapper in — rather than applying it around a woven string — is what lets the
+  parent (and brood_live.js) treat a component slot as an ordinary statics/dynamics pair, with
+  one interleave implementation on each side instead of a wrapper rule that could drift. The
+  open tag is built by rendering an empty `[:div {:data-cid id}]` and splitting it, so the
+  attribute escaping is `web/template`'s own and can't diverge from it.
+
+  (hatch/web/component/wrapper-statics \"a\" [\"<p>\" \"</p>\"]) ;=> [\"<div data-cid=\\\"a\\\"><p>\" \"</p></div>\"]"
+  (let (empty-div (web/template/render [:div {:data-cid id}])
+        open (substring empty-div 0 (- (string-length empty-div) 6))
+        v (into [] statics)
+        n (count v))
+    (if (= n 0)
+      [(str open "</div>")]
+      (assoc (assoc v 0 (str open (nth v 0))) (- n 1) (str (nth v (- n 1)) "</div>")))))
+
+(defn render-slot (module spec-thunk assigns components-table)
+  "Render one `(component module assigns)` hole to a **component slot value** (web/parts'
+  `component-slot`) for the parent's dynamic slot: the component's own statics and dynamics,
+  wrapper baked in, rather than one opaque HTML string.
+
+  That split is what gives a component an independent wire diff. When only the component's
+  state changed, `web/parts/slot-diff` compares this slot against its previous self and emits
+  `{:__kdiff__ {inner-idx value}}` — just the component's changed inner slots — instead of
+  re-sending its whole subtree. A parent re-render that leaves the component untouched
+  produces an equal slot value and so ships nothing at all for it.
+
+  `components-table` is the session's live per-id state table (a `table`): first time
+  `(get assigns \"id\")` is seen, calls the component's `mount` and stores the result;
+  thereafter reuses the stored state as-is (the parent's `assigns` are only consulted on first
+  mount — see the module docstring).
+
+  The `[:div {:data-cid id} …]` wrapper guarantees exactly one tagged root regardless of what
+  the component's `render` returns (one element, a list, …) — the same reason Phoenix's
+  LiveComponent requires a single HTML root. brood_live.js reads the nearest ancestor
+  `data-cid` off a client event's target and sends it along, which is how
+  `web/live/session-dispatch` knows to route that event to this component's own `handle-event`
+  instead of the parent's.
+
+  A component whose spec predates the split (no `:render-static`) falls back to one opaque
+  string, exactly as before — correct, just not granular."
+  (let (id (get assigns "id")
+        state (slot-state module spec-thunk assigns components-table)
+        spec (spec-thunk)
+        statics (get spec :render-static))
+    (if (nil? statics)
+      (web/template/render [:div {:data-cid id} ((get spec :render) state)])
+      (web/parts/component-slot id
+        (wrapper-statics id statics)
+        ((get spec :render-dynamic) state)))))
+
+(defn render-slot-html (module spec-thunk assigns components-table)
+  "`render-slot` as a plain HTML string — the whole component, wrapper included.
+
+  Used on the paths that need HTML rather than a diffable value: a view's plain `render` (whose
+  contract is to return Hiccup, so the string is wrapped in `web/template/raw`), and any
+  component nested inside an `(if …)`/`(for …)`, which the parent already compiles as one
+  opaque dynamic. A nested component therefore keeps the coarser v1 behaviour — it re-sends its
+  whole HTML when its enclosing slot changes — the same carve-out that has always applied to
+  anything inside a conditional or comprehension."
+  (web/parts/slot->html (render-slot module spec-thunk assigns components-table)))
 
 ; ---- event routing: a client event whose target DOM carries data-cid ----
 

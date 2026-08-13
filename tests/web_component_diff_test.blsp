@@ -1,0 +1,132 @@
+;; Component-level wire diffing: a LiveComponent gets its own static/dynamic split, so a
+;; state change ships only the component's changed inner slots — not its whole subtree, and
+;; not the parent's.
+;;
+;; The parent's side of this is exercised via `render-slot` + `web/parts`' diff directly
+;; rather than through a `deflive` view, because `deflive-component` and `deflive` both
+;; define `render`/`mount` in the enclosing module and would collide in one file (the same
+;; reason web_live_component_integration_test hand-writes its spec). What matters here is
+;; the slot value and how two of them diff, which is exactly what these call.
+(defmodule web-component-diff-test
+  (:use web/component)
+  (:alias web/parts)
+  ; encode — the JSON codec the diff actually reaches the client through
+  (:alias web/live)
+  (:use web/template)
+  (:use test))
+
+; Two dynamic holes — a label and a count — so a change to one can be shown NOT to ship the
+; other. The literal markup around them is static and never crosses the wire twice.
+(deflive-component (mount (id assigns) {:label (get assigns "label" "hi") :n 0})
+  (render (state)
+    [:div {} [:span {:class "label"} (get state :label)] [:b {} (str (get state :n))]])
+  (on "bump" (params state) (assoc state :n (inc (get state :n))))
+  (on "relabel" (params state) (assoc state :label (get params "text"))))
+
+(defn slot-for (t id)
+  (render-slot 'web-component-diff-test live-component-spec {"id" id} t))
+
+(describe "deflive-component compiles its own static/dynamic split"
+  (test "the spec carries render-static and render-dynamic, like a view's"
+    (let (spec (live-component-spec))
+      (assert= (vector? (get spec :render-static)) true)
+      (assert= (nil? (get spec :render-dynamic)) false)))
+  (test "statics and dynamics satisfy the weave invariant against the plain render"
+    (let (spec (live-component-spec)
+          state {:label "hi" :n 3})
+      (assert= (web/parts/weave (get spec :render-static) ((get spec :render-dynamic) state))
+        ; web/template/render qualified: deflive-component defines `render` in THIS module
+        ; (the component's own), which would shadow the template one
+        (web/template/render ((get spec :render) state))))))
+
+(describe "render-slot returns a diffable component slot"
+  (test "it is a component slot tagged with the cid, not an opaque string"
+    (let (t (table)
+          v (slot-for t "c1"))
+      (assert= (web/parts/kslot? v) true)
+      (assert= (get v :cid) "c1")))
+  (test "the data-cid wrapper is baked into the statics, so weaving alone reproduces it"
+    (let (t (table)
+          v (slot-for t "c1"))
+      (assert= (includes? (nth (get v :s) 0) "<div data-cid=\"c1\">") true)
+      (assert= (includes? (last (get v :s)) "</div>") true)))
+  (test "slot->html is byte-identical to the whole-component HTML render-slot-html returns"
+    (let (t (table)
+          t2 (table))
+      (assert= (web/parts/slot->html (slot-for t "c1"))
+        (render-slot-html 'web-component-diff-test live-component-spec {"id" "c1"} t2))))
+  (test "and to what the pre-split implementation produced"
+    (let (t (table))
+      (assert= (web/parts/slot->html (slot-for t "c1"))
+        ; the inner <div> is the fixture component's own root; the outer one is the
+        ; data-cid wrapper render-slot guarantees around whatever a component returns
+        "<div data-cid=\"c1\"><div><span class=\"label\">hi</span><b>0</b></div></div>"))))
+
+(describe "a component's state change ships only its changed inner slot"
+  (test "bumping the count diffs the count slot alone — the label doesn't cross the wire"
+    (let (t (table)
+          before (slot-for t "c1")
+          _ (dispatch-event t "c1" "bump" {})
+          after (slot-for t "c1")
+          d (web/parts/slot-diff before after))
+      ; a per-inner-slot patch, not the whole re-rendered component
+      (assert= (nil? (get d :__kdiff__)) false)
+      (assert= (get d :cid) "c1")
+      ; exactly one inner slot changed — the count. The label slot is absent entirely.
+      (assert= (count (get d :__kdiff__)) 1)
+      (assert= (get (get d :__kdiff__) 1) "1")))
+  (test "changing the label diffs the label slot alone"
+    (let (t (table)
+          before (slot-for t "c2")
+          _ (dispatch-event t "c2" "relabel" {"text" "bye"})
+          after (slot-for t "c2")
+          d (web/parts/slot-diff before after))
+      (assert= (count (get d :__kdiff__)) 1)
+      (assert= (get (get d :__kdiff__) 0) "bye")))
+  (test "an untouched component produces an equal slot, so the parent ships nothing for it"
+    (let (t (table)
+          a (slot-for t "c3")
+          b (slot-for t "c3"))
+      (assert= a b)
+      (assert= (web/parts/diff-dynamics [a] [b]) {})))
+  (test "a parent re-render around an untouched component still ships nothing for it"
+    (let (t (table)
+          c (slot-for t "c4"))
+      ; the parent's own slot 0 changed; the component in slot 1 did not
+      (assert= (web/parts/diff-dynamics ["old" c] ["new" c]) {0 "new"}))))
+
+(describe "a slot that stops being the same component is replaced, not patched"
+  (test "a different cid ships the whole new slot rather than a kdiff"
+    (let (t (table)
+          a (slot-for t "c5")
+          b (slot-for t "c6")
+          d (web/parts/slot-diff a b))
+      ; patching one component's inner slots onto another's would splice two unrelated
+      ; renders together, so the whole slot is sent instead
+      (assert= (nil? (get d :__kdiff__)) true)
+      (assert= (web/parts/kslot? d) true)
+      (assert= (get d :cid) "c6")))
+  (test "a component replacing a plain string slot ships the whole slot"
+    (let (t (table)
+          a (slot-for t "c7")
+          d (web/parts/slot-diff "was just text" a))
+      (assert= (web/parts/kslot? d) true))))
+
+(describe "the slot values survive the wire codec"
+  ; The diff reaches brood_live.js as JSON, so the tags/keys the client branches on have to
+  ; encode as it expects. Cheap to get wrong (a keyword key, a bool tag) and invisible to
+  ; every test above, which all work on the Brood values directly.
+  (test "a component slot encodes with the keys the client reads"
+    (let (t (table)
+          json (web/live/encode (slot-for t "c8")))
+      (assert= (includes? json "\"__kslot__\":true") true)
+      (assert= (includes? json "\"cid\":\"c8\"") true)
+      (assert= (includes? json "\"s\":[") true)
+      (assert= (includes? json "\"d\":[") true)))
+  (test "a component diff encodes with the keys the client reads"
+    (let (t (table)
+          before (slot-for t "c9")
+          _ (dispatch-event t "c9" "bump" {})
+          json (web/live/encode (web/parts/slot-diff before (slot-for t "c9"))))
+      (assert= (includes? json "\"__kdiff__\":{") true)
+      (assert= (includes? json "\"cid\":\"c9\"") true))))
