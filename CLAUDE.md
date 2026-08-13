@@ -3,7 +3,8 @@
 **Hatch** is a Phoenix/LiveView-inspired web framework for the
 [Brood](https://broodlang.org) language. Pure Brood, no npm, no new Rust.
 
-See `docs/roadmap.md` for what's built and what's next.
+See `docs/roadmap.md` for what's built and what's next. Closed history lives in
+`docs/_archive/` — don't pull it into context unless the roadmap points you at it.
 See `docs/web-framework-design.md` for the full design rationale.
 
 ---
@@ -94,6 +95,8 @@ src/
     application.blsp — canonical app entry point: default-logger-opts + start (logger + children + park)
     repo.blsp       — open a store repo, migrate schemas, warm up the pool (web/repo/start)
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
+    upload.blsp     — live upload progress: ?upload_token= → [:hatch :upload :progress]
+                      telemetry → pubsub → the view's handle-info as {:upload {…}}
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
 static/
   brood_live.js     — vanilla JS client for live views; apps can serve it straight
@@ -125,10 +128,15 @@ tests/
   web_pubsub_test.blsp
   web_presence_test.blsp
   web_assets_test.blsp
+  web_upload_test.blsp
   web_test_test.blsp
   web_application_test.blsp
 docs/
-  roadmap.md
+  roadmap.md              — what's LIVE: shipped summary, open backlog, upstream blockers
+  _archive/               — closed history. Do NOT read by default; the roadmap links to
+                            the specific entry when one is relevant.
+    shipped-phases.md     — what each of Phases 1–11 built, and the scope calls behind them
+    fixed-issues.md       — closed bugs, cleanup passes, post-merge reviews (+ root causes)
   assets.md
   web-framework-design.md
   brood-http.md
