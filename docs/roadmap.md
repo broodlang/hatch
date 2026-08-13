@@ -63,6 +63,16 @@ appetite.
   **idle** timeout (reset per chunk, by explicit upstream design) and all four of hatch's read
   loops enforce an idle timeout *and* a total deadline. See *Blocked on Brood language changes*
   below for the full finding; it needs a `:deadline-ms` option upstream first.
+- **A live view cannot mint a CSRF token** — found while building the `/upload-progress` demo
+  (2026-08-13). `csrf/token`/`csrf-input` both take a Conn, and a live view's `render` has none
+  (`mount` takes only `(params)` — the deliberate Phase 7 carve-out). So any live view that
+  needs to POST to a CSRF-protected route has no way to render a token, even though the token
+  is minted from the signed session cookie the socket's upgrade request carried. The demo works
+  around it with an SPA-style bootstrap endpoint (`GET /csrf-token`, inside the router's CSRF
+  pipeline, read by `fetch` before the POST) — correct, but boilerplate every app would rewrite.
+  Options: a `csrf-token` accessor keyed off the live session's stored Conn (`on-mount-guard`
+  already proves one is available and carried across navigations), or revisiting the decision to
+  keep `mount` at one argument. Related to Q8.
 - **Per-item `:for` diffing** — a comprehension is one opaque dynamic slot today, so changing one
   row re-sends every row. The "coarser but correct" carve-out from Phase 6.
 - **Component-level wire diffs** — same shape, from Phase 8: a component's state change re-sends

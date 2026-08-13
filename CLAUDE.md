@@ -55,6 +55,12 @@ The demo (`../hatch-demo/src/web/routes.blsp`) serves:
   validates with `web/form` (`required?`, `matches-pattern?`); `:id` is the demo's one
   named-path-param route; the form's second button posts via `fetch` with the CSRF token
   as an `X-CSRF-Token` header instead of the hidden field
+- `GET /uploads` — multipart upload (in-memory + spooled-to-disk), stored in Postgres as
+  `bytea` and served back byte-faithfully; `GET /csrf-token` — CSRF bootstrap for clients
+  that can't be handed a token in their HTML (a live view has no Conn in `render`)
+- `GET /upload-progress` — live upload progress (web/upload): the bar is fed by the server
+  as it reads a multipart POST on a *different* connection, tied to the live session by an
+  `?upload_token=`
 - `GET /dev` — Basic-auth-gated diagnostics; `GET /slow` — slow-request logging demo
 - `GET /static/*` — static assets (+ `/static/brood_live.js`, the live client)
 
