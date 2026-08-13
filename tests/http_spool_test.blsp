@@ -58,7 +58,7 @@
     (let (me (self)
           dest "/tmp/hatch-spool-dest.bin"
           _ (try (delete-file dest) (catch _ nil))
-          port 24743
+          port 24832
           _sup (server/start port
                  (spool-save-handler dest me)
                  nil
@@ -80,7 +80,7 @@
           (assert= saved (into [] (bytes->list raw-body)))))))
   (test "a body under the threshold takes the buffered path (in-memory :body, no :body-file)"
     (let (me (self)
-          port 24744
+          port 24833
           _sup (server/start port
                  (fn (request)
                    (let (conn (build request))
