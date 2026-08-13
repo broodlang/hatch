@@ -1,0 +1,131 @@
+;; `web/live/live-conn` — the connection's read-only Conn, reachable from view code — and
+;; the `web/csrf` live accessors built on it.
+;;
+;; The unit cases below pin the nil behaviour, but the case that actually matters is the
+;; end-to-end one: `start-session` binds `*live-conn*` around the whole session loop, and
+;; nothing short of running a real session proves that binding reaches `render`. So that
+;; test drives a genuine WebSocket session over a loopback socket — accept, `start-session`
+;; in its own process, a masked client `join` frame in, the rendered join frame back out —
+;; with a signed session cookie on the upgrade request carrying a CSRF token.
+(defmodule web-live-conn-test
+  (:use web/live)
+  ; *live-conn* — bound directly in the unit cases, to test the accessors without a session
+  (:use-internals web/live)
+  (:alias web/csrf)
+  (:alias web/session)
+  (:alias web/conn)
+  (:use http/websocket)
+  (:use test))
+
+(def secret "test-secret-for-live-conn-cases-0123456789")
+
+;; ---- the accessors, with and without a connection ----
+
+(describe "live-conn outside a live session"
+  (test "is nil — a web/test driver calls spec functions directly, with no session"
+    (assert= (live-conn) nil))
+  (test "live-token is nil rather than throwing on the absent conn"
+    (assert= (csrf/live-token secret) nil))
+  (test "live-csrf-input renders nothing rather than an empty, rejectable field"
+    (assert= (csrf/live-csrf-input secret) nil)))
+
+(defn conn-with-session (data)
+  "A synthetic Conn whose Cookie header carries `data` as a signed session — what the
+  browser sends on the WebSocket upgrade once an HTTP request has set the cookie."
+  (let (signed (session/encode-session secret data))
+    (conn/build {:method "GET"
+                 :path "/"
+                 :query ""
+                 :params {}
+                 :headers {:cookie (str "_hatch_session=" signed)}
+                 :body ""})))
+
+(describe "live-token reads the session off the connection's Conn"
+  (test "returns the token the signed session cookie carries"
+    (binding (*live-conn* (conn-with-session {"_csrf" "tok-abc"}))
+      (assert= (csrf/live-token secret) "tok-abc")))
+  (test "renders it as a hidden field"
+    (binding (*live-conn* (conn-with-session {"_csrf" "tok-abc"}))
+      (assert= (csrf/live-csrf-input secret)
+        [:input {:type "hidden" :name "_csrf_token" :value "tok-abc"}])))
+  (test "nil when the session carries no token — nothing minted it over HTTP yet"
+    (binding (*live-conn* (conn-with-session {"other" "x"}))
+      (assert= (csrf/live-token secret) nil)))
+  (test "nil for a session signed with a different secret (a forged cookie)"
+    (binding (*live-conn* (conn-with-session {"_csrf" "tok-abc"}))
+      (assert= (csrf/live-token "a-completely-different-secret-value-xyz") nil))))
+
+;; ---- end to end: a real session, proving start-session's binding reaches render ----
+
+; The view under test: its render simply emits whatever token the connection carries, so a
+; token in the rendered frame can only have come through *live-conn*.
+(deflive (mount (params) {:n 0})
+  (render (model)
+    [:div {} [:span {} (str "token=" (or (csrf/live-token secret) "none"))]]))
+
+(defn masked-text-frame (s)
+  "A masked client text frame carrying `s` (mask key all zeros, so the masked payload equals
+  the plaintext). Payload assumed < 126 bytes, which every frame here is."
+  (let (b (string->utf8-bytes s))
+    (bytes-concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+
+; A CLIENT-side frame reader. http/websocket's `parse-frame` is the server's parser and
+; enforces that client frames are masked (RFC 6455), so it rejects a server->client frame,
+; which is unmasked by rule. Decoding one here is only a few bytes of arithmetic: FIN+opcode,
+; then a 7-bit length or the 126 escape into a 16-bit one, then the payload.
+(defn frame-payload (buf)
+  "`[:ok text]` once `buf` holds a whole unmasked server frame, else `[:incomplete]`."
+  (if (< (count buf) 2)
+    [:incomplete]
+    (let (len7 (byte-at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126)
+                (+ (* 256 (byte-at buf 2)) (byte-at buf 3))
+                len7))
+      (if (< (count buf) (+ header len))
+        [:incomplete]
+        [:ok (utf8-bytes->string (subbytes buf header (+ header len)))]))))
+
+(defn read-frame (sock buf)
+  "Block until one complete server frame is buffered; return its payload as text."
+  (match (frame-payload buf)
+    ([:ok text] text)
+    ([:incomplete] (receive
+                     ([:tcp ^sock chunk] (read-frame sock (bytes-concat buf chunk)))
+                     ([:tcp-closed ^sock] :closed)
+                     (after 3000 :timeout)))))
+
+(describe "a real live session exposes its Conn to render"
+  :isolated
+  (test "render reads the CSRF token off the connection the client actually opened"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (client (tcp-connect "127.0.0.1" port)
+            server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-set-binary server true)
+        (tcp-set-binary client true)
+        ; the upgrade request the browser would send, carrying the signed session cookie
+        ; a prior HTTP request through the CSRF pipeline had set
+        (let (signed (session/encode-session secret {"_csrf" "live-token-xyz"})
+              request {:method "GET"
+                       :path "/live/ws/probe"
+                       :query ""
+                       :params {}
+                       :headers {:cookie (str "_hatch_session=" signed)}
+                       :body ""}
+              entry {:spec (fn () (live-spec)) :session "customer"})
+          ; The session owns the server socket, so it must run in its own process — and it
+          ; must not start reading until ownership has actually transferred, or the client's
+          ; frames land in THIS process's mailbox and the session waits forever. So the
+          ; spawned process blocks on a go-ahead we send only after the handoff.
+          (let (pid (spawn (receive ([:go] (start-session server request entry)))))
+            (tcp-controlling-process server pid)
+            (send pid [:go]))
+          (tcp-send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+          (let (frame (read-frame client (bytes [])))
+            (tcp-close client)
+            (tcp-close ls)
+            ; the join frame carries the rendered statics; the token came from the cookie,
+            ; through *live-conn*, into render — with no plug pipeline anywhere in between
+            (assert= (string? frame) true)
+            (assert= (includes? frame "live-token-xyz") true)))))))

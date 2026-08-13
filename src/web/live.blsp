@@ -424,6 +424,42 @@
   "Cancel the given interval timers — used when a session swaps to a different view."
   (dolist (h handles) (cancel-timer h)))
 
+;; ---- the connection's Conn, reachable from view code ----------------------------------
+;; A live view's `mount`/`render`/handlers take only their own arguments, so until now the
+;; read-only Conn built from the WebSocket upgrade request was reachable *only* by
+;; `on-mount-guard`, which is handed it explicitly. That left a real hole: anything a view
+;; needs to know about the connection itself — the session cookie, and through it the CSRF
+;; token, the request headers, the peer address — was simply unavailable, and the workaround
+;; (an HTTP endpoint the page fetches to bootstrap the value) is boilerplate every app would
+;; rewrite.
+;;
+;; Rather than widen `mount`/`render`'s signature — a breaking change to every existing view,
+;; for something most views never touch, and one the `LiveModule` behaviour already had to be
+;; contorted for once (see the `&optional` arity wart) — the Conn is exposed as a dynamic
+;; binding, bound ONCE around the whole session loop in `start-session`. It is therefore in
+;; scope for every hook the session ever runs (`mount`, `render`, `handle-event`,
+;; `handle-info`, `handle-tick`, `handle-params`, `unmount`) with no per-call-site plumbing,
+;; and it costs a view that never asks for it nothing.
+;;
+;; One binding frame per session, not per iteration: the receive loop recurses to itself,
+;; inside the binding, and never returns through it.
+
+(defdyn *live-conn* nil)
+
+(defn live-conn ()
+  "The read-only Conn for this live session's connection — built once from the WebSocket
+  upgrade request (so its cookies and headers are the ones the browser sent when it
+  connected) and carried unchanged across live-navigations, which reuse the same socket.
+
+  Callable from any live-view hook. Returns nil outside a live session — including in a
+  `web/test` driver, which calls a spec's functions directly rather than running a session —
+  so a view that reads it must tolerate nil rather than assume a connection.
+
+  It is deliberately a *read-only* view of the connection: a WebSocket has no response to
+  attach a `Set-Cookie` to, so nothing written onto this Conn can reach the client. Read
+  from it (see `web/csrf/live-token`); don't try to mutate the session through it."
+  *live-conn*)
+
 (defn send-safely (pid msg)
   "Send `msg` to `pid`, swallowing a failure — the shared delivery guarantee behind
   `send-info` and `web/component/send-update`: a fan-out caller (a PubSub/Presence
@@ -923,8 +959,12 @@
                       ; the session's live per-id LiveComponent state (web/component); lives
                       ; for the socket's lifetime, reset on live-navigate
                       :components (table)}))
+          ; Bind the connection's Conn for the whole session — every hook the loop ever runs
+          ; is inside this frame, so `(live-conn)` works in mount/render/handlers without
+          ; widening any signature (see *live-conn* above). The loop recurses to itself
+          ; inside the binding, so this is one frame for the socket's lifetime.
           ; the bytes-native frame parser reads a `bytes` buffer — start empty
-          (session-loop sock view (bytes []))))))
+          (binding (*live-conn* conn) (session-loop sock view (bytes [])))))))
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
 ; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
