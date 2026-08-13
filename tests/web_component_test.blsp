@@ -23,20 +23,20 @@
 (describe "render-slot"
   (test "mounts on first render, wrapping the component's HTML in [data-cid]"
     (let (t (table)
-          html (render-slot 'web-component-test live-component-spec {"id" "c1" "start" 3} t))
+          html (render-slot-html 'web-component-test live-component-spec {"id" "c1" "start" 3} t))
       (assert= html "<div data-cid=\"c1\"><span>3</span></div>")
       (assert= (get (table-get t "c1") :state) {:n 3})))
   (test "reuses stored state on later renders, ignoring changed assigns"
     (let (t (table))
       (render-slot 'web-component-test live-component-spec {"id" "c2" "start" 1} t)
-      (assert= (render-slot 'web-component-test live-component-spec {"id" "c2" "start" 99} t)
+      (assert= (render-slot-html 'web-component-test live-component-spec {"id" "c2" "start" 99} t)
         "<div data-cid=\"c2\"><span>1</span></div>")))
   (test "a different module reusing the same id remounts fresh instead of reusing foreign state"
     (let (t (table))
       (render-slot 'web-component-test live-component-spec {"id" "shared" "start" 1} t)
       ; a different (fictitious) module claims the same id — same spec shape here just to
       ; keep the fixture simple, but a distinct :module tag is what actually matters
-      (assert= (render-slot 'some-other-module live-component-spec {"id" "shared" "start" 7} t)
+      (assert= (render-slot-html 'some-other-module live-component-spec {"id" "shared" "start" 7} t)
         "<div data-cid=\"shared\"><span>7</span></div>")
       (assert= (get (table-get t "shared") :module) 'some-other-module))))
 
@@ -47,7 +47,7 @@
       (dispatch-event t "c3" "bump" {})
       (assert= (get (table-get t "c3") :state) {:n 1})
       ; the next render picks up the mutated state
-      (assert= (render-slot 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
+      (assert= (render-slot-html 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
         "<div data-cid=\"c3\"><span>1</span></div>")))
   (test "a stale/unknown cid is a safe no-op"
     (assert= (dispatch-event (table) "nope" "bump" {}) nil)))

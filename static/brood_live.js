@@ -92,8 +92,9 @@ const BroodLive = (() => {
         this._patch(this._assemble());
       } else if (msg.event === "diff") {
         // Minimal update: a map of {slotIndex: newValue} for the dynamics that changed.
-        // A value is a string (scalar slot), a full comprehension `{__comp__:[…]}`, or a
-        // per-item comprehension diff `{__cdiff__:{i:html}, n}` — _applySlot folds each into
+        // A value is a string (scalar slot), a full comprehension `{__comp__:[…]}` or
+        // component `{__kslot__,s,d}`, or a per-slot diff of either (`{__cdiff__:{i:html},n}`
+        // / `{__kdiff__:{i:value},cid}`) — _applySlot folds each into
         // our dynamics array. Then re-interleave with the (unchanged) statics and morph.
         const d = msg.d || {};
         for (const k in d) this.dynamics[k] = this._applySlot(this.dynamics[k], d[k]);
@@ -121,16 +122,39 @@ const BroodLive = (() => {
       }
     }
 
-    // The HTML for one dynamic slot value: a comprehension slot ({__comp__:[items]}) joins
-    // its per-item HTML; a scalar slot is already its string; null/undefined render empty.
+    // The HTML for one dynamic slot value:
+    //   {__comp__:[items]}        a comprehension — join its per-item HTML
+    //   {__kslot__, s, d}         a LiveComponent — weave its OWN statics and dynamics,
+    //                             exactly as _assemble does for the top level. Its wrapper
+    //                             <div data-cid> is baked into s[0]/s[n] server-side, so
+    //                             there is no wrapper rule here to drift from the server's.
+    //                             Recursive: a component's inner slots may be comprehensions
+    //                             or further components.
+    //   anything else             already an HTML string; null/undefined render empty.
     _slotHtml(v) {
       if (v && v.__comp__) return v.__comp__.join("");
+      if (v && v.__kslot__) return this._weave(v.s || [], v.d || []);
       return v == null ? "" : v;
     }
 
-    // Fold a diff value for slot `k` onto its previous value. A `{__cdiff__, n}` patches the
-    // previous comprehension's item array in place (set changed items, grow/shrink to n);
-    // anything else (a string, or a full `{__comp__}`) replaces the slot outright.
+    // Interleave statics with rendered dynamics: s0 + d0 + s1 + d1 + ... + sn.
+    // (statics has one more entry than dynamics.)
+    _weave(s, d) {
+      let out = "";
+      for (let i = 0; i < s.length; i++) {
+        out += s[i];
+        if (i < d.length) out += this._slotHtml(d[i]);
+      }
+      return out;
+    }
+
+    // Fold a diff value for slot `k` onto its previous value.
+    //   {__cdiff__, n}   patch the previous comprehension's item array (set changed items,
+    //                    grow/shrink to n)
+    //   {__kdiff__, cid} patch a LiveComponent's own dynamics, keeping its statics — the
+    //                    component shipped only the inner slots that changed. Folded
+    //                    recursively, so an inner comprehension still diffs per item.
+    //   anything else    (a string, or a full {__comp__} / {__kslot__}) replaces the slot
     _applySlot(prev, val) {
       if (val && val.__cdiff__ !== undefined) {
         const items = (prev && prev.__comp__) ? prev.__comp__.slice() : [];
@@ -139,19 +163,24 @@ const BroodLive = (() => {
         items.length = val.n; // grow (new items are all in `changed`) or shrink
         return { __comp__: items };
       }
+      if (val && val.__kdiff__ !== undefined) {
+        // Without a previous component slot there are no statics to weave against, so the
+        // patch is unusable — keep what we have rather than render a half component. The
+        // server only sends a __kdiff__ when its own previous slot was the same cid, so this
+        // is a defensive branch, not an expected one.
+        if (!prev || !prev.__kslot__ || prev.cid !== val.cid) return prev;
+        const d = (prev.d || []).slice();
+        const changed = val.__kdiff__ || {};
+        for (const j in changed) d[j] = this._applySlot(d[j], changed[j]);
+        return { __kslot__: true, cid: prev.cid, s: prev.s, d };
+      }
       return val;
     }
 
     // Assemble the full HTML by interleaving statics with the current dynamics:
     // s0 + d0 + s1 + d1 + ... + sn  (statics has one more entry than dynamics).
     _assemble() {
-      const s = this.statics || [], d = this.dynamics || [];
-      let out = "";
-      for (let i = 0; i < s.length; i++) {
-        out += s[i];
-        if (i < d.length) out += this._slotHtml(d[i]);
-      }
-      return out;
+      return this._weave(this.statics || [], this.dynamics || []);
     }
 
     // Morph the container's content to the new HTML in place (so focus/caret survive

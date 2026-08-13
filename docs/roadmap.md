@@ -42,7 +42,9 @@ trade-offs behind them — is archived in
 | Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
-Since 0.4.2, `web/live/live-conn` also exposes the connection's read-only Conn to view code
+Per-item `:for` diffing and per-component wire diffs are both in: a changed row ships that row,
+and a changed component ships only its own changed inner slots. Since 0.4.2,
+`web/live/live-conn` also exposes the connection's read-only Conn to view code
 (a dynamic binding set once per session, so no hook signature changed), and `web/csrf` grew
 `live-token`/`live-csrf-input` on top of it — closing the gap where a live view had no way to
 render a CSRF token for a POST to a protected route.
@@ -66,10 +68,12 @@ appetite.
   shipped in brood **0.3.10**. `worker-read-head` and the three body drains can each now drop
   their hand-rolled `receive` loop for a single call. Still only a line-count win — the loops
   are already O(n) and already answer 408/413 — so it is cleanup, not a fix.
-- **Per-item `:for` diffing** — a comprehension is one opaque dynamic slot today, so changing one
-  row re-sends every row. The "coarser but correct" carve-out from Phase 6.
-- **Component-level wire diffs** — same shape, from Phase 8: a component's state change re-sends
-  its whole slot's HTML rather than a minimal patch. Also no component-level `tick`.
+- **No component-level `tick`** — the remaining half of the Phase 8 carve-out (the wire-diff
+  half shipped 2026-08-13). A parent's own tick can `send-update` if a component needs periodic
+  refresh, which covers most of it.
+- **Components nested in `(if …)`/`(for …)` still diff coarsely** — such a component is part of
+  its enclosing opaque dynamic and re-sends whole. The same carve-out that applies to anything
+  inside a conditional; a *direct* component hole now diffs per inner slot.
 - **Slot fingerprints on reconnect** — let a reconnecting client keep its statics instead of
   re-receiving them (Phase 6, "Option A++").
 - **Q10, still undecided** — head updates: a `[:set-title]` effect, or a `<head>` slot in the

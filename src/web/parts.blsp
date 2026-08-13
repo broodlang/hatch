@@ -22,10 +22,10 @@
   an attrs map on every element, so this fallback rarely fires.
 
   A `(component module assigns)` form (web/component's LiveComponents) gets its own dynamic
-  hole via `web/component/render-slot` rather than falling into the generic opaque-dynamic
-  case — same granularity (one opaque slot; a component doesn't yet get its own wire-level
-  diff — v1 scope, see web/component's docstring) but a distinct compiled form so render-slot
-  can thread the session's live component table through. Its change-tracking dependency is
+  hole via `web/component/render-slot`, which returns a *component slot* carrying the
+  component's own statics and dynamics — so a component diffs per inner slot, independently of
+  its parent, the same way a comprehension diffs per item (see both slot types below). The
+  compiled form also threads the session's live component table through. Its change-tracking dependency is
   always `:all` (see `deps-of`'s `live-components` case) — a component's own state can change
   (via `web/component/send-update` or its own event) without any `model` key changing at all,
   so the slot must always be considered dirty; there's no way to pin it to specific keys.
@@ -80,6 +80,13 @@
   (web/component), compiled to its own dynamic hole instead of falling through to the
   generic opaque-dynamic case (walk's else branch)."
   (and (pair? node) (= (first node) 'component)))
+
+(defn component-slot-form-html (node)
+  "`component-slot-form`'s HTML-returning twin, for `rewrite-components` — the paths that need
+  a string rather than a diffable slot value (a view's plain `render`, and any component nested
+  inside an `(if …)`/`(for …)`, which is part of one opaque dynamic anyway)."
+  (let (f (component-slot-form node))
+    (cons 'web/component/render-slot-html (rest f))))
 
 (defn component-slot-form (node)
   "The generated call for a `(component module assigns)` hole: resolves `module` to its
@@ -179,7 +186,7 @@
 
 (defn rewrite-components (form)
   "Recursively replace every `(component module assigns)` sub-form of `form` with its
-  compiled `web/component/render-slot` call, wrapped in `web/template/raw` so the
+  compiled `web/component/render-slot-html` call, wrapped in `web/template/raw` so the
   already-rendered HTML isn't re-escaped as text. `component-form?`'s top-level case in
   `walk` only catches a component that's a *direct* child of an element or `(list …)`; a
   component nested inside anything else — `(if …)`, `(for …)`, a component call — falls
@@ -190,7 +197,7 @@
   marker). Also used to fix up deflive's plain, non-split `render`, which composes
   render-static + render-dynamic rather than re-walking render-expr itself (see deflive)."
   (cond
-    (component-form? form) (list 'web/template/raw (component-slot-form form))
+    (component-form? form) (list 'web/template/raw (component-slot-form-html form))
     (pair? form) (map rewrite-components form)
     (vector? form) (mapv rewrite-components form)
     else form))
@@ -257,10 +264,40 @@
   "The per-item HTML string vector of a comprehension slot value."
   (get v :__comp__))
 
+; ---- component slots (per-component diffing) ----
+; A `(component …)` hole renders to the component's OWN static/dynamic split rather than one
+; opaque HTML string, so a component whose state changed ships only its changed inner slots
+; — not its whole subtree, and not the parent's. Structurally it is the comprehension slot's
+; twin: a tagged value the runtime knows how to render whole and how to diff against its
+; previous self.
+;
+; The `[:div {:data-cid id} …]` wrapper is baked into the component's own statics (first and
+; last), NOT re-applied at render time. That is what lets both sides treat a component slot as
+; "just another statics/dynamics pair": `weave` alone reproduces the wrapper, and
+; brood_live.js reuses the exact interleave it already runs for the top-level render instead
+; of needing wrapper logic that could drift from the server's.
+;
+; On the wire: `{"__kslot__":true,"cid":id,"s":[…],"d":[…]}` on join (or whenever a slot
+; becomes a component), and `{"__kdiff__":{inner-idx:value},"cid":id}` on update.
+
+(defn component-slot (cid statics dynamics)
+  "Tag a rendered component as one slot value carrying its own static/dynamic split, so the
+  runtime diffs it per inner slot instead of as one opaque string. `statics` must already
+  carry the `data-cid` wrapper (see the note above)."
+  {:__kslot__ true :cid cid :s (into [] statics) :d (into [] dynamics)})
+
+(defn kslot? (v)
+  "True if `v` is a component slot value (from `component-slot`)."
+  (and (map? v) (contains? v :__kslot__)))
+
 (defn slot->html (v)
-  "The HTML for a rendered slot value: a comprehension slot joins its items; a scalar slot
-  is already its HTML string."
-  (if (comp? v) (join "" (comp-items v)) v))
+  "The HTML for a rendered slot value: a comprehension slot joins its items, a component slot
+  weaves its own statics and dynamics (recursively — a component's inner slots may themselves
+  be comprehensions or nested components), and a scalar slot is already its HTML string."
+  (cond
+    (comp? v) (join "" (comp-items v))
+    (kslot? v) (weave (get v :s) (get v :d))
+    else v))
 
 ; ---- runtime: assemble HTML and diff dynamic slots ----
 
@@ -302,12 +339,20 @@
           (assoc acc i (slot-diff (if (< i (count old)) (nth old i) nil) nv)))))))
 
 (defn slot-diff (o nv)
-  "The wire value for a changed slot: a per-item comprehension diff when both old and new
-  are comprehensions, else the whole new value (a string, or a full comprehension marker
-  when a slot just became — or was replaced by — a comprehension)."
-  (if (and (comp? o) (comp? nv))
-    (comp-slot-diff (comp-items o) (comp-items nv))
-    nv))
+  "The wire value for a changed slot: a per-item diff when both old and new are
+  comprehensions, a per-inner-slot diff when both are the *same* component, else the whole
+  new value (a string, or a full comprehension/component marker when a slot just became — or
+  was replaced by — one).
+
+  The component case is gated on the cid matching: a slot holding a *different* component
+  than last render shares nothing with it, so patching one's inner slots onto the other's
+  would splice two unrelated renders together. Same reasoning as `render-slot`'s
+  module-mismatch remount."
+  (cond
+    (and (comp? o) (comp? nv)) (comp-slot-diff (comp-items o) (comp-items nv))
+    (and (kslot? o) (kslot? nv) (= (get o :cid) (get nv :cid)))
+      {:__kdiff__ (diff-dynamics (get o :d) (get nv :d)) :cid (get nv :cid)}
+    else nv))
 
 (defn comp-slot-diff (old-items new-items)
   "A per-item diff of a comprehension slot: `{:__cdiff__ {item-idx html} :n new-count}` —
