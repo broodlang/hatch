@@ -33,7 +33,9 @@
   `weave` and `diff-dynamics` are the runtime helpers the session actor uses."
   ; render / render-attr / escape-html / *void-tags* — reused at compile time and in the
   ; emitted dynamic forms
-  (:use web/template))
+  (:use web/template)
+  ; sha256 — the statics fingerprint a reconnecting client replays
+  (:alias hash))
 
 ; ---- compile-time predicates ----
 
@@ -314,6 +316,22 @@
     (let (acc (cons (nth statics i) acc)
           acc (if (< i (count dynamics)) (cons (slot->html (nth dynamics i)) acc) acc))
       (weave-at statics dynamics (+ i 1) n acc))))
+
+(defn statics-fingerprint (statics)
+  "A short, stable fingerprint of a view's static segments — the identity of its *template*,
+  independent of any model.
+
+  A live client caches the statics it was sent and replays this fingerprint on a reconnect
+  join; when it matches, the server omits them from the join frame and the client reuses what
+  it already holds (see `web/live/push-full`). The statics are the bulk of a join — a page's
+  whole literal skeleton — so a flaky connection stops re-downloading its own markup on every
+  drop.
+
+  The count is folded in ahead of the segments so that two different splits which happen to
+  concatenate alike can't collide, and the NUL separator can't occur in rendered HTML.
+
+  (hatch/web/parts/statics-fingerprint [\"<p>\" \"</p>\"]) ;=> \"f461e62bd2db8219\""
+  (substring (hash/sha256 (str (count statics) "\x00" (join "\x00" statics))) 0 16))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole

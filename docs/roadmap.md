@@ -42,8 +42,9 @@ trade-offs behind them — is archived in
 | Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
-Per-item `:for` diffing and per-component wire diffs are both in: a changed row ships that row,
-and a changed component ships only its own changed inner slots. Since 0.4.2,
+Per-item `:for` diffing, per-component wire diffs and reconnect statics-caching are all in: a
+changed row ships that row, a changed component ships only its own changed inner slots, and a
+reconnecting client that still holds the page skeleton is not sent it again. Since 0.4.2,
 `web/live/live-conn` also exposes the connection's read-only Conn to view code
 (a dynamic binding set once per session, so no hook signature changed), and `web/csrf` grew
 `live-token`/`live-csrf-input` on top of it — closing the gap where a live view had no way to
@@ -74,8 +75,6 @@ appetite.
 - **Components nested in `(if …)`/`(for …)` still diff coarsely** — such a component is part of
   its enclosing opaque dynamic and re-sends whole. The same carve-out that applies to anything
   inside a conditional; a *direct* component hole now diffs per inner slot.
-- **Slot fingerprints on reconnect** — let a reconnecting client keep its statics instead of
-  re-receiving them (Phase 6, "Option A++").
 - **Q10, still undecided** — head updates: a `[:set-title]` effect, or a `<head>` slot in the
   layout? (See *Open design questions*.)
 

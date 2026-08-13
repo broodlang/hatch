@@ -15,6 +15,8 @@
   (:alias web/session)
   (:alias web/conn)
   (:use http/websocket)
+  ; statics-fingerprint — the reconnect negotiation the cases below drive
+  (:alias web/parts)
   (:use test))
 
 (def secret "test-secret-for-live-conn-cases-0123456789")
@@ -94,6 +96,60 @@
                      ([:tcp ^sock chunk] (read-frame sock (bytes-concat buf chunk)))
                      ([:tcp-closed ^sock] :closed)
                      (after 3000 :timeout)))))
+
+(defn join-frame (sfp)
+  "A client `join` frame, optionally claiming cached statics by fingerprint."
+  (if (nil? sfp)
+    "{\"event\":\"join\",\"params\":{}}"
+    (str "{\"event\":\"join\",\"params\":{},\"f\":\"" sfp "\"}")))
+
+(defn run-session (request-headers sfp)
+  "Open a real live session, send one join frame (claiming `sfp` if given), and return the
+  server's join frame as text."
+  (let (ls (tcp-listen "127.0.0.1" 0)
+        port (tcp-local-port ls))
+    (let (client (tcp-connect "127.0.0.1" port)
+          server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+      (tcp-set-binary server true)
+      (tcp-set-binary client true)
+      (let (request {:method "GET"
+                     :path "/live/ws/probe"
+                     :query ""
+                     :params {}
+                     :headers request-headers
+                     :body ""}
+            entry {:spec (fn () (live-spec)) :session "customer"}
+            pid (spawn (receive ([:go] (start-session server request entry)))))
+        (tcp-controlling-process server pid)
+        (send pid [:go])
+        (tcp-send client (masked-text-frame (join-frame sfp)))
+        (let (frame (read-frame client (bytes [])))
+          (tcp-close client)
+          (tcp-close ls)
+          frame)))))
+
+(describe "statics fingerprinting on reconnect"
+  :isolated
+  ; The statics are the bulk of a join — the page's whole literal skeleton — so a reconnecting
+  ; client that still holds them shouldn't be sent them again. It replays the fingerprint the
+  ; server issued; a match means "keep what you have".
+  (test "a first join carries the statics and the fingerprint that names them"
+    (let (frame (run-session {} nil))
+      (assert= (includes? frame "\"s\":[") true)
+      (assert= (includes? frame "\"f\":\"") true)))
+  (test "a join claiming the current fingerprint gets the dynamics without the statics"
+    (let (fp (web/parts/statics-fingerprint render-static)
+          frame (run-session {} fp))
+      (assert= (includes? frame "\"s\":[") false)
+      (assert= (includes? frame "\"d\":[") true)
+      (assert= (includes? frame (str "\"f\":\"" fp "\"")) true)))
+  (test "a stale fingerprint (a changed template, another view) still gets the statics"
+    (let (frame (run-session {} "0000000000000000"))
+      (assert= (includes? frame "\"s\":[") true)))
+  (test "the fingerprint the server issues is the one for THIS view's statics"
+    (let (frame (run-session {} nil))
+      (assert= (includes? frame (str "\"f\":\"" (web/parts/statics-fingerprint render-static) "\""))
+        true))))
 
 (describe "a real live session exposes its Conn to render"
   :isolated

@@ -496,13 +496,13 @@
   "From inside a live handler, navigate the client to `path` over the live socket — the
   server-initiated equivalent of the user clicking a `data-nav` link (a live view morphs in
   place, a non-live path falls back to a full load), with the address bar updated."
-  (send (self) [:push-effect {:event "nav" :path path}])
+  (send (self) [:push-effect {:event "nav" :path path :sfp nil}])
   nil)
 
 (defn push-redirect (url)
   "From inside a live handler, force the client to do a full page load to `url` (leaving the
   live socket) — e.g. after logout, or to cross a live-session/auth boundary."
-  (send (self) [:push-effect {:event "redirect" :path url}])
+  (send (self) [:push-effect {:event "redirect" :path url :sfp nil}])
   nil)
 
 (defn flush-effects (sock)
@@ -559,11 +559,19 @@
       (push-diff sock view buf))))
 
 (defn push-full (sock view buf)
-  "Send the whole view — `{:event \"join\" :s statics :d dynamics}` — and record the dynamic
-  slots (and the model they were rendered from) so later updates diff and change-track
-  against them. The client assembles the HTML and morphs. Any `(component …)` holes
-  read/write the session's live component table (`:components`) as they render — see
-  web/component."
+  "Send the whole view — `{:event \"join\" :s statics :d dynamics :f fingerprint}` — and record
+  the dynamic slots (and the model they were rendered from) so later updates diff and
+  change-track against them. The client assembles the HTML and morphs. Any `(component …)`
+  holes read/write the session's live component table (`:components`) as they render — see
+  web/component.
+
+  **Statics are omitted when the client already has them.** A reconnecting client replays the
+  fingerprint of the statics it cached (`:client-sfp`, off its join frame); if it matches this
+  view's, the frame carries only `:d` and `:f`, and the client reuses what it holds. The
+  statics are the bulk of a join — a page's entire literal skeleton — so a flaky connection
+  stops re-downloading its own markup on every drop. A mismatch (a first connect, a
+  live-navigate to a different view, a hot-reloaded template) sends them as usual, so the
+  client can never be left weaving against a stale skeleton."
   (let (statics (get view :render-static)
         model (get view :model)
         ; Guard the render like every other view hook: a template that throws (a nil deref, a
@@ -574,9 +582,16 @@
                    (catch e (live-handler-error "render" :render e nil))))
     (if (nil? dynamics)
       (close-session sock view)
-      (let (view (assoc view :dynamics dynamics :render-model model))
-        (if (send-msg sock {:event "join" :s statics :d dynamics})
-          (session-recv sock view buf)
+      (let (view (assoc view :dynamics dynamics :render-model model)
+            fp (web/parts/statics-fingerprint statics)
+            ; the client's claim is consumed by this join and not carried forward: a later
+            ; re-join on the same socket (a live-navigate) is a fresh negotiation
+            cached? (= fp (get view :client-sfp))
+            frame (if cached?
+                    {:event "join" :d dynamics :f fp}
+                    {:event "join" :s statics :d dynamics :f fp}))
+        (if (send-msg sock frame)
+          (session-recv sock (dissoc view :client-sfp) buf)
           (close-session sock view))))))
 
 (defn slot-dirty? (dep old-model model)
@@ -657,7 +672,7 @@
   `path`) and close the socket. Used when an `on-mount-guard` vetoes a fresh connect, before
   any session state exists — so there's no live-registry registration to undo, unlike
   `close-session`."
-  (try (send-msg sock {:event "redirect" :path path}) (catch _ nil))
+  (try (send-msg sock {:event "redirect" :path path :sfp nil}) (catch _ nil))
   (close-socket sock))
 
 (defn redirect-and-continue (sock view buf path)
@@ -666,7 +681,7 @@
   keep listening on the *current*, still-live `view` — the socket doesn't have to
   cross the boundary itself, the browser's own reload does. A failed send means the peer
   is already gone, so end the session instead."
-  (if (send-msg sock {:event "redirect" :path path})
+  (if (send-msg sock {:event "redirect" :path path :sfp nil})
     (session-recv sock view buf)
     (close-session sock view)))
 
@@ -781,19 +796,22 @@
   `\"x\"`, or `[1,2,3]`) would kill the session actor before `close-session` runs, leaking its
   registry entry and component table per connection.
 
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\"}
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\"}"
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}
+  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}"
   (let (decoded (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
         msg (if (map? decoded) decoded {})
         raw-params (get msg "params" {}))
     ; The frame carries every field the dispatcher routes on: `:event` (the frame type) and
-    ; `:params`, plus `:name`/`:cid` (a component-targeted event) and `:path` (a live navigate).
+    ; `:params`, plus `:name`/`:cid` (a component-targeted event), `:path` (a live navigate),
+    ; and `:sfp` (on a join: the fingerprint of the statics this client already holds, so
+    ; push-full can omit them — see statics-fingerprint).
     ; Decoding them ALL here is what keeps `session-dispatch` from reaching back to the raw map.
     {:event (get msg "event" "")
      :params (if (map? raw-params) raw-params {})
      :name (get msg "name" "")
      :cid (get msg "cid" nil)
-     :path (get msg "path" "")}))
+     :path (get msg "path" "")
+     :sfp (get msg "f" nil)}))
 
 (defn session-dispatch (sock view buf payload)
   ; `payload` is a `bytes` value (bytes-native parser) holding the client's UTF-8 JSON —
@@ -809,20 +827,24 @@
       ; session cleanly (no model to render) instead of crashing it. A SECOND `join` (a buggy
       ; or hostile client) is ignored: re-running `mount` would fire its side effects twice and
       ; skip unmount/generation-bump — a re-mount is what `navigate` is for.
-      ("join" (if (get view :mounted?)
-                (session-recv sock view buf)
-                (let (model (try
-                              ((get view :mount) params)
-                              (catch e (live-handler-error "mount" :mount e :hatch/mount-error))))
-                  (if (= model :hatch/mount-error)
-                    (close-session sock view)
-                    (push-update sock
-                      (assoc view
-                        :mounted? true
-                        :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
-                      buf
-                      "render"
-                      model)))))
+      ("join"
+        (if (get view :mounted?)
+          (session-recv sock view buf)
+          (let (model (try
+                        ((get view :mount) params)
+                        (catch e (live-handler-error "mount" :mount e :hatch/mount-error))))
+            (if (= model :hatch/mount-error)
+              (close-session sock view)
+              (push-update sock
+                (assoc view
+                  :mounted? true
+                  ; what statics this client says it still holds (nil on a first
+                  ; connect) — push-full drops them from the frame if they match
+                  :client-sfp (get frame :sfp)
+                  :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
+                buf
+                "render"
+                model)))))
       ; A component-targeted event carries a `cid` (brood_live.js reads the nearest
       ; ancestor's data-cid) — route it to that component's own handle-event instead of
       ; the parent's, and re-render with the parent's :model unchanged (the component's
