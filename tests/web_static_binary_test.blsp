@@ -108,7 +108,7 @@
           content (bytes [137 80 78 71 13 10 0 255 42 13 10 7]))
       (try (make-dir dir) (catch _ nil))
       (spit-bytes (str dir "/pic.png") content)
-      (let (port 24741
+      (let (port 24831
             _sup (server/start port (static-handler dir))
             client (tcp-connect "127.0.0.1" port))
         (tcp-set-binary client true)

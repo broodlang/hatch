@@ -146,6 +146,15 @@
 
 ; Tier-3 (docs/robustness.md): the route table survives the registry process crashing —
 ; it mirrors to a supervised vault and re-seeds from it on restart.
+(defn wait-live-route (path tries)
+  "Poll until `path` resolves in the route registry again (after a supervised restart), or
+  give up after `tries` x 10ms and return whatever the last lookup gave."
+  (let (e (lookup-live path))
+    (cond
+      (not (nil? e)) e
+      (<= tries 0) e
+      else (do (sleep 10) (wait-live-route path (- tries 1))))))
+
 (describe "live-route registry survives a crash"
   :isolated
   (test "a registered route is still there after the registry process is killed"
@@ -154,9 +163,9 @@
       (assert= (get (lookup-live "/crash-test") :session) :customer)
       ; hard-kill the route registry; the supervisor restarts it and it re-seeds from the vault
       (exit (whereis :hatch-live-routes) :kill)
-      ; wait for the supervised restart + re-seed (lookup itself also waits out the window)
-      (sleep 80)
-      (let (e (lookup-live "/crash-test"))
+      ; Poll for the supervised restart + re-seed rather than sleeping a guessed 80ms: the
+      ; restart is async w.r.t. the kill, so a fixed wait is a race on a loaded machine.
+      (let (e (wait-live-route "/crash-test" 200))
         (assert= (nil? e) false)
         (assert= ((get e :spec)) {:ok true})
         (assert= (get e :session) :customer)))))

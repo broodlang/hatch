@@ -189,15 +189,24 @@
       (assert= (includes? final "body=hello") true))))
 
 ; Tier-2 (docs/robustness.md): graceful shutdown drains in-flight connections.
+(defn slow-handler (reporter ms)
+  "A handler that reports it has STARTED, then takes `ms` to finish. The report is what makes
+  the graceful-stop tests deterministic: `stop` must be called while a request is genuinely
+  in flight, and sleeping a guessed interval to `hope` the worker got there loses that race on
+  a loaded machine (the worker may not exist yet, so there is nothing to drain)."
+  (fn (_req)
+    (send reporter [:handler-started])
+    (sleep ms)
+    {:status 200 :headers {} :body "done"}))
+
 (describe "graceful stop lets an in-flight request finish"
   (test "a request already running when stop is called still gets its response"
     (let (me (self)
-          port 24743
-          _sup (server/start port
-                 (fn (_req) (do (sleep 200) {:status 200 :headers {} :body "done"})))
+          port 24834
+          _sup (server/start port (slow-handler me 200))
           _c (spawn (report-response port me))
-          ; let the request reach the (slow) handler
-          _wait (sleep 60)
+          ; wait for the handler to actually be running — not a guessed interval
+          _started (receive ([:handler-started] :ok) (after 5000 :timeout))
           ; drains: blocks until the in-flight worker finishes
           _stop (server/stop port)
           resp (receive ([:resp r] r) (after 3000 :timeout)))
@@ -208,12 +217,10 @@
   (test "a request still running after the grace window is cut off"
     (let (me (self)
           port 24744
-          _sup (server/start port
-                 (fn (_req) (do (sleep 1000) {:status 200 :headers {} :body "done"}))
-                 nil
-                 {:shutdown-grace-ms 100})
+          _sup (server/start port (slow-handler me 1000) nil {:shutdown-grace-ms 100})
           _c (spawn (report-response port me))
-          _wait (sleep 60)
+          ; wait for the handler to actually be running — not a guessed interval
+          _started (receive ([:handler-started] :ok) (after 5000 :timeout))
           ; grace 100ms < 1000ms handler → worker killed
           _stop (server/stop port)
           resp (receive ([:resp r] r) (after 3000 :timeout)))
@@ -267,6 +274,13 @@
 ; restarted). The listener's own monitor still drives drain + the max-connections cap.
 (require 'proc/supervisor)
 
+(defn wait-unregistered (nm tries)
+  "Poll until `nm` is no longer registered — true if it went away within `tries` x 10ms."
+  (cond
+    (nil? (whereis nm)) true
+    (<= tries 0) false
+    else (do (sleep 10) (wait-unregistered nm (- tries 1)))))
+
 (describe "connection workers are supervised and observable"
   (test "a live keep-alive connection shows up as a supervised worker"
     (let (port 24771
@@ -287,8 +301,10 @@
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
           up? (pid? (whereis (server/worker-supervisor-name port)))
           _ (server/stop port)
-          _ (sleep 50)
-          down? (nil? (whereis (server/worker-supervisor-name port))))
+          ; POLL rather than sleeping a fixed 50ms: the teardown is async w.r.t. `stop`, so a
+          ; fixed wait is a race that loses every ~15th run on a loaded machine (observed).
+          ; Same shape as web_pubsub_test's wait-gone.
+          down? (wait-unregistered (server/worker-supervisor-name port) 100))
       (assert= up? true)
       (assert= down? true))))
 
@@ -307,7 +323,11 @@
           sock (tcp-connect "127.0.0.1" port)
           _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n")
           _ (sleep 150)
-          _ (tcp-send sock "X: y\r\n")
+          ; Best-effort: the point of this byte is to reset the IDLE timer mid-window and show
+          ; the deadline fires anyway. On a loaded machine the 150ms sleep can overshoot the
+          ; 250ms deadline, in which case the socket is already closed and this send would
+          ; raise — failing a test whose assertion (a 408) the server has in fact satisfied.
+          _ (try (tcp-send sock "X: y\r\n") (catch _e nil))
           resp (drain sock ""))
       (tcp-close sock)
       (server/stop port)
@@ -327,7 +347,8 @@
           sock (tcp-connect "127.0.0.1" port)
           _ (tcp-send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
           _ (sleep 150)
-          _ (tcp-send sock "C")
+          ; best-effort, same reason as the head-timeout case above
+          _ (try (tcp-send sock "C") (catch _e nil))
           resp (drain sock ""))
       (tcp-close sock)
       (server/stop port)

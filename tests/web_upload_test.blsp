@@ -74,6 +74,16 @@
                            (collect-progress acc2 (- tries 1)))))
       (after 5000 (reverse acc)))))
 
+(defn collect-for-token (token ms)
+  "Drain `:info` payloads for `ms`, returning only those carrying `token` — so an unrelated
+  event from a concurrently-running case can't be mistaken for one about this upload."
+  (receive
+    ([:info payload] (let (up (get payload :upload))
+                       (if (and up (= (get up :token) token))
+                         (cons up (collect-for-token token ms))
+                         (collect-for-token token ms))))
+    (after ms (list))))
+
 (defn ok-handler (reporter)
   (fn (_request)
     (send reporter [:handled])
@@ -183,13 +193,17 @@
       (tcp-send client
         (b (str "POST /up HTTP/1.1\r\n"
              "Host: x\r\n" "Content-Length: 10\r\n" "Connection: close\r\n\r\n" "0123456789")))
-      ; wait for the request to be fully handled, then check no progress arrived
+      ; wait for the request to be fully handled, then check no progress arrived FOR OUR
+      ; TOKEN. Deliberately not "no :info at all": these tests run concurrently and share the
+      ; pubsub registry, so a sibling's late event (or a subscription of ours not yet torn
+      ; down) can land in this mailbox without saying anything about the claim under test,
+      ; which is that an UNTOKENED upload emits nothing.
       (let (handled (receive ([:handled] :yes) (after 5000 :timeout))
             _resp (drain client "")
-            stray (receive ([:info p] p) (after 300 :none)))
+            stray (collect-for-token tok 300))
         (tcp-close client)
         (server/stop port)
         (unwatch tok)
         (detach-progress {:id hid})
         (assert= handled :yes)
-        (assert= stray :none)))))
+        (assert= stray (list))))))
