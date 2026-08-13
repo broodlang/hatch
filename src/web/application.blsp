@@ -18,6 +18,7 @@
                     (fn () (serve))]}))"
   (:use log :only [start-logger fn-backend])
   (:alias web/logger)
+  (:alias web/upload)
   (:use json :only [json-encode]))
 
 ;; ---- log formatters ---------------------------------------------------------
@@ -83,17 +84,23 @@
   `:access-log` — `true` to log one line per request (via `web/logger`), or an
                   opts map passed to `attach-access-log` (`:level`, `:id`, …).
                   Omit/`false` to skip. Starts telemetry if needed.
+  `:upload-progress` — `true` to push upload progress to live views (via
+                  `web/upload`), or an opts map passed to `attach-progress`.
+                  Omit/`false` to skip. Starts telemetry if needed.
   `:children`   — list of zero-arg fns called in order at startup (open DB,
                   boot endpoint, start background workers, …).
 
   Parks with `(receive (:shutdown nil))` after all children have started."
   (let (logger-opts (get config :logger nil)
         access-log (get config :access-log nil)
+        upload-progress (get config :upload-progress nil)
         children (get config :children []))
     (when logger-opts
       (start-logger logger-opts))
     (when access-log
       (web/logger/attach-access-log (if (map? access-log) access-log {})))
+    (when upload-progress
+      (web/upload/attach-progress (if (map? upload-progress) upload-progress {})))
     (start-children children 0)
     (receive (:shutdown nil))))
 

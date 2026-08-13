@@ -43,6 +43,10 @@
 ;   :spool-dir         — directory for spool temp files (default "/tmp"); each spooled
 ;                        request writes one `hatch-upload-<token>` file, deleted after the
 ;                        handler returns unless it moved it (see web/conn `save-body`)
+;   :progress-interval-ms — minimum gap between `[:hatch :upload :progress]` telemetry events
+;                        while reading one body (default 250). Only requests carrying an
+;                        `?upload_token=` query param report progress at all, so this costs
+;                        nothing for ordinary traffic; see web/upload for the consumer side.
 (def default-config
   {:read-timeout-ms 30000
    :head-timeout-ms 15000
@@ -54,7 +58,8 @@
    :tls nil
    :check-origin true
    :spool-threshold nil
-   :spool-dir "/tmp"})
+   :spool-dir "/tmp"
+   :progress-interval-ms 250})
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -466,6 +471,67 @@
 ; and `join` exactly once when the declared length is reached. Spooling (when enabled and over
 ; its threshold) streams to disk; this is the in-memory equivalent for bodies kept in memory.
 
+; ---- upload progress (opt-in, per request) ----
+; A body read can take a long time; a live view showing a progress bar needs to know how far
+; along it is. The HTTP layer must not know about live sessions, so the worker only *emits* —
+; one `[:hatch :upload :progress]` telemetry event, the same fire-and-forget seam the access
+; log rides (a `send` to the listener process; a handler can never slow or crash this worker).
+; `web/upload` is the consumer that turns those events into `handle-info` messages.
+;
+; Progress is opt-in per request and addressed by an `?upload_token=` query param, NOT a form
+; field: the head is parsed before a single body byte is read, so a query param is the only
+; part of the request we can see in time to report on the body's arrival. A request without
+; the param builds no progress state and emits nothing, so ordinary traffic is untouched.
+;
+; Only the two Content-Length paths report (in-memory `buffered-drain` and on-disk
+; `spool-drain`). A chunked body has no declared length, so there is no total to be a fraction
+; of — it is deliberately left out rather than reporting a percentage that can't exist.
+
+(def upload-token-param "upload_token")
+
+(defn upload-token (head)
+  "The `?upload_token=` value from a parsed request head, or nil when absent — the opt-in
+  marker that makes a body read report its progress."
+  (get (parse-query (get head :query "")) upload-token-param))
+
+(defn- progress-begin
+  (config head clen)
+  "Progress state for one body read — `{:token :total :next}` (`:next` is the epoch-ms the next
+  event is due) — or nil when this request didn't ask for progress, which switches every
+  `progress-tick` below off at zero cost."
+  (let (tok (upload-token head))
+    (if (nil? tok)
+      nil
+      {:token tok :total clen :interval (get config :progress-interval-ms 250) :next 0})))
+
+(defn- progress-emit
+  (prog got)
+  "Emit one progress event. Fire-and-forget; never raises into the read loop."
+  (telemetry/emit [:hatch :upload :progress]
+    {:got got :total (get prog :total)}
+    {:token (get prog :token)})
+  nil)
+
+(defn- progress-tick
+  (prog got)
+  "Emit a progress event if one is due and return the advanced state (unchanged when it isn't,
+  nil when this request doesn't report). Throttled to one event per `:interval` ms — a socket
+  read can be a single MTU, so an unthrottled emit would be thousands of events (and thousands
+  of re-renders) for one upload."
+  (cond
+    (nil? prog) nil
+    (< (now) (get prog :next)) prog
+    else (do
+           (progress-emit prog got)
+           (assoc prog :next (+ (now) (get prog :interval))))))
+
+(defn- progress-finish
+  (prog got)
+  "Emit the final, unthrottled event for a completed body, so a progress bar always lands on
+  100% instead of stopping at whatever the last throttled tick happened to report."
+  (when prog (progress-emit prog got))
+  nil)
+
 (defn partial-body? (buf head body-start clen ws-handler)
   "True when a non-chunked, body-bearing request's body has NOT fully arrived yet — exactly the
   case the fast path would drain with O(n²) `str`ing. False for empty bodies, WebSocket upgrades,
@@ -491,30 +557,35 @@
         (list already)
         (count already)
         clen
-        (+ (now) (get config :body-timeout-ms))))))
+        (+ (now) (get config :body-timeout-ms))
+        (progress-begin config head clen)))))
 
 (defn- buffered-drain
-  (sock handler ws-handler config head chunks got clen deadline)
+  (sock handler ws-handler config head chunks got clen deadline prog)
   "Accumulate incoming body reads (`bytes` chunks, newest-first) in `chunks` until `clen`
   bytes are in hand, then `join` once, split off any pipelined `remainder`, and dispatch.
   Bounds the idle wait AND the total body time (both slow-loris → 408) and the size (→ 413,
-  at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by."
+  at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by.
+  `prog` is the upload-progress state, or nil when this request doesn't report progress."
   (if (>= got clen)
     (let (all (bytes-concat (reverse chunks))
           body (subbytes all 0 clen)
           remainder (subbytes all clen (count all))
           request (assoc head :body body))
+      (progress-finish prog clen)
       (dispatch-buffered sock handler ws-handler config request remainder))
     (receive
-      ([:tcp ^sock chunk] (buffered-drain sock
-                            handler
-                            ws-handler
-                            config
-                            head
-                            (cons chunk chunks)
-                            (+ got (count chunk))
-                            clen
-                            deadline))
+      ([:tcp ^sock chunk] (let (got2 (+ got (count chunk)))
+                            (buffered-drain sock
+                              handler
+                              ws-handler
+                              config
+                              head
+                              (cons chunk chunks)
+                              got2
+                              clen
+                              deadline
+                              (progress-tick prog (min got2 clen)))))
       ([:tcp-closed ^sock] nil)
       (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
@@ -629,20 +700,26 @@
         path
         take
         clen
-        (+ (now) (get config :body-timeout-ms))))))
+        (+ (now) (get config :body-timeout-ms))
+        (progress-begin config head clen)))))
 
 (defn- spool-drain
-  (sock handler ws-handler config head path written clen deadline)
+  (sock handler ws-handler config head path written clen deadline prog)
   "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
   the idle wait AND the total body time (both slow-loris → 408, whichever comes first) and
   deletes the partial spool on a stalled/closed socket. `deadline` is the absolute epoch-ms the
-  whole body must arrive by."
+  whole body must arrive by. `prog` is the upload-progress state, or nil when this request
+  doesn't report progress — the streaming path is the one a progress bar most wants, since
+  spooling is what a large upload does."
   (if (>= written clen)
-    (spool-dispatch sock handler config head path clen)
+    (do
+      (progress-finish prog clen)
+      (spool-dispatch sock handler config head path clen))
     (receive
       ([:tcp ^sock chunk] (let (n (count chunk)
                                 take (min n (- clen written))
-                                piece (if (= take n) chunk (subbytes chunk 0 take)))
+                                piece (if (= take n) chunk (subbytes chunk 0 take))
+                                written2 (+ written take))
                             (spool-append path piece)
                             (spool-drain sock
                               handler
@@ -650,9 +727,10 @@
                               config
                               head
                               path
-                              (+ written take)
+                              written2
                               clen
-                              deadline)))
+                              deadline
+                              (progress-tick prog written2))))
       ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
       (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
