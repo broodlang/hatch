@@ -272,7 +272,6 @@
 ; Phase 11 — per-connection workers run under a dynamic supervisor (observable via
 ; `nest observe` / whereis), as :temporary children (a dead socket can't resume, so never
 ; restarted). The listener's own monitor still drives drain + the max-connections cap.
-(require 'proc/supervisor)
 
 (defn wait-unregistered (nm tries)
   "Poll until `nm` is no longer registered — true if it went away within `tries` x 10ms."

@@ -1,5 +1,4 @@
 (defmodule http-base64-test (:use http/base64) (:use test))
-(require 'hash)
 
 (describe "encode-bytes"
   (test "empty"

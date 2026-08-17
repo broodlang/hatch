@@ -21,7 +21,6 @@
   ; DECODED value of which the traversal checks run
   (:alias http/util))
 
-(require 'hash) ; strong ETags are a SHA-256 prefix of the body
 ; ---- MIME types ----
 
 (def *mime-types*

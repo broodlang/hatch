@@ -31,8 +31,6 @@
   (:alias web/static)
   (:alias log))
 
-(require 'hash) ; content-addressed asset fingerprints are a SHA-256 prefix
-(require 'zlib) ; in-process gzip for precompressed static variants (no `gzip` CLI needed)
 (def *default-reload-marker* "Done in")
 
 ; ---- dev watchers ----------------------------------------------------------

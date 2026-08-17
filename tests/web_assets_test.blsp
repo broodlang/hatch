@@ -1,6 +1,4 @@
 (defmodule web-assets-test (:use web/assets) (:alias web/static) (:use test))
-(require 'hash)
-(require 'zlib) ; round-trip the in-process precompressed `.gz`
 (describe "proc-opts"
   (test "empty when no cwd/env"
     (assert= (proc-opts {:cmd ["x"]}) {}))

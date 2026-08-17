@@ -139,8 +139,6 @@
 
 ; ---- stream-bytes / stream-file (chunked byte/file streaming) ----
 
-(require 'zlib)
-
 (defn big-body-stream (_request)
   "Stream a payload larger than the block size, forcing multiple chunks."
   (conn->response (stream/stream-bytes (build _request)

@@ -19,8 +19,6 @@
   changed, so plain GETs don't churn the cookie."
   ; get-cookie, put-cookie, register-before-send — the conn plumbing this builds on
   (:use web/conn)
-  ; json-encode / json-parse — the session payload is JSON
-  (:use json)
   ; base64-url-encode / base64-url-decode — cookie-safe payload encoding
   (:use encoding)
   ; hmac-sha256 — the cookie signature
@@ -72,7 +70,7 @@
 (defn encode-session (secret data)
   "Serialize session `data` (a map) into a signed cookie string: `payload.signature`,
   where payload is base64url(JSON) and signature is HMAC-SHA256(secret, payload)."
-  (let (payload (base64-url-encode (json-encode data))
+  (let (payload (base64-url-encode (json/encode data))
         sig (hmac-sha256 secret payload))
     (str payload "." sig)))
 
@@ -121,7 +119,7 @@
   parse failure, or if the payload isn't a JSON object."
   (try
     (let (json (base64-url-decode payload)
-          parsed (if (nil? json) nil (json-parse json)))
+          parsed (if (nil? json) nil (json/parse json)))
       (if (map? parsed) (stringify-keys parsed) {}))
     (catch _e {})))
 

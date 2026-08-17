@@ -47,7 +47,7 @@
       [(assoc b :tokens (- tokens cost)) :ok]
       (let (per-ms (/ (get cfg :rate) (* 1.0 (get cfg :per)))
             deficit (- cost tokens)
-            retry-ms (ceil (/ deficit per-ms)))
+            retry-ms (math/ceil (/ deficit per-ms)))
         [b [:deny retry-ms]]))))
 
 (defn- ratelimit-loop
@@ -120,4 +120,4 @@
     (fn (conn)
       (match (take-token (key-fn conn) cost cfg)
         (:ok conn)
-        ([:deny retry-ms] (on-limit conn (max 1 (ceil (/ retry-ms 1000.0)))))))))
+        ([:deny retry-ms] (on-limit conn (max 1 (math/ceil (/ retry-ms 1000.0)))))))))
