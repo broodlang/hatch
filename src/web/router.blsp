@@ -249,7 +249,7 @@
                         (list 'web/live/live-chrome)
                         body)))))
     {:route (list 'make-route "GET" path handler)
-     :setup (list (list 'require (list 'quote module))
+     :setup (list (list 'require-one (list 'quote module))
               (list 'web/live/register-live path spec session))}))
 
 (defn with-plugs (compiled ctx)
