@@ -1,5 +1,4 @@
 (defmodule web-compress-test (:use web/compress) (:use web/conn) (:use test))
-(require 'zlib)
 
 ; A body comfortably over the 1024-byte floor so the size gate never masks a behaviour test.
 (def big-body (join "" (map (fn (_) "Hello, compression! ") (range 0 200))))

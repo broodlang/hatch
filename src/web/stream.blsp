@@ -30,7 +30,6 @@
   ; stream-resp / put-resp-header — build the chunked streaming conn
   (:use web/conn))
 
-(require 'zlib) ; optional gzip-over-chunked for stream-bytes/stream-file
 (defn sse-field (name value)
   "One SSE header line `name: value\\n`, or \"\" when `value` is nil (the field is omitted)."
   (if (nil? value) "" (str name ": " value "\n")))

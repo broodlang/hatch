@@ -74,15 +74,16 @@
                            (collect-progress acc2 (- tries 1)))))
       (after 5000 (reverse acc)))))
 
-(defn collect-for-token (token ms)
-  "Drain `:info` payloads for `ms`, returning only those carrying `token` — so an unrelated
-  event from a concurrently-running case can't be mistaken for one about this upload."
-  (receive
-    ([:info payload] (let (up (get payload :upload))
-                       (if (and up (= (get up :token) token))
-                         (cons up (collect-for-token token ms))
-                         (collect-for-token token ms))))
-    (after ms (list))))
+(check-allow :non-tail-recursion
+  (defn collect-for-token (token ms)
+    "Drain `:info` payloads for `ms`, returning only those carrying `token` — so an unrelated
+    event from a concurrently-running case can't be mistaken for one about this upload."
+    (receive
+      ([:info payload] (let (up (get payload :upload))
+                         (if (and up (= (get up :token) token))
+                           (cons up (collect-for-token token ms))
+                           (collect-for-token token ms))))
+      (after ms (list)))))
 
 (defn ok-handler (reporter)
   (fn (_request)

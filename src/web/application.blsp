@@ -18,8 +18,7 @@
                     (fn () (serve))]}))"
   (:use log :only [start-logger fn-backend])
   (:alias web/logger)
-  (:alias web/upload)
-  (:use json :only [json-encode]))
+  (:alias web/upload))
 
 ;; ---- log formatters ---------------------------------------------------------
 
@@ -46,7 +45,7 @@
 (defn- application-json-line
   (rec)
   "One NDJSON object per record — compatible with Grafana Loki, Datadog, AppSignal."
-  (str (json-encode (merge (get rec :meta)
+  (str (json/encode (merge (get rec :meta)
                       {:timestamp (get rec :ts)
                        :level (or (get application-lower (get rec :level)) "info")
                        :message (get rec :msg)}))

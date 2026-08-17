@@ -27,7 +27,6 @@
   ; bodyless-status? — 1xx/204/304 carry no body, so never compress one
   (:alias http/response))
 
-(require 'zlib) ; in-process brotli/gzip (RFC 7932 `br` / RFC 1952 gzip)
 ; The default text-ish media types worth compressing. `text/*` is handled by prefix in
 ; `compressible-type?`; this set is the compressible `application/*` and `image/svg+xml` cases.
 (def default-compressible-types

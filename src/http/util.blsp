@@ -1,7 +1,5 @@
 (defmodule http/util
-  "HTTP utility functions: URL decoding, query-string + body parsing, status codes."
-  ; json-parse — parsing application/json request bodies into params
-  (:use json))
+  "HTTP utility functions: URL decoding, query-string + body parsing, status codes.")
 
 ;; ---- hex helpers ----
 
@@ -139,7 +137,7 @@
   form params throughout (json-parse yields keyword keys). A non-object body or a parse error
   yields `{}` (a malformed body is ignored, not fatal)."
   (try
-    (let (parsed (json-parse body))
+    (let (parsed (json/parse body))
       (if (map? parsed) (stringify-keys parsed) {}))
     (catch _e {})))
 

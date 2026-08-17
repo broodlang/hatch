@@ -12,8 +12,7 @@
   ; the application--* log-line formatters are module-private (ADR-146 `--` names);
   ; this test exercises them directly
   (:use-internals web/application)
-  (:use test)
-  (:use json :only [json-parse]))
+  (:use test))
 
 (describe "valid-level"
   (test "known levels pass through"
@@ -69,7 +68,7 @@
                                                        :msg "slow"
                                                        :ts 1000
                                                        :meta {:request_id "r1" :duration_ms 4.2}})
-          parsed (json-parse line))
+          parsed (json/parse line))
       (assert= (get parsed :timestamp) 1000)
       (assert= (get parsed :level) "warn")
       (assert= (get parsed :message) "slow")
@@ -77,7 +76,7 @@
       (assert= (get parsed :duration_ms) 4.2)
       (assert= (includes? line "\n") true)))
   (test "an unrecognized level falls back to \"info\""
-    (assert= (get (json-parse (web/application/application-json-line {:level :bogus
+    (assert= (get (json/parse (web/application/application-json-line {:level :bogus
                                                                       :msg "x"
                                                                       :ts 0
                                                                       :meta {}}))
