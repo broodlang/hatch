@@ -33,7 +33,7 @@
         (telemetry/emit [:hatch :request :stop]
           {:duration 12}
           {:method "GET" :path "/users" :status 200})
-        (telemetry/telemetry-sync)
+        (telemetry/sync)
         (receive
           ([:line line] (assert= (nth line 0) :info)
             (assert= (nth line 1) "GET /users 200 12ms")
@@ -54,7 +54,7 @@
         (telemetry/emit [:hatch :request :stop]
           {:duration 3}
           {:method "POST" :path "/boom" :status 500})
-        (telemetry/telemetry-sync)
+        (telemetry/sync)
         (receive
           ([:line lvl] (assert= lvl :error))
           (after 2000 (assert= :got-a-line :timeout))))
@@ -69,7 +69,7 @@
                                         {:format (fn (rec) [(get rec :level) (get rec :msg)])})]})
         (attach-access-log)
         (telemetry/emit [:hatch :request :bad-request] {} {:error "bad framing"})
-        (telemetry/telemetry-sync)
+        (telemetry/sync)
         (receive
           ([:line line] (assert= (nth line 0) :warn)
             (assert= (includes? (nth line 1) "400 bad request") true))

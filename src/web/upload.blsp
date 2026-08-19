@@ -112,7 +112,7 @@
 
   The handler runs in the telemetry listener process, so a broadcast can never slow the HTTP
   worker reading the body."
-  (when (nil? (telemetry/telemetry-pid))
+  (when (nil? (telemetry/pid))
     (telemetry/start-telemetry))
   (let (id (get opts :id :hatch-upload-progress))
     (telemetry/attach id
