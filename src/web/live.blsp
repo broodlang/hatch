@@ -41,7 +41,7 @@
     (= cp 10) "\\n"
     (= cp 12) "\\f"
     (= cp 13) "\\r"
-    else (str "\\u00" (char-at *json-hex* (quot cp 16)) (char-at *json-hex* (mod cp 16)))))
+    else (str "\\u00" (string/char-at *json-hex* (quot cp 16)) (string/char-at *json-hex* (mod cp 16)))))
 
 (defn json-str (s)
   "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
@@ -50,10 +50,10 @@
   user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
   the whole frame — a per-field server↔client desync with no error surfaced."
   (str "\""
-    (fold (fn (acc cp) (replace acc (utf8-bytes->string (bytes [cp])) (json-esc-control cp)))
+    (fold (fn (acc cp) (string/replace acc (utf8-bytes->string (bytes [cp])) (json-esc-control cp)))
       (-> s
-        (replace "\\" "\\\\")
-        (replace "\"" "\\\""))
+        (string/replace "\\" "\\\\")
+        (string/replace "\"" "\\\""))
       (range 32))
     "\""))
 
@@ -66,9 +66,9 @@
 (impl Encode :int (encode [n] (str n)))
 (impl Encode :float (encode [n] (str n)))
 (impl Encode :string (encode [s] (json-str s)))
-(impl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
-(impl Encode :pair (encode [v] (str "[" (join "," (map encode v)) "]")))
-(impl Encode :map (encode [m] (str "{" (join "," (map encode-entry (map-pairs m))) "}")))
+(impl Encode :vector (encode [v] (str "[" (string/join "," (map encode v)) "]")))
+(impl Encode :pair (encode [v] (str "[" (string/join "," (map encode v)) "]")))
+(impl Encode :map (encode [m] (str "{" (string/join "," (map encode-entry (map-pairs m))) "}")))
 ; keywords, symbols, …
 (impl Encode :default (encode [v] (json-str (str v))))
 (defn- encode-entry
@@ -80,7 +80,7 @@
 
 ; The parser walks the input as a *list of chars* (`string->list` once), consuming with
 ; `first`/`rest` — both O(1). This sidesteps two brood quadratics that bite on a large inbound
-; frame (a pasted textarea, a big form): `(char-at s i)` is O(i) on a UTF-8 string (it scans
+; frame (a pasted textarea, a big form): `(string/char-at s i)` is O(i) on a UTF-8 string (it scans
 ; codepoints), and appending to a string/vector one element at a time copies it each step. So
 ; string/number content is gathered into a reversed list and joined once, and array items are
 ; consed and turned into a vector once at the end (never `(into vec [x])` per item). This is
@@ -92,7 +92,7 @@
 (defn json-decode (s)
   "Parse a JSON string into a Brood value.
   Handles objects, arrays, strings, numbers, true/false/null."
-  (let ([v _] (jp-value (string->list s)))
+  (let ([v _] (jp-value (string/to-list s)))
     v))
 
 (defn jp-ws? (c)
@@ -124,7 +124,7 @@
 
 (defn jp-join (acc)
   "Assemble a reversed list of chars into a string in one linear pass."
-  (join "" (reverse acc)))
+  (string/join "" (reverse acc)))
 
 (defn jp-string (cs)
   "Parse the JSON string whose opening quote is the head of `cs`. `[value rest]`."
@@ -162,7 +162,7 @@
 (defn- json-hex-val
   (c)
   "Hex digit (0-9, a-f, case-insensitive) → its value 0-15, or -1 for a non-hex char."
-  (index-of "0123456789abcdef" (lower c)))
+  (index-of "0123456789abcdef" (string/lower c)))
 
 (defn jp-str-uni (cs acc)
   "Decode a `\\uXXXX` escape: the 4 hex chars head `cs`. Falls back to U+FFFD for a
@@ -1125,8 +1125,8 @@
   "The app path a `/live/ws<path>` WebSocket URL targets. brood_live.js connects to
   `/live/ws` + the page's `data-live` path, so `/live/ws/counter` → `/counter`."
   (let (prefix "/live/ws")
-    (if (starts-with? req-path prefix)
-      (substring req-path (string-length prefix) (string-length req-path))
+    (if (string/starts-with? req-path prefix)
+      (string/substring req-path (string/length prefix) (string/length req-path))
       req-path)))
 
 (defn live-dispatcher ()
@@ -1474,7 +1474,7 @@
 (def *hatch-root*
   ; This file is <hatch>/src/web/live.blsp; strip the known suffix to find <hatch>,
   ; so we can serve the bundled brood_live.js without the app vendoring a copy.
-  (replace (current-file) "/src/web/live.blsp" ""))
+  (string/replace (current-file) "/src/web/live.blsp" ""))
 
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_live.js`."
@@ -1482,7 +1482,7 @@
 
 (defn client-js ()
   "The framework's brood_live.js source, or nil if it can't be located."
-  (try (slurp (asset-path)) (catch _ nil)))
+  (try (file/slurp (asset-path)) (catch _ nil)))
 
 (defn client-js-handler ()
   "A conn handler that serves hatch's brood_live.js with the right content-type, so an

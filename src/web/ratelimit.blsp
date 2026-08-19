@@ -88,7 +88,7 @@
 (defn- first-hop
   (xff)
   "The first address in an `X-Forwarded-For` list (the original client), trimmed."
-  (if (or (nil? xff) (blank? xff)) nil (trim (first (string-split xff ",")))))
+  (if (or (nil? xff) (string/blank? xff)) nil (string/trim (first (string/split xff ",")))))
 
 (defn client-key (conn)
   "The rate-limit key for `conn`: the client IP from `X-Forwarded-For` (first hop) or

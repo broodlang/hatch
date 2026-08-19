@@ -8,7 +8,7 @@
 
 (defn form-encode (m)
   "Encode a string→string map as an x-www-form-urlencoded body (test values are token-safe)."
-  (join "&" (map (fn (kv) (str (nth kv 0) "=" (nth kv 1))) (map-pairs m))))
+  (string/join "&" (map (fn (kv) (str (nth kv 0) "=" (nth kv 1))) (map-pairs m))))
 
 (defn fresh (method opts)
   "A conn that has run fetch-session (empty session) for `method`. `opts` may carry:

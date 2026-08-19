@@ -18,7 +18,7 @@
   "Parse `body` (bytes) as multipart/form-data delimited by `boundary`. Returns
   `{:fields … :files …}` (see the module doc). A nil/blank boundary, or a body with no
   boundary in it, yields empty maps."
-  (if (or (nil? boundary) (blank? boundary))
+  (if (or (nil? boundary) (string/blank? boundary))
     {:fields {} :files {}}
     (let (delim (string->utf8-bytes (str "--" boundary))
           parts (filter (fn (p) (not (nil? p))) (map parse-part (split-parts body delim))))
@@ -88,10 +88,10 @@
             (if (= ci -1)
               m
               (assoc m
-                (lower (trim (substring line 0 ci)))
-                  (trim (substring line (+ ci 1) (string-length line)))))))
+                (string/lower (string/trim (string/substring line 0 ci)))
+                  (string/trim (string/substring line (+ ci 1) (string/length line)))))))
     {}
-    (filter (fn (l) (not (blank? l))) (string-split s "\r\n"))))
+    (filter (fn (l) (not (string/blank? l))) (string/split s "\r\n"))))
 
 (defn cd-param (disposition key)
   "The quoted value of a Content-Disposition parameter — `name` / `filename` — i.e. the text
@@ -102,9 +102,9 @@
         i (cd-param-find disposition needle 0))
     (if (< i 0)
       nil
-      (let (start (+ i (string-length needle))
+      (let (start (+ i (string/length needle))
             end (index-of-from disposition "\"" start))
-        (if (= end -1) nil (substring disposition start end))))))
+        (if (= end -1) nil (string/substring disposition start end))))))
 
 (defn param-name-char? (c)
   "True for a Content-Disposition parameter-name character (letter/digit/`-`) — used to tell a
@@ -122,12 +122,12 @@
   (let (i (index-of-from s needle from))
     (cond
       (< i 0) -1
-      (or (= i 0) (not (param-name-char? (char-at s (- i 1))))) i
+      (or (= i 0) (not (param-name-char? (string/char-at s (- i 1))))) i
       else (cd-param-find s needle (+ i 1)))))
 
 (defn index-of-from (s needle from)
   "Index of `needle` in `s` at or after `from`, or -1."
-  (let (i (index-of (substring s from (string-length s)) needle))
+  (let (i (index-of (string/substring s from (string/length s)) needle))
     (if (= i -1) -1 (+ from i))))
 
 (defn add-part (acc part)

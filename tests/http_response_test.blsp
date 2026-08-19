@@ -41,7 +41,7 @@
   (test "the multibyte body is encoded exactly once (no doubling)"
     ; the wire bytes must equal the single UTF-8 encoding of header + body, byte for byte
     (let (out (bytes-concat (format-response (ok "é"))))
-      (assert= (ends-with? (rtext out) "é") true)
+      (assert= (string/ends-with? (rtext out) "é") true)
       ; last byte = 0xA9, the 2nd byte of é; preceding = 0xC3 — not a doubled C3 82…
       (assert= (byte-at out (- (count out) 1)) 169)
       (assert= (byte-at out (- (count out) 2)) 195)))
@@ -145,7 +145,7 @@
     (let (r (rtext (format-response (ok "hello") true)))
       (assert= (includes? r "Content-Length: 5") true)
       (assert= (includes? r "\r\n\r\nhello") false)
-      (assert= (ends-with? r "\r\n\r\n") true))))
+      (assert= (string/ends-with? r "\r\n\r\n") true))))
 
 ; Audit #2 — HTTP response splitting. A header value carrying CR/LF must not inject a
 ; new header line; format-header strips them.
@@ -188,7 +188,7 @@
       (assert= (includes? r "Transfer-Encoding: chunked\r\n") true)
       (assert= (includes? r "Content-Length") false)
       (assert= (includes? r "Content-Type: text/plain\r\n") true)
-      (assert= (ends-with? r "\r\n\r\n") true)))
+      (assert= (string/ends-with? r "\r\n\r\n") true)))
   (test "drops any Content-Length the caller set"
     (let (r (rtext (format-stream-head {:status 200 :headers {:content-length "9"}})))
       (assert= (includes? r "Content-Length") false)))

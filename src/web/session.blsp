@@ -48,7 +48,7 @@
   known/short key makes them forgeable (full auth bypass), so we fail the boot loudly rather
   than ship it. Pure; `secret-from-env` supplies `v`/`dev?` from the environment."
   (cond
-    (and v (>= (string-length v) *min-secret-len*)) v
+    (and v (>= (string/length v) *min-secret-len*)) v
     dev? (or v *dev-secret*)
     (nil? v)
       (error "web/session: HATCH_SECRET_KEY_BASE is not set. Refusing to sign sessions "
@@ -79,13 +79,13 @@
   for an absent, malformed, or tampered cookie (signature mismatch) — a bad cookie reads as
   an empty session, never an error. base64url has no `.`, so the final `.` cleanly splits
   payload from signature."
-  (if (or (nil? cookie) (blank? cookie))
+  (if (or (nil? cookie) (string/blank? cookie))
     {}
     (let (dot (index-of cookie "."))
       (if (= dot -1)
         {}
-        (let (payload (substring cookie 0 dot)
-              sig (substring cookie (+ dot 1) (string-length cookie))
+        (let (payload (string/substring cookie 0 dot)
+              sig (string/substring cookie (+ dot 1) (string/length cookie))
               expected (hmac-sha256 secret payload))
           (if (secure=? (string->utf8-bytes sig) (string->utf8-bytes expected))
             (check-expiry (decode-payload payload))

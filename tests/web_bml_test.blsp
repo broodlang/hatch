@@ -83,7 +83,7 @@
   (test ":if false renders nothing"
     (assert= (render-bml "<p :if={@show}>hi</p>" {:show false}) ""))
   (test ":if + :for filters per item (test sees the loop binding)"
-    (assert= (render-bml "<li :for={x <- @xs} :if={(even? x)}>{x}</li>" {:xs [1 2 3 4]})
+    (assert= (render-bml "<li :for={x <- @xs} :if={(math/even? x)}>{x}</li>" {:xs [1 2 3 4]})
       "<li>2</li><li>4</li>"))
   (test "text is HTML-escaped"
     (assert= (render-bml "<p>{@s}</p>" {:s "<b>"}) "<p>&lt;b&gt;</p>"))

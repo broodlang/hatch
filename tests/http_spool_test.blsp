@@ -57,7 +57,7 @@
   (test "a body over :spool-threshold is spooled and save-body persists it byte-for-byte"
     (let (me (self)
           dest "/tmp/hatch-spool-dest.bin"
-          _ (try (delete-file dest) (catch _ nil))
+          _ (try (file/rm dest) (catch _ nil))
           port 24832
           _sup (server/start port
                  (spool-save-handler dest me)
@@ -68,10 +68,10 @@
       (tcp-send client (post-raw))
       (let (info (receive ([:done d] d) (after 5000 :timeout))
             _resp (drain client ""))
-        (let (saved (into [] (bytes->list (slurp-bytes dest))))
+        (let (saved (into [] (bytes->list (file/slurp-bytes dest))))
           (tcp-close client)
           (server/stop port)
-          (try (delete-file dest) (catch _ nil))
+          (try (file/rm dest) (catch _ nil))
           ; the handler saw a spooled request with an empty in-memory body
           (assert= (get info :spooled) true)
           (assert= (get info :body-empty) true)

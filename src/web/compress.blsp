@@ -58,7 +58,7 @@
 (defn base-type (ctype)
   "The media type of a `Content-Type` value, lowercased and without parameters:
   `\"text/html; charset=utf-8\"` → `\"text/html\"`."
-  (lower (trim (first (string-split ctype ";")))))
+  (string/lower (string/trim (first (string/split ctype ";")))))
 
 (defn compressible-type? (ctype types)
   "True if a response with `Content-Type` `ctype` is worth gzipping — any `text/*`, or a base
@@ -67,7 +67,7 @@
   (if (nil? ctype)
     true
     (let (base (base-type ctype))
-      (or (starts-with? base "text/") (contains? types base)))))
+      (or (string/starts-with? base "text/") (contains? types base)))))
 
 (defn add-vary (conn token)
   "Add `token` to the response `Vary` header, preserving (and not duplicating) any existing
@@ -76,7 +76,7 @@
   (let (existing (get-in conn [:resp-headers :vary]))
     (cond
       (nil? existing) (put-resp-header conn :vary token)
-      (includes? (lower existing) (lower token)) conn
+      (includes? (string/lower existing) (string/lower token)) conn
       else (put-resp-header conn :vary (str existing ", " token)))))
 
 (defn maybe-compress (conn opts)

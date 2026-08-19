@@ -64,19 +64,19 @@
   (not URL-decoded): session/flash cookies are base64url, which is already cookie-safe, and
   decoding opaque third-party cookies would only corrupt them."
   (let (raw (get headers :cookie))
-    (if (or (nil? raw) (blank? raw))
+    (if (or (nil? raw) (string/blank? raw))
       {}
       (fold (fn (m pair)
               (let (eq (index-of pair "="))
                 (if (= eq -1)
                   m
                   (assoc m
-                    (trim (substring pair 0 eq))
-                      (trim (substring pair
+                    (string/trim (string/substring pair 0 eq))
+                      (string/trim (string/substring pair
                               (+ eq 1)
-                              (string-length pair)))))))
+                              (string/length pair)))))))
         {}
-        (string-split raw ";")))))
+        (string/split raw ";")))))
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."
@@ -143,7 +143,7 @@
   (let (src (get conn :body-file))
     (if (nil? src)
       (error "save-body: request body was not spooled to disk (no :body-file)")
-      (do (rename-file src dest) dest))))
+      (do (file/rename src dest) dest))))
 
 (defn parse-upload-file (conn)
   "Parse a spooled `multipart/form-data` body from disk into `{:fields :files}` (the same shape
@@ -153,7 +153,7 @@
   (let (src (get conn :body-file))
     (if (nil? src)
       nil
-      (http/multipart/parse (slurp-bytes src)
+      (http/multipart/parse (file/slurp-bytes src)
         (content-type-param (get conn :headers {}) "boundary")))))
 
 (defn header (conn key)
@@ -186,9 +186,9 @@
   user-controlled value can't smuggle attributes. (Signed session/flash cookies are
   base64url+hex, so this is a no-op for them.)"
   (-> (str s)
-    (replace "\r" "")
-    (replace "\n" "")
-    (replace ";" "")))
+    (string/replace "\r" "")
+    (string/replace "\n" "")
+    (string/replace ";" "")))
 
 (defn format-set-cookie (name value opts)
   "Format one `Set-Cookie` header value from `name`, `value`, and `opts` (see put-cookie)."

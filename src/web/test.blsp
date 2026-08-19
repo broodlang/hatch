@@ -48,7 +48,7 @@
   (string-keyed map), `:query` (string), `:headers` (keyword-keyed map), and `:body`
   (string) — the same fields web/conn/build receives, so handlers see a realistic conn.
   `method` is upcased, matching how the HTTP parser presents it."
-  (build {:method (upper method)
+  (build {:method (string/upper method)
           :path path
           :query (get opts :query "")
           :params (get opts :params {})

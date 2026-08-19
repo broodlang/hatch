@@ -296,7 +296,7 @@
 (defn expects-continue? (head)
   "True if the request head asked for a `100 Continue` interim response (RFC 7231 §5.1.1:
   `Expect: 100-continue`)."
-  (= (lower (trim (get (get head :headers {}) :expect ""))) "100-continue"))
+  (= (string/lower (string/trim (get (get head :headers {}) :expect ""))) "100-continue"))
 
 (defn maybe-continue (sock head)
   "Send a `100 Continue` interim response when the client asked for it (`Expect: 100-continue`),
@@ -718,7 +718,7 @@
 (defn- spool-cleanup
   (path)
   "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."
-  (try (delete-file path) (catch _e nil)))
+  (try (file/rm path) (catch _e nil)))
 
 (defn- spool-append
   (path piece)
@@ -762,8 +762,8 @@
   HTTP/1.1 persists unless closed, HTTP/1.0 closes unless the request opted in with
   `Connection: keep-alive` (RFC 7230 §6.3)."
   (let (version (get request :version "1.1")
-        req-conn (lower (get-in request [:headers :connection] ""))
-        resp-conn (lower (get-in response [:headers :connection] "")))
+        req-conn (string/lower (get-in request [:headers :connection] ""))
+        resp-conn (string/lower (get-in response [:headers :connection] "")))
     (cond
       (= resp-conn "close") false
       (= req-conn "close") false

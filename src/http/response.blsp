@@ -49,7 +49,7 @@
                        " "
                        (status-text status)
                        "\r\n"
-                       (join "" (map format-header (map-pairs headers)))
+                       (string/join "" (map format-header (map-pairs headers)))
                        "\r\n"))
       ; Return an ADR-139 iolist: `tcp-send` flattens `[head, body]` straight onto the
       ; socket with no monolithic combined buffer. Leaves are `bytes` (already UTF-8), so a
@@ -74,7 +74,7 @@
   (if (= n 0)
     acc
     (let (d (rem n 16))
-      (int->hex-acc (quot n 16) (str (substring "0123456789abcdef" d (+ d 1)) acc)))))
+      (int->hex-acc (quot n 16) (str (string/substring "0123456789abcdef" d (+ d 1)) acc)))))
 
 (defn int->hex (n)
   "The lowercase hexadecimal string for a non-negative integer `n` (`0` → \"0\") — the size
@@ -112,7 +112,7 @@
                           " "
                           (status-text status)
                           "\r\n"
-                          (join "" (map format-header (map-pairs headers)))
+                          (string/join "" (map format-header (map-pairs headers)))
                           "\r\n"))))
 
 (defn header-safe (v)
@@ -120,8 +120,8 @@
   `Location`, a reflected header) can't inject extra headers or split the response
   — HTTP response splitting. Values are always strings here; coerce for safety."
   (-> (str v)
-    (replace "\r" "")
-    (replace "\n" "")))
+    (string/replace "\r" "")
+    (string/replace "\n" "")))
 
 (defn format-header (kv)
   "Format a `[keyword value]` pair as one or more HTTP header lines. A scalar value emits
@@ -130,7 +130,7 @@
   (let (k (first kv)
         v (first (rest kv)))
     (if (or (list? v) (vector? v))
-      (join "" (map (fn (one) (format-header-line k one)) v))
+      (string/join "" (map (fn (one) (format-header-line k one)) v))
       (format-header-line k v))))
 
 (defn format-header-line (k v)
@@ -139,14 +139,14 @@
 
 (defn header-name (k)
   "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."
-  (join "-" (map capitalize-first (string-split (name k) "-"))))
+  (string/join "-" (map capitalize-first (string/split (name k) "-"))))
 
 (defn capitalize-first (s)
   "Uppercase the first character of `s`, leaving the rest unchanged (unlike the prelude's
   `capitalize`, which lowercases the tail) — a header-name segment like `WWW` must survive."
-  (if (blank? s)
+  (if (string/blank? s)
     s
-    (str (upper (substring s 0 1)) (substring s 1 (string-length s)))))
+    (str (string/upper (string/substring s 0 1)) (string/substring s 1 (string/length s)))))
 
 (defn ok (body)
   "200 OK response with HTML body."

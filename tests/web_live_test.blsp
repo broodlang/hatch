@@ -34,7 +34,7 @@
 (describe "client-script"
   (test "default src + defer"
     (let (h (render (client-script)))
-      (assert= (starts-with? h "<script") true)
+      (assert= (string/starts-with? h "<script") true)
       (assert= (includes? h "src=\"/static/brood_live.js\"") true)
       (assert= (includes? h "defer") true)))
   (test "custom src"
@@ -60,7 +60,7 @@
 (describe "status-style"
   (test "style element with the status class"
     (let (h (render (status-style)))
-      (assert= (starts-with? h "<style>") true)
+      (assert= (string/starts-with? h "<style>") true)
       (assert= (includes? h ".brood-status") true))))
 
 (describe "client-js"
