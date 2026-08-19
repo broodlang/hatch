@@ -19,9 +19,9 @@
   "The session cookie's value from a response's first Set-Cookie line (drops attributes)."
   (let (sc (first (get (get r :headers) :set-cookie))
         eq (index-of sc "=")
-        tail (substring sc (+ eq 1) (string-length sc))
+        tail (string/substring sc (+ eq 1) (string/length sc))
         semi (index-of tail ";"))
-    (substring tail 0 semi)))
+    (string/substring tail 0 semi)))
 
 (describe "encode / decode round-trip"
   (test "round-trips a string-keyed map"

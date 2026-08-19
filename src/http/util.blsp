@@ -15,7 +15,7 @@
 (defn hex-str->bytes (hex)
   "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
   (map (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))
-    (partition 2 (string->list hex))))
+    (partition 2 (string/to-list hex))))
 
 ;; ---- URL decode ----
 
@@ -29,7 +29,7 @@
   query outside any try, so an unguarded throw crashes the worker with no response (a
   trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
   (try
-    (utf8-bytes->string (vec (reverse (url-decode-acc (string->list s) nil))))
+    (utf8-bytes->string (vec (reverse (url-decode-acc (string/to-list s) nil))))
     (catch _e s)))
 
 (defn- url-decode-acc
@@ -51,19 +51,19 @@
   "Parse a URL query string (\"key=val&key2=val2\") into a string→string map.
 
   (hatch/http/util/parse-query \"a=1&b=two\") ;=> {\"a\" \"1\" \"b\" \"two\"}"
-  (if (or (nil? s) (blank? s))
+  (if (or (nil? s) (string/blank? s))
     {}
     (fold (fn (m pair)
             (let (eq (index-of pair "="))
               (if (= eq -1)
                 (assoc m (url-decode pair) "")
                 (assoc m
-                  (url-decode (substring pair 0 eq))
-                    (url-decode (substring pair
+                  (url-decode (string/substring pair 0 eq))
+                    (url-decode (string/substring pair
                                   (+ eq 1)
-                                  (string-length pair)))))))
+                                  (string/length pair)))))))
       {}
-      (string-split s "&"))))
+      (string/split s "&"))))
 
 ;; ---- carrier <-> bytes (byte-faithful request bodies) ----
 ; The server reads connections in binary mode and accumulates the request as a *carrier*
@@ -75,7 +75,7 @@
   "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
   the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
   upload) from the parsed carrier body."
-  (bytes (map char->int (string->list carrier))))
+  (bytes (map char->int (string/to-list carrier))))
 
 (defn carrier->text (carrier)
   "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
@@ -90,7 +90,7 @@
   (let (ct (get headers :content-type))
     (if (nil? ct)
       ""
-      (lower (trim (first (string-split ct ";")))))))
+      (string/lower (string/trim (first (string/split ct ";")))))))
 
 (defn content-type-param (headers key)
   "The value of a Content-Type parameter — e.g. `(content-type-param headers \"boundary\")`
@@ -99,22 +99,22 @@
   (let (ct (get headers :content-type))
     (if (nil? ct)
       nil
-      (ct-param-find (rest (string-split ct ";")) (lower key)))))
+      (ct-param-find (rest (string/split ct ";")) (string/lower key)))))
 
 (defn- ct-param-find
   (parts key)
   (if (empty? parts)
     nil
-    (let (p (trim (first parts))
+    (let (p (string/trim (first parts))
           eq (index-of p "="))
-      (if (and (not (= eq -1)) (= (lower (trim (substring p 0 eq))) key))
-        (ct-param-unquote (trim (substring p (+ eq 1) (string-length p))))
+      (if (and (not (= eq -1)) (= (string/lower (string/trim (string/substring p 0 eq))) key))
+        (ct-param-unquote (string/trim (string/substring p (+ eq 1) (string/length p))))
         (ct-param-find (rest parts) key)))))
 
 (defn- ct-param-unquote
   (v)
-  (if (and (>= (string-length v) 2) (starts-with? v "\"") (ends-with? v "\""))
-    (substring v 1 (- (string-length v) 1))
+  (if (and (>= (string/length v) 2) (string/starts-with? v "\"") (string/ends-with? v "\""))
+    (string/substring v 1 (- (string/length v) 1))
     v))
 
 (defn parse-body-params (headers body)
@@ -123,7 +123,7 @@
   yields the top-level object's fields (keys stringified to match query/form params).
   Any other type — or an empty/malformed body — yields `{}`; the raw bytes stay on the
   conn as `:body`. multipart/form-data is not parsed yet (file uploads, Tier 2)."
-  (if (blank? body)
+  (if (string/blank? body)
     {}
     (let (ct (content-type-base headers))
       (cond

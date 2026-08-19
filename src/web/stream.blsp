@@ -37,7 +37,7 @@
 (defn sse-data (data)
   "The `data:` lines for a payload. Each embedded newline starts a new `data:` line, per the
   SSE spec — so a multi-line payload arrives as one event with newlines preserved."
-  (join "" (map (fn (line) (str "data: " line "\n")) (string-split (str data) "\n"))))
+  (string/join "" (map (fn (line) (str "data: " line "\n")) (string/split (str data) "\n"))))
 
 (defn sse-event (data &optional (opts {}))
   "Format one SSE event frame from `data` and `opts` (`:event`, `:id`, `:retry`), terminated by
@@ -115,4 +115,4 @@
   build, not the read (brood has no incremental file read yet), so it suits moderate downloads
   and progressive delivery rather than arbitrarily large files. Guard the path (existence /
   traversal) before calling; an unreadable path raises."
-  (stream-bytes conn (slurp-bytes path) opts))
+  (stream-bytes conn (file/slurp-bytes path) opts))

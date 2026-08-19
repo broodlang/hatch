@@ -57,13 +57,13 @@
                  (catch e
                    (do
                      (log/log-error (str "[assets] cannot start watcher `"
-                                      (join " " cmd)
+                                      (string/join " " cmd)
                                       "`: "
                                       (error-message e)))
                      nil))))
     (when handle
-      (log/log-info (str "[assets] watching: " (join " " cmd)))
-      (watcher-recv handle (get w :reload-on *default-reload-marker*) (join " " cmd) ""))))
+      (log/log-info (str "[assets] watching: " (string/join " " cmd)))
+      (watcher-recv handle (get w :reload-on *default-reload-marker*) (string/join " " cmd) ""))))
 
 (defn watcher-recv (handle marker label buf)
   "Drain a watcher child's piped stdout/stderr, accumulating a `buf` of the trailing partial
@@ -86,7 +86,7 @@
 (defn on-output (buf marker)
   "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that
   contains `marker`; return the trailing incomplete line (no newline yet) to carry forward."
-  (let (lines (string-split buf "\n")
+  (let (lines (string/split buf "\n")
         complete (reverse (rest (reverse lines))))
     (dolist (line complete) (emit-line line marker))
     (first (reverse lines))))
@@ -94,7 +94,7 @@
 (defn emit-line (line marker)
   "Log one non-blank watcher line under an `[assets]` prefix; if it contains `marker`, hot-swap
   CSS in open live sessions."
-  (when (not (blank? line))
+  (when (not (string/blank? line))
     (log/log-info (str "[assets] " line))
     (when (and marker (includes? line marker)) (web/live/notify-reload-css))))
 
@@ -142,17 +142,17 @@
   live-serving process during a redeploy) sees either the old manifest or the new one — never
   a half-written, truncated file that would mint broken asset URLs."
   (let (tmp (str path ".tmp"))
-    (spit tmp text)
-    (rename-file tmp path)))
+    (file/spit tmp text)
+    (file/rename tmp path)))
 
 (defn fingerprint-file (dir file)
   "Write a content-addressed copy of `dir/file` (`base.<sha8>.ext`) and return its name. Reads
   and writes the raw bytes (`slurp-bytes`/`spit-bytes`) and hashes the bytes, so a binary asset
   (.woff2/.png/.ico/.wasm) is copied byte-faithfully — a UTF-8 `slurp`/`spit` round-trip would
   corrupt it AND change its hash, shipping a broken file under an immutable/cache-forever URL."
-  (let (body (slurp-bytes (str dir "/" file))
-        fp (fingerprint-name file (substring (hash/sha256-bytes body) 0 8)))
-    (spit-bytes (str dir "/" fp) body)
+  (let (body (file/slurp-bytes (str dir "/" file))
+        fp (fingerprint-name file (string/substring (hash/sha256-bytes body) 0 8)))
+    (file/spit-bytes (str dir "/" fp) body)
     (log/log-info (str "[assets] fingerprint: " file " -> " fp))
     (when (compressible? file)
       (precompress (str dir "/" fp)))
@@ -173,7 +173,7 @@
   build/boot host without one no longer degrades to uncompressed serving. Overwrites stale
   siblings from a previous build. A read/compress/write failure is logged and skipped, so serving
   still works uncompressed."
-  (let (raw (try (slurp-bytes path) (catch e :error)))
+  (let (raw (try (file/slurp-bytes path) (catch e :error)))
     (if (= raw :error)
       (log/log-warn (str "[assets] precompress could not read " path "; serving uncompressed"))
       (do
@@ -185,7 +185,7 @@
   coding's problem never blocks the other or breaks serving."
   (try
     (do
-      (spit-bytes out (encode))
+      (file/spit-bytes out (encode))
       (log/log-info (str "[assets] precompress: " out)))
     (catch e
       (log/log-warn (str "[assets] precompress failed for "
@@ -199,11 +199,11 @@
 (defn fingerprint-name (file digest)
   "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →
   append `.<digest>`)."
-  (let (parts (string-split file "."))
+  (let (parts (string/split file "."))
     (if (< (count parts) 2)
       (str file "." digest)
       (let (ext (first (reverse parts))
-            base (join "." (reverse (rest (reverse parts)))))
+            base (string/join "." (reverse (rest (reverse parts)))))
         (str base "." digest "." ext)))))
 
 (defn install (config)
@@ -231,7 +231,7 @@
   (try
     (do
       (when (and (get config :install-probe)
-              (not (file-exists? (get config :install-probe))))
+              (not (file/exists? (get config :install-probe))))
         (log/log-info (str "[assets] toolchain missing ("
                         (get config :install-probe)
                         ") — running one-time install"))
@@ -247,8 +247,8 @@
   "Run each argv in `cmds` with `run-process` (inherited stdio), in order; raise on the
   first non-zero exit."
   (dolist (cmd cmds)
-    (log/log-info (str "[assets] " label ": " (join " " cmd)))
+    (log/log-info (str "[assets] " label ": " (string/join " " cmd)))
     (let (code (run-process (first cmd) (rest cmd)))
       (when (not (= code 0))
-        (error "[assets] " label " failed (exit " code "): " (join " " cmd)))))
+        (error "[assets] " label " failed (exit " code "): " (string/join " " cmd)))))
   nil)

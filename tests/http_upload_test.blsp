@@ -150,4 +150,4 @@
         (server/stop port)
         (assert= (count (get info :body)) (* reps 10))
         (assert= (utf8-bytes->string (get info :body))
-          (join "" (map (fn (_) part) (range 0 reps))))))))
+          (string/join "" (map (fn (_) part) (range 0 reps))))))))

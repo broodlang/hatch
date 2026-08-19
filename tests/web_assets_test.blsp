@@ -42,23 +42,23 @@
 (describe "fingerprint"
   (test "writes content-addressed copies and a manifest"
     (let (dir "/tmp/hatch-assets-fp-test"
-          _ (try (make-dir dir) (catch _ nil))
+          _ (try (file/mkdir dir) (catch _ nil))
           content "body{color:red}"
-          _ (spit (str dir "/app.css") content)
+          _ (file/spit (str dir "/app.css") content)
           manifest (fingerprint {:dir dir :files ["app.css"]})
           fp (get manifest "app.css"))
-      (assert= fp (fingerprint-name "app.css" (substring (hash/sha256 content) 0 8)))
-      (assert= (file-exists? (str dir "/" fp)) true)
-      (assert= (slurp (str dir "/" fp)) content)
-      (assert= (static/parse-manifest (slurp (str dir "/cache-manifest"))) manifest)
+      (assert= fp (fingerprint-name "app.css" (string/substring (hash/sha256 content) 0 8)))
+      (assert= (file/exists? (str dir "/" fp)) true)
+      (assert= (file/slurp (str dir "/" fp)) content)
+      (assert= (static/parse-manifest (file/slurp (str dir "/cache-manifest"))) manifest)
       ; the atomic write renames its temp file into place — none should be left behind
-      (assert= (file-exists? (str dir "/cache-manifest.tmp")) false)
-      (delete-file (str dir "/app.css"))
-      (delete-file (str dir "/" fp))
+      (assert= (file/exists? (str dir "/cache-manifest.tmp")) false)
+      (file/rm (str dir "/app.css"))
+      (file/rm (str dir "/" fp))
       ; fingerprinting a compressible asset also emits best-effort .br and .gz siblings
-      (when (file-exists? (str dir "/" fp ".gz")) (delete-file (str dir "/" fp ".gz")))
-      (when (file-exists? (str dir "/" fp ".br")) (delete-file (str dir "/" fp ".br")))
-      (delete-file (str dir "/cache-manifest")))))
+      (when (file/exists? (str dir "/" fp ".gz")) (file/rm (str dir "/" fp ".gz")))
+      (when (file/exists? (str dir "/" fp ".br")) (file/rm (str dir "/" fp ".br")))
+      (file/rm (str dir "/cache-manifest")))))
 
 (describe "compressible?"
   (test "text assets are compressible"
@@ -75,20 +75,20 @@
   ; sibling — assert each exists, is smaller, and round-trips back to the original bytes.
   (test "a fingerprinted compressible asset gets smaller .br and .gz siblings"
     (let (dir "/tmp/hatch-fp-gz-test"
-          _ (try (make-dir dir) (catch _ nil))
-          body (join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
-          _ (spit (str dir "/app.css") body)
+          _ (try (file/mkdir dir) (catch _ nil))
+          body (string/join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
+          _ (file/spit (str dir "/app.css") body)
           fp (fingerprint-file dir "app.css")
           gz (str dir "/" fp ".gz")
           br (str dir "/" fp ".br"))
-      (assert= (file-exists? gz) true)
-      (assert= (file-exists? br) true)
-      (assert= (< (count (slurp-bytes gz)) (count (string->utf8-bytes body))) true)
-      (assert= (< (count (slurp-bytes br)) (count (string->utf8-bytes body))) true)
+      (assert= (file/exists? gz) true)
+      (assert= (file/exists? br) true)
+      (assert= (< (count (file/slurp-bytes gz)) (count (string->utf8-bytes body))) true)
+      (assert= (< (count (file/slurp-bytes br)) (count (string->utf8-bytes body))) true)
       ; each variant is valid and recovers the exact source bytes
-      (assert= (utf8-bytes->string (zlib/gunzip (slurp-bytes gz))) body)
-      (assert= (utf8-bytes->string (zlib/unbrotli (slurp-bytes br))) body)
-      (delete-file (str dir "/app.css"))
-      (delete-file (str dir "/" fp))
-      (when (file-exists? gz) (delete-file gz))
-      (when (file-exists? br) (delete-file br)))))
+      (assert= (utf8-bytes->string (zlib/gunzip (file/slurp-bytes gz))) body)
+      (assert= (utf8-bytes->string (zlib/unbrotli (file/slurp-bytes br))) body)
+      (file/rm (str dir "/app.css"))
+      (file/rm (str dir "/" fp))
+      (when (file/exists? gz) (file/rm gz))
+      (when (file/exists? br) (file/rm br)))))

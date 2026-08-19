@@ -37,9 +37,9 @@
   fails closed to a 401 instead of crashing the worker (a pre-auth DoS)."
   (let (raw (header conn :authorization)
         prefix "Basic ")
-    (if (and raw (starts-with? raw prefix))
+    (if (and raw (string/starts-with? raw prefix))
       (try
-        (base64-decode (trim (substring raw (string-length prefix) (string-length raw))))
+        (base64-decode (string/trim (string/substring raw (string/length prefix) (string/length raw))))
         (catch _e nil))
       nil)))
 
@@ -47,9 +47,9 @@
   "Strip characters that would break the `WWW-Authenticate` auth-param syntax or inject a
   header — double quotes and CR/LF."
   (-> (str realm)
-    (replace "\"" "")
-    (replace "\r" "")
-    (replace "\n" "")))
+    (string/replace "\"" "")
+    (string/replace "\r" "")
+    (string/replace "\n" "")))
 
 (defn basic-auth-challenge (conn realm)
   "A 401 conn carrying the `WWW-Authenticate: Basic` challenge for `realm`."

@@ -48,14 +48,14 @@
 
 ; ---- built-in validators — each (fn (value) bool) ----
 
-(defn required? (v) (not (blank? v)))
+(defn required? (v) (not (string/blank? v)))
 
 (defn- no-space-or-control?
   (v)
   "True when `v` holds no space, tab, CR, LF, or other control character (any codepoint
   ≤ 32). Rejecting the whole control range — not just the space — keeps a validated address
   from smuggling a CR/LF into a downstream mail header (header injection)."
-  (not (any? (fn (c) (<= (char->int c) 32)) (string->list v))))
+  (not (any? (fn (c) (<= (char->int c) 32)) (string/to-list v))))
 
 (defn email? (v)
   "A deliberately simple email check: one `@` with text before it and a dotted domain
@@ -64,14 +64,14 @@
   (let (at (index-of v "@"))
     (and (> at 0)
       (no-space-or-control? v)
-      (let (domain (substring v (+ at 1) (string-length v)))
+      (let (domain (string/substring v (+ at 1) (string/length v)))
         (and (= (index-of domain "@") -1)
           (> (index-of domain ".") 0)
-          (< (index-of domain ".") (- (string-length domain) 1)))))))
+          (< (index-of domain ".") (- (string/length domain) 1)))))))
 
-(defn min-length? (n) (fn (v) (>= (string-length v) n)))
+(defn min-length? (n) (fn (v) (>= (string/length v) n)))
 
-(defn max-length? (n) (fn (v) (<= (string-length v) n)))
+(defn max-length? (n) (fn (v) (<= (string/length v) n)))
 
 (defn matches-pattern? (pattern) (fn (v) (regex/matches? pattern v)))
 

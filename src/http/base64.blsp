@@ -7,7 +7,7 @@
 
 (defn b64-char (n)
   "Encode 6-bit value (0-63) as a base64 character."
-  (char-at *b64-table* n))
+  (string/char-at *b64-table* n))
 
 (defn encode-bytes (bytes)
   "Base64-encode a list or vector of byte integers (0-255).
@@ -16,7 +16,7 @@
   ; Accumulate 4-char groups in a list (most-recent first), then reverse + join once.
   ; O(n): first/rest stepping, no per-step `count`, no per-step whole-string rebuild;
   ; the recursion stays in tail position.
-  (join "" (reverse (encode-bytes-acc bytes (list)))))
+  (string/join "" (reverse (encode-bytes-acc bytes (list)))))
 
 (defn- encode-bytes-acc
   (bytes acc)

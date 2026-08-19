@@ -25,7 +25,7 @@
   reaches the wire intact. tcp-send UTF-8-encodes a string leaf (ADR-141), which would mangle
   every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
   verbatim — the same reason the server builds its frames as `bytes`."
-  (bytes (map char->int (string->list carrier))))
+  (bytes (map char->int (string/to-list carrier))))
 
 (defn read-one-frame (sock buf)
   "Block until one complete WebSocket frame is buffered; return its decoded payload,
@@ -229,7 +229,7 @@
 ; A masked client frame (zero mask key → payload bytes unchanged); fin 0/1, payload ≤125.
 (defn ws-frame (fin opcode payload)
   (str (byte->char (+ (* fin 128) opcode))
-    (byte->char (+ 128 (string-length payload)))
+    (byte->char (+ 128 (string/length payload)))
     "\x00\x00\x00\x00"
     payload))
 

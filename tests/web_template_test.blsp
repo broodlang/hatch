@@ -69,7 +69,7 @@
   (test "br" (assert= (render [:br {}]) "<br>"))
   (test "hr" (assert= (render [:hr {}]) "<hr>"))
   (test "input starts with tag"
-    (assert= (starts-with? (render [:input {:type "text"}]) "<input") true))
+    (assert= (string/starts-with? (render [:input {:type "text"}]) "<input") true))
   (test "input contains type attr"
     (assert= (includes? (render [:input {:type "text"}]) "type=\"text\"") true))
   (test "img is void"
@@ -147,7 +147,7 @@
 (describe "html"
   (test "prepends doctype"
     (let (r (html [:html {} [:body {} "x"]]))
-      (assert= (starts-with? r "<!DOCTYPE html>") true)))
+      (assert= (string/starts-with? r "<!DOCTYPE html>") true)))
   (test "contains element content"
     (let (r (html [:p {} "hello"]))
       (assert= (includes? r "<p>hello</p>") true))))
@@ -155,6 +155,6 @@
 (describe "stylesheet"
   (test "renders a void rel=stylesheet link to the href"
     (let (r (render (stylesheet "/static/app.css")))
-      (assert= (starts-with? r "<link") true)
+      (assert= (string/starts-with? r "<link") true)
       (assert= (includes? r "rel=\"stylesheet\"") true)
       (assert= (includes? r "href=\"/static/app.css\"") true))))

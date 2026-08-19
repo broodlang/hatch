@@ -170,7 +170,7 @@
 
   (hatch/web/component/wrapper-statics \"a\" [\"<p>\" \"</p>\"]) ;=> [\"<div data-cid=\\\"a\\\"><p>\" \"</p></div>\"]"
   (let (empty-div (web/template/render [:div {:data-cid id}])
-        open (substring empty-div 0 (- (string-length empty-div) 6))
+        open (string/substring empty-div 0 (- (string/length empty-div) 6))
         v (into [] statics)
         n (count v))
     (if (= n 0)

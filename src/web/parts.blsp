@@ -297,7 +297,7 @@
   weaves its own statics and dynamics (recursively — a component's inner slots may themselves
   be comprehensions or nested components), and a scalar slot is already its HTML string."
   (cond
-    (comp? v) (join "" (comp-items v))
+    (comp? v) (string/join "" (comp-items v))
     (kslot? v) (weave (get v :s) (get v :d))
     else v))
 
@@ -307,7 +307,7 @@
   "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn.
   Collects the pieces in a list and `join`s once — a per-slot `(str acc …)` fold re-copies the
   whole growing HTML each step, O(n²) in the slot count (and this runs on every re-render)."
-  (join "" (reverse (weave-at statics dynamics 0 (count statics) (list)))))
+  (string/join "" (reverse (weave-at statics dynamics 0 (count statics) (list)))))
 
 (defn- weave-at
   (statics dynamics i n acc)
@@ -331,7 +331,7 @@
   concatenate alike can't collide, and the NUL separator can't occur in rendered HTML.
 
   (hatch/web/parts/statics-fingerprint [\"<p>\" \"</p>\"]) ;=> \"f461e62bd2db8219\""
-  (substring (hash/sha256 (str (count statics) "\x00" (join "\x00" statics))) 0 16))
+  (string/substring (hash/sha256 (str (count statics) "\x00" (string/join "\x00" statics))) 0 16))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole

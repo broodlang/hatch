@@ -28,10 +28,10 @@
 
 (defn with-file (dir name content thunk)
   "Write `content` (bytes) to dir/name, run (thunk path), clean up."
-  (try (make-dir dir) (catch _ nil))
-  (spit-bytes (str dir "/" name) content)
+  (try (file/mkdir dir) (catch _ nil))
+  (file/spit-bytes (str dir "/" name) content)
   (let (r (thunk))
-    (delete-file (str dir "/" name))
+    (file/rm (str dir "/" name))
     r))
 
 (describe "serve — binary assets"
@@ -99,15 +99,15 @@
   (fn (request)
     ; serve the request path (minus the leading '/') from `dir`
     (let (p (get request :path)
-          rel (substring p 1 (string-length p)))
+          rel (string/substring p 1 (string/length p)))
       (conn->response (serve (build request) dir rel)))))
 
 (describe "binary asset end-to-end through the server"
   (test "a PNG GET returns the raw bytes on the wire, byte-for-byte"
     (let (dir "/tmp/hatch-staticbin-e2e"
           content (bytes [137 80 78 71 13 10 0 255 42 13 10 7]))
-      (try (make-dir dir) (catch _ nil))
-      (spit-bytes (str dir "/pic.png") content)
+      (try (file/mkdir dir) (catch _ nil))
+      (file/spit-bytes (str dir "/pic.png") content)
       (let (port 24831
             _sup (server/start port (static-handler dir))
             client (tcp-connect "127.0.0.1" port))
@@ -119,7 +119,7 @@
               head (utf8-bytes->string (subbytes resp 0 sep)))
           (tcp-close client)
           (server/stop port)
-          (delete-file (str dir "/pic.png"))
+          (file/rm (str dir "/pic.png"))
           (assert= (includes? head "200 OK") true)
           (assert= (includes? head "Content-Type: image/png") true)
           (assert= (includes? head "Content-Length: 12") true)

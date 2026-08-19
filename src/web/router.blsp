@@ -9,7 +9,7 @@
 
 (defn path-segments (path)
   "Split a path into segments, dropping empty strings from leading slash."
-  (filter (fn (s) (not (blank? s))) (string-split path "/")))
+  (filter (fn (s) (not (string/blank? s))) (string/split path "/")))
 
 (defn match-path (pattern segments)
   "Match a pattern list against path segments.
@@ -30,7 +30,7 @@
       ; A splat consumes everything that remains (including nothing), each segment decoded.
       (splat? p)
         (assoc acc
-          (first (rest p)) (if (nil? segments) "" (join "/" (map http/util/url-decode segments))))
+          (first (rest p)) (if (nil? segments) "" (string/join "/" (map http/util/url-decode segments))))
       (and (nil? pattern) (nil? segments)) acc
       (or (nil? pattern) (nil? segments)) nil
       ; A `:param` captures one segment, percent-decoded (matching literals stays on the raw
@@ -47,16 +47,16 @@
   capture keyword; `*name` (or bare `*`) becomes a `[:splat name]` catch-all."
   (map (fn (seg)
          (cond
-           (starts-with? seg ":") (keyword (substring seg 1 (string-length seg)))
-           (starts-with? seg "*") [:splat (parse-pattern-splat-name seg)]
+           (string/starts-with? seg ":") (keyword (string/substring seg 1 (string/length seg)))
+           (string/starts-with? seg "*") [:splat (parse-pattern-splat-name seg)]
            else seg))
     (path-segments path)))
 
 (defn- parse-pattern-splat-name
   (seg)
   "The capture name for a `*name` splat segment; bare `*` captures as `splat`."
-  (let (n (substring seg 1 (string-length seg)))
-    (if (blank? n) "splat" n)))
+  (let (n (string/substring seg 1 (string/length seg)))
+    (if (string/blank? n) "splat" n)))
 
 ; ---- route table ----
 
@@ -119,7 +119,7 @@
   "The `Allow` header value for a path serving `methods`: the declared methods, plus
   `HEAD` wherever `GET` is served, plus `OPTIONS` (which we answer automatically)."
   (let (with-head (if (mem? "GET" methods) (append methods (list "HEAD")) methods))
-    (join ", " (uniq (append with-head (list "OPTIONS"))))))
+    (string/join ", " (uniq (append with-head (list "OPTIONS"))))))
 
 (defn- dispatch-no-match
   (routes conn method segments)
@@ -131,7 +131,7 @@
         (str "<h1>404 Not Found</h1><p>No route for "
           (escape-html method)
           " /"
-          (escape-html (join "/" segments))
+          (escape-html (string/join "/" segments))
           "</p>"))
       (let (allow (allow-header methods)
             conn (put-resp-header conn :allow allow))
@@ -175,7 +175,7 @@
     (let (segs (path-segments path))
       (if (empty? segs)
         "Home"
-        (join " " (map capitalize segs))))))
+        (string/join " " (map string/capitalize segs))))))
 
 (defn plist-get (plist key)
   "Look `key` up in a flat keyword/value list `(:a 1 :b 2)`; nil if absent."
@@ -223,7 +223,7 @@
   (let (verb (first clause)
         path (first (rest clause))
         handler (first (rest (rest clause)))
-        method (if (= verb 'any) "*" (upper (name verb))))
+        method (if (= verb 'any) "*" (string/upper (name verb))))
     {:route (list 'make-route method path (list 'fn (list 'route-conn) (list handler 'route-conn)))
      :setup nil}))
 

@@ -62,7 +62,7 @@
   "True if `mime` is a text media type — served with `slurp` as a string. Everything else
   (images, fonts, video, an unknown octet-stream) is read byte-faithfully with `slurp-bytes`
   and served as raw `bytes`, so binary assets aren't UTF-8-mangled."
-  (or (starts-with? mime "text/")
+  (or (string/starts-with? mime "text/")
     (= mime "application/json")
     (= mime "application/xml")
     (= mime "application/manifest+json")
@@ -71,9 +71,9 @@
 (defn extension (path)
   "The lowercase file extension of `path` (after the last dot of the last segment),
   or \"\" when there's no extension."
-  (let (seg (last (string-split path "/"))
-        parts (string-split seg "."))
-    (if (> (count parts) 1) (lower (last parts)) "")))
+  (let (seg (last (string/split path "/"))
+        parts (string/split seg "."))
+    (if (> (count parts) 1) (string/lower (last parts)) "")))
 
 (defn mime-type (path)
   "Content-Type for `path`, chosen by extension; `application/octet-stream` if unknown."
@@ -84,7 +84,7 @@
 (defn has-control-byte? (s)
   "True if `s` contains any control byte (< 0x20) or DEL (0x7f) — e.g. a NUL, which can
   truncate a path at the OS layer and on which `file-stat` may raise."
-  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string->codepoints s)))))
+  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string/to-codepoints s)))))
 
 (defn unsafe-segment? (s)
   "True if a (percent-decoded) path segment would escape the root or is otherwise unsafe:
@@ -98,7 +98,7 @@
   is per-segment so a `%2f` becomes a literal `/` *inside* a segment (rejected by
   `unsafe-segment?`) rather than a new separator."
   (let (segs (map http/util/url-decode
-               (filter (fn (s) (not (blank? s))) (string-split rel "/"))))
+               (filter (fn (s) (not (string/blank? s))) (string/split rel "/"))))
     (if (empty? (filter unsafe-segment? segs)) segs nil)))
 
 ; ---- environment ----
@@ -115,11 +115,11 @@
   "A strong ETag for a text `body`: a quoted SHA-256 prefix. Content-addressed, so it changes
   iff the bytes change — no filesystem mtime needed, and identical across server restarts and
   replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
-  (str "\"" (substring (hash/sha256 body) 0 16) "\""))
+  (str "\"" (string/substring (hash/sha256 body) 0 16) "\""))
 
 (defn bytes-etag-hash (body)
   "A strong ETag for a binary (`bytes`) body — same quoted-SHA-256-prefix shape as `etag`."
-  (str "\"" (substring (hash/sha256-bytes body) 0 16) "\""))
+  (str "\"" (string/substring (hash/sha256-bytes body) 0 16) "\""))
 
 ; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
 ; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
@@ -132,7 +132,7 @@
   recomputing it (via `fresh-fn`, called only on a miss) after an edit. One `file-stat` (a
   cheap syscall) replaces hashing the whole body on every hit. Shared by the text and binary
   paths — they differ only in how the fresh tag is hashed."
-  (let (st (file-stat path))
+  (let (st (file/stat path))
     (if (nil? st)
       (fresh-fn)
       (let (hit (table-get *etag-cache* path))
@@ -154,12 +154,12 @@
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
   `asset-path`/`web/assets/fingerprint` emit. A cheap, no-IO pre-check: it gates the manifest
   lookup in `fingerprinted?` so a normal request never touches disk."
-  (let (seg (lower (last (string-split path "/")))
-        parts (string-split seg "."))
+  (let (seg (string/lower (last (string/split path "/")))
+        parts (string/split seg "."))
     (and (>= (count parts) 3)
       (let (h (first (rest (reverse parts))))
-        (and (>= (string-length h) 8)
-          (= (string-span h 0 "0123456789abcdef") (string-length h)))))))
+        (and (>= (string/length h) 8)
+          (= (string/span h 0 "0123456789abcdef") (string/length h)))))))
 
 (defn fingerprinted? (path dir)
   "True if `path` is an asset hatch actually content-fingerprinted — its basename appears as
@@ -168,7 +168,7 @@
   treated as immutable, so it can't get stuck in caches for a year if its bytes later change.
   The structural pre-check means only a fingerprint-shaped URL ever reads the manifest."
   (and (fingerprint-shaped? path)
-    (includes? (vals (load-manifest dir)) (last (string-split path "/")))))
+    (includes? (vals (load-manifest dir)) (last (string/split path "/")))))
 
 (defn cache-control (path dir)
   "The Cache-Control for a static asset at `path` (served from `dir`). In prod a
@@ -195,7 +195,7 @@
 (defn strip-weak (t)
   "Drop a leading weak-validator `W/` from an ETag token, so a weak `If-None-Match` still
   matches our strong tag (the RFC 7232 comparison for `If-None-Match` is weak)."
-  (if (starts-with? t "W/") (substring t 2 (string-length t)) t))
+  (if (string/starts-with? t "W/") (string/substring t 2 (string/length t)) t))
 
 (defn if-none-match? (conn tag)
   "True if the request's `If-None-Match` lists `tag` (or is the `*` wildcard) — i.e. the
@@ -207,10 +207,10 @@
   (let (inm (get (get conn :headers) :if-none-match))
     (if (nil? inm)
       false
-      (let (want (trim inm))
+      (let (want (string/trim inm))
         (or (= want "*")
-          (not (empty? (filter (fn (t) (= (strip-weak (trim t)) tag))
-                         (string-split want ",")))))))))
+          (not (empty? (filter (fn (t) (= (strip-weak (string/trim t)) tag))
+                         (string/split want ",")))))))))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
@@ -218,7 +218,7 @@
   (`\"1.5\"` → 1.5) — and a float offset would later blow up `substring` (int-only), turning a
   crafted `Range` header into a 500. So anything non-integer (floats, signs, hex, spaces) is
   rejected here and the range is ignored."
-  (if (and (not (blank? s)) (= (string-span s 0 "0123456789") (string-length s)))
+  (if (and (not (string/blank? s)) (= (string/span s 0 "0123456789") (string/length s)))
     (string->number s)
     nil))
 
@@ -227,26 +227,26 @@
   `[start end]` (inclusive, satisfiable), `:unsatisfiable` (a syntactically valid range
   wholly past the end), or nil (absent/garbled/multi-range — ignore it and serve the whole
   body). Forms: `bytes=a-b`, `bytes=a-` (a..end), `bytes=-n` (final n bytes)."
-  (if (or (nil? spec) (not (starts-with? (trim spec) "bytes=")))
+  (if (or (nil? spec) (not (string/starts-with? (string/trim spec) "bytes=")))
     nil
-    (let (r (substring (trim spec) 6 (string-length (trim spec))))
+    (let (r (string/substring (string/trim spec) 6 (string/length (string/trim spec))))
       (if (includes? r ",")
         ; multi-range: not worth it for text assets — fall back to a full 200
         nil
         (let (dash (index-of r "-"))
           (if (= dash -1)
             nil
-            (let (lo (trim (substring r 0 dash))
-                  hi (trim (substring r (+ dash 1) (string-length r))))
+            (let (lo (string/trim (string/substring r 0 dash))
+                  hi (string/trim (string/substring r (+ dash 1) (string/length r))))
               (cond
                 ; suffix: bytes=-n → final n bytes
-                (blank? lo)
+                (string/blank? lo)
                   (let (n (range-int hi))
                     (if (or (nil? n) (<= n 0))
                       nil
                       [(max 0 (- len n)) (- len 1)]))
                 ; bytes=a- → a..end
-                (blank? hi)
+                (string/blank? hi)
                   (let (a (range-int lo))
                     (cond
                       (nil? a) nil
@@ -268,7 +268,7 @@
   slice. Otherwise (and for multi-range) we ignore the Range and the caller sends a full 200,
   which the spec explicitly allows. Returns a 206/416 conn, or nil to mean 'serve the whole
   body'."
-  (if (not (= (string-length body) len))
+  (if (not (= (string/length body) len))
     ; multibyte body — can't slice by byte safely; let the caller send 200
     nil
     (let (r (parse-range (get (get conn :headers) :range) len))
@@ -293,7 +293,7 @@
                           :x-content-type-options "nosniff"
                           :content-range (str "bytes " start "-" end "/" len)})
               206
-              (substring body start (+ end 1))))))))
+              (string/substring body start (+ end 1))))))))
 
 (defn serve-body (conn content-type body path &optional (dir "static") (tag nil))
   "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
@@ -322,7 +322,7 @@
   slurping the file. nil if the file is uncached, changed, or unstattable (the caller then
   reads + hashes it). `file-stat` is guarded: a path the OS rejects (an interior NUL that
   slipped a check, an odd encoding) fails closed to 404 rather than crashing the worker."
-  (let (st (try (file-stat path) (catch _ nil)))
+  (let (st (try (file/stat path) (catch _ nil)))
     (if (nil? st)
       nil
       (let (hit (table-get *etag-cache* path))
@@ -346,8 +346,8 @@
   coding AND the sibling exists on disk (both written by `web/assets/fingerprint`). nil when
   neither applies (fall through to the identity representation)."
   (cond
-    (and (accepts? conn "br") (file-exists? (str path ".br"))) ["br" (str path ".br")]
-    (and (accepts? conn "gzip") (file-exists? (str path ".gz"))) ["gzip" (str path ".gz")]
+    (and (accepts? conn "br") (file/exists? (str path ".br"))) ["br" (str path ".br")]
+    (and (accepts? conn "gzip") (file/exists? (str path ".gz"))) ["gzip" (str path ".gz")]
     else nil))
 
 (defn serve-encoded (conn path root)
@@ -363,7 +363,7 @@
     (when variant
       (let (coding (first variant)
             sibling (nth variant 1)
-            body (try (slurp-bytes sibling) (catch _ nil)))
+            body (try (file/slurp-bytes sibling) (catch _ nil)))
         (when body
           (let (tag (cached-bytes-etag sibling body)
                 cc (cache-control path root))
@@ -392,12 +392,12 @@
   (let (segs (safe-segments rel))
     (if (or (nil? segs) (empty? segs))
       (not-found-resp conn)
-      (let (path (str root "/" (join "/" segs)))
+      (let (path (str root "/" (string/join "/" segs)))
         (or (serve-encoded conn path root)
           (let (fresh (fresh-cached-etag path))
             (if (and fresh (if-none-match? conn fresh))
               (not-modified conn fresh (cache-control path root))
-              ; text types are read as a string (slurp); everything else (images, fonts,
+              ; text types are read as a string (file/slurp); everything else (images, fonts,
               ; video, an unknown octet-stream) is read byte-faithfully as `bytes`
               (if (text-mime? (mime-type path))
                 (serve-text conn path root)
@@ -405,7 +405,7 @@
 
 (defn serve-text (conn path root)
   "Serve a text asset at `path`: read as a UTF-8 string and hand to `serve-body`."
-  (let (body (try (slurp path) (catch _ nil)))
+  (let (body (try (file/slurp path) (catch _ nil)))
     (if (nil? body)
       (not-found-resp conn)
       (serve-body conn (mime-type path) body path root (cached-etag path body)))))
@@ -413,7 +413,7 @@
 (defn serve-binary (conn path root)
   "Serve a binary asset at `path`: read the raw bytes (byte-faithful, never UTF-8-mangled) and
   hand to `serve-binary-body`."
-  (let (body (try (slurp-bytes path) (catch _ nil)))
+  (let (body (try (file/slurp-bytes path) (catch _ nil)))
     (if (nil? body)
       (not-found-resp conn)
       (serve-binary-body conn (mime-type path) body path root (cached-bytes-etag path body)))))
@@ -488,7 +488,7 @@
   "Serialize a `logical → fingerprinted` map to the manifest line format — one
   `logical<TAB>fingerprinted` line per asset. The inverse of `parse-manifest`; written by
   `web/assets/fingerprint`."
-  (join "" (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (map-pairs manifest))))
+  (string/join "" (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (map-pairs manifest))))
 
 (defn parse-manifest (text)
   "Parse a manifest (one `logical<TAB>fingerprinted` line per asset) into a map."
@@ -496,9 +496,9 @@
           (let (tab (index-of line "\t"))
             (if (= tab -1)
               m
-              (assoc m (substring line 0 tab) (substring line (+ tab 1) (string-length line))))))
+              (assoc m (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))
     {}
-    (filter (fn (l) (not (blank? l))) (string-split text "\n"))))
+    (filter (fn (l) (not (string/blank? l))) (string/split text "\n"))))
 
 ; Process-shared cache (ETS) of `dir → parsed manifest`. The manifest is immutable for a
 ; deployment's lifetime (a new build means a new process), so this is read once per dir and
@@ -512,7 +512,7 @@
   empty/miss result), so a hot path reads the file at most once."
   (if (table-has? *manifest-cache* dir)
     (table-get *manifest-cache* dir)
-    (let (text (try (slurp (manifest-path dir)) (catch _ nil))
+    (let (text (try (file/slurp (manifest-path dir)) (catch _ nil))
           m (if (nil? text) {} (parse-manifest text)))
       (table-put *manifest-cache* dir m)
       m)))

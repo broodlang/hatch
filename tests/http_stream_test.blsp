@@ -27,7 +27,7 @@
 (defn body-of (resp)
   "The body (everything past the head terminator) of a raw response."
   (let (i (index-of resp "\r\n\r\n"))
-    (if (= i -1) "" (substring resp (+ i 4) (string-length resp)))))
+    (if (= i -1) "" (string/substring resp (+ i 4) (string/length resp)))))
 
 (defn unchunk (s acc)
   "Decode a chunked-transfer body string back to its payload (ASCII framing/payload — chunk
@@ -35,12 +35,12 @@
   (let (nl (index-of s "\r\n"))
     (if (= nl -1)
       acc
-      (let (size (parse-hex (substring s 0 nl))
-            after-size (substring s (+ nl 2) (string-length s)))
+      (let (size (parse-hex (string/substring s 0 nl))
+            after-size (string/substring s (+ nl 2) (string/length s)))
         (if (or (nil? size) (= size 0))
           acc
-          (unchunk (substring after-size (+ size 2) (string-length after-size))
-            (str acc (substring after-size 0 size))))))))
+          (unchunk (string/substring after-size (+ size 2) (string/length after-size))
+            (str acc (string/substring after-size 0 size))))))))
 
 (defn parse-hex (s)
   "Parse a lowercase/uppercase hex string to an int (small helper for the chunk-size line)."
@@ -52,7 +52,7 @@
                     else nil))
             (if (nil? d) acc (+ (* acc 16) d))))
     0
-    (string->list (trim s))))
+    (string/to-list (string/trim s))))
 
 ; ---- handlers ----
 
@@ -96,7 +96,7 @@
           _ (server/start port count-stream)
           resp (get-raw port "/"))
       (server/stop port)
-      (assert= (ends-with? (body-of resp) "0\r\n\r\n") true))))
+      (assert= (string/ends-with? (body-of resp) "0\r\n\r\n") true))))
 
 (describe "conn-level stream-resp"
   (test "streams the writes through the conn path"
@@ -142,13 +142,13 @@
 (defn big-body-stream (_request)
   "Stream a payload larger than the block size, forcing multiple chunks."
   (conn->response (stream/stream-bytes (build _request)
-                    (join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
+                    (string/join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
                     {:content-type "text/plain" :block-size 64})))
 
 (defn gzip-stream (request)
   "Stream a payload gzip-compressed when the client accepts it."
   (conn->response (stream/stream-bytes (build request)
-                    (join "" (map (fn (_) "compress me ") (range 0 500)))
+                    (string/join "" (map (fn (_) "compress me ") (range 0 500)))
                     {:gzip true :content-type "text/plain"})))
 
 (defn file-stream (request)
@@ -159,7 +159,7 @@
 
 (describe "stream-bytes"
   (test "splits a large body into multiple chunks that reassemble exactly"
-    (let (want (join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
+    (let (want (string/join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
           port 24817
           _ (server/start port big-body-stream)
           resp (get-raw port "/"))
@@ -168,7 +168,7 @@
       (assert= (includes? resp "Content-Type: text/plain\r\n") true)
       (assert= (unchunk (body-of resp) "") want)))
   (test "gzip: negotiated, Content-Encoding set, and the body inflates to the original"
-    (let (want (join "" (map (fn (_) "compress me ") (range 0 500)))
+    (let (want (string/join "" (map (fn (_) "compress me ") (range 0 500)))
           port 24818
           _ (server/start port gzip-stream)
           sock (tcp-connect "127.0.0.1" port)
@@ -186,12 +186,12 @@
 (describe "stream-file"
   (test "streams a file's bytes, reassembling exactly"
     (let (path "/tmp/hatch-stream-file-test.txt"
-          want (join "" (map (fn (i) (str "row " i "\n")) (range 0 300)))
-          _ (spit path want)
+          want (string/join "" (map (fn (i) (str "row " i "\n")) (range 0 300)))
+          _ (file/spit path want)
           port 24819
           _ (server/start port file-stream)
           resp (get-raw port "/"))
       (server/stop port)
-      (delete-file path)
+      (file/rm path)
       (assert= (includes? resp "Transfer-Encoding: chunked\r\n") true)
       (assert= (unchunk (body-of resp) "") want))))

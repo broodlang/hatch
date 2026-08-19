@@ -9,9 +9,9 @@
   (let (sep (index-of buf "\r\n\r\n"))
     (if (= sep -1)
       [:incomplete]
-      (let (header-block (substring buf 0 sep)
+      (let (header-block (string/substring buf 0 sep)
             body-start (+ sep 4)
-            lines (string-split header-block "\r\n"))
+            lines (string/split header-block "\r\n"))
         (match lines
           (nil [:error "empty request"])
           ((req-line & header-lines)
@@ -21,7 +21,7 @@
                 ([:error e] [:error e])
                 ([:ok method path query version]
                   (let (headers (parse-headers header-lines)
-                        buflen (string-length buf))
+                        buflen (string/length buf))
                     (cond
                       ; A bare CR or LF in the head (only CRLF was split away) lets a proxy that
                       ; splits on it see a different header set — a smuggling primitive (§3.5).
@@ -81,8 +81,8 @@
                                 query
                                 version
                                 headers
-                                (substring buf body-start body-end))
-                              (substring buf body-end buflen)])))))))))))))
+                                (string/substring buf body-start body-end))
+                              (string/substring buf body-end buflen)])))))))))))))
 
 (defn try-parse-head (buf)
   "Parse a request's line + headers WITHOUT requiring the body to have arrived — for the
@@ -95,9 +95,9 @@
   (let (sep (index-of buf "\r\n\r\n"))
     (if (= sep -1)
       [:incomplete]
-      (let (header-block (substring buf 0 sep)
+      (let (header-block (string/substring buf 0 sep)
             body-start (+ sep 4)
-            lines (string-split header-block "\r\n"))
+            lines (string/split header-block "\r\n"))
         (match lines
           (nil [:error "empty request"])
           ((req-line & header-lines)
@@ -182,7 +182,7 @@
   "Decode head-block `bytes` to a Latin-1 carrier string (one codepoint 0-255 per byte), so the
   string-based head parser runs byte-faithfully. Applied only to the request HEAD, which is
   bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`."
-  (join "" (map int->char (bytes->list b))))
+  (string/join "" (map int->char (bytes->list b))))
 
 (defn try-parse-bytes (buf)
   "Bytes-native `try-parse`: `buf` is a `bytes` value. Returns `[:ok request remainder]`,
@@ -234,8 +234,8 @@
       [:more (subbytes buf pos buflen) decoded dlen]
       (let (size-line (head-carrier (subbytes buf pos eol))
             semi (index-of size-line ";")
-            size-tok (if (= semi -1) size-line (substring size-line 0 semi))
-            size (parse-hex (trim size-tok)))
+            size-tok (if (= semi -1) size-line (string/substring size-line 0 semi))
+            size (parse-hex (string/trim size-tok)))
         (cond
           (nil? size) [:error "invalid chunk size"]
           (= size 0)
@@ -272,11 +272,11 @@
 ;; ---- chunked Transfer-Encoding (RFC 7230 §4.1) ------------------------------
 (defn chunked? (te)
   "True if the Transfer-Encoding value is exactly `chunked` (the only coding we decode)."
-  (= (lower (trim te)) "chunked"))
+  (= (string/lower (string/trim te)) "chunked"))
 
 (defn idx-from (s needle from)
   "Index of `needle` in `s` at or after `from`, or -1."
-  (let (i (index-of (substring s from (string-length s)) needle))
+  (let (i (index-of (string/substring s from (string/length s)) needle))
     (if (= i -1) -1 (+ from i))))
 
 (defn hex-digit-val (c)
@@ -293,14 +293,14 @@
 
 (defn parse-hex (s)
   "Parse hex string `s` to a non-negative integer, or nil if empty/invalid."
-  (if (blank? s)
+  (if (string/blank? s)
     nil
     (fold (fn (acc c)
             (if (nil? acc)
               nil
               (let (d (hex-digit-val c)) (if (nil? d) nil (+ (* acc 16) d)))))
       0
-      (string->list s))))
+      (string/to-list s))))
 
 (defn- dechunk-trailers
   (buf pos buflen)
@@ -325,53 +325,53 @@
     `[:error msg]`          — malformed framing.
   Pieces are `join`ed once (at `:ok`) rather than `(str acc …)` per chunk. `try-parse` reuses this
   on a whole buffer (`:more` → `:incomplete`), so both paths share one decoder."
-  (let (buflen (string-length buf)
+  (let (buflen (string/length buf)
         eol (idx-from buf "\r\n" pos))
     (if (= eol -1)
-      [:more (substring buf pos buflen) decoded dlen]
-      (let (size-line (substring buf pos eol)
+      [:more (string/substring buf pos buflen) decoded dlen]
+      (let (size-line (string/substring buf pos eol)
             semi (index-of size-line ";")
-            size-tok (if (= semi -1) size-line (substring size-line 0 semi))
-            size (parse-hex (trim size-tok)))
+            size-tok (if (= semi -1) size-line (string/substring size-line 0 semi))
+            size (parse-hex (string/trim size-tok)))
         (cond
           (nil? size) [:error "invalid chunk size"]
           (= size 0)
             (let (end (dechunk-trailers buf (+ eol 2) buflen))
               (if (= end -1)
-                [:more (substring buf pos buflen) decoded dlen]
-                [:ok (join "" (reverse decoded)) (substring buf end buflen)]))
+                [:more (string/substring buf pos buflen) decoded dlen]
+                [:ok (string/join "" (reverse decoded)) (string/substring buf end buflen)]))
           else
             (let (data-start (+ eol 2)
                   data-end (+ data-start size)
                   after (+ data-end 2))
               (if (< buflen after)
-                [:more (substring buf pos buflen) decoded dlen]
-                (if (= (substring buf data-end after) "\r\n")
+                [:more (string/substring buf pos buflen) decoded dlen]
+                (if (= (string/substring buf data-end after) "\r\n")
                   (dechunk-step buf
                     after
-                    (cons (substring buf data-start data-end) decoded)
+                    (cons (string/substring buf data-start data-end) decoded)
                     (+ dlen size))
                   [:error "malformed chunk"]))))))))
 
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
-  (and (not (blank? s))
-    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string->list s)))))
+  (and (not (string/blank? s))
+    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string/to-list s)))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
   else nil. Splits on the first `:` (the space after it is optional)."
   (let (ci (index-of line ":"))
-    (if (and (not (= ci -1)) (= (lower (trim (substring line 0 ci))) lower-key))
-      (trim (substring line (+ ci 1) (string-length line)))
+    (if (and (not (= ci -1)) (= (string/lower (string/trim (string/substring line 0 ci))) lower-key))
+      (string/trim (string/substring line (+ ci 1) (string/length line)))
       nil)))
 
 (defn obs-fold? (header-lines)
   "True if any header line begins with a space or tab — an obs-fold continuation line, which
   RFC 7230 §3.2.4 says a server must reject in a request (it's a header-desync primitive)."
   (not (empty? (filter (fn (line)
-                         (and (> (string-length line) 0)
-                           (let (c (substring line 0 1)) (or (= c " ") (= c "\t")))))
+                         (and (> (string/length line) 0)
+                           (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))
                  header-lines))))
 
 (defn ws-before-colon? (line)
@@ -382,7 +382,7 @@
   disagreement is a CL.TE desync primitive, the same class as obs-fold."
   (let (ci (index-of line ":"))
     (and (> ci 0)
-      (let (before (substring line (- ci 1) ci)) (or (= before " ") (= before "\t"))))))
+      (let (before (string/substring line (- ci 1) ci)) (or (= before " ") (= before "\t"))))))
 
 (defn any-ws-before-colon? (header-lines)
   "True if any header line puts whitespace before its colon (see `ws-before-colon?`)."
@@ -401,7 +401,7 @@
   it (as a bare field, or by joining it to a neighbour) from disagreeing with us, the same
   desync posture as the other malformed-header rejections. Obs-fold continuation lines start
   with SP/HTAB and are caught by `obs-fold?` first, so this only fires on a non-folded line."
-  (not (empty? (filter (fn (line) (and (> (string-length line) 0) (= (index-of line ":") -1)))
+  (not (empty? (filter (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))
                  header-lines))))
 
 (defn duplicate-transfer-encoding? (header-lines)
@@ -423,31 +423,31 @@
   "True if the Content-Length header value `cl` is absent (nil), or present and a
   non-negative integer. Rejects negatives, floats, hex, and empty — any of which would
   otherwise mis-size or crash the body read."
-  (or (nil? cl) (all-digits? (trim cl))))
+  (or (nil? cl) (all-digits? (string/trim cl))))
 
 (defn content-length-value (cl)
   "The integer Content-Length, or 0 when absent. Assumes `valid-content-length?`."
-  (if (nil? cl) 0 (string->number (trim cl))))
+  (if (nil? cl) 0 (string->number (string/trim cl))))
 
 (defn http-version (token)
   "Extract the numeric HTTP version ('1.1', '1.0') from a request-line version token like
   `HTTP/1.1`; defaults to '1.1' when the token is missing the `/version` suffix."
   (let (slash (index-of (str token) "/"))
-    (if (= slash -1) "1.1" (substring token (+ slash 1) (string-length token)))))
+    (if (= slash -1) "1.1" (string/substring token (+ slash 1) (string/length token)))))
 
 (defn parse-request-line (line)
   "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query version]` or
   `[:error msg]`. `version` is the numeric HTTP version ('1.1'/'1.0')."
-  (let (parts (string-split line " "))
+  (let (parts (string/split line " "))
     (match parts
       ((method target version & _) (let (qi (index-of target "?")
                                          v (http-version version))
                                      (if (= qi -1)
-                                       [:ok (upper method) target "" v]
+                                       [:ok (string/upper method) target "" v]
                                        [:ok
-                                         (upper method)
-                                         (substring target 0 qi)
-                                         (substring target (+ qi 1) (string-length target))
+                                         (string/upper method)
+                                         (string/substring target 0 qi)
+                                         (string/substring target (+ qi 1) (string/length target))
                                          v])))
       (_ [:error (str "invalid request line: " line)]))))
 
@@ -469,7 +469,7 @@
   §3.2.2 (`; ` for `Cookie`, `, ` otherwise)."
   (if (= k :content-length)
     (first values)
-    (join (header-join-sep k) values)))
+    (string/join (header-join-sep k) values)))
 
 (defn parse-headers (lines)
   "Parse a list of raw header lines into a keyword→string map. Splits on the first
@@ -485,8 +485,8 @@
                         (let (ci (index-of line ":"))
                           (if (= ci -1)
                             m
-                            (let (k (keyword (lower (trim (substring line 0 ci))))
-                                  v (trim (substring line (+ ci 1) (string-length line))))
+                            (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
+                                  v (string/trim (string/substring line (+ ci 1) (string/length line))))
                               (assoc m k (cons v (get m k (list))))))))
                   {}
                   lines))

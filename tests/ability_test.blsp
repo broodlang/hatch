@@ -5,7 +5,7 @@
   (shout [v] :-> string))
 
 (impl Shout :int (shout [n] (str "INT:" n)))
-(impl Shout :string (shout [s] (upper s)))
+(impl Shout :string (shout [s] (string/upper s)))
 (impl Shout :default (shout [v] "?"))
 
 (describe "ability dispatch"

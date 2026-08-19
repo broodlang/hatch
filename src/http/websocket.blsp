@@ -30,7 +30,7 @@
 ; `char-at` on the (multibyte) table returns a fresh view string each time, and joining tens
 ; of thousands of those into one frame body blows up super-linearly (a >64 KB render could
 ; allocate gigabytes and OOM the session). Joining references to 256 shared strings is linear.
-(def *byte-strs* (mapv (fn (n) (char-at *byte-table* n)) (range 256)))
+(def *byte-strs* (mapv (fn (n) (string/char-at *byte-table* n)) (range 256)))
 
 (defn byte->char (n)
   "Convert byte value 0-255 to a 1-char string."
@@ -42,14 +42,14 @@
   value; convert it here at the receive boundary so the existing string-based readers
   (frame parser, request reader) keep working unchanged. Built with `join` rather than
   `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
-  (join "" (map byte->char (bytes->list b))))
+  (string/join "" (map byte->char (bytes->list b))))
 
 (defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
   frame/request parser's form) or a first-class `bytes` value (an outbound frame)."
   (if (bytes? s)
     (get s i)
-    (char->int (char-at s i))))
+    (char->int (string/char-at s i))))
 
 ; ---- handshake ----
 
@@ -58,7 +58,7 @@
   The example is RFC 6455 §1.3's reference vector.
 
   (hatch/http/websocket/accept-key \"dGhlIHNhbXBsZSBub25jZQ==\") ;=> \"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\""
-  (encode-sha1 (hash/sha1 (str (trim client-key) *ws-magic*))))
+  (encode-sha1 (hash/sha1 (str (string/trim client-key) *ws-magic*))))
 
 (defn upgrade-response (key)
   "Build the 101 Switching Protocols response for a WebSocket upgrade request."
@@ -72,8 +72,8 @@
 
 (defn upgrade-request? (request)
   "True if the HTTP request is a WebSocket upgrade."
-  (let (conn (lower (get-in request [:headers :connection] ""))
-        upg (lower (get-in request [:headers :upgrade] "")))
+  (let (conn (string/lower (get-in request [:headers :connection] ""))
+        upg (string/lower (get-in request [:headers :upgrade] "")))
     (and (includes? conn "upgrade")
       (= upg "websocket"))))
 
@@ -83,7 +83,7 @@
 
   (hatch/http/websocket/origin-host \"https://example.com:8080\") ;=> \"example.com:8080\""
   (let (i (index-of origin "://"))
-    (if (= i -1) origin (substring origin (+ i 3) (string-length origin)))))
+    (if (= i -1) origin (string/substring origin (+ i 3) (string/length origin)))))
 
 (defn origin-allowed? (request policy)
   "Whether a WebSocket upgrade's `Origin` is permitted — the cross-site-WebSocket-hijacking
@@ -121,14 +121,14 @@
   on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
   payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
   through a list first keeps this O(n)."
-  (join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
+  (string/join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
 
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
   `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
   `char-at`/`carrier-byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
   per-index walk was O(n²) on every inbound frame payload."
-  (utf8-bytes->string (bytes (string->codepoints s))))
+  (utf8-bytes->string (bytes (string/to-codepoints s))))
 
 ; Each frame is described as an *iolist* (ADR-139) — a nested list of byte ints and
 ; `bytes` values — and flattened exactly once by `bytes-concat`. The length fields go

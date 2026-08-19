@@ -44,7 +44,7 @@
   "A raw request `bytes`: request `line`, `headers` (a list of \"Name: Value\"), CRLF, then `body`
   (a string or bytes)."
   (bytes-concat [(str line "\r\n")
-                  (join "" (map (fn (h) (str h "\r\n")) headers))
+                  (string/join "" (map (fn (h) (str h "\r\n")) headers))
                   "\r\n"
                   body]))
 
