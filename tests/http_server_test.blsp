@@ -290,7 +290,7 @@
           _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
           _resp (drain sock "")
           sup (whereis (server/worker-supervisor-name port))
-          n (proc/supervisor/count-children sup))
+          n (supervisor/count-children sup))
       (tcp-close sock)
       (server/stop port)
       (assert= (pid? sup) true)

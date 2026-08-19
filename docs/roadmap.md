@@ -43,7 +43,7 @@ trade-offs behind them — is archived in
 | Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
-`http/server`'s request-head read is `tcp-read-until` (brood ≥ 0.3.11), so the delimiter
+`http/server`'s request-head read is `tcp/read-until` (brood ≥ 0.3.11), so the delimiter
 arithmetic — hand-rolled here through several O(n²) fixes — now lives upstream, in one place,
 tested there. Per-item `:for` diffing, per-component wire diffs and reconnect statics-caching
 are all in: a
@@ -66,7 +66,7 @@ With Phases 1–11 done, this is the actual backlog. Nothing here blocks anythin
 appetite.
 
 - **The three body drains stay hand-rolled, on purpose** — the leftover of the framed-read
-  adoption (the head reader took it; see *What shipped*). `tcp-read-n` reads to a length and
+  adoption (the head reader took it; see *What shipped*). `tcp/read-n` reads to a length and
   returns the bytes, with no per-chunk hook, and each body reader needs one: `spool-drain`
   appends each chunk to disk (buffering the whole body in memory is the exact thing spooling
   exists to avoid), `buffered-drain` emits upload-progress telemetry per read, and
@@ -141,7 +141,7 @@ fix hadn't cleared. It is adopted as of 2026-08-13; details in its entry below.
   `web/conn`'s `carrier->bytes` round-trip — the quadratic-in-upload-size double walk of audit
   §16 — are both gone from the hot path. The one behaviour change: a RAW handler's `:body` is
   now `bytes`. The carrier parser stays in `http/request` purely as the fuzz oracle.
-- ✅ **Framed reads — `tcp-read-until` / `tcp-read-n`**, and the three upstream gaps that had to
+- ✅ **Framed reads — `tcp/read-until` / `tcp/read-n`**, and the three upstream gaps that had to
   close before hatch could use them. Shipped 2026-07-25 with neither a timeout nor a size cap,
   so adopting would have dropped this server's 408/413; `:timeout-ms` and `:max-bytes` were
   added 2026-08-07 on our report. Attempting the adoption on 2026-08-13 found two more, both
@@ -151,7 +151,7 @@ fix hadn't cleared. It is adopted as of 2026-08-13; details in its entry below.
   combinator could not express; and **`:seed`** (brood 0.3.11) — the keep-alive path re-enters
   the head read holding the leftover of a pipelined request, which can be a *partial* head, and
   a `\r\n\r\n` straddling that leftover and the next chunk has to be found. **Adopted** in
-  `http/server`'s `worker-read-head`, which is gone: the read is one `tcp-read-until` call whose
+  `http/server`'s `worker-read-head`, which is gone: the read is one `tcp/read-until` call whose
   three bounds map onto the same 408/408/413 answers. The body drains deliberately stay
   hand-rolled — see *Still open*.
 - ✅ **`mapv`/`filterv` — shipped upstream 2026-07-18.** Swept: every
@@ -181,7 +181,7 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
   global is imaged by value (its snapshot) and rebuilt as a fresh table on restore; image
   format v4. No hatch change needed — `nest check` stops printing the note and hatch gets
   imaged startup, so keep the two caches as tables.
-- ✅ **`tcp-read-until` / `tcp-read-n` needed a timeout and a byte cap** — see the
+- ✅ **`tcp/read-until` / `tcp/read-n` needed a timeout and a byte cap** — see the
   framed-reads entry above. **Fixed:** both take `{:timeout-ms n :max-bytes n}`.
 - ✅ **`nest format` descended into `_deps/`** — it counted and rewrote files in the
   dependency cache (it reformatted `_deps/store/.brood-pkg.blsp` on first run here), so

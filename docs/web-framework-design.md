@@ -12,7 +12,7 @@ Five ideas from Phoenix/LiveView are worth stealing wholesale, in order of lever
 Phoenix.LiveView.Engine compiles HEEx templates at build time into a `Rendered` struct with a fixed `:static` list (never re-sent) and a `:dynamic` function whose outputs map one-to-one with assign dependencies. Only the changed dynamic slots are sent over the wire after the first render. This is the core reason LiveView can sustain 60fps-class interactivity over WebSocket without sending full HTML. Brood can do the same: s-expression templates compile to a parallel structure (static strings interleaved with numbered dynamic slots) and the diff reduces to slot-value comparison.
 
 **2. The process-per-session model.**
-Each LiveView connection is an ordinary Erlang process — nothing more. It holds state in its mailbox loop, receives events, calls its render function, diffs, and sends patches. Brood already has this: `proc/gen` actors are a direct match. A LiveBrood session is a `defprocess` whose state is the view model, whose cast messages are client events and PubSub notifications, and whose render function is called after every state transition.
+Each LiveView connection is an ordinary Erlang process — nothing more. It holds state in its mailbox loop, receives events, calls its render function, diffs, and sends patches. Brood already has this: `gen` actors are a direct match. A LiveBrood session is a `defprocess` whose state is the view model, whose cast messages are client events and PubSub notifications, and whose render function is called after every state transition.
 
 **3. The dual-pass lifecycle (HTTP → WebSocket).**
 The first request renders a full static HTML page (no JS dependency, SEO-friendly). The JavaScript client then upgrades the connection to WebSocket and sends a `join` message that re-runs `mount`. Only the dynamic diffs are then sent. This is elegant: HTTP and WebSocket share the same render path; the static HTML embed contains a signed session token that the WebSocket picks up. Brood's HTTP layer can do the same with a single render fn called in two contexts.
@@ -1043,7 +1043,7 @@ A PubSub server is a `defprocess` that maintains a map of `topic -> [pid, ...]`:
 
 ```lisp
 (defmodule web/pubsub "Topic-based broadcast over Brood processes."
-  (:use proc/gen))
+  (:use gen))
 
 (defprocess pubsub-server (topics)
   ;; topics = {:some-topic [pid1 pid2 ...]}
@@ -1304,14 +1304,14 @@ LiveBrood views are testable by calling `mount`, `render`, and `on` directly:
       (is (string-contains? html "42")))))
 ```
 
-The LiveBrood session process itself can be tested with `spawn-server` + `gen-call`:
+The LiveBrood session process itself can be tested with `spawn-server` + `gen/call`:
 
 ```lisp
 (test "full session lifecycle"
   (let (pid (spawn-live-session dashboard {:params {} :session {}}))
     (send pid [:event {:type "increment" :value {}}])
     (sleep 10)   ; give the process time to handle the message
-    (assert= (gen-call pid :get-model) {:count 1 :items []})))
+    (assert= (gen/call pid :get-model) {:count 1 :items []})))
 ```
 
 #### Hot reload integration

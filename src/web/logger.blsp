@@ -64,7 +64,7 @@
     :id     — handler id (default `:hatch-access-log`); re-attaching replaces it
     :level  — a fixed log level for every request, or nil (default) to derive from the status
     :log-bad-requests — also log rejected/malformed requests at :warn (default true)"
-  (when (nil? (telemetry/telemetry-pid))
+  (when (nil? (telemetry/pid))
     (telemetry/start-telemetry))
   (let (id (get opts :id :hatch-access-log)
         fixed (get opts :level))

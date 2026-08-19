@@ -21,7 +21,7 @@
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
   ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
-  (:alias proc/supervisor)
+  (:alias supervisor)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
 ; ---- JSON encode via the Encode protocol -----------------------------------

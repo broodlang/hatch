@@ -13,7 +13,7 @@
   This covers the single-fault case (registry crash → recover from vault). The vault is also
   supervised; if it crashes it restarts empty and is repopulated by the registry's next
   `mirror` (registries mirror their full snapshot on every state change)."
-  (:alias proc/supervisor))
+  (:alias supervisor))
 
 (defn await (nm tries)
   "Block until `nm` is registered (supervisor children start asynchronously). Gives up after

@@ -1,4 +1,4 @@
-; log/log-info, log/log-warn, log/log-error
+; log/info, log/warn, log/error
 (defmodule web/assets
   "Build-step-agnostic asset integration. Hatch only ever *serves* `static/`; this
   module is the optional glue that *produces* what goes there by shelling out to an
@@ -56,13 +56,13 @@
                  (proc-spawn (first cmd) (rest cmd) (proc-opts w))
                  (catch e
                    (do
-                     (log/log-error (str "[assets] cannot start watcher `"
+                     (log/error (str "[assets] cannot start watcher `"
                                       (string/join " " cmd)
                                       "`: "
                                       (error-message e)))
                      nil))))
     (when handle
-      (log/log-info (str "[assets] watching: " (string/join " " cmd)))
+      (log/info (str "[assets] watching: " (string/join " " cmd)))
       (watcher-recv handle (get w :reload-on *default-reload-marker*) (string/join " " cmd) ""))))
 
 (defn watcher-recv (handle marker label buf)
@@ -77,10 +77,10 @@
     ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:stop] (do
                (try (proc-close handle) (catch _ nil))
-               (log/log-info (str "[assets] stopped watching: " label))))
+               (log/info (str "[assets] stopped watching: " label))))
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
-                                   (log/log-warn (str "[assets] watcher exited (code "
+                                   (log/warn (str "[assets] watcher exited (code "
                                                    code "): " label))))))
 
 (defn on-output (buf marker)
@@ -95,7 +95,7 @@
   "Log one non-blank watcher line under an `[assets]` prefix; if it contains `marker`, hot-swap
   CSS in open live sessions."
   (when (not (string/blank? line))
-    (log/log-info (str "[assets] " line))
+    (log/info (str "[assets] " line))
     (when (and marker (includes? line marker)) (web/live/notify-reload-css))))
 
 (defn proc-opts (w)
@@ -113,7 +113,7 @@
   serves them under immutable, cache-forever URLs."
   (run-each (or (get config :build) (list)) "build")
   (when (get config :fingerprint)
-    (log/log-info "[assets] fingerprinting built assets")
+    (log/info "[assets] fingerprinting built assets")
     (fingerprint (get config :fingerprint)))
   nil)
 
@@ -153,7 +153,7 @@
   (let (body (file/slurp-bytes (str dir "/" file))
         fp (fingerprint-name file (string/substring (hash/sha256-bytes body) 0 8)))
     (file/spit-bytes (str dir "/" fp) body)
-    (log/log-info (str "[assets] fingerprint: " file " -> " fp))
+    (log/info (str "[assets] fingerprint: " file " -> " fp))
     (when (compressible? file)
       (precompress (str dir "/" fp)))
     fp))
@@ -175,7 +175,7 @@
   still works uncompressed."
   (let (raw (try (file/slurp-bytes path) (catch e :error)))
     (if (= raw :error)
-      (log/log-warn (str "[assets] precompress could not read " path "; serving uncompressed"))
+      (log/warn (str "[assets] precompress could not read " path "; serving uncompressed"))
       (do
         (precompress-variant (str path ".br") (fn () (zlib/brotli raw 11)) path)
         (precompress-variant (str path ".gz") (fn () (zlib/gzip raw 9)) path)))))
@@ -186,9 +186,9 @@
   (try
     (do
       (file/spit-bytes out (encode))
-      (log/log-info (str "[assets] precompress: " out)))
+      (log/info (str "[assets] precompress: " out)))
     (catch e
-      (log/log-warn (str "[assets] precompress failed for "
+      (log/warn (str "[assets] precompress failed for "
                       path
                       " -> "
                       out
@@ -232,13 +232,13 @@
     (do
       (when (and (get config :install-probe)
               (not (file/exists? (get config :install-probe))))
-        (log/log-info (str "[assets] toolchain missing ("
+        (log/info (str "[assets] toolchain missing ("
                         (get config :install-probe)
                         ") — running one-time install"))
         (install config))
       (build config))
     (catch e
-      (log/log-warn (str "[assets] could not prepare assets ("
+      (log/warn (str "[assets] could not prepare assets ("
                       (error-message e)
                       "); serving without a fresh build — styles may be missing until the watcher rebuilds"))))
   (watch config))
@@ -247,7 +247,7 @@
   "Run each argv in `cmds` with `run-process` (inherited stdio), in order; raise on the
   first non-zero exit."
   (dolist (cmd cmds)
-    (log/log-info (str "[assets] " label ": " (string/join " " cmd)))
+    (log/info (str "[assets] " label ": " (string/join " " cmd)))
     (let (code (run-process (first cmd) (rest cmd)))
       (when (not (= code 0))
         (error "[assets] " label " failed (exit " code "): " (string/join " " cmd)))))

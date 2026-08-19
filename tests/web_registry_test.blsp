@@ -36,4 +36,4 @@
           p2 (ensure-supervised :rtest-sup-b [(child-spec :rtest-child-b)] :rtest-child-b))
       (assert= (= p1 p2) true))))
 ; (Supervisor-driven restart-after-crash + vault recovery is proven end-to-end by the
-;  live-route registry crash test in web_live_test; web/registry reuses proc/supervisor.)
+;  live-route registry crash test in web_live_test; web/registry reuses supervisor.)

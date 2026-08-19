@@ -8,10 +8,10 @@
   (:use http/response)
   (:use http/websocket)
   (:use http/util)
-  ; tcp-read-until — the framed head read (brood >= 0.3.11 for its :seed/:deadline-ms opts).
-  ; :only, not a refer-all: net/tcp also exports names this module has its own senses of.
-  (:use net/tcp :only [tcp-read-until])
-  (:alias proc/supervisor)
+  ; tcp/read-until — the framed head read (brood >= 0.3.11 for its :seed/:deadline-ms opts).
+  ; :only, not a refer-all: tcp also exports names this module has its own senses of.
+  (:use tcp :only [tcp/read-until])
+  (:alias supervisor)
   (:alias telemetry))
 ; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
 ;   :read-timeout-ms   — idle wait for request bytes before answering 408 and closing
@@ -244,7 +244,7 @@
 (defn- worker-run
   (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head
-  with `tcp-read-until` — seeded with whatever `buf` already holds from a pipelined request —
+  with `tcp/read-until` — seeded with whatever `buf` already holds from a pipelined request —
   then hands off to `worker-dispatch`, which routes the body to the spool / in-memory-drain /
   incremental-de-chunk path so no path re-buffers the body.
 
@@ -262,7 +262,7 @@
   and the next chunk has to be found. Passing it in means the delimiter arithmetic (the subtle
   part, and the reason this was hand-rolled through several O(n²) fixes) now lives in one
   place, upstream, tested there."
-  (match (tcp-read-until sock
+  (match (tcp/read-until sock
            crlf-crlf-bytes
            {:seed buf
             :timeout-ms (get config :read-timeout-ms)
@@ -336,7 +336,7 @@
                                   (chunked-begin sock handler ws-handler config buf head body-start)))
     ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
     ([:error msg] (bad-request-close sock msg))
-    ; tcp-read-until only returns a head once the terminator has landed, so :incomplete
+    ; tcp/read-until only returns a head once the terminator has landed, so :incomplete
     ; cannot occur here; be defensive.
     (_ (dispatch-complete sock handler ws-handler config buf))))
 
