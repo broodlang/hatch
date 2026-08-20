@@ -84,7 +84,7 @@
 (defn has-control-byte? (s)
   "True if `s` contains any control byte (< 0x20) or DEL (0x7f) — e.g. a NUL, which can
   truncate a path at the OS layer and on which `file-stat` may raise."
-  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string/to-codepoints s)))))
+  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string/->codepoints s)))))
 
 (defn unsafe-segment? (s)
   "True if a (percent-decoded) path segment would escape the root or is otherwise unsafe:
@@ -135,11 +135,11 @@
   (let (st (file/stat path))
     (if (nil? st)
       (fresh-fn)
-      (let (hit (table-get *etag-cache* path))
+      (let (hit (table/get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
           (let (tag (fresh-fn))
-            (table-put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
+            (table/put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
             tag))))))
 
 (defn cached-etag (path body)
@@ -325,7 +325,7 @@
   (let (st (try (file/stat path) (catch _ nil)))
     (if (nil? st)
       nil
-      (let (hit (table-get *etag-cache* path))
+      (let (hit (table/get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
           nil)))))
@@ -511,18 +511,18 @@
   "The fingerprint manifest under `dir` as a `logical → fingerprinted` map, or `{}` when
   there's none (dev, or a build that didn't fingerprint). Memoized per `dir` (including the
   empty/miss result), so a hot path reads the file at most once."
-  (if (table-has? *manifest-cache* dir)
-    (table-get *manifest-cache* dir)
+  (if (table/has? *manifest-cache* dir)
+    (table/get *manifest-cache* dir)
     (let (text (try (file/slurp (manifest-path dir)) (catch _ nil))
           m (if (nil? text) {} (parse-manifest text)))
-      (table-put *manifest-cache* dir m)
+      (table/put *manifest-cache* dir m)
       m)))
 
 (defn clear-manifest-cache ()
   "Drop every memoized manifest, so the next `load-manifest` re-reads from disk. For tests
   and a dev rebuild that rewrote the manifest within a running process."
-  (dolist (dir (keys (table-snapshot *manifest-cache*)))
-    (table-delete *manifest-cache* dir))
+  (dolist (dir (keys (table/snapshot *manifest-cache*)))
+    (table/delete *manifest-cache* dir))
   nil)
 
 (defn asset-path (logical &optional (dir "static"))

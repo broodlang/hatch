@@ -55,7 +55,7 @@
   "True when `v` holds no space, tab, CR, LF, or other control character (any codepoint
   ≤ 32). Rejecting the whole control range — not just the space — keeps a validated address
   from smuggling a CR/LF into a downstream mail header (header injection)."
-  (not (any? (fn (c) (<= (char->int c) 32)) (string/to-list v))))
+  (not (any? (fn (c) (<= (char->int c) 32)) (string/->list v))))
 
 (defn email? (v)
   "A deliberately simple email check: one `@` with text before it and a dotted domain

@@ -52,7 +52,7 @@
                     else nil))
             (if (nil? d) acc (+ (* acc 16) d))))
     0
-    (string/to-list (string/trim s))))
+    (string/->list (string/trim s))))
 
 ; ---- handlers ----
 

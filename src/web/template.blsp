@@ -44,7 +44,7 @@
 ;; the wrapper map around it.
 (impl Display
   web/template/raw-node
-  (to-str [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+  (->string [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (impl Inspect
   web/template/raw-node
@@ -94,7 +94,7 @@
   case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
   `javascript:`)."
   (let (s (string/lower (string/join ""
-                          (filter (fn (c) (not (url-scheme-noise? c))) (string/to-list (str v))))))
+                          (filter (fn (c) (not (url-scheme-noise? c))) (string/->list (str v))))))
     (or (string/starts-with? s "javascript:")
       (string/starts-with? s "vbscript:")
       (and (string/starts-with? s "data:") (not (safe-data-image? s))))))
@@ -119,7 +119,7 @@
   an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
   value path already defends but the name path otherwise emits verbatim."
   (and (> (string/length n) 0)
-    (not (any? (fn (c) (unsafe-attr-name-cp? (char->int c))) (string/to-list n)))))
+    (not (any? (fn (c) (unsafe-attr-name-cp? (char->int c))) (string/->list n)))))
 
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.

@@ -99,7 +99,7 @@
   symbol too, alongside the resolved spec-thunk: render-slot stores it next to a mounted
   component's state so a same-id-different-module collision can be detected by comparing
   symbols (stable across a table round-trip) rather than the spec-thunk function value
-  (table-put/get deep-clone a stored function, so two 'equal' thunks are never `=` after
+  (table/put/get deep-clone a stored function, so two 'equal' thunks are never `=` after
   a round-trip — comparing those would report every render as a different component)."
   (list 'web/component/render-slot
     (list 'quote (nth node 1))

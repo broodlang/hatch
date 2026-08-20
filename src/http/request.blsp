@@ -300,7 +300,7 @@
               nil
               (let (d (hex-digit-val c)) (if (nil? d) nil (+ (* acc 16) d)))))
       0
-      (string/to-list s))))
+      (string/->list s))))
 
 (defn- dechunk-trailers
   (buf pos buflen)
@@ -356,7 +356,7 @@
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
   (and (not (string/blank? s))
-    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string/to-list s)))))
+    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string/->list s)))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
