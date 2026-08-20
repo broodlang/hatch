@@ -30,7 +30,8 @@
       ; A splat consumes everything that remains (including nothing), each segment decoded.
       (splat? p)
         (assoc acc
-          (first (rest p)) (if (nil? segments) "" (string/join "/" (map http/util/url-decode segments))))
+          (first (rest p))
+            (if (nil? segments) "" (string/join "/" (map http/util/url-decode segments))))
       (and (nil? pattern) (nil? segments)) acc
       (or (nil? pattern) (nil? segments)) nil
       ; A `:param` captures one segment, percent-decoded (matching literals stays on the raw

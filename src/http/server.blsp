@@ -10,7 +10,7 @@
   (:use http/util)
   ; tcp/read-until — the framed head read (brood >= 0.3.11 for its :seed/:deadline-ms opts).
   ; :only, not a refer-all: tcp also exports names this module has its own senses of.
-  (:use tcp :only [tcp/read-until])
+  (:use tcp :only [read-until])
   (:alias supervisor)
   (:alias telemetry))
 ; Per-connection / per-listener limits, overridable per `start` (docs/robustness.md):
@@ -262,7 +262,7 @@
   and the next chunk has to be found. Passing it in means the delimiter arithmetic (the subtle
   part, and the reason this was hand-rolled through several O(n²) fixes) now lives in one
   place, upstream, tested there."
-  (match (tcp/read-until sock
+  (match (read-until sock
            crlf-crlf-bytes
            {:seed buf
             :timeout-ms (get config :read-timeout-ms)

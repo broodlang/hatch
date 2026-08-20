@@ -57,9 +57,9 @@
                  (catch e
                    (do
                      (log/error (str "[assets] cannot start watcher `"
-                                      (string/join " " cmd)
-                                      "`: "
-                                      (error-message e)))
+                                  (string/join " " cmd)
+                                  "`: "
+                                  (error-message e)))
                      nil))))
     (when handle
       (log/info (str "[assets] watching: " (string/join " " cmd)))
@@ -81,7 +81,7 @@
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
                                    (log/warn (str "[assets] watcher exited (code "
-                                                   code "): " label))))))
+                                               code "): " label))))))
 
 (defn on-output (buf marker)
   "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that
@@ -189,12 +189,12 @@
       (log/info (str "[assets] precompress: " out)))
     (catch e
       (log/warn (str "[assets] precompress failed for "
-                      path
-                      " -> "
-                      out
-                      " ("
-                      (error-message e)
-                      "); serving that coding uncompressed")))))
+                  path
+                  " -> "
+                  out
+                  " ("
+                  (error-message e)
+                  "); serving that coding uncompressed")))))
 
 (defn fingerprint-name (file digest)
   "Insert `digest` before the extension: `app.css` → `app.<digest>.css` (no extension →
@@ -233,14 +233,14 @@
       (when (and (get config :install-probe)
               (not (file/exists? (get config :install-probe))))
         (log/info (str "[assets] toolchain missing ("
-                        (get config :install-probe)
-                        ") — running one-time install"))
+                    (get config :install-probe)
+                    ") — running one-time install"))
         (install config))
       (build config))
     (catch e
       (log/warn (str "[assets] could not prepare assets ("
-                      (error-message e)
-                      "); serving without a fresh build — styles may be missing until the watcher rebuilds"))))
+                  (error-message e)
+                  "); serving without a fresh build — styles may be missing until the watcher rebuilds"))))
   (watch config))
 
 (defn run-each (cmds label)

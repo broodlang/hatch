@@ -362,7 +362,8 @@
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
   else nil. Splits on the first `:` (the space after it is optional)."
   (let (ci (index-of line ":"))
-    (if (and (not (= ci -1)) (= (string/lower (string/trim (string/substring line 0 ci))) lower-key))
+    (if (and (not (= ci -1))
+          (= (string/lower (string/trim (string/substring line 0 ci))) lower-key))
       (string/trim (string/substring line (+ ci 1) (string/length line)))
       nil)))
 
@@ -486,7 +487,9 @@
                           (if (= ci -1)
                             m
                             (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
-                                  v (string/trim (string/substring line (+ ci 1) (string/length line))))
+                                  v (string/trim (string/substring line
+                                                   (+ ci 1)
+                                                   (string/length line))))
                               (assoc m k (cons v (get m k (list))))))))
                   {}
                   lines))

@@ -245,7 +245,8 @@
 (defn parse-attr-value (s)
   "An attribute value. Returns `[value-form rest]`."
   (cond
-    (= (string/char-at s 0) "\"") (let ([inner rest] (read-quoted s)) [(attr-string-value inner) rest])
+    (= (string/char-at s 0) "\"")
+      (let ([inner rest] (read-quoted s)) [(attr-string-value inner) rest])
     (= (string/char-at s 0) "{") (parse-interp s)
     else (read-while s name-char? "")))
 
@@ -262,8 +263,8 @@
       (error "bml: :for needs `x <- coll`, got: " spec)
       [(read-expr (string/trim (string/substring spec 0 idx)))
         (read-expr (string/trim (string/substring spec
-                           (+ idx 2)
-                           (string/length spec))))])))
+                                  (+ idx 2)
+                                  (string/length spec))))])))
 
 (defn apply-directives (form directives)
   "Wrap an element form per its directive attributes. `:for` becomes a `for`
@@ -435,10 +436,12 @@
     (= (string/length s) 0) [(reverse acc) s]
     (string/starts-with? s "</") [(reverse acc) s]
     (string/starts-with? s "<!--") (parse-nodes-acc (skip-comment s) acc)
-    (string/starts-with? s "<") (let ([el rest] (parse-element s))
-                           (parse-nodes-acc rest (cons el acc)))
-    (string/starts-with? s "{") (let ([form rest] (parse-interp s))
-                           (parse-nodes-acc rest (cons form acc)))
+    (string/starts-with? s "<")
+      (let ([el rest] (parse-element s))
+        (parse-nodes-acc rest (cons el acc)))
+    (string/starts-with? s "{")
+      (let ([form rest] (parse-interp s))
+        (parse-nodes-acc rest (cons form acc)))
     else
       (let ([txt rest] (parse-text s))
         (if (string/blank? txt)

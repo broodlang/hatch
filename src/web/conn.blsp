@@ -73,8 +73,8 @@
                   (assoc m
                     (string/trim (string/substring pair 0 eq))
                       (string/trim (string/substring pair
-                              (+ eq 1)
-                              (string/length pair)))))))
+                                     (+ eq 1)
+                                     (string/length pair)))))))
         {}
         (string/split raw ";")))))
 
