@@ -128,7 +128,7 @@
   `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
   `char-at`/`carrier-byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
   per-index walk was O(n²) on every inbound frame payload."
-  (utf8-bytes->string (bytes (string/to-codepoints s))))
+  (utf8-bytes->string (bytes (string/->codepoints s))))
 
 ; Each frame is described as an *iolist* (ADR-139) — a nested list of byte ints and
 ; `bytes` values — and flattened exactly once by `bytes-concat`. The length fields go

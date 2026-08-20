@@ -15,7 +15,7 @@
 (defn hex-str->bytes (hex)
   "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
   (map (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))
-    (partition 2 (string/to-list hex))))
+    (partition 2 (string/->list hex))))
 
 ;; ---- URL decode ----
 
@@ -29,7 +29,7 @@
   query outside any try, so an unguarded throw crashes the worker with no response (a
   trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
   (try
-    (utf8-bytes->string (vec (reverse (url-decode-acc (string/to-list s) nil))))
+    (utf8-bytes->string (vec (reverse (url-decode-acc (string/->list s) nil))))
     (catch _e s)))
 
 (defn- url-decode-acc
@@ -75,7 +75,7 @@
   "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
   the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
   upload) from the parsed carrier body."
-  (bytes (map char->int (string/to-list carrier))))
+  (bytes (map char->int (string/->list carrier))))
 
 (defn carrier->text (carrier)
   "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
