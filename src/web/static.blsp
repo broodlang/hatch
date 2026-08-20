@@ -496,7 +496,8 @@
           (let (tab (index-of line "\t"))
             (if (= tab -1)
               m
-              (assoc m (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))
+              (assoc m
+                (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))
     {}
     (filter (fn (l) (not (string/blank? l))) (string/split text "\n"))))
 

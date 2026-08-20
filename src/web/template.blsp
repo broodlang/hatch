@@ -54,10 +54,11 @@
   "Escape HTML special characters: & < > \" '.
 
   (hatch/web/template/escape-html \"a<b&c\") ;=> \"a&lt;b&amp;c\""
-  (string/replace (string/replace (string/replace (string/replace (string/replace (str s) "&" "&amp;")
-                               "<" "&lt;")
-                      ">" "&gt;")
-             "\"" "&quot;")
+  (string/replace (string/replace (string/replace (string/replace (string/replace (str s)
+                                                                    "&" "&amp;")
+                                                    "<" "&lt;")
+                                    ">" "&gt;")
+                    "\"" "&quot;")
     "'" "&#39;"))
 
 ; Attributes whose value is a URL — a `javascript:`/`vbscript:` value (or a `data:` document)
@@ -92,7 +93,8 @@
   `data:image/svg+xml,…` are caught). Whitespace and control characters are removed first and
   case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
   `javascript:`)."
-  (let (s (string/lower (string/join "" (filter (fn (c) (not (url-scheme-noise? c))) (string/to-list (str v))))))
+  (let (s (string/lower (string/join ""
+                          (filter (fn (c) (not (url-scheme-noise? c))) (string/to-list (str v))))))
     (or (string/starts-with? s "javascript:")
       (string/starts-with? s "vbscript:")
       (and (string/starts-with? s "data:") (not (safe-data-image? s))))))

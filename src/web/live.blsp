@@ -41,7 +41,8 @@
     (= cp 10) "\\n"
     (= cp 12) "\\f"
     (= cp 13) "\\r"
-    else (str "\\u00" (string/char-at *json-hex* (quot cp 16)) (string/char-at *json-hex* (mod cp 16)))))
+    else
+      (str "\\u00" (string/char-at *json-hex* (quot cp 16)) (string/char-at *json-hex* (mod cp 16)))))
 
 (defn json-str (s)
   "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
