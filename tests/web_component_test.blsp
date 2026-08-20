@@ -25,7 +25,7 @@
     (let (t (table)
           html (render-slot-html 'web-component-test live-component-spec {"id" "c1" "start" 3} t))
       (assert= html "<div data-cid=\"c1\"><span>3</span></div>")
-      (assert= (get (table/get t "c1") :state) {:n 3})))
+      (assert= (get (table-get t "c1") :state) {:n 3})))
   (test "reuses stored state on later renders, ignoring changed assigns"
     (let (t (table))
       (render-slot 'web-component-test live-component-spec {"id" "c2" "start" 1} t)
@@ -38,14 +38,14 @@
       ; keep the fixture simple, but a distinct :module tag is what actually matters
       (assert= (render-slot-html 'some-other-module live-component-spec {"id" "shared" "start" 7} t)
         "<div data-cid=\"shared\"><span>7</span></div>")
-      (assert= (get (table/get t "shared") :module) 'some-other-module))))
+      (assert= (get (table-get t "shared") :module) 'some-other-module))))
 
 (describe "dispatch-event"
   (test "routes to the component's own handle-event and stores the result"
     (let (t (table))
       (render-slot 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
       (dispatch-event t "c3" "bump" {})
-      (assert= (get (table/get t "c3") :state) {:n 1})
+      (assert= (get (table-get t "c3") :state) {:n 1})
       ; the next render picks up the mutated state
       (assert= (render-slot-html 'web-component-test live-component-spec {"id" "c3" "start" 0} t)
         "<div data-cid=\"c3\"><span>1</span></div>")))
@@ -57,7 +57,7 @@
     (let (t (table))
       (render-slot 'web-component-test live-component-spec {"id" "c4" "start" 0} t)
       (apply-update t "c4" {:n 42})
-      (assert= (get (table/get t "c4") :state) {:n 42})))
+      (assert= (get (table-get t "c4") :state) {:n 42})))
   (test "a stale/unknown cid is a safe no-op"
     (assert= (apply-update (table) "nope" {:n 1}) nil)))
 

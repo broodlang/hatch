@@ -125,9 +125,9 @@
 
 ; ---- the components table: {id -> {:module 'mod :spec-thunk spec-thunk :state state}} ----
 ; Storing the spec-thunk alongside state (not just state) is what lets an event or an
-; out-of-band update find the right component's functions by id alone — table/put/get
+; out-of-band update find the right component's functions by id alone — table-put/get
 ; round-trip function values fine (a spec-thunk is a plain closure) *as callables*, but a
-; value read back out is never `=` to the original (table/put/get deep-clone in and out) —
+; value read back out is never `=` to the original (table-put/get deep-clone in and out) —
 ; so `:module` (a plain symbol, stable across the round-trip) is what render-slot actually
 ; compares to tell "the same component" from "a different module reusing this id".
 
@@ -150,12 +150,12 @@
   live-navigate happens to reuse it), that's not the same component: treat it as unmounted and
   mount fresh rather than rendering a foreign module's state through this one's `render`."
   (let (id (get assigns "id")
-        entry (table/get components-table id)
+        entry (table-get components-table id)
         same-component? (and entry (= (get entry :module) module)))
     (if same-component?
       (get entry :state)
       (let (initial ((get (spec-thunk) :mount) id assigns))
-        (table/put components-table id (component-entry module spec-thunk initial))
+        (table-put components-table id (component-entry module spec-thunk initial))
         initial))))
 
 (defn wrapper-statics (id statics)
@@ -230,13 +230,13 @@
   by `web/live/session-dispatch` on a wire event carrying a `cid`), storing the resulting
   state back. A no-op (swallowed) if `cid` names no mounted component — a stale id from a
   slow client is harmless, the same defensive stance `send-info`/a late tick already take."
-  (let (entry (table/get components-table cid))
+  (let (entry (table-get components-table cid))
     (when entry
       (let (spec-thunk (get entry :spec-thunk)
             new-state (try
                         ((get (spec-thunk) :handle-event) name params (get entry :state))
                         (catch _ (get entry :state))))
-        (table/put components-table cid (component-entry (get entry :module) spec-thunk new-state)))))
+        (table-put components-table cid (component-entry (get entry :module) spec-thunk new-state)))))
   nil)
 
 ; ---- send-update: push new state into a running component from anywhere ----
@@ -245,9 +245,9 @@
   "Merge `changes` into component `cid`'s stored state — the session-side handler for a
   `[:update-component cid changes]` mailbox message (see `send-update`). A no-op if `cid`
   names no mounted component."
-  (let (entry (table/get components-table cid))
+  (let (entry (table-get components-table cid))
     (when entry
-      (table/put components-table
+      (table-put components-table
         cid
         (component-entry (get entry :module)
           (get entry :spec-thunk)
