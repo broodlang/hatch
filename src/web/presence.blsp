@@ -116,7 +116,7 @@
                                               remotes2 (presence-record-remote remotes
                                                          from topic roster))
                                           (when fresh
-                                            (monitor-node from)
+                                            (node/monitor from)
                                             (presence-sync-all-to state from))
                                           (presence-notify-merged state remotes2 topic)
                                           (presence-loop state refs remotes2 vault-ref)))
@@ -201,17 +201,17 @@
   (map (fn (e) {:key (get e :key) :meta (get e :meta)}) (presence-entries state topic)))
 
 ; ---- cross-node roster replication ----
-; Presence is cluster-aware when the runtime is a distributed node (node-start + connect/
+; Presence is cluster-aware when the runtime is a distributed node (node/start + connect/
 ; ensure-link, wired in the app's entry point). Each node owns its LOCAL presences and
 ; replicates each topic's roster to peers on every change; the roster a member sees is the
 ; merge of the local presences and every peer's last-reported roster. A member is only ever
 ; notified by its OWN node (its pid is local there). node-down purges a departed peer. With no
-; node started, `(nodes)` is empty and every peer step is a no-op — single-node behaviour is
+; node started, `(node/list)` is empty and every peer step is a no-op — single-node behaviour is
 ; unchanged.
 
 (defn remote-nodes ()
   "Connected peer node names, or empty when this runtime isn't a distributed node."
-  (or (try (nodes) (catch _e nil)) (list)))
+  (or (try (node/list) (catch _e nil)) (list)))
 
 (defn- presence-remote-roster
   (remotes topic)
@@ -255,7 +255,7 @@
   (state topic)
   "Tell every peer node this node's current local roster for `topic` (state-based
   replication). A no-op with no peers."
-  (let (me (node-name)
+  (let (me (node/name)
         roster (presence-roster state topic))
     (dolist (n (remote-nodes)) (presence-sync-to n me topic roster))))
 
@@ -263,7 +263,7 @@
   (state target-node)
   "Send this node's full local rosters (every topic) to `target-node` — the one-time bootstrap
   when a peer is first seen, so it learns our already-tracked presences."
-  (let (me (node-name))
+  (let (me (node/name))
     (dolist (kv (map-pairs state))
       (presence-sync-to target-node me (first kv) (presence-roster state (first kv))))))
 
