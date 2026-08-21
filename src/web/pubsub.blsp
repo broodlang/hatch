@@ -21,7 +21,7 @@
   `connect`/`ensure-link` to peers, wired once in the app's entry point), a broadcast fans
   out to subscribers on every connected node — each node keeps only its local subscribers and
   a locally-published broadcast is replicated once per peer (see `pubsub-fanout-remote`).
-  With no node started, `(nodes)` is empty and the replication is a no-op, so a single-node
+  With no node started, `(node/list)` is empty and the replication is a no-op, so a single-node
   app behaves exactly as before."
   ; send-info — deliver a payload to a subscribed session
   (:use web/live)
@@ -119,18 +119,18 @@
 ; registry (addressed by its distributed name `:hatch-pubsub`), which fans it out to that
 ; node's subscribers. Delivery to a subscriber — local or remote — already rides brood's
 ; location-transparent `send` (via `send-info`). When the runtime isn't a distributed node,
-; `(nodes)` is empty and this is a no-op, so single-node apps are entirely unaffected.
+; `(node/list)` is empty and this is a no-op, so single-node apps are entirely unaffected.
 
 (defn remote-nodes ()
   "The connected peer node names, or an empty list when this runtime isn't a distributed
   node (so cross-node fan-out is a safe no-op)."
-  (or (try (nodes) (catch _e nil)) (list)))
+  (or (try (node/list) (catch _e nil)) (list)))
 
 (defn- pubsub-fanout-remote
   (topic payload)
   "Replicate a locally-originated broadcast to every peer node's registry — once each, marked
   `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
-  O(nodes) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
+  O(node/list) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
   that just dropped, is skipped rather than failing the publish."
   (dolist (n (remote-nodes))
     (try
