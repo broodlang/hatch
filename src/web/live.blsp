@@ -20,7 +20,7 @@
   (:alias web/component)
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
-  ; start-supervisor — the live registries run under a supervisor (docs/robustness.md)
+  ; start — the live registries run under a supervisor (docs/robustness.md)
   (:alias supervisor)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
@@ -1093,7 +1093,7 @@
                 :name :hatch-live-routes
                 :restart :permanent
                 :start (fn () (spawn (live-routes-boot)))}
-        sup (supervisor/start-supervisor [reload routes-vault routes]
+        sup (supervisor/start [reload routes-vault routes]
               {:name :hatch-live-sup :strategy :one-for-one}))
     (live-await :hatch-live-routes 60)
     sup))

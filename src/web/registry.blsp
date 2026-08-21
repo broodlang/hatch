@@ -29,7 +29,7 @@
   on one — and wait through the brief async-start window."
   (or (whereis wait-name)
     (do
-      (supervisor/start-supervisor children {:name sup-name :strategy :one-for-one})
+      (supervisor/start children {:name sup-name :strategy :one-for-one})
       (await wait-name 60)
       (whereis wait-name))))
 
