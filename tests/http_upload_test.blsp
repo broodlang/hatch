@@ -5,9 +5,9 @@
 
 (defn b (s) (string->utf8-bytes s))
 
-; Send raw bytes over a binary socket. Wrapping tcp-send keeps its arg opaque to the
+; Send raw bytes over a binary socket. Wrapping tcp/send keeps its arg opaque to the
 ; string-arg type check (bytes are correct on a binary-mode socket).
-(defn send-raw (sock data) (tcp-send sock data))
+(defn send-raw (sock data) (tcp/send sock data))
 
 ; A file whose bytes include 0xFF (invalid UTF-8) and embedded CR/LF — proof the whole
 ; server path (binary socket → carrier → parse → conn → multipart) preserves raw bytes.
@@ -54,11 +54,11 @@
     (let (me (self)
           port 24739
           _sup (server/start port (upload-handler me))
-          client (tcp-connect "127.0.0.1" port))
-      (tcp-set-binary client true)
-      (tcp-send client (multipart-request "XBOUNDARY42"))
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
+      (tcp/send client (multipart-request "XBOUNDARY42"))
       (let (up (receive ([:upload u] u) (after 5000 :timeout)))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (assert= (get up :title) "hello world")
         (assert= (get up :filename) "pic.png")
@@ -95,8 +95,8 @@
           head (b (str "POST /u HTTP/1.1\r\nHost: x\r\n"
                     "Content-Length: " n "\r\nConnection: close\r\n\r\n"))
           _sup (server/start port (body-echo-handler me))
-          client (tcp-connect "127.0.0.1" port))
-      (tcp-set-binary client true)
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
       ; send the head alone first, so it completes before any body byte arrives
       (send-raw client head)
       (sleep 20)
@@ -108,7 +108,7 @@
         nil
         (range 0 40))
       (let (info (receive ([:body d] d) (after 5000 :timeout)))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (assert= (get info :len) n)
         (assert= (get info :sum) expected-sum)))))
@@ -132,8 +132,8 @@
           head (b (str "POST /c HTTP/1.1\r\nHost: x\r\n"
                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"))
           _sup (server/start port (chunked-body-handler me))
-          client (tcp-connect "127.0.0.1" port))
-      (tcp-set-binary client true)
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
       ; head alone first, so it completes before any chunk arrives
       (send-raw client head)
       (sleep 20)
@@ -146,7 +146,7 @@
         (range 0 reps))
       (send-raw client (b "0\r\n\r\n"))
       (let (info (receive ([:chunked d] d) (after 5000 :timeout)))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (assert= (count (get info :body)) (* reps 10))
         (assert= (utf8-bytes->string (get info :body))

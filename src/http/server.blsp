@@ -32,7 +32,7 @@
 ;   :shutdown-grace-ms — on `stop`, how long to let in-flight connections finish before
 ;                        hard-killing stragglers (stop first stops accepting new ones)
 ;   :tls               — nil (plaintext, default) or `{:cert <pem> :key <pem>}` to serve
-;                        HTTPS/WSS: the listener terminates TLS (tls-listen) and accepted
+;                        HTTPS/WSS: the listener terminates TLS (tls/listen) and accepted
 ;                        sockets are transparent, so handlers/`worker-run` are unchanged
 ;   :check-origin      — WebSocket upgrade Origin policy (CSWSH guard): true = same-origin
 ;                        only (default), false = allow any, or a list of allowed Origin
@@ -91,7 +91,7 @@
   worker process. Returns the supervisor pid; `(stop)` tears it down.
 
   The listener is `:transient` (restarted only on an abnormal exit), bounded to 5
-  restarts / 10s so a hard fault (e.g. the port is taken) eventually gives up. tcp-listen
+  restarts / 10s so a hard fault (e.g. the port is taken) eventually gives up. tcp/listen
   runs INSIDE the listener process — accepts go to the calling process's mailbox — so
   the child's :start spawns `listen-and-serve` rather than binding the socket here."
   (let (cfg (merge default-config config)
@@ -123,16 +123,16 @@
 
 (defn bind-retry (port attempts tls)
   "Bind a listening socket on `port`, retrying briefly while the address is still in use.
-  Uses `tls-listen` (terminating TLS with `tls`'s `:cert`/`:key` PEM) when `tls` is set,
-  else plaintext `tcp-listen`. On a supervised restart the new listener can race the
+  Uses `tls/listen` (terminating TLS with `tls`'s `:cert`/`:key` PEM) when `tls` is set,
+  else plaintext `tcp/listen`. On a supervised restart the new listener can race the
   crashed one's socket teardown: the runtime frees a dead process's sockets on exit, but
   the accept thread releases the bound port a beat later. Rather than let the bind fail,
   retry for a short window (the port frees within a couple ms). Gives up after `attempts`
   tries (~250ms), re-raising the original error so a genuinely-taken port still surfaces."
   (try
     (if tls
-      (tls-listen "0.0.0.0" port (get tls :cert) (get tls :key))
-      (tcp-listen "0.0.0.0" port))
+      (tls/listen "0.0.0.0" port (get tls :cert) (get tls :key))
+      (tcp/listen "0.0.0.0" port))
     (catch e
       (if (and (> attempts 1) (includes? (error-message e) "in use"))
         (do (sleep 10) (bind-retry port (- attempts 1) tls))
@@ -189,7 +189,7 @@
         (do (listener-kill-all workers) (send from :drained))
         (receive
           ([:down _ pid _] (listener-drain (listener-without workers pid) deadline from))
-          ([:tcp-accept _ client] (do (tcp-close client) (listener-drain workers deadline from)))
+          ([:tcp-accept _ client] (do (tcp/close client) (listener-drain workers deadline from)))
           (after remaining (do (listener-kill-all workers) (send from :drained))))))))
 
 (defn- listener-loop
@@ -199,7 +199,7 @@
       (if (>= (count workers) (get config :max-connections))
         (do
           ; over capacity — refuse without spawning a worker
-          (tcp-close client)
+          (tcp/close client)
           (listener-loop lsock handler ws-handler config workers sup))
         (let (worker (supervisor/start-child sup
                        {:id (ref)
@@ -211,9 +211,9 @@
           ; UTF-8-lossily decode (and corrupt) a binary request body (a file upload). The
           ; worker accumulates each `bytes` chunk verbatim and parses it with the bytes-native
           ; request parser (`try-parse-bytes`); the body reaches the handler as raw `bytes`.
-          (tcp-set-binary client true)
+          (tcp/set-binary client true)
           (monitor worker)
-          (tcp-controlling-process client worker)
+          (tcp/controlling-process client worker)
           (listener-loop lsock handler ws-handler config (cons worker workers) sup))))
     ([:down _ pid _] (listener-loop lsock
                        handler
@@ -222,11 +222,11 @@
                        (listener-without workers pid)
                        sup))
     ([:drain from] (do
-                     (tcp-close lsock)
+                     (tcp/close lsock)
                      (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)
                      (supervisor/stop sup)))
     (:stop (do
-             (tcp-close lsock)
+             (tcp/close lsock)
              (supervisor/stop sup)
              (println "http/server: stopped")))))
 
@@ -270,15 +270,15 @@
             :max-bytes (get config :max-request-bytes)})
     ; idle timeout or the total head deadline — the peer never finished its head
     ([:timeout _acc] (do
-                       (tcp-send sock
+                       (tcp/send sock
                          (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-                       (tcp-close sock)))
+                       (tcp/close sock)))
     ; the head grew past the request cap without a terminator
     ([:too-large _acc] (do
-                         (tcp-send sock
+                         (tcp/send sock
                            (format-response {:status 413
                                              :body "<h1>413 Payload Too Large</h1>"}))
-                         (tcp-close sock)))
+                         (tcp/close sock)))
     ; peer hung up mid-head (or between keep-alive requests) — nothing to answer
     ([:closed _acc] nil)
     ; `head` includes the terminator; `rest` is whatever arrived past it (a pipelined
@@ -290,8 +290,8 @@
   "Answer a generic 400 and close. Doesn't reflect the parser message (it echoes attacker-
   controlled bytes) — the detail goes to telemetry instead."
   (telemetry/emit [:hatch :request :bad-request] {} {:error msg})
-  (tcp-send sock (format-response {:status 400 :body "<h1>400 Bad Request</h1>"}))
-  (tcp-close sock))
+  (tcp/send sock (format-response {:status 400 :body "<h1>400 Bad Request</h1>"}))
+  (tcp/close sock))
 
 (defn expects-continue? (head)
   "True if the request head asked for a `100 Continue` interim response (RFC 7231 §5.1.1:
@@ -304,7 +304,7 @@
   many HTTP libraries) holds its body waiting for the interim while the server waits for the
   body — a deadlock that only breaks when the read timeout answers 408 and the upload fails."
   (when (expects-continue? head)
-    (try (tcp-send sock (string->utf8-bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
+    (try (tcp/send sock (string->utf8-bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
 
 (defn- worker-dispatch
   (sock handler ws-handler config buf)
@@ -356,13 +356,13 @@
             ; socket to binary mode BEFORE the 101 — the client only sends frames after it sees the
             ; 101, so this closes the race where the reader would otherwise decode the first
             ; frame(s) as UTF-8-lossy text and corrupt them (the ws-handler may do a slow registry
-            ; lookup before its own tcp-set-binary, leaving a window the client beats).
-            (tcp-set-binary sock true)
-            (tcp-send sock (upgrade-response key))
+            ; lookup before its own tcp/set-binary, leaving a window the client beats).
+            (tcp/set-binary sock true)
+            (tcp/send sock (upgrade-response key))
             (ws-handler sock request))
           (do
-            (tcp-send sock (format-response {:status 403 :body "<h1>403 Forbidden</h1>"}))
-            (tcp-close sock)))
+            (tcp/send sock (format-response {:status 403 :body "<h1>403 Forbidden</h1>"}))
+            (tcp/close sock)))
         (dispatch-buffered sock handler ws-handler config request remainder)))
     ; With the head complete and every incomplete-body case routed above, this is only reached
     ; with a complete request; keep the incomplete recursion as a safety net.
@@ -375,9 +375,9 @@
                      ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
                        (do
-                         (tcp-send sock
+                         (tcp/send sock
                            (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-                         (tcp-close sock)))))
+                         (tcp/close sock)))))
     ([:error msg] (bad-request-close sock msg))))
 
 ; ---- buffered request dispatch (shared by the fast path and the O(n) body drain) ----
@@ -416,28 +416,28 @@
       (stream-response sock request response)
       (let (ka (keep-alive? request response)
             response (assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
-        (tcp-send sock (format-response response (= (get request :method) "HEAD")))
+        (tcp/send sock (format-response response (= (get request :method) "HEAD")))
         (if ka
           (worker-run sock handler ws-handler config remainder)
-          (tcp-close sock))))))
+          (tcp/close sock))))))
 
 (defn- stream-response
   (sock request response)
   "Send a chunked (Transfer-Encoding: chunked) streaming response: the head, then the handler's
   `:stream` function driving a `write` callback (each call sends one chunk), then the terminating
   chunk. `write` takes a string/`bytes`/iolist. A HEAD request gets the head only. The connection
-  always closes afterwards. A mid-stream failure — a client disconnect breaking `tcp-send`, or the
+  always closes afterwards. A mid-stream failure — a client disconnect breaking `tcp/send`, or the
   stream function raising — stops the stream; the socket is closed either way."
   (let (response (assoc-in response [:headers :connection] "close")
         head? (= (get request :method) "HEAD"))
-    (tcp-send sock (format-stream-head response))
+    (tcp/send sock (format-stream-head response))
     (when (not head?)
       (try
         (do
-          ((get response :stream) (fn (data) (let (c (chunk data)) (when c (tcp-send sock c)))))
-          (tcp-send sock (last-chunk)))
+          ((get response :stream) (fn (data) (let (c (chunk data)) (when c (tcp/send sock c)))))
+          (tcp/send sock (last-chunk)))
         (catch _e nil)))
-    (tcp-close sock)))
+    (tcp/close sock)))
 
 ; ---- O(n) in-memory body drain (non-chunked bodies that arrive over several reads) ----
 ; The fast path re-`str`s the whole growing buffer on every socket read, which is O(n²) in
@@ -523,8 +523,8 @@
   else seed the drain with the body bytes already in `buf` and read the rest by length."
   (if (> (+ body-start clen) (get config :max-request-bytes))
     (do
-      (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-      (tcp-close sock))
+      (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+      (tcp/close sock))
     (let (already (subbytes buf body-start (count buf)))
       (buffered-drain sock
         handler
@@ -566,9 +566,9 @@
       ([:tcp-closed ^sock] nil)
       (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
-          (tcp-send sock
+          (tcp/send sock
             (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-          (tcp-close sock))))))
+          (tcp/close sock))))))
 
 ; ---- O(n) incremental de-chunk drain (Transfer-Encoding: chunked bodies) ----
 ; The buffered path de-chunks by re-running the whole decoder over the entire buffer on every
@@ -609,10 +609,10 @@
     ([:error msg] (bad-request-close sock msg))
     ([:more tail decoded dlen] (if (> (+ dlen (count tail)) (get config :max-request-bytes))
                                  (do
-                                   (tcp-send sock
+                                   (tcp/send sock
                                      (format-response {:status 413
                                                        :body "<h1>413 Payload Too Large</h1>"}))
-                                   (tcp-close sock))
+                                   (tcp/close sock))
                                  (receive
                                    ([:tcp ^sock chunk] (chunked-drain sock
                                                          handler
@@ -627,10 +627,10 @@
                                    (after (min (get config :read-timeout-ms)
                                             (max 1 (- deadline (now))))
                                      (do
-                                       (tcp-send sock
+                                       (tcp/send sock
                                          (format-response {:status 408
                                                            :body "<h1>408 Request Timeout</h1>"}))
-                                       (tcp-close sock))))))))
+                                       (tcp/close sock))))))))
 
 ; ---- large-body streaming to disk (opt-in via :spool-threshold) ----
 
@@ -659,8 +659,8 @@
   bytes already sitting in `buf` to a fresh temp file and stream the rest off the socket."
   (if (> clen (get config :max-request-bytes))
     (do
-      (tcp-send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-      (tcp-close sock))
+      (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+      (tcp/close sock))
     (let (path (spool-path config)
           already (subbytes buf body-start (count buf))
           alen (count already)
@@ -712,8 +712,8 @@
       (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
         (do
           (spool-cleanup path)
-          (tcp-send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-          (tcp-close sock))))))
+          (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+          (tcp/close sock))))))
 
 (defn- spool-cleanup
   (path)
@@ -752,9 +752,9 @@
       {:method (get request :method)
        :path (get request :path)
        :status (get response :status 200)})
-    (tcp-send sock (format-response response (= (get head :method) "HEAD")))
+    (tcp/send sock (format-response response (= (get head :method) "HEAD")))
     (spool-cleanup path)
-    (tcp-close sock)))
+    (tcp/close sock)))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request. Either side signalling

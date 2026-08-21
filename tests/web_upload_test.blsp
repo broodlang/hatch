@@ -94,7 +94,7 @@
   "Send each slice with a gap, so the server sees several distinct reads (one progress
   event per read at :progress-interval-ms 0) rather than one."
   (when (not (empty? slices))
-    (tcp-send sock (first slices))
+    (tcp/send sock (first slices))
     (sleep 30)
     (send-slices sock (rest slices))))
 
@@ -112,18 +112,18 @@
                  (ok-handler me)
                  nil
                  {:spool-threshold 8 :spool-dir "/tmp" :progress-interval-ms 0})
-          client (tcp-connect "127.0.0.1" port)
+          client (tcp/connect "127.0.0.1" port)
           ; 30-byte body, sent as three 10-byte slices
           slice (b "0123456789"))
-      (tcp-set-binary client true)
-      (tcp-send client
+      (tcp/set-binary client true)
+      (tcp/send client
         (b (str "POST /up?upload_token="
              tok " HTTP/1.1\r\n" "Host: x\r\n" "Content-Length: 30\r\n" "Connection: close\r\n\r\n")))
       (send-slices client [slice slice slice])
       (let (events (collect-progress (list) 20)
             _resp (drain client "")
             final (first (reverse events)))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (unwatch tok)
         (detach-progress {:id hid})
@@ -157,17 +157,17 @@
           port 24793
           ; no :spool-threshold → buffered-drain, the other instrumented body reader
           _sup (server/start port (ok-handler me) nil {:progress-interval-ms 0})
-          client (tcp-connect "127.0.0.1" port)
+          client (tcp/connect "127.0.0.1" port)
           slice (b "0123456789"))
-      (tcp-set-binary client true)
-      (tcp-send client
+      (tcp/set-binary client true)
+      (tcp/send client
         (b (str "POST /up?upload_token="
              tok " HTTP/1.1\r\n" "Host: x\r\n" "Content-Length: 20\r\n" "Connection: close\r\n\r\n")))
       (send-slices client [slice slice])
       (let (events (collect-progress (list) 20)
             _resp (drain client "")
             final (first (reverse events)))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (unwatch tok)
         (detach-progress {:id hid})
@@ -189,9 +189,9 @@
                  (ok-handler me)
                  nil
                  {:spool-threshold 8 :spool-dir "/tmp" :progress-interval-ms 0})
-          client (tcp-connect "127.0.0.1" port))
-      (tcp-set-binary client true)
-      (tcp-send client
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
+      (tcp/send client
         (b (str "POST /up HTTP/1.1\r\n"
              "Host: x\r\n" "Content-Length: 10\r\n" "Connection: close\r\n\r\n" "0123456789")))
       ; wait for the request to be fully handled, then check no progress arrived FOR OUR
@@ -202,7 +202,7 @@
       (let (handled (receive ([:handled] :yes) (after 5000 :timeout))
             _resp (drain client "")
             stray (collect-for-token tok 300))
-        (tcp-close client)
+        (tcp/close client)
         (server/stop port)
         (unwatch tok)
         (detach-progress {:id hid})

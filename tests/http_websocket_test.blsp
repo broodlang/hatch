@@ -43,7 +43,7 @@
     (assert= (carrier-byte-at (text-frame "hello") 0) 129))
   (test "small frame second byte is payload length"
     (assert= (carrier-byte-at (text-frame "hello") 1) 5))
-  (test "text-frame returns a bytes value (sent verbatim by tcp-send, not re-encoded)"
+  (test "text-frame returns a bytes value (sent verbatim by tcp/send, not re-encoded)"
     (assert= (bytes? (text-frame "hello")) true))
   (test "small frame payload"
     (assert= (utf8-bytes->string (bytes (drop 2 (bytes->list (text-frame "hello"))))) "hello"))
@@ -75,7 +75,7 @@
   (test "utf8-byte-string then byte-string->utf8 round-trips multibyte text"
     (assert= (byte-string->utf8 (utf8-byte-string "café − ✓")) "café − ✓"))
   ; Regression: the frame's payload must be single-UTF-8-encoded (each multibyte char
-  ; appearing exactly once). A byte-string frame would be re-encoded by tcp-send (ADR-141),
+  ; appearing exactly once). A byte-string frame would be re-encoded by tcp/send (ADR-141),
   ; doubling every byte >= 0x80 and mis-sizing the length field — this asserts it doesn't.
   (test "frame payload decodes back to the original multibyte text, length in bytes"
     (let (text "café − ✓"

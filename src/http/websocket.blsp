@@ -109,7 +109,7 @@
 
 ; A WebSocket frame is a byte sequence (control bytes ≥ 0x80, a length-prefixed
 ; binary body), so we build each frame as a `bytes` value and send it verbatim.
-; `tcp-send` UTF-8-encodes a *string* leaf (ADR-141) — which would re-encode an
+; `tcp/send` UTF-8-encodes a *string* leaf (ADR-141) — which would re-encode an
 ; already-encoded payload, doubling every byte ≥ 0x80 (multibyte chars AND the frame's
 ; own header/length bytes) and mis-sizing the frame. A `bytes` value bypasses that: the
 ; payload is UTF-8-encoded exactly once (`string->utf8-bytes`), and the header bytes go
@@ -137,7 +137,7 @@
 
 (defn text-frame (payload)
   "Build a WebSocket text frame (opcode 0x1, FIN=1, no mask) as a `bytes` value: the
-  header bytes followed by the UTF-8-encoded `payload`, sent verbatim by `tcp-send`.
+  header bytes followed by the UTF-8-encoded `payload`, sent verbatim by `tcp/send`.
   Uses the 7-bit, 16-bit, or 64-bit length form by size — so a large render (>64 KB of
   HTML) produces a valid frame instead of raising and crashing the live session."
   (let (body (string->utf8-bytes payload)

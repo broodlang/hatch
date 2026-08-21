@@ -16,13 +16,13 @@
 ;
 ; The fix: set the socket to binary BEFORE sending the 101 (the client can't send a
 ; frame until it sees the 101). This test pins that invariant: the ws-handler below
-; deliberately does NOT call `tcp-set-binary` itself, so a frame with a high byte is
+; deliberately does NOT call `tcp/set-binary` itself, so a frame with a high byte is
 ; delivered byte-faithfully ONLY because the upgrade path already switched to binary.
 ; Revert the fix and `read-one-frame` sees U+FFFD → `:incomplete` → times out.
 
 (defn carrier->bytes (carrier)
   "A byte-string carrier (one codepoint 0-255 per byte) → a `bytes` value, so a client frame
-  reaches the wire intact. tcp-send UTF-8-encodes a string leaf (ADR-141), which would mangle
+  reaches the wire intact. tcp/send UTF-8-encodes a string leaf (ADR-141), which would mangle
   every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
   verbatim — the same reason the server builds its frames as `bytes`."
   (bytes (map char->int (string/->list carrier))))
@@ -42,7 +42,7 @@
 
 (defn echo-one-frame (reporter)
   "A ws-handler that reads one client frame and reports its `bytes` payload to `reporter`.
-  Crucially it never calls tcp-set-binary — the upgrade path must have done so."
+  Crucially it never calls tcp/set-binary — the upgrade path must have done so."
   (fn (sock _request)
     (send reporter [:got (read-one-frame sock (bytes []))])))
 
@@ -57,14 +57,14 @@
 (defn ws-client-connect (port)
   "Open a raw client socket, send a WebSocket upgrade request, wait for the 101, then
   switch the client side to binary so it can send raw frame bytes. Returns the socket."
-  (let (sock (tcp-connect "127.0.0.1" port)
-        _req (tcp-send sock
+  (let (sock (tcp/connect "127.0.0.1" port)
+        _req (tcp/send sock
                (str "GET /ws HTTP/1.1\r\n"
                  "Host: localhost\r\n" "Upgrade: websocket\r\n" "Connection: Upgrade\r\n"
                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
                  "Sec-WebSocket-Version: 13\r\n\r\n"))
         _ack (await-101 sock ""))
-    (tcp-set-binary sock true)
+    (tcp/set-binary sock true)
     sock))
 
 (defn masked-byte-frame (b)
@@ -88,9 +88,9 @@
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
           client (ws-client-connect port)
-          _send (tcp-send client (carrier->bytes (masked-byte-frame 255)))
+          _send (tcp/send client (carrier->bytes (masked-byte-frame 255)))
           payload (receive ([:got p] p) (after 3000 :timeout)))
-      (tcp-close client)
+      (tcp/close client)
       (server/stop port)
       ; Before the fix: payload would be :timeout (frame read as U+FFFD → :incomplete).
       ; The bytes-native parser returns the payload as a `bytes` value, byte 0xFF intact.
@@ -109,11 +109,11 @@
 (defn get-response (port path)
   "Open a client, send one GET (Connection: close, so the worker closes + exits once it
   has answered), and return the full raw response string."
-  (let (sock (tcp-connect "127.0.0.1" port)
-        _req (tcp-send sock
+  (let (sock (tcp/connect "127.0.0.1" port)
+        _req (tcp/send sock
                (str "GET " path " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
         resp (drain sock ""))
-    (tcp-close sock)
+    (tcp/close sock)
     resp))
 
 (defn report-response (port me)
@@ -123,10 +123,10 @@
 
 (defn raw-response (port raw)
   "Send an arbitrary (possibly malformed) request string and return the full raw response."
-  (let (sock (tcp-connect "127.0.0.1" port)
-        _req (tcp-send sock raw)
+  (let (sock (tcp/connect "127.0.0.1" port)
+        _req (tcp/send sock raw)
         resp (drain sock ""))
-    (tcp-close sock)
+    (tcp/close sock)
     resp))
 
 ; Tier-2 (docs/robustness.md): a handler that raises must answer a generic 500 without
@@ -175,15 +175,15 @@
                     :headers {}
                     :body (str "body="
                             (utf8-bytes->string (get req :body)))}))
-          sock (tcp-connect "127.0.0.1" port)
+          sock (tcp/connect "127.0.0.1" port)
           ; send only the head (with Expect + Content-Length) — the body is withheld
-          _h (tcp-send sock
+          _h (tcp/send sock
                (str "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                  "Expect: 100-continue\r\nConnection: close\r\n\r\n"))
           interim (drain sock "")
-          _b (tcp-send sock "hello")
+          _b (tcp/send sock "hello")
           final (drain sock ""))
-      (tcp-close sock)
+      (tcp/close sock)
       (server/stop port)
       (assert= (includes? interim "HTTP/1.1 100 Continue") true)
       (assert= (includes? final "body=hello") true))))
@@ -244,22 +244,22 @@
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
           client (ws-client-connect port)
-          _send (tcp-send client
+          _send (tcp/send client
                   (carrier->bytes (str (ws-frame 0 1 "Hel")
                                     (ws-frame 0 0 "lo ")
                                     (ws-frame 1 0 "world"))))
           payload (receive ([:got p] p) (after 3000 :timeout)))
-      (tcp-close client)
+      (tcp/close client)
       (server/stop port)
       (assert= (utf8-bytes->string payload) "Hello world"))))
 
 ; Tier-3 (docs/robustness.md): server-side TLS. A full handshake needs a verification-
-; skipping client (the runtime's tls-request validates against real roots), so the
+; skipping client (the runtime's tls/request validates against real roots), so the
 ; end-to-end handshake is verified out-of-band with `curl -k`; here we smoke-test that
-; the TLS bind path (tls-self-signed → :tls config → tls-listen) starts and stops cleanly.
+; the TLS bind path (tls/self-signed → :tls config → tls/listen) starts and stops cleanly.
 (describe "server/start serves TLS with a self-signed cert"
-  (test "a :tls config binds (tls-listen) and stops without error"
-    (let ([cert key] (tls-self-signed "localhost")
+  (test "a :tls config binds (tls/listen) and stops without error"
+    (let ([cert key] (tls/self-signed "localhost")
           port 24761
           sup (server/start port
                 (fn (_req) {:status 200 :headers {} :body "ok"})
@@ -286,12 +286,12 @@
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
           ; open a keep-alive connection, read the response, leave the socket OPEN so the
           ; worker is still alive (looping for the next request) when we introspect
-          sock (tcp-connect "127.0.0.1" port)
-          _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          sock (tcp/connect "127.0.0.1" port)
+          _ (tcp/send sock "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
           _resp (drain sock "")
           sup (whereis (server/worker-supervisor-name port))
           n (supervisor/count-children sup))
-      (tcp-close sock)
+      (tcp/close sock)
       (server/stop port)
       (assert= (pid? sup) true)
       (assert= (>= n 1) true)))
@@ -319,16 +319,16 @@
               (fn (_r) {:status 200 :headers {} :body "ok"})
               nil
               {:head-timeout-ms 250 :read-timeout-ms 5000})
-          sock (tcp-connect "127.0.0.1" port)
-          _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\n")
+          sock (tcp/connect "127.0.0.1" port)
+          _ (tcp/send sock "GET / HTTP/1.1\r\nHost: localhost\r\n")
           _ (sleep 150)
           ; Best-effort: the point of this byte is to reset the IDLE timer mid-window and show
           ; the deadline fires anyway. On a loaded machine the 150ms sleep can overshoot the
           ; 250ms deadline, in which case the socket is already closed and this send would
           ; raise — failing a test whose assertion (a 408) the server has in fact satisfied.
-          _ (try (tcp-send sock "X: y\r\n") (catch _e nil))
+          _ (try (tcp/send sock "X: y\r\n") (catch _e nil))
           resp (drain sock ""))
-      (tcp-close sock)
+      (tcp/close sock)
       (server/stop port)
       (assert= (includes? resp "408") true))))
 
@@ -343,12 +343,12 @@
               (fn (_r) {:status 200 :headers {} :body "ok"})
               nil
               {:body-timeout-ms 250 :read-timeout-ms 5000})
-          sock (tcp-connect "127.0.0.1" port)
-          _ (tcp-send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
+          sock (tcp/connect "127.0.0.1" port)
+          _ (tcp/send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
           _ (sleep 150)
           ; best-effort, same reason as the head-timeout case above
-          _ (try (tcp-send sock "C") (catch _e nil))
+          _ (try (tcp/send sock "C") (catch _e nil))
           resp (drain sock ""))
-      (tcp-close sock)
+      (tcp/close sock)
       (server/stop port)
       (assert= (includes? resp "408") true))))
