@@ -9,7 +9,6 @@
   (:use web/parts)
   ; build — a read-only Conn from the WS upgrade request, for on-mount-guard
   (:use web/conn)
-  (:use protocol)
   ; defability Encode / impl — value dispatch for JSON wire encoding (ability, ADR)
   ; apply-update / dispatch-event — this module's own session runtime calls these
   ; fully-qualified (web/component/…); declaring the dependency here — rather than

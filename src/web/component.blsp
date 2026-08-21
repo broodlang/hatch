@@ -42,9 +42,7 @@
   (:use web/template)
   ; compile-parts / component-slot / slot->html — the component's own static/dynamic split
   ; and the tagged slot value the parent diffs it as
-  (:alias web/parts)
-  ; defbehaviour — LiveComponentModule
-  (:use protocol))
+  (:alias web/parts))
 
 ; ---- the LiveComponentModule behaviour ----
 
