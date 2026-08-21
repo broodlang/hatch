@@ -25,7 +25,7 @@
   (:use web/conn)
   ; live-conn — the WebSocket connection's read-only Conn, for the live-view accessors
   (:alias web/live)
-  ; secure=? — constant-time token comparison
+  ; constant-time-equal? — constant-time token comparison
   (:use crypto))
 
 ; Module-scoped (not earmuffed → not global): the session key the token is stored under, the
@@ -63,7 +63,7 @@
   "True if the submitted token is present and matches the session token (constant-time)."
   (let (want (token conn)
         got (submitted-token conn))
-    (and want got (secure=? (string->utf8-bytes want) (string->utf8-bytes got)))))
+    (and want got (constant-time-equal? (string->utf8-bytes want) (string->utf8-bytes got)))))
 
 (defn reject (conn)
   "A halted 403 for a missing/invalid CSRF token."

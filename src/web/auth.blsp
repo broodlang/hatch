@@ -9,7 +9,7 @@
   ; header, put-resp-header, send-resp, halt, assign
   (:use web/conn)
   (:use encoding)
-  ; secure=? — constant-time credential comparison (no timing oracle)
+  ; constant-time-equal? — constant-time credential comparison (no timing oracle)
   (:use crypto))
 (defn basic-auth (username password &optional (realm "Restricted"))
   "A plug that requires HTTP Basic auth matching `username`:`password`. On a match it
@@ -23,11 +23,11 @@
 
 (defn basic-auth-ok? (conn username password)
   "True if the conn's Authorization header carries Basic creds equal to
-  `username`:`password`. Uses a constant-time compare (`secure=?`), not `=`, so the response
+  `username`:`password`. Uses a constant-time compare (`constant-time-equal?`), not `=`, so the response
   time can't be used as an oracle to recover the password byte-by-byte."
   (let (creds (basic-auth-creds conn))
     (and creds
-      (secure=? (string->utf8-bytes creds)
+      (constant-time-equal? (string->utf8-bytes creds)
         (string->utf8-bytes (str username ":" password))))))
 
 (defn basic-auth-creds (conn)
