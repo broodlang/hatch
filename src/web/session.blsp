@@ -23,7 +23,7 @@
   (:use encoding)
   ; hmac-sha256 — the cookie signature
   (:use hash)
-  ; secure=? — constant-time signature comparison (no timing oracle)
+  ; constant-time-equal? — constant-time signature comparison (no timing oracle)
   (:use crypto))
 
 (def *default-cookie* "_hatch_session")
@@ -87,7 +87,7 @@
         (let (payload (string/substring cookie 0 dot)
               sig (string/substring cookie (+ dot 1) (string/length cookie))
               expected (hmac-sha256 secret payload))
-          (if (secure=? (string->utf8-bytes sig) (string->utf8-bytes expected))
+          (if (constant-time-equal? (string->utf8-bytes sig) (string->utf8-bytes expected))
             (check-expiry (decode-payload payload))
             {}))))))
 
