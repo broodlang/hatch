@@ -106,12 +106,12 @@
 (defn run-session (request-headers sfp)
   "Open a real live session, send one join frame (claiming `sfp` if given), and return the
   server's join frame as text."
-  (let (ls (tcp-listen "127.0.0.1" 0)
-        port (tcp-local-port ls))
-    (let (client (tcp-connect "127.0.0.1" port)
+  (let (ls (tcp/listen "127.0.0.1" 0)
+        port (tcp/local-port ls))
+    (let (client (tcp/connect "127.0.0.1" port)
           server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
-      (tcp-set-binary server true)
-      (tcp-set-binary client true)
+      (tcp/set-binary server true)
+      (tcp/set-binary client true)
       (let (request {:method "GET"
                      :path "/live/ws/probe"
                      :query ""
@@ -120,12 +120,12 @@
                      :body ""}
             entry {:spec (fn () (live-spec)) :session "customer"}
             pid (spawn (receive ([:go] (start-session server request entry)))))
-        (tcp-controlling-process server pid)
+        (tcp/controlling-process server pid)
         (send pid [:go])
-        (tcp-send client (masked-text-frame (join-frame sfp)))
+        (tcp/send client (masked-text-frame (join-frame sfp)))
         (let (frame (read-frame client (bytes [])))
-          (tcp-close client)
-          (tcp-close ls)
+          (tcp/close client)
+          (tcp/close ls)
           frame)))))
 
 (describe "statics fingerprinting on reconnect"
@@ -154,12 +154,12 @@
 (describe "a real live session exposes its Conn to render"
   :isolated
   (test "render reads the CSRF token off the connection the client actually opened"
-    (let (ls (tcp-listen "127.0.0.1" 0)
-          port (tcp-local-port ls))
-      (let (client (tcp-connect "127.0.0.1" port)
+    (let (ls (tcp/listen "127.0.0.1" 0)
+          port (tcp/local-port ls))
+      (let (client (tcp/connect "127.0.0.1" port)
             server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
-        (tcp-set-binary server true)
-        (tcp-set-binary client true)
+        (tcp/set-binary server true)
+        (tcp/set-binary client true)
         ; the upgrade request the browser would send, carrying the signed session cookie
         ; a prior HTTP request through the CSRF pipeline had set
         (let (signed (session/encode-session secret {"_csrf" "live-token-xyz"})
@@ -175,12 +175,12 @@
           ; frames land in THIS process's mailbox and the session waits forever. So the
           ; spawned process blocks on a go-ahead we send only after the handoff.
           (let (pid (spawn (receive ([:go] (start-session server request entry)))))
-            (tcp-controlling-process server pid)
+            (tcp/controlling-process server pid)
             (send pid [:go]))
-          (tcp-send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+          (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
           (let (frame (read-frame client (bytes [])))
-            (tcp-close client)
-            (tcp-close ls)
+            (tcp/close client)
+            (tcp/close ls)
             ; the join frame carries the rendered statics; the token came from the cookie,
             ; through *live-conn*, into render — with no plug pipeline anywhere in between
             (assert= (string? frame) true)

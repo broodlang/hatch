@@ -18,10 +18,10 @@
 
 (defn get-raw (port path)
   "Send one GET and return the full raw response string (head + chunked body)."
-  (let (sock (tcp-connect "127.0.0.1" port)
-        _ (tcp-send sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+  (let (sock (tcp/connect "127.0.0.1" port)
+        _ (tcp/send sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))
         resp (drain sock ""))
-    (tcp-close sock)
+    (tcp/close sock)
     resp))
 
 (defn body-of (resp)
@@ -171,10 +171,10 @@
     (let (want (string/join "" (map (fn (_) "compress me ") (range 0 500)))
           port 24818
           _ (server/start port gzip-stream)
-          sock (tcp-connect "127.0.0.1" port)
-          _ (tcp-send sock "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n")
+          sock (tcp/connect "127.0.0.1" port)
+          _ (tcp/send sock "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n")
           resp (drain sock ""))
-      (tcp-close sock)
+      (tcp/close sock)
       (server/stop port)
       (assert= (includes? resp "Content-Encoding: gzip\r\n") true)
       (assert= (includes? resp "Vary: Accept-Encoding\r\n") true)

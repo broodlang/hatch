@@ -1,5 +1,5 @@
 ;; format-response returns an ADR-139 iolist of `bytes` leaves (or a bare `bytes` value for a
-;; bodyless/HEAD response) — tcp-send UTF-8-encodes a *string* leaf (ADR-141), so the leaves
+;; bodyless/HEAD response) — tcp/send UTF-8-encodes a *string* leaf (ADR-141), so the leaves
 ;; are pre-encoded bytes. `rtext` flattens and decodes it back to text for the assertions.
 (defmodule http-response-test (:use http/response) (:use http/websocket) (:use test))
 
@@ -30,7 +30,7 @@
       (assert= (includes? out "Set-Cookie: b=2\r\n") true))))
 
 (describe "format-response: byte-faithful output for a binary-mode socket"
-  ; tcp-send writes a `bytes` leaf verbatim but UTF-8-encodes a *string* leaf (ADR-141), so
+  ; tcp/send writes a `bytes` leaf verbatim but UTF-8-encodes a *string* leaf (ADR-141), so
   ; format-response returns an ADR-139 iolist of `bytes` leaves. Flattened, a multibyte body
   ; is single-encoded (not doubled) and Content-Length matches the bytes actually sent.
   (test "flattens to a bytes value"

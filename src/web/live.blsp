@@ -244,7 +244,7 @@
   "Encode `msg-map` as JSON and send it as a WebSocket text frame. Returns true on
   success, false if the write failed — a peer that vanished mid-write (broken pipe)
   then ends the session cleanly instead of crashing the worker with an uncaught error."
-  (try (do (tcp-send sock (text-frame (encode msg-map))) true) (catch _ false)))
+  (try (do (tcp/send sock (text-frame (encode msg-map))) true) (catch _ false)))
 
 (defn- recv-frame-loop
   (sock buf)
@@ -279,7 +279,7 @@
   (if (and (not (nil? need)) (>= got need))
     (recv-frame-loop sock (bytes-concat buf (reverse pieces)))
     (receive
-      ; Binary-mode socket (see http/server's pre-101 tcp-set-binary): `chunk` is a first-class
+      ; Binary-mode socket (see http/server's pre-101 tcp/set-binary): `chunk` is a first-class
       ; `bytes` value — the parser reads it directly.
       ([:tcp ^sock chunk] (if (nil? need)
                             (recv-frame-loop sock (bytes-concat buf chunk))
@@ -289,7 +289,7 @@
                               (+ got (count chunk))
                               need)))
       ([:tcp-closed ^sock] [:closed])
-      ([:ws-send ^sock frame] (if (try (do (tcp-send sock frame) true) (catch _ false))
+      ([:ws-send ^sock frame] (if (try (do (tcp/send sock frame) true) (catch _ false))
                                 (recv-frame-fill sock buf pieces got need)
                                 [:closed]))
       ([:tick key gen] [:tick key gen (bytes-concat buf (reverse pieces))])
@@ -656,8 +656,8 @@
 (defn close-socket (sock)
   "Send a close frame and close the TCP socket. Best-effort throughout — the peer may
   already be gone (a broken pipe), so a failed write here is never itself an error."
-  (try (tcp-send sock (close-frame)) (catch _ nil))
-  (try (tcp-close sock) (catch _ nil))
+  (try (tcp/send sock (close-frame)) (catch _ nil))
+  (try (tcp/close sock) (catch _ nil))
   nil)
 
 (defn close-session (sock view)
@@ -718,7 +718,7 @@
     ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
     ; is best-effort: a failed write means the peer is gone, so end the session.
     ([:ok 9 payload _] (kick-watchdog view)
-      (if (try (do (tcp-send sock (pong-frame payload)) true) (catch _ false))
+      (if (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false))
         (session-recv sock view buf)
         (close-session sock view)))
     ; client message
@@ -966,7 +966,7 @@
         ; (handle-info/tick/unmount) is guarded against a user-code exception
         guard-result (try ((get spec :mount-guard) conn) (catch _ :hatch/guard-error)))
     (cond
-      (= guard-result :hatch/guard-error) (try (tcp-close sock) (catch _ nil))
+      (= guard-result :hatch/guard-error) (try (tcp/close sock) (catch _ nil))
       guard-result (redirect-and-close sock guard-result)
       ; Do NOT mount here: the paramless upgrade request (the WS URL carries no query string)
       ; would build the model with the wrong params, and the client's first frame — `join` —
@@ -1140,7 +1140,7 @@
     (let (entry (lookup-live (live-ws-path (get request :path))))
       (if entry
         (start-session sock request entry)
-        (tcp-close sock)))))
+        (tcp/close sock)))))
 
 ; ---- the LiveModule behaviour ----
 ; The contract a live-view module satisfies — exactly what `deflive` generates.

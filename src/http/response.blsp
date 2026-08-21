@@ -1,8 +1,8 @@
 (defmodule http/response
   "HTTP/1.1 response serialization. `format-response` returns an ADR-139 iolist —
-  `[head-bytes, body-bytes]` — that `tcp-send` flattens straight onto the socket with no
+  `[head-bytes, body-bytes]` — that `tcp/send` flattens straight onto the socket with no
   monolithic combined buffer (a bodyless/HEAD response is just the head `bytes`). The leaves
-  are `bytes`, never strings: `tcp-send` UTF-8-encodes a string leaf (ADR-141), so a string
+  are `bytes`, never strings: `tcp/send` UTF-8-encodes a string leaf (ADR-141), so a string
   body with any multibyte char (an em dash, an arrow, any non-ASCII prose) would be encoded
   twice — the bytes doubled and the response truncated at the too-short Content-Length.
   `(bytes-concat (format-response …))` materialises the whole response when one value is
@@ -51,9 +51,9 @@
                        "\r\n"
                        (string/join "" (map format-header (map-pairs headers)))
                        "\r\n"))
-      ; Return an ADR-139 iolist: `tcp-send` flattens `[head, body]` straight onto the
+      ; Return an ADR-139 iolist: `tcp/send` flattens `[head, body]` straight onto the
       ; socket with no monolithic combined buffer. Leaves are `bytes` (already UTF-8), so a
-      ; multibyte body is not re-encoded — tcp-send would UTF-8-encode a *string* leaf
+      ; multibyte body is not re-encoded — tcp/send would UTF-8-encode a *string* leaf
       ; (ADR-141), doubling it and truncating at the too-short Content-Length; encoding to
       ; `bytes` up front sends each body byte exactly once. `(bytes-concat …)` materialises
       ; the whole response for a caller (e.g. a test) that wants one value.
@@ -84,7 +84,7 @@
 (defn chunk (data)
   "Encode `data` (a string, `bytes`, or ADR-139 iolist) as one HTTP/1.1 chunked-transfer chunk:
   the payload's byte length in hex, CRLF, the payload bytes, CRLF — returned as an iolist that
-  `tcp-send` flattens. An empty payload returns nil (a 0-length chunk would prematurely end the
+  `tcp/send` flattens. An empty payload returns nil (a 0-length chunk would prematurely end the
   stream, so the caller skips a nil), keeping `last-chunk` the sole terminator."
   (let (bs (bytes-concat data)
         n (count bs))
@@ -99,7 +99,7 @@
 (defn format-stream-head (resp)
   "Serialize the status line + headers for a chunked streaming response: `Transfer-Encoding:
   chunked` is stamped and any `Content-Length` dropped (the chunk framing delimits the body).
-  Returns head `bytes` for `tcp-send`; the body follows as `chunk`s then `last-chunk`. An unset
+  Returns head `bytes` for `tcp/send`; the body follows as `chunk`s then `last-chunk`. An unset
   content type defaults to text/html, as for a buffered response."
   (let (status (get resp :status 200)
         headers (get resp :headers {})
