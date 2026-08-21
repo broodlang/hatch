@@ -95,7 +95,7 @@
   runs INSIDE the listener process — accepts go to the calling process's mailbox — so
   the child's :start spawns `listen-and-serve` rather than binding the socket here."
   (let (cfg (merge default-config config)
-        sup (supervisor/start-supervisor [{:id :http-listener
+        sup (supervisor/start [{:id :http-listener
                                            :name (listener-name port)
                                            :start (fn ()
                                                     (spawn (listen-and-serve port
@@ -116,7 +116,7 @@
         ; The listener still monitors each worker itself (for the graceful drain and the
         ; max-connections cap), so the supervisor adds supervision/observability without changing
         ; the shutdown or back-pressure behaviour.
-        sup (supervisor/start-supervisor []
+        sup (supervisor/start []
               {:name (worker-supervisor-name port) :strategy :one-for-one}))
     (println (str "listening on " scheme "://localhost:" port))
     (listener-loop lsock handler ws-handler config (list) sup)))
@@ -160,7 +160,7 @@
     (if sup
       (do
         (when listener (drain-and-wait listener))
-        (supervisor/stop-supervisor sup))
+        (supervisor/stop sup))
       (println (str "http/server: no server running on port " port)))))
 
 ; The listener carries the live in-flight worker pids: it `monitor`s each worker and drops
@@ -224,10 +224,10 @@
     ([:drain from] (do
                      (tcp-close lsock)
                      (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)
-                     (supervisor/stop-supervisor sup)))
+                     (supervisor/stop sup)))
     (:stop (do
              (tcp-close lsock)
-             (supervisor/stop-supervisor sup)
+             (supervisor/stop sup)
              (println "http/server: stopped")))))
 
 (defn head-complete? (buf)
