@@ -26,13 +26,13 @@
 
 (defn wait-key (topic key tries)
   (cond
-    (member? key (roster-keys topic)) true
+    (includes? (roster-keys topic) key) true
     (<= tries 0) false
     else (do (snooze 50) (wait-key topic key (- tries 1)))))
 
 (defn wait-key-gone (topic key tries)
   (cond
-    (not (member? key (roster-keys topic))) true
+    (not (includes? (roster-keys topic) key)) true
     (<= tries 0) false
     else (do (snooze 50) (wait-key-gone topic key (- tries 1)))))
 
@@ -81,7 +81,7 @@
     (let (r (receive ([:roster ks] ks) (after 300 :none)))
       (cond
         (= r :none) (wait-roster-without key (- tries 1))
-        (not (member? key r)) true
+        (not (includes? r key)) true
         else (wait-roster-without key (- tries 1))))))
 
 (describe "track + roster"
@@ -149,9 +149,9 @@
           remotes {:nodeB {"room" (list {:key "remote-b" :meta {}})}
                    :nodeC {"room" (list {:key "remote-c" :meta {}})}}
           keys (map (fn (e) (get e :key)) (web/presence/presence-merged state remotes "room")))
-      (assert= (member? "local-a" keys) true)
-      (assert= (member? "remote-b" keys) true)
-      (assert= (member? "remote-c" keys) true)
+      (assert= (includes? keys "local-a") true)
+      (assert= (includes? keys "remote-b") true)
+      (assert= (includes? keys "remote-c") true)
       (assert= (count keys) 3)))
   (test "a topic with only remote members still merges"
     (let (remotes {:nodeB {"room" (list {:key "b" :meta {}})}})
@@ -160,8 +160,8 @@
   (test "remote-topics-of lists the topics a departed peer was on"
     (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}}
           ts (web/presence/presence-remote-topics-of remotes :nodeB))
-      (assert= (member? "r1" ts) true)
-      (assert= (member? "r2" ts) true)
+      (assert= (includes? ts "r1") true)
+      (assert= (includes? ts "r2") true)
       (assert= (count ts) 2)))
   (test "remote-nodes is empty on a single (non-distributed) runtime"
     (assert= (remote-nodes) (list))))
@@ -247,7 +247,7 @@
         (receive (:tracked nil) (after 2000 nil))
         ; the observer received a roster push containing the new member
         (receive
-          ([:roster keys] (assert= (member? "alice" keys) true))
+          ([:roster keys] (assert= (includes? keys "alice") true))
           (after 2000 (assert= :push :timeout)))
         ; and the observer itself is NOT present in the roster — only alice is
         (assert= (wait-key "obs:room" "alice" 20) true)

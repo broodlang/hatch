@@ -23,14 +23,14 @@
 (defn wait-member (topic pid tries)
   "Poll until `pid` IS a subscriber of `topic`."
   (cond
-    (member? pid (subscribers topic)) true
+    (includes? (subscribers topic) pid) true
     (<= tries 0) false
     else (do (receive (after 50 nil)) (wait-member topic pid (- tries 1)))))
 
 (defn wait-gone (topic pid tries)
   "Poll until `pid` is no longer a subscriber of `topic` (DOWN cleanup is async)."
   (cond
-    (not (member? pid (subscribers topic))) true
+    (not (includes? (subscribers topic) pid)) true
     (<= tries 0) false
     else (do (receive (after 50 nil)) (wait-gone topic pid (- tries 1)))))
 
