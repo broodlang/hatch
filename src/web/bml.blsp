@@ -493,7 +493,7 @@
   "Resolve `filename` against the directory of the file currently being compiled (the
   module that invoked a template macro). Call only at macro-expansion time, where
   `(current-file)` is that module's source."
-  (let (parts (string/split (current-file) "/")
+  (let (parts (string/split (reflect/current-file) "/")
         dir (string/join "/" (take (- (count parts) 1) parts)))
     (str dir "/" filename)))
 
