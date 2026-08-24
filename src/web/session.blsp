@@ -62,8 +62,8 @@
   "The session signing secret, read from `$var` and validated by `check-secret`: a strong
   secret in any environment, the labeled dev default when it's missing/weak in dev, or a loud
   boot failure when it's missing/weak outside dev. Prefer this over a hand-rolled
-  `(or (getenv …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
-  (check-secret (getenv var) (= (or (getenv "HATCH_ENV") "dev") "dev")))
+  `(or (os/getenv …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
+  (check-secret (os/getenv var) (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
 
 ; ---- signing / verification ----
 
@@ -98,7 +98,7 @@
   (let (exp (get data *exp-key*))
     (cond
       (nil? exp) data
-      (> (now) exp) {}
+      (> (os/now) exp) {}
       else (dissoc data *exp-key*))))
 
 ; A signed session's default absolute lifetime (seconds) when `:max-age` isn't configured.
@@ -112,7 +112,7 @@
   — a signed session ALWAYS expires, so a captured cookie is replayable only until `__exp__`,
   not forever (`check-expiry` enforces it on decode)."
   (let (max-age (get opts :max-age *default-max-age*))
-    (assoc data *exp-key* (+ (now) (* max-age 1000)))))
+    (assoc data *exp-key* (+ (os/now) (* max-age 1000)))))
 
 (defn decode-payload (payload)
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
@@ -175,7 +175,7 @@
   in prod the auth cookie is sent only over HTTPS (a network attacker can't read it off a
   plaintext request and replay it) while local HTTP dev still works. An explicit `:secure`
   opt overrides."
-  (not (= (or (getenv "HATCH_ENV") "dev") "dev")))
+  (not (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
 
 (defn session-cookie-opts (opts)
   "The put-cookie options for the session cookie, defaulting to a secure-by-default shape

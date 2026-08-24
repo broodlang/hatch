@@ -45,7 +45,7 @@
   the possibly-updated conn."
   (if (token conn)
     conn
-    (session/put-session conn session-key (random-token 32))))
+    (session/put-session conn session-key (rand/token 32))))
 
 (defn safe-method? (conn)
   "True for methods that don't change state — never CSRF-checked."

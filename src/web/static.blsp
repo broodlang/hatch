@@ -107,7 +107,7 @@
   "True unless $HATCH_ENV names the dev environment (the zero-config default). Mirrors the
   endpoint's `dev?`; it lives here too so the static layer can pick its cache policy without
   the app threading an env flag through every call."
-  (not (= (or (getenv "HATCH_ENV") "dev") "dev")))
+  (not (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
 
 ; ---- caching ----
 
@@ -124,7 +124,7 @@
 ; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
 ; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
 ; registry process would funnel every read through one mailbox).
-(def *etag-cache* (table))
+(def *etag-cache* (table/new))
 
 (defn- cached-etag-via
   (path fresh-fn)
@@ -135,11 +135,11 @@
   (let (st (file/stat path))
     (if (nil? st)
       (fresh-fn)
-      (let (hit (table-get *etag-cache* path))
+      (let (hit (table/get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
           (let (tag (fresh-fn))
-            (table-put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
+            (table/put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
             tag))))))
 
 (defn cached-etag (path body)
@@ -325,7 +325,7 @@
   (let (st (try (file/stat path) (catch _ nil)))
     (if (nil? st)
       nil
-      (let (hit (table-get *etag-cache* path))
+      (let (hit (table/get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
           nil)))))
@@ -505,24 +505,24 @@
 ; deployment's lifetime (a new build means a new process), so this is read once per dir and
 ; never invalidated — removing per-render disk IO in prod. `clear-manifest-cache` exists for
 ; tests / a dev rebuild.
-(def *manifest-cache* (table))
+(def *manifest-cache* (table/new))
 
 (defn load-manifest (&optional (dir "static"))
   "The fingerprint manifest under `dir` as a `logical → fingerprinted` map, or `{}` when
   there's none (dev, or a build that didn't fingerprint). Memoized per `dir` (including the
   empty/miss result), so a hot path reads the file at most once."
-  (if (table-has? *manifest-cache* dir)
-    (table-get *manifest-cache* dir)
+  (if (table/has? *manifest-cache* dir)
+    (table/get *manifest-cache* dir)
     (let (text (try (file/slurp (manifest-path dir)) (catch _ nil))
           m (if (nil? text) {} (parse-manifest text)))
-      (table-put *manifest-cache* dir m)
+      (table/put *manifest-cache* dir m)
       m)))
 
 (defn clear-manifest-cache ()
   "Drop every memoized manifest, so the next `load-manifest` re-reads from disk. For tests
   and a dev rebuild that rewrote the manifest within a running process."
-  (dolist (dir (keys (table-snapshot *manifest-cache*)))
-    (table-delete *manifest-cache* dir))
+  (dolist (dir (keys (table/snapshot *manifest-cache*)))
+    (table/delete *manifest-cache* dir))
   nil)
 
 (defn asset-path (logical &optional (dir "static"))

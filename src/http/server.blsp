@@ -184,7 +184,7 @@
   Late `[:tcp-accept]`s (a connection that slipped in as we closed the socket) are refused."
   (if (empty? workers)
     (send from :drained)
-    (let (remaining (- deadline (now)))
+    (let (remaining (- deadline (os/now)))
       (if (<= remaining 0)
         (do (listener-kill-all workers) (send from :drained))
         (receive
@@ -223,7 +223,7 @@
                        sup))
     ([:drain from] (do
                      (tcp/close lsock)
-                     (listener-drain workers (+ (now) (get config :shutdown-grace-ms)) from)
+                     (listener-drain workers (+ (os/now) (get config :shutdown-grace-ms)) from)
                      (supervisor/stop sup)))
     (:stop (do
              (tcp/close lsock)
@@ -387,7 +387,7 @@
   next pipelined request (`remainder`) on a kept-alive socket or close. Shared by the
   single-read fast path and the streamed-body drain so both get identical telemetry,
   error isolation, keep-alive and HEAD handling."
-  (let (t0 (now)
+  (let (t0 (os/now)
         response (try
                    (handler request)
                    (catch e
@@ -403,7 +403,7 @@
     ; Telemetry: one fire-and-forget event per handled request (handlers run in the
     ; telemetry listener, so a slow/buggy one can never slow or crash this worker).
     (telemetry/emit [:hatch :request :stop]
-      {:duration (- (now) t0)}
+      {:duration (- (os/now) t0)}
       {:method (get request :method)
        :path (get request :path)
        :status (get response :status 200)})
@@ -497,10 +497,10 @@
   of re-renders) for one upload."
   (cond
     (nil? prog) nil
-    (< (now) (get prog :next)) prog
+    (< (os/now) (get prog :next)) prog
     else (do
            (progress-emit prog got)
-           (assoc prog :next (+ (now) (get prog :interval))))))
+           (assoc prog :next (+ (os/now) (get prog :interval))))))
 
 (defn- progress-finish
   (prog got)
@@ -534,7 +534,7 @@
         (list already)
         (count already)
         clen
-        (+ (now) (get config :body-timeout-ms))
+        (+ (os/now) (get config :body-timeout-ms))
         (progress-begin config head clen)))))
 
 (defn- buffered-drain
@@ -564,7 +564,7 @@
                               deadline
                               (progress-tick prog (min got2 clen)))))
       ([:tcp-closed ^sock] nil)
-      (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
+      (after (min (get config :read-timeout-ms) (max 1 (- deadline (os/now))))
         (do
           (tcp/send sock
             (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
@@ -590,7 +590,7 @@
     (subbytes buf body-start (count buf))
     (list)
     0
-    (+ (now) (get config :body-timeout-ms))))
+    (+ (os/now) (get config :body-timeout-ms))))
 
 (defn- chunked-drain
   (sock handler ws-handler config head pending decoded dlen deadline)
@@ -625,7 +625,7 @@
                                                          deadline))
                                    ([:tcp-closed ^sock] nil)
                                    (after (min (get config :read-timeout-ms)
-                                            (max 1 (- deadline (now))))
+                                            (max 1 (- deadline (os/now))))
                                      (do
                                        (tcp/send sock
                                          (format-response {:status 408
@@ -651,7 +651,7 @@
 (defn- spool-path
   (config)
   "A fresh unique temp path under :spool-dir for one spooled request body."
-  (str (get config :spool-dir "/tmp") "/hatch-upload-" (random-token 16)))
+  (str (get config :spool-dir "/tmp") "/hatch-upload-" (rand/token 16)))
 
 (defn- spool-begin
   (sock handler ws-handler config buf head body-start clen)
@@ -677,7 +677,7 @@
         path
         take
         clen
-        (+ (now) (get config :body-timeout-ms))
+        (+ (os/now) (get config :body-timeout-ms))
         (progress-begin config head clen)))))
 
 (defn- spool-drain
@@ -709,7 +709,7 @@
                               deadline
                               (progress-tick prog written2))))
       ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
-      (after (min (get config :read-timeout-ms) (max 1 (- deadline (now))))
+      (after (min (get config :read-timeout-ms) (max 1 (- deadline (os/now))))
         (do
           (spool-cleanup path)
           (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
@@ -735,7 +735,7 @@
   remove the temp file unless the handler moved it. A spooled request always closes the
   connection afterwards — no keep-alive/pipelining bookkeeping across a multi-megabyte body."
   (let (request (assoc head :body "" :body-file path :body-length clen)
-        t0 (now)
+        t0 (os/now)
         response (try
                    (handler request)
                    (catch e
@@ -748,7 +748,7 @@
                        ((get config :error-handler) request (error-message e)))))
         response (assoc-in response [:headers :connection] "close"))
     (telemetry/emit [:hatch :request :stop]
-      {:duration (- (now) t0)}
+      {:duration (- (os/now) t0)}
       {:method (get request :method)
        :path (get request :path)
        :status (get response :status 200)})

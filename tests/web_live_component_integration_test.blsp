@@ -68,7 +68,7 @@
     (assert= (get (live-spec) :slot-deps) [[:n] :all :all]))
   (test "recompute-dynamics picks up a component-only state change with model unchanged"
     (let (spec (live-spec)
-          components (table)
+          components (table/new)
           model {:authed true :n 5}
           dyn1 ((get spec :render-dynamic) model components)
           view {:render-slots (get spec :render-slots)
@@ -76,10 +76,10 @@
                 :render-model model
                 :dynamics dyn1
                 :components components}
-          entry (table-get components "direct")
+          entry (table/get components "direct")
           bumped (web/component/component-entry (get entry :module)
                    (get entry :spec-thunk)
                    (assoc (get entry :state) :n 99))
-          _ (table-put components "direct" bumped)
+          _ (table/put components "direct" bumped)
           dyn2 (recompute-dynamics view dyn1 model))
       (assert= (includes? (str (nth dyn2 1)) "99") true))))

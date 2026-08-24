@@ -144,16 +144,16 @@
       ; exp = 1ms past epoch
       (assert= (decode-session *secret* cookie) {})))
   (test "a live cookie decodes to the data with __exp__ stripped"
-    (let (cookie (encode-session *secret* {"user" "x" "__exp__" (+ (now) 100000)}))
+    (let (cookie (encode-session *secret* {"user" "x" "__exp__" (+ (os/now) 100000)}))
       (assert= (decode-session *secret* cookie) {"user" "x"})))
   (test "with-expiry always stamps __exp__ (default lifetime when no :max-age)"
     ; a signed session must always carry a deadline — a captured cookie can't be valid forever
     (let (default (with-expiry {"a" "1"} {}))
       (assert= (get default "a") "1")
-      (assert= (> (get default "__exp__") (now)) true))
+      (assert= (> (get default "__exp__") (os/now)) true))
     (let (stamped (with-expiry {"a" "1"} {:max-age 60}))
       (assert= (get stamped "a") "1")
-      (assert= (> (get stamped "__exp__") (now)) true)))
+      (assert= (> (get stamped "__exp__") (os/now)) true)))
   ; a legacy cookie signed with no __exp__ still decodes (can't retroactively change issued
   ; cookies) — but every newly WRITTEN session now carries one via with-expiry above
   (test "a cookie with no __exp__ still decodes (legacy compatibility)"
