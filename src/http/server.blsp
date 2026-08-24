@@ -160,7 +160,9 @@
     (if sup
       (do
         (when listener (drain-and-wait listener))
-        (supervisor/stop sup))
+        ;; `/stop` — root-qualified on purpose: this module defines its own `stop`
+        ;; (by PORT, above), so a bare `stop` here would call ourselves with a pid.
+        (/stop sup))
       (println (str "http/server: no server running on port " port)))))
 
 ; The listener carries the live in-flight worker pids: it `monitor`s each worker and drops
@@ -224,10 +226,10 @@
     ([:drain from] (do
                      (tcp/close lsock)
                      (listener-drain workers (+ (os/now) (get config :shutdown-grace-ms)) from)
-                     (supervisor/stop sup)))
+                     (/stop sup)))
     (:stop (do
              (tcp/close lsock)
-             (supervisor/stop sup)
+             (/stop sup)
              (println "http/server: stopped")))))
 
 (defn head-complete? (buf)
