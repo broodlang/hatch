@@ -95,7 +95,7 @@
           (compressible-type? (get headers :content-type) types))
       ; Flatten the body to bytes once (a string, `bytes`, or an ADR-139 iolist) — its length
       ; gates the size floor and its bytes are what we compress, so there's no second pass.
-      (let (raw (bytes-concat (get conn :resp-body "")))
+      (let (raw (bytes/concat (get conn :resp-body "")))
         (if (< (count raw) min-bytes)
           conn
           (-> conn

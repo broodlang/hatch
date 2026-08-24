@@ -87,7 +87,7 @@
         (let (payload (string/substring cookie 0 dot)
               sig (string/substring cookie (+ dot 1) (string/length cookie))
               expected (hmac-sha256 secret payload))
-          (if (constant-time-equal? (string->utf8-bytes sig) (string->utf8-bytes expected))
+          (if (constant-time-equal? (string/->bytes sig) (string/->bytes expected))
             (check-expiry (decode-payload payload))
             {}))))))
 

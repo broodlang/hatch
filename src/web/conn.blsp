@@ -26,8 +26,8 @@
         raw (get request :body "")
         ; `:body` is `bytes` from the parser (empty `bytes` for no body); a spooled request carries
         ; the empty string "" — coerce either to bytes, then decode text for form/JSON handlers.
-        body-bytes (if (bytes? raw) raw (string->utf8-bytes raw))
-        body-text (try (utf8-bytes->string body-bytes) (catch _e ""))
+        body-bytes (if (bytes? raw) raw (string/->bytes raw))
+        body-text (try (string/bytes-> body-bytes) (catch _e ""))
         parsed (parse-conn-body headers body-text body-bytes)
         body-params (get parsed :params))
     {:method (get request :method)

@@ -50,7 +50,7 @@
   user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
   the whole frame — a per-field server↔client desync with no error surfaced."
   (str "\""
-    (fold (fn (acc cp) (string/replace acc (utf8-bytes->string (bytes [cp])) (json-esc-control cp)))
+    (fold (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp)))
       (-> s
         (string/replace "\\" "\\\\")
         (string/replace "\"" "\\\""))
@@ -277,12 +277,12 @@
   `recv-frame-loop` (keep the two in sync), carrying the bytes gathered so far so the caller
   can resume."
   (if (and (not (nil? need)) (>= got need))
-    (recv-frame-loop sock (bytes-concat buf (reverse pieces)))
+    (recv-frame-loop sock (bytes/concat buf (reverse pieces)))
     (receive
       ; Binary-mode socket (see http/server's pre-101 tcp/set-binary): `chunk` is a first-class
       ; `bytes` value — the parser reads it directly.
       ([:tcp ^sock chunk] (if (nil? need)
-                            (recv-frame-loop sock (bytes-concat buf chunk))
+                            (recv-frame-loop sock (bytes/concat buf chunk))
                             (recv-frame-fill sock
                               buf
                               (cons chunk pieces)
@@ -292,19 +292,19 @@
       ([:ws-send ^sock frame] (if (try (do (tcp/send sock frame) true) (catch _ false))
                                 (recv-frame-fill sock buf pieces got need)
                                 [:closed]))
-      ([:tick key gen] [:tick key gen (bytes-concat buf (reverse pieces))])
+      ([:tick key gen] [:tick key gen (bytes/concat buf (reverse pieces))])
       ; an out-of-band message for the view's handle-info (PubSub/Presence
       ; broadcast, a timer, anything that holds this session's pid)
-      ([:info payload] [:info payload (bytes-concat buf (reverse pieces))])
+      ([:info payload] [:info payload (bytes/concat buf (reverse pieces))])
       ; a web/component/send-update push — merge into that component's stored state
       ([:update-component cid changes] [:update-component
                                          cid
                                          changes
-                                         (bytes-concat buf (reverse pieces))])
-      ([:reload] [:reload (bytes-concat buf (reverse pieces))])
-      ([:reload-css] [:reload-css (bytes-concat buf (reverse pieces))])
+                                         (bytes/concat buf (reverse pieces))])
+      ([:reload] [:reload (bytes/concat buf (reverse pieces))])
+      ([:reload-css] [:reload-css (bytes/concat buf (reverse pieces))])
       ; the idle watchdog decided this peer is dead — reap the session (it owns the socket)
-      ([:reap] [:reap (bytes-concat buf (reverse pieces))]))))
+      ([:reap] [:reap (bytes/concat buf (reverse pieces))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 ; A `tick` interval is a native `send-interval` timer (Erlang parity, prelude): a tiny
@@ -798,7 +798,7 @@
 
   (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}
   (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}"
-  (let (decoded (try (json-decode (utf8-bytes->string payload)) (catch _ nil))
+  (let (decoded (try (json-decode (string/bytes-> payload)) (catch _ nil))
         msg (if (map? decoded) decoded {})
         raw-params (get msg "params" {}))
     ; The frame carries every field the dispatcher routes on: `:event` (the frame type) and

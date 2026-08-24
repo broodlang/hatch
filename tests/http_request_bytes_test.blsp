@@ -43,20 +43,20 @@
 (defn build (line headers body)
   "A raw request `bytes`: request `line`, `headers` (a list of \"Name: Value\"), CRLF, then `body`
   (a string or bytes)."
-  (bytes-concat [(str line "\r\n")
+  (bytes/concat [(str line "\r\n")
                   (string/join "" (map (fn (h) (str h "\r\n")) headers))
                   "\r\n"
                   body]))
 
 (defn chunk-of (data)
   "One chunked-transfer chunk for `data` (string or bytes): <hexlen>CRLF data CRLF."
-  (let (n (count (bytes-concat [data])))
-    (bytes-concat [(str (response/int->hex n) "\r\n") data "\r\n"])))
+  (let (n (count (bytes/concat [data])))
+    (bytes/concat [(str (response/int->hex n) "\r\n") data "\r\n"])))
 
 (defn chunked-body (datas &optional (trailer ""))
   "A chunked body: one chunk per `data`, then the 0-chunk, an optional `trailer` line, and the
   terminating CRLF."
-  (bytes-concat (append (map chunk-of datas)
+  (bytes/concat (append (map chunk-of datas)
                   (list "0\r\n" trailer "\r\n"))))
 
 ; a binary body with bytes the carrier must round-trip exactly (NUL, high bytes, a bare CR/LF)
@@ -78,7 +78,7 @@
     ["cookie combine"
       (build "GET / HTTP/1.1" ["Host: x" "Cookie: a=1" "Cookie: b=2"] "")]
     ["pipelined (a 2nd request in the remainder)"
-      (bytes-concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
+      (bytes/concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
                       (build "GET /next HTTP/1.1" ["Host: x"] "")])]
     ; chunked
     ["chunked one chunk"
@@ -100,26 +100,26 @@
     ["chunked with a chunk extension"
       (build "POST /c HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked"]
-        (bytes-concat ["5;name=value\r\nhello\r\n0\r\n\r\n"]))]
+        (bytes/concat ["5;name=value\r\nhello\r\n0\r\n\r\n"]))]
     ["chunked then pipelined"
-      (bytes-concat [(build "POST /c HTTP/1.1"
+      (bytes/concat [(build "POST /c HTTP/1.1"
                        ["Host: x" "Transfer-Encoding: chunked"]
                        (chunked-body ["ab"]))
                       (build "GET /after HTTP/1.1" ["Host: x"] "")])]
     ; incomplete
-    ["incomplete: no terminator" (string->utf8-bytes "GET / HTTP/1.1\r\nHost: x\r\n")]
+    ["incomplete: no terminator" (string/->bytes "GET / HTTP/1.1\r\nHost: x\r\n")]
     ["incomplete: CL body short" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 10"] "abc")]
     ["incomplete: chunked not terminated"
       (build "POST /c HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked"]
-        (bytes-concat ["5\r\nhello\r\n"]))]
+        (bytes/concat ["5\r\nhello\r\n"]))]
     ["incomplete: chunked partial data"
       (build "POST /c HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked"]
-        (bytes-concat ["5\r\nhel"]))]
+        (bytes/concat ["5\r\nhel"]))]
     ; errors / smuggling
     ["error: bad request line" (build "GET" ["Host: x"] "")]
-    ["error: obs-fold" (bytes-concat ["GET / HTTP/1.1\r\nHost: x\r\n\tfolded: y\r\n\r\n"])]
+    ["error: obs-fold" (bytes/concat ["GET / HTTP/1.1\r\nHost: x\r\n\tfolded: y\r\n\r\n"])]
     ["error: duplicate Transfer-Encoding"
       (build "POST / HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked" "Transfer-Encoding: chunked"]
@@ -137,18 +137,18 @@
     ["error: invalid chunk size"
       (build "POST /c HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked"]
-        (bytes-concat ["zz\r\nhello\r\n0\r\n\r\n"]))]
+        (bytes/concat ["zz\r\nhello\r\n0\r\n\r\n"]))]
     ["error: malformed chunk (bad trailing bytes)"
       (build "POST /c HTTP/1.1"
         ["Host: x" "Transfer-Encoding: chunked"]
-        (bytes-concat ["5\r\nhelloXX0\r\n\r\n"]))]
+        (bytes/concat ["5\r\nhelloXX0\r\n\r\n"]))]
     ; the smuggling rejections added in the header-hardening pass — the byte parser must inherit
     ; every one, so the corpus exercises each (a missing check here is exactly what a bare
     ; hand-copied cond would drop)
     ["error: bare CR in the header block"
-      (bytes-concat ["GET / HTTP/1.1\r\nHost: x\rEvil: y\r\n\r\n"])]
+      (bytes/concat ["GET / HTTP/1.1\r\nHost: x\rEvil: y\r\n\r\n"])]
     ["error: bare LF in the header block"
-      (bytes-concat ["GET / HTTP/1.1\r\nHost: x\nEvil: y\r\n\r\n"])]
+      (bytes/concat ["GET / HTTP/1.1\r\nHost: x\nEvil: y\r\n\r\n"])]
     ["error: whitespace before the header colon"
       (build "GET / HTTP/1.1" ["Host : x"] "")]
     ["error: header line without a colon"
@@ -170,7 +170,7 @@
   "Tail-recursive scan for the shortest prefix length where the parsers disagree; nil if none."
   (cond
     (> i n) nil
-    (not (agree? (subbytes buf 0 i))) i
+    (not (agree? (bytes/slice buf 0 i))) i
     else (fdp buf (+ i 1) n)))
 
 (defn first-divergent-prefix (buf)
@@ -190,7 +190,7 @@
                        ["Host: x" "Transfer-Encoding: chunked"]
                        (chunked-body ["x"] "T: 1"))]
                    ["pipelined"
-                     (bytes-concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
+                     (bytes/concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
                                      (build "GET /n HTTP/1.1" ["Host: x"] "")])]])
     (test (str "all prefixes agree: " (first entry))
       (assert= (first-divergent-prefix (nth entry 1)) nil))))
@@ -209,14 +209,14 @@
     (match (try-parse-bytes (build "POST /c HTTP/1.1"
                               ["Host: x" "Transfer-Encoding: chunked"]
                               (chunked-body ["Wiki" "pedia"])))
-      ([:ok req _] (assert= (utf8-bytes->string (get req :body)) "Wikipedia"))
+      ([:ok req _] (assert= (string/bytes-> (get req :body)) "Wikipedia"))
       (_ (is false))))
   (test "the pipelined remainder is the exact trailing bytes"
-    (match (try-parse-bytes (bytes-concat [(build "POST /f HTTP/1.1"
+    (match (try-parse-bytes (bytes/concat [(build "POST /f HTTP/1.1"
                                              ["Host: x" "Content-Length: 3"]
                                              "abc")
-                                            (string->utf8-bytes "GET /n HTTP/1.1\r\n")]))
-      ([:ok _ rem] (assert= (utf8-bytes->string rem) "GET /n HTTP/1.1\r\n"))
+                                            (string/->bytes "GET /n HTTP/1.1\r\n")]))
+      ([:ok _ rem] (assert= (string/bytes-> rem) "GET /n HTTP/1.1\r\n"))
       (_ (is false))))
   (test "try-parse-head-bytes classifies a chunked head without the body"
     (assert= (first (try-parse-head-bytes (build "POST /c HTTP/1.1"

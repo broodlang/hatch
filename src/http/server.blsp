@@ -235,13 +235,13 @@
 (defn head-complete? (buf)
   "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` (a `bytes` value) —
   i.e. the head can be parsed and we can decide how to handle the body."
-  (not (= -1 (bytes-index-of buf crlf-crlf-bytes))))
+  (not (= -1 (bytes/index-of buf crlf-crlf-bytes))))
 
 (defn tail3 (b)
   "The last ≤3 bytes of `b` — the overlap `worker-read-head` keeps between reads so a head
   terminator split across a read boundary is still detected, without re-scanning the whole buffer."
   (let (n (count b))
-    (if (<= n 3) b (subbytes b (- n 3) n))))
+    (if (<= n 3) b (bytes/slice b (- n 3) n))))
 
 (defn- worker-run
   (sock handler ws-handler config buf)
@@ -286,7 +286,7 @@
     ; `head` includes the terminator; `rest` is whatever arrived past it (a pipelined
     ; request, or the start of this one's body). worker-dispatch parses the head out of the
     ; whole buffer and slices the body itself, so rejoin them and leave it unchanged.
-    ([head rest] (worker-dispatch sock handler ws-handler config (bytes-concat [head rest])))))
+    ([head rest] (worker-dispatch sock handler ws-handler config (bytes/concat [head rest])))))
 
 (defn bad-request-close (sock msg)
   "Answer a generic 400 and close. Doesn't reflect the parser message (it echoes attacker-
@@ -306,7 +306,7 @@
   many HTTP libraries) holds its body waiting for the interim while the server waits for the
   body — a deadlock that only breaks when the read timeout answers 408 and the upload fails."
   (when (expects-continue? head)
-    (try (tcp/send sock (string->utf8-bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
+    (try (tcp/send sock (string/->bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
 
 (defn- worker-dispatch
   (sock handler ws-handler config buf)
@@ -373,7 +373,7 @@
                                            handler
                                            ws-handler
                                            config
-                                           (bytes-concat [buf chunk])))
+                                           (bytes/concat [buf chunk])))
                      ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
                        (do
@@ -527,7 +527,7 @@
     (do
       (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp/close sock))
-    (let (already (subbytes buf body-start (count buf)))
+    (let (already (bytes/slice buf body-start (count buf)))
       (buffered-drain sock
         handler
         ws-handler
@@ -547,9 +547,9 @@
   at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by.
   `prog` is the upload-progress state, or nil when this request doesn't report progress."
   (if (>= got clen)
-    (let (all (bytes-concat (reverse chunks))
-          body (subbytes all 0 clen)
-          remainder (subbytes all clen (count all))
+    (let (all (bytes/concat (reverse chunks))
+          body (bytes/slice all 0 clen)
+          remainder (bytes/slice all clen (count all))
           request (assoc head :body body))
       (progress-finish prog clen)
       (dispatch-buffered sock handler ws-handler config request remainder))
@@ -589,7 +589,7 @@
     ws-handler
     config
     head
-    (subbytes buf body-start (count buf))
+    (bytes/slice buf body-start (count buf))
     (list)
     0
     (+ (os/now) (get config :body-timeout-ms))))
@@ -621,7 +621,7 @@
                                                          ws-handler
                                                          config
                                                          head
-                                                         (bytes-concat [tail chunk])
+                                                         (bytes/concat [tail chunk])
                                                          decoded
                                                          dlen
                                                          deadline))
@@ -664,10 +664,10 @@
       (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
       (tcp/close sock))
     (let (path (spool-path config)
-          already (subbytes buf body-start (count buf))
+          already (bytes/slice buf body-start (count buf))
           alen (count already)
           take (min alen clen)
-          prefix (if (= take alen) already (subbytes already 0 take)))
+          prefix (if (= take alen) already (bytes/slice already 0 take)))
       ; the prefix is already `bytes` (the read loop keeps the buffer as bytes end to end).
       ; Later chunks arrive as `bytes` off the binary socket and are appended verbatim.
       (spool-append path prefix)
@@ -697,7 +697,7 @@
     (receive
       ([:tcp ^sock chunk] (let (n (count chunk)
                                 take (min n (- clen written))
-                                piece (if (= take n) chunk (subbytes chunk 0 take))
+                                piece (if (= take n) chunk (bytes/slice chunk 0 take))
                                 written2 (+ written take))
                             (spool-append path piece)
                             (spool-drain sock
@@ -728,7 +728,7 @@
   that lost write permission) delete the partial temp file before re-raising, so a failed
   upload can't leak an abandoned `hatch-upload-*` file (repeated failures → disk exhaustion)."
   (try
-    (append-bytes path piece)
+    (bytes/append path piece)
     (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
 (defn- spool-dispatch

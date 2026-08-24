@@ -12,7 +12,7 @@
   binary content is never UTF-8-mangled.")
 
 ; The part header/body separator and a reusable CRLF, as bytes.
-(def sep-bytes (string->utf8-bytes "\r\n\r\n"))
+(def sep-bytes (string/->bytes "\r\n\r\n"))
 
 (defn parse (body boundary)
   "Parse `body` (bytes) as multipart/form-data delimited by `boundary`. Returns
@@ -20,7 +20,7 @@
   boundary in it, yields empty maps."
   (if (or (nil? boundary) (string/blank? boundary))
     {:fields {} :files {}}
-    (let (delim (string->utf8-bytes (str "--" boundary))
+    (let (delim (string/->bytes (str "--" boundary))
           parts (filter (fn (p) (not (nil? p))) (map parse-part (split-parts body delim))))
       (fold add-part {:fields {} :files {}} parts))))
 
@@ -32,48 +32,48 @@
   preamble). We find the first `--boundary`, then split on the CRLF-anchored `\r\n-boundary`,
   so a bare `--boundary` occurring inside a part's binary content is not mistaken for a
   delimiter. The preamble and the closing `--boundary--` are naturally excluded."
-  (let (first-at (bytes-index-of body delim 0))
+  (let (first-at (bytes/index-of body delim 0))
     (if (< first-at 0)
       (list)
-      (let (crlf-delim (bytes-concat (string->utf8-bytes "\r\n") delim))
-        (split-parts-loop body crlf-delim (+ first-at (byte-length delim)) (list))))))
+      (let (crlf-delim (bytes/concat (string/->bytes "\r\n") delim))
+        (split-parts-loop body crlf-delim (+ first-at (bytes/length delim)) (list))))))
 
 (defn- split-parts-loop
   (body crlf-delim pos acc)
-  (let (next-at (bytes-index-of body crlf-delim pos))
+  (let (next-at (bytes/index-of body crlf-delim pos))
     (if (< next-at 0)
       (reverse acc)
       (split-parts-loop body
         crlf-delim
-        (+ next-at (byte-length crlf-delim))
-        (cons (subbytes body pos next-at) acc)))))
+        (+ next-at (bytes/length crlf-delim))
+        (cons (bytes/slice body pos next-at) acc)))))
 
 ; ---- one part ----
 
 (defn crlf-at? (b i)
   "True if bytes `i`,`i+1` of `b` are CR,LF."
   (and (>= i 0)
-    (>= (byte-length b) (+ i 2))
-    (= (byte-at b i) 13)
-    (= (byte-at b (+ i 1)) 10)))
+    (>= (bytes/length b) (+ i 2))
+    (= (bytes/at b i) 13)
+    (= (bytes/at b (+ i 1)) 10)))
 
 (defn part-trim (seg)
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
   body). The CRLF that precedes the next delimiter is already excluded from `seg` — it belongs
   to the `\r\n-boundary` split delimiter — so only the leading CRLF is removed here."
-  (let (n (byte-length seg)
+  (let (n (bytes/length seg)
         start (if (crlf-at? seg 0) 2 0))
-    (if (>= start n) (subbytes seg 0 0) (subbytes seg start n))))
+    (if (>= start n) (bytes/slice seg 0 0) (bytes/slice seg start n))))
 
 (defn parse-part (seg)
   "Parse one boundary-delimited segment into `{:name :filename :content-type :bytes}`, or nil
   if it has no header/body separator (a malformed or empty part)."
   (let (part (part-trim seg)
-        at (bytes-index-of part sep-bytes 0))
+        at (bytes/index-of part sep-bytes 0))
     (if (< at 0)
       nil
-      (let (hdrs (parse-part-headers (utf8-bytes->string (subbytes part 0 at)))
-            content (subbytes part (+ at 4) (byte-length part))
+      (let (hdrs (parse-part-headers (string/bytes-> (bytes/slice part 0 at)))
+            content (bytes/slice part (+ at 4) (bytes/length part))
             disp (get hdrs "content-disposition" ""))
         {:name (cd-param disp "name")
          :filename (cd-param disp "filename")
@@ -147,4 +147,4 @@
 (defn part-text (b)
   "Decode a text field's bytes to a string, safely (a field is text; fall back to empty on
   the pathological case of invalid UTF-8 rather than failing the whole parse)."
-  (try (utf8-bytes->string b) (catch _e "")))
+  (try (string/bytes-> b) (catch _e "")))

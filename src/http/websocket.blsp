@@ -42,7 +42,7 @@
   value; convert it here at the receive boundary so the existing string-based readers
   (frame parser, request reader) keep working unchanged. Built with `join` rather than
   `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
-  (string/join "" (map byte->char (bytes->list b))))
+  (string/join "" (map byte->char (bytes/->list b))))
 
 (defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
@@ -121,14 +121,14 @@
   on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
   payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
   through a list first keeps this O(n)."
-  (string/join "" (map byte->char (bytes->list (string->utf8-bytes s)))))
+  (string/join "" (map byte->char (bytes/->list (string/->bytes s)))))
 
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
   `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
   `char-at`/`carrier-byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
   per-index walk was O(n²) on every inbound frame payload."
-  (utf8-bytes->string (bytes (string/->codepoints s))))
+  (string/bytes-> (bytes (string/->codepoints s))))
 
 ; Each frame is described as an *iolist* (ADR-139) — a nested list of byte ints and
 ; `bytes` values — and flattened exactly once by `bytes-concat`. The length fields go
@@ -140,12 +140,12 @@
   header bytes followed by the UTF-8-encoded `payload`, sent verbatim by `tcp/send`.
   Uses the 7-bit, 16-bit, or 64-bit length form by size — so a large render (>64 KB of
   HTML) produces a valid frame instead of raising and crashing the live session."
-  (let (body (string->utf8-bytes payload)
+  (let (body (string/->bytes payload)
         n (count body))
     (cond
-      (<= n 125) (bytes-concat [129 n body])
-      (<= n 65535) (bytes-concat [129 126 (int->bytes n 2) body])
-      else (bytes-concat [129 127 (int->bytes n 8) body]))))
+      (<= n 125) (bytes/concat [129 n body])
+      (<= n 65535) (bytes/concat [129 126 (bytes/int-> n 2) body])
+      else (bytes/concat [129 127 (bytes/int-> n 8) body]))))
 
 (defn close-frame ()
   "Build a WebSocket connection-close frame (opcode 0x8, FIN=1, no payload)."
@@ -157,9 +157,9 @@
   directly (a string is UTF-8-encoded, for callers/tests that pass one). Control frames are
   capped at 125 bytes (RFC 6455), so an over-long payload is truncated — guarding against an
   echoed length that would overflow the single length byte into an extended-length marker."
-  (let (raw (if (bytes? payload) payload (string->utf8-bytes payload))
-        body (if (> (count raw) 125) (subbytes raw 0 125) raw))
-    (bytes-concat [138 (count body) body])))
+  (let (raw (if (bytes? payload) payload (string/->bytes payload))
+        body (if (> (count raw) 125) (bytes/slice raw 0 125) raw))
+    (bytes/concat [138 (count body) body])))
 
 (defn ping-frame ()
   "Build an empty WebSocket ping frame (opcode 0x9, FIN=1) — used for server keepalive."
@@ -217,7 +217,7 @@
                                     (= fin 1)
                                       [:ok
                                         msg-opcode
-                                        (bytes-concat (reverse (cons payload pieces)))
+                                        (bytes/concat (reverse (cons payload pieces)))
                                         rem]
                                     else
                                       (reassemble rem
@@ -281,7 +281,7 @@
     (cond
       (= n 0) true
       (= n 1) false
-      else (valid-close-code? (bytes-uint payload 0 2)))))
+      else (valid-close-code? (bytes/uint payload 0 2)))))
 
 (defn- one-frame-sized
   (buf buflen fin opcode masked plen7 maxf)
@@ -294,7 +294,7 @@
     (= plen7 126)
       (if (< buflen 4)
         [:incomplete]
-        (let (plen (bytes-uint buf 2 2)
+        (let (plen (bytes/uint buf 2 2)
               hlen (if (= masked 1) 8 4))
           (one-frame-payload buf buflen fin opcode masked plen hlen maxf)))
     ; 64-bit extended length — not supported (caps inbound frames at ~64 KB)
@@ -313,8 +313,8 @@
         [:incomplete]
         (let (payload (if (= masked 1)
                         (unmask buf (- hlen 4) plen)
-                        (subbytes buf hlen (+ hlen plen)))
-              remainder (subbytes buf total buflen))
+                        (bytes/slice buf hlen (+ hlen plen)))
+              remainder (bytes/slice buf total buflen))
           ; §5.5.1: a close frame's body must be 0 or ≥2 bytes with a legal status code — a
           ; 1-byte body or a reserved code is a protocol error, so fail the connection.
           (if (and (= opcode 8) (not (valid-close-payload? payload)))
@@ -336,7 +336,7 @@
         (cond
           (= plen7 126) (if (< buflen 4)
                           nil
-                          (+ (if (= masked 1) 8 4) (bytes-uint buf 2 2)))
+                          (+ (if (= masked 1) 8 4) (bytes/uint buf 2 2)))
           (= plen7 127) nil
           else (+ (if (= masked 1) 6 2) plen7))))))
 

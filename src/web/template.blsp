@@ -202,7 +202,7 @@
 
 (defn- render-children
   (children)
-  (string/join "" (map render (flatten children))))
+  (string/join "" (map render (seq/flatten children))))
 
 (defn html (node)
   "Render a Hiccup node and prepend the HTML5 doctype declaration.
