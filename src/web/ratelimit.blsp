@@ -78,7 +78,7 @@
   must not take the endpoint down. `now` is read here (not in the process) so the caller's clock
   drives refill."
   (let (r (ref))
-    (send (limiter) [:take key cost cfg (now) (self) r])
+    (send (limiter) [:take key cost cfg (os/now) (self) r])
     (receive
       ([:take ^r decision] decision)
       (after 1000 :ok))))

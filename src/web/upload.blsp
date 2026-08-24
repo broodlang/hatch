@@ -54,7 +54,7 @@
   "Mint a fresh, unguessable upload token. A token is a capability — anyone who knows it can
   watch (and, with `attach-progress`, be told about) that upload's progress — so it is random
   rather than derived from anything about the request."
-  (random-token 16))
+  (rand/token 16))
 
 (defn watch (&optional (token nil))
   "Subscribe the current process to an upload's progress and return the token, minting one if

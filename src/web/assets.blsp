@@ -53,7 +53,7 @@
   inside this process so its [:proc …] messages land in this mailbox."
   (let (cmd (get w :cmd)
         handle (try
-                 (proc-spawn (first cmd) (rest cmd) (proc-opts w))
+                 (proc/spawn (first cmd) (rest cmd) (proc-opts w))
                  (catch e
                    (do
                      (log/error (str "[assets] cannot start watcher `"
@@ -76,7 +76,7 @@
     ([:proc ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:stop] (do
-               (try (proc-close handle) (catch _ nil))
+               (try (proc/close handle) (catch _ nil))
                (log/info (str "[assets] stopped watching: " label))))
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
@@ -99,7 +99,7 @@
     (when (and marker (includes? line marker)) (web/live/notify-reload-css))))
 
 (defn proc-opts (w)
-  "The proc-spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
+  "The proc/spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
   (let (base (if (get w :cwd) {:cwd (get w :cwd)} {}))
     (if (get w :env) (assoc base :env (get w :env)) base)))
 
@@ -244,11 +244,11 @@
   (watch config))
 
 (defn run-each (cmds label)
-  "Run each argv in `cmds` with `run-process` (inherited stdio), in order; raise on the
+  "Run each argv in `cmds` with `os/run-process` (inherited stdio), in order; raise on the
   first non-zero exit."
   (dolist (cmd cmds)
     (log/info (str "[assets] " label ": " (string/join " " cmd)))
-    (let (code (run-process (first cmd) (rest cmd)))
+    (let (code (os/run-process (first cmd) (rest cmd)))
       (when (not (= code 0))
         (error "[assets] " label " failed (exit " code "): " (string/join " " cmd)))))
   nil)

@@ -422,7 +422,7 @@
 
 (defn stop-tickers (handles)
   "Cancel the given interval timers — used when a session swaps to a different view."
-  (dolist (h handles) (cancel-timer h)))
+  (dolist (h handles) (proc/cancel-timer h)))
 
 ;; ---- the connection's Conn, reachable from view code ----------------------------------
 ;; A live view's `mount`/`render`/handlers take only their own arguments, so until now the
@@ -664,7 +664,7 @@
   "Drop out of the reload registry, free the session's live component table (web/component),
   and close the socket."
   (live-unregister (self))
-  (try (table-drop (get view :components)) (catch _ nil))
+  (try (table/drop (get view :components)) (catch _ nil))
   (close-socket sock))
 
 (defn redirect-and-close (sock path)
@@ -917,7 +917,7 @@
                         ; free the old view's LiveComponent table and start the new view with a
                         ; fresh one: carrying it leaked every navigated-away view's component
                         ; state and let a same-id component in the new view silently reuse it.
-                        _drop (try (table-drop (get view :components)) (catch _ nil))
+                        _drop (try (table/drop (get view :components)) (catch _ nil))
                         ; bump the generation so a beat still queued from the OLD view's ticker
                         ; (killed just above, but a message already sent lingers) is dropped
                         ; rather than dispatched into the new view's handle-tick.
@@ -937,7 +937,7 @@
                                     ; same session lifetime); the component table starts fresh
                                     :watchdog (get view :watchdog)
                                     :conn (get view :conn)
-                                    :components (table)}))
+                                    :components (table/new)}))
                     (push-update sock new-view buf "render" model))))
               (catch _ (close-session sock view)))
             ; unknown path, OR a different live-session group → full reload, which
@@ -980,7 +980,7 @@
                       :conn conn
                       ; the session's live per-id LiveComponent state (web/component); lives
                       ; for the socket's lifetime, reset on live-navigate
-                      :components (table)}))
+                      :components (table/new)}))
           ; Bind the connection's Conn for the whole session — every hook the loop ever runs
           ; is inside this frame, so `(live-conn)` works in mount/render/handlers without
           ; widening any signature (see *live-conn* above). The loop recurses to itself
@@ -995,23 +995,23 @@
 ; dispatches per request — different processes that need to share the mapping.
 
 (defn- live-routes-loop
-  (table)
+  (table/new)
   (receive
     ; mirror every change to the vault, so the table survives this process crashing
     ([:put path entry] (let (v (whereis :hatch-live-routes-vault))
                          (when v (send v [:put path entry])))
-      (live-routes-loop (assoc table path entry)))
+      (live-routes-loop (assoc table/new path entry)))
     ; reply keyed by the caller's ref `r` so a late reply from a timed-out :get can't be
     ; mismatched to a later lookup in the same process
-    ([:get path from r] (send from [:entry r (get table path)]) (live-routes-loop table))
+    ([:get path from r] (send from [:entry r (get table/new path)]) (live-routes-loop table/new))
     ; the vault we monitor died: once the supervisor restarts it, re-mirror our whole
     ; table so the backup is whole again, and re-watch the fresh vault
     ([:down _ _ _] (live-await :hatch-live-routes-vault 60)
       (let (v (whereis :hatch-live-routes-vault))
         (when v
-          (dolist (kv (map-pairs table)) (send v [:put (first kv) (second kv)]))
+          (dolist (kv (map-pairs table/new)) (send v [:put (first kv) (second kv)]))
           (monitor v)))
-      (live-routes-loop table))))
+      (live-routes-loop table/new))))
 
 (defn- live-routes
   ()
@@ -1029,13 +1029,13 @@
 ; run under one supervisor (below), which also bounds a crash loop.
 
 (defn- live-vault-loop
-  (table)
+  (table/new)
   "The durable mirror of the route table: it only stores `:put`s and serves `:get-snapshot`
   (the registry's boot-time pull), so it's far simpler — and less crash-prone — than the
   registry it backs. It never pulls, so registry and vault can't deadlock at boot."
   (receive
-    ([:put path entry] (live-vault-loop (assoc table path entry)))
-    ([:get-snapshot from] (send from [:snapshot table]) (live-vault-loop table))))
+    ([:put path entry] (live-vault-loop (assoc table/new path entry)))
+    ([:get-snapshot from] (send from [:snapshot table/new]) (live-vault-loop table/new))))
 
 (defn- live-pull
   (nm)
@@ -1057,9 +1057,9 @@
 (defn- live-routes-boot
   ()
   ; recover the table from the vault, then watch the vault for its own restarts
-  (let (table (live-pull :hatch-live-routes-vault))
+  (let (table/new (live-pull :hatch-live-routes-vault))
     (live-watch-vault)
-    (live-routes-loop table)))
+    (live-routes-loop table/new)))
 
 (defn- live-vault-boot
   ()
@@ -1151,7 +1151,7 @@
 (defbehaviour LiveModule
   "A live view: build a model from params, render it, and handle client events."
   (mount [params])
-  (render [model &optional (live-components (table))])
+  (render [model &optional (live-components (table/new))])
   (handle-event [name params model]))
 
 ; ---- shared macro-time expansion, used by both deflive and deflive-component ----
@@ -1335,7 +1335,7 @@
         ; only component holes ever reference `live-components`.
         render-with-components-args (list (first render-dyn-args)
                                       '&optional
-                                      (list 'live-components (list 'table)))
+                                      (list 'live-components (list 'table/new)))
         ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap
         ; it in web/template/render themselves), so it can't just call render-dynamic
         ; (which returns an already-rendered *string*,

@@ -41,22 +41,22 @@
 
 (describe "render-slot returns a diffable component slot"
   (test "it is a component slot tagged with the cid, not an opaque string"
-    (let (t (table)
+    (let (t (table/new)
           v (slot-for t "c1"))
       (assert= (web/parts/kslot? v) true)
       (assert= (get v :cid) "c1")))
   (test "the data-cid wrapper is baked into the statics, so weaving alone reproduces it"
-    (let (t (table)
+    (let (t (table/new)
           v (slot-for t "c1"))
       (assert= (includes? (nth (get v :s) 0) "<div data-cid=\"c1\">") true)
       (assert= (includes? (last (get v :s)) "</div>") true)))
   (test "slot->html is byte-identical to the whole-component HTML render-slot-html returns"
-    (let (t (table)
-          t2 (table))
+    (let (t (table/new)
+          t2 (table/new))
       (assert= (web/parts/slot->html (slot-for t "c1"))
         (render-slot-html 'web-component-diff-test live-component-spec {"id" "c1"} t2))))
   (test "and to what the pre-split implementation produced"
-    (let (t (table))
+    (let (t (table/new))
       (assert= (web/parts/slot->html (slot-for t "c1"))
         ; the inner <div> is the fixture component's own root; the outer one is the
         ; data-cid wrapper render-slot guarantees around whatever a component returns
@@ -64,7 +64,7 @@
 
 (describe "a component's state change ships only its changed inner slot"
   (test "bumping the count diffs the count slot alone — the label doesn't cross the wire"
-    (let (t (table)
+    (let (t (table/new)
           before (slot-for t "c1")
           _ (dispatch-event t "c1" "bump" {})
           after (slot-for t "c1")
@@ -76,7 +76,7 @@
       (assert= (count (get d :__kdiff__)) 1)
       (assert= (get (get d :__kdiff__) 1) "1")))
   (test "changing the label diffs the label slot alone"
-    (let (t (table)
+    (let (t (table/new)
           before (slot-for t "c2")
           _ (dispatch-event t "c2" "relabel" {"text" "bye"})
           after (slot-for t "c2")
@@ -84,20 +84,20 @@
       (assert= (count (get d :__kdiff__)) 1)
       (assert= (get (get d :__kdiff__) 0) "bye")))
   (test "an untouched component produces an equal slot, so the parent ships nothing for it"
-    (let (t (table)
+    (let (t (table/new)
           a (slot-for t "c3")
           b (slot-for t "c3"))
       (assert= a b)
       (assert= (web/parts/diff-dynamics [a] [b]) {})))
   (test "a parent re-render around an untouched component still ships nothing for it"
-    (let (t (table)
+    (let (t (table/new)
           c (slot-for t "c4"))
       ; the parent's own slot 0 changed; the component in slot 1 did not
       (assert= (web/parts/diff-dynamics ["old" c] ["new" c]) {0 "new"}))))
 
 (describe "a slot that stops being the same component is replaced, not patched"
   (test "a different cid ships the whole new slot rather than a kdiff"
-    (let (t (table)
+    (let (t (table/new)
           a (slot-for t "c5")
           b (slot-for t "c6")
           d (web/parts/slot-diff a b))
@@ -107,7 +107,7 @@
       (assert= (web/parts/kslot? d) true)
       (assert= (get d :cid) "c6")))
   (test "a component replacing a plain string slot ships the whole slot"
-    (let (t (table)
+    (let (t (table/new)
           a (slot-for t "c7")
           d (web/parts/slot-diff "was just text" a))
       (assert= (web/parts/kslot? d) true))))
@@ -117,14 +117,14 @@
   ; encode as it expects. Cheap to get wrong (a keyword key, a bool tag) and invisible to
   ; every test above, which all work on the Brood values directly.
   (test "a component slot encodes with the keys the client reads"
-    (let (t (table)
+    (let (t (table/new)
           json (web/live/encode (slot-for t "c8")))
       (assert= (includes? json "\"__kslot__\":true") true)
       (assert= (includes? json "\"cid\":\"c8\"") true)
       (assert= (includes? json "\"s\":[") true)
       (assert= (includes? json "\"d\":[") true)))
   (test "a component diff encodes with the keys the client reads"
-    (let (t (table)
+    (let (t (table/new)
           before (slot-for t "c9")
           _ (dispatch-event t "c9" "bump" {})
           json (web/live/encode (web/parts/slot-diff before (slot-for t "c9"))))
