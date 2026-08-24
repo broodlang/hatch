@@ -1474,7 +1474,7 @@
 (def *hatch-root*
   ; This file is <hatch>/src/web/live.blsp; strip the known suffix to find <hatch>,
   ; so we can serve the bundled brood_live.js without the app vendoring a copy.
-  (string/replace (current-file) "/src/web/live.blsp" ""))
+  (string/replace (reflect/current-file) "/src/web/live.blsp" ""))
 
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_live.js`."

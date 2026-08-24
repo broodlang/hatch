@@ -18,4 +18,4 @@
     (impl Shout :vector (shout [v] (str "VEC:" (count v))))
     (is (= (shout [1 2 3]) "VEC:3")))
   (test "the ability descriptor is introspectable (the type-checker / LSP hook)"
-    (is (= (first (first (ability-ops 'Shout))) 'shout))))
+    (is (= (first (first (%ability-ops 'Shout))) 'shout))))
