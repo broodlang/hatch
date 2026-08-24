@@ -29,7 +29,7 @@
   query outside any try, so an unguarded throw crashes the worker with no response (a
   trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
   (try
-    (utf8-bytes->string (vec (reverse (url-decode-acc (string/->list s) nil))))
+    (string/bytes-> (vec (reverse (url-decode-acc (string/->list s) nil))))
     (catch _e s)))
 
 (defn- url-decode-acc
@@ -43,7 +43,7 @@
                   (if (< cp 128)
                     (url-decode-acc rest (cons cp acc))
                     (url-decode-acc rest
-                      (fold (fn (a b) (cons b a)) acc (seq (string->utf8-bytes c)))))))))
+                      (fold (fn (a b) (cons b a)) acc (seq (string/->bytes c)))))))))
 
 ;; ---- query-string parser ----
 
@@ -80,7 +80,7 @@
 (defn carrier->text (carrier)
   "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
   bytes aren't valid UTF-8 (a binary body — which text handlers don't read anyway)."
-  (try (utf8-bytes->string (carrier->bytes carrier)) (catch _e carrier)))
+  (try (string/bytes-> (carrier->bytes carrier)) (catch _e carrier)))
 
 ;; ---- request body parser ----
 

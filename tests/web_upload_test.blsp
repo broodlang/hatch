@@ -12,7 +12,7 @@
 ;; The pure helpers are unit-tested; the end-to-end test drives a real socket, sending the
 ;; body in slices so more than one event has to fire.
 
-(defn b (s) (string->utf8-bytes s))
+(defn b (s) (string/->bytes s))
 
 ;; ---- pure helpers ----
 
@@ -57,7 +57,7 @@
 
 (defn drain (sock acc)
   (receive
-    ([:tcp ^sock chunk] (drain sock (str acc (utf8-bytes->string chunk))))
+    ([:tcp ^sock chunk] (drain sock (str acc (string/bytes-> chunk))))
     ([:tcp-closed ^sock] acc)
     (after 1500 acc)))
 
@@ -135,8 +135,8 @@
         ; at exactly 100%.
         (assert= (>= (count events) 1) true)
         ; every event is for our token, and counts never exceed the declared total
-        (assert= (filterv (fn (e) (not (= (get e :token) tok))) events) [])
-        (assert= (filterv (fn (e) (> (get e :got) 30)) events) [])
+        (assert= (seq/filterv (fn (e) (not (= (get e :token) tok))) events) [])
+        (assert= (seq/filterv (fn (e) (> (get e :got) 30)) events) [])
         ; monotonic: a bar must never go backwards
         (assert= (map (fn (e) (get e :got)) events)
           (sort (map (fn (e) (get e :got)) events)))

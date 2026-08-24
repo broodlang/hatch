@@ -25,11 +25,11 @@
   (test "quote and backslash" (assert= (json-str "a\"\\b") "\"a\\\"\\\\b\""))
   ; a backspace/ESC/NUL in user text must be \u-escaped, not emitted raw (raw → invalid JSON
   ; → the client's JSON.parse drops the whole frame). \b = U+0008, ESC = U+001B, NUL = U+0000.
-  (test "backspace → \\b" (assert= (json-str (utf8-bytes->string (bytes [8]))) "\"\\b\""))
-  (test "ESC → \\u001b" (assert= (json-str (utf8-bytes->string (bytes [27]))) "\"\\u001b\""))
-  (test "NUL → \\u0000" (assert= (json-str (utf8-bytes->string (bytes [0]))) "\"\\u0000\""))
+  (test "backspace → \\b" (assert= (json-str (string/bytes-> (bytes [8]))) "\"\\b\""))
+  (test "ESC → \\u001b" (assert= (json-str (string/bytes-> (bytes [27]))) "\"\\u001b\""))
+  (test "NUL → \\u0000" (assert= (json-str (string/bytes-> (bytes [0]))) "\"\\u0000\""))
   (test "vertical tab → \\u000b"
-    (assert= (json-str (utf8-bytes->string (bytes [11]))) "\"\\u000b\"")))
+    (assert= (json-str (string/bytes-> (bytes [11]))) "\"\\u000b\"")))
 
 (describe "client-script"
   (test "default src + defer"
@@ -99,9 +99,9 @@
 (defn feed-tcp (sock frame chunk)
   "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
   as the socket layer would deliver them."
-  (let (flen (byte-length frame))
+  (let (flen (bytes/length frame))
     (fold (fn (_ k)
-            (send (self) [:tcp sock (subbytes frame (* k chunk) (min flen (* (+ k 1) chunk)))]))
+            (send (self) [:tcp sock (bytes/slice frame (* k chunk) (min flen (* (+ k 1) chunk)))]))
       nil
       (range (quot (+ flen (- chunk 1)) chunk)))))
 
@@ -115,7 +115,7 @@
         ([:ok opcode payload-out rem] (do
                                         (assert= opcode 1)
                                         (assert= (count rem) 0)
-                                        (assert= (into [] (bytes->list payload-out)) payload)))
+                                        (assert= (into [] (bytes/->list payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
     (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
@@ -125,7 +125,7 @@
       (match (web/live/recv-frame-loop sock (bytes []))
         ([:ok _opcode payload-out rem] (do
                                          (assert= (count rem) 0)
-                                         (assert= (into [] (bytes->list payload-out)) payload)))
+                                         (assert= (into [] (bytes/->list payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; :isolated — registering and looking up both touch the shared :hatch-live-routes process,
@@ -275,29 +275,29 @@
 (describe "parse-client-frame: a non-object frame can't crash the session actor"
   ; the frame carries every dispatch field (:event/:params/:name/:cid/:path); absent ones default
   (test "a bare scalar decodes to an empty event (no throw)"
-    (assert= (parse-client-frame (string->utf8-bytes "5"))
+    (assert= (parse-client-frame (string/->bytes "5"))
       {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "a bare bool decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "true"))
+    (assert= (parse-client-frame (string/->bytes "true"))
       {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "a bare string decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "\"x\""))
+    (assert= (parse-client-frame (string/->bytes "\"x\""))
       {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "a JSON array decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "[1,2,3]"))
+    (assert= (parse-client-frame (string/->bytes "[1,2,3]"))
       {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "unparseable garbage decodes to an empty event"
-    (assert= (parse-client-frame (string->utf8-bytes "}{not json"))
+    (assert= (parse-client-frame (string/->bytes "}{not json"))
       {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "a well-formed object keeps its event and params"
-    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"tick\",\"params\":{\"n\":1}}"))
+    (assert= (parse-client-frame (string/->bytes "{\"event\":\"tick\",\"params\":{\"n\":1}}"))
       {:event "tick" :params {"n" 1} :name "" :cid nil :path "" :sfp nil}))
   (test "a non-object params is coerced to an empty map"
-    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"go\",\"params\":5}"))
+    (assert= (parse-client-frame (string/->bytes "{\"event\":\"go\",\"params\":5}"))
       {:event "go" :params {} :name "" :cid nil :path "" :sfp nil}))
   (test "a component-targeted event carries its name, cid, and params"
-    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"event\",\"name\":\"click\",\"cid\":\"3\",\"params\":{\"x\":1}}"))
+    (assert= (parse-client-frame (string/->bytes "{\"event\":\"event\",\"name\":\"click\",\"cid\":\"3\",\"params\":{\"x\":1}}"))
       {:event "event" :params {"x" 1} :name "click" :cid "3" :path "" :sfp nil}))
   (test "a navigate frame carries its path"
-    (assert= (parse-client-frame (string->utf8-bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
+    (assert= (parse-client-frame (string/->bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
       {:event "navigate" :params {} :name "" :cid nil :path "/next" :sfp nil})))

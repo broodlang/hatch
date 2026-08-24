@@ -306,7 +306,7 @@
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
       else
-        (or (serve-range conn content-type body tag cc (count (string->utf8-bytes body)))
+        (or (serve-range conn content-type body tag cc (count (string/->bytes body)))
           (send-resp (with-resp-headers conn
                        {:content-type content-type
                         :etag tag
@@ -463,7 +463,7 @@
                         :x-content-type-options "nosniff"
                         :content-range (str "bytes " start "-" end "/" len)})
             206
-            (subbytes body start (+ end 1)))))))
+            (bytes/slice body start (+ end 1)))))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the

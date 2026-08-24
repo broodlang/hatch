@@ -35,7 +35,7 @@
     ([:incomplete]
       (receive
         ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
-        ([:tcp ^sock chunk] (read-one-frame sock (bytes-concat buf chunk)))
+        ([:tcp ^sock chunk] (read-one-frame sock (bytes/concat buf chunk)))
         ([:tcp-closed ^sock] :closed)
         (after 2000 :timeout)))
     ([:error _m] :error)))
@@ -96,7 +96,7 @@
       ; The bytes-native parser returns the payload as a `bytes` value, byte 0xFF intact.
       (assert= (bytes? payload) true)
       (assert= (count payload) 1)
-      (assert= (byte-at payload 0) 255))))
+      (assert= (bytes/at payload 0) 255))))
 
 (defn drain (sock buf)
   "Collect everything `sock` sends until it goes idle (keep-alive leaves it open), so a
@@ -174,7 +174,7 @@
                    {:status 200
                     :headers {}
                     :body (str "body="
-                            (utf8-bytes->string (get req :body)))}))
+                            (string/bytes-> (get req :body)))}))
           sock (tcp/connect "127.0.0.1" port)
           ; send only the head (with Expect + Content-Length) — the body is withheld
           _h (tcp/send sock
@@ -251,7 +251,7 @@
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp/close client)
       (server/stop port)
-      (assert= (utf8-bytes->string payload) "Hello world"))))
+      (assert= (string/bytes-> payload) "Hello world"))))
 
 ; Tier-3 (docs/robustness.md): server-side TLS. A full handshake needs a verification-
 ; skipping client (the runtime's tls/request validates against real roots), so the

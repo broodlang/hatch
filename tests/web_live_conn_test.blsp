@@ -68,8 +68,8 @@
 (defn masked-text-frame (s)
   "A masked client text frame carrying `s` (mask key all zeros, so the masked payload equals
   the plaintext). Payload assumed < 126 bytes, which every frame here is."
-  (let (b (string->utf8-bytes s))
-    (bytes-concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+  (let (b (string/->bytes s))
+    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
 
 ; A CLIENT-side frame reader. http/websocket's `parse-frame` is the server's parser and
 ; enforces that client frames are masked (RFC 6455), so it rejects a server->client frame,
@@ -79,21 +79,21 @@
   "`[:ok text]` once `buf` holds a whole unmasked server frame, else `[:incomplete]`."
   (if (< (count buf) 2)
     [:incomplete]
-    (let (len7 (byte-at buf 1)
+    (let (len7 (bytes/at buf 1)
           header (if (= len7 126) 4 2)
           len (if (= len7 126)
-                (+ (* 256 (byte-at buf 2)) (byte-at buf 3))
+                (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3))
                 len7))
       (if (< (count buf) (+ header len))
         [:incomplete]
-        [:ok (utf8-bytes->string (subbytes buf header (+ header len)))]))))
+        [:ok (string/bytes-> (bytes/slice buf header (+ header len)))]))))
 
 (defn read-frame (sock buf)
   "Block until one complete server frame is buffered; return its payload as text."
   (match (frame-payload buf)
     ([:ok text] text)
     ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (read-frame sock (bytes-concat buf chunk)))
+                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
                      ([:tcp-closed ^sock] :closed)
                      (after 3000 :timeout)))))
 

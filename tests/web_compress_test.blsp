@@ -49,10 +49,10 @@
       (assert= (get-in r [:headers :vary]) "Accept-Encoding")))
   (test "the body is valid gzip that round-trips to the original"
     (let (r (respond (req) big-body))
-      (assert= (utf8-bytes->string (zlib/gunzip (get r :body))) big-body)))
+      (assert= (string/bytes-> (zlib/gunzip (get r :body))) big-body)))
   (test "the compressed body is smaller than the original"
     (let (r (respond (req) big-body))
-      (assert= (< (count (get r :body)) (count (string->utf8-bytes big-body))) true))))
+      (assert= (< (count (get r :body)) (count (string/->bytes big-body))) true))))
 
 (describe "compress plug — when it must NOT compress"
   (test "no Accept-Encoding → identity body, no Content-Encoding"
@@ -94,8 +94,8 @@
     (let (r (respond (req {:accept-encoding "br, gzip"}) big-body))
       (assert= (get-in r [:headers :content-encoding]) "br")
       (assert= (get-in r [:headers :vary]) "Accept-Encoding")
-      (assert= (utf8-bytes->string (zlib/unbrotli (get r :body))) big-body)))
+      (assert= (string/bytes-> (zlib/unbrotli (get r :body))) big-body)))
   (test "a gzip-only client still gets gzip"
     (let (r (respond (req {:accept-encoding "gzip"}) big-body))
       (assert= (get-in r [:headers :content-encoding]) "gzip")
-      (assert= (utf8-bytes->string (zlib/gunzip (get r :body))) big-body))))
+      (assert= (string/bytes-> (zlib/gunzip (get r :body))) big-body))))

@@ -31,7 +31,7 @@
         ; nested string/bytes tree, ADR-139). Flatten it to `bytes` exactly once with
         ; `bytes-concat`: its byte count is the Content-Length, and it is the body leaf of
         ; the response iolist. `bodyless` skips it entirely (no body, no Content-Length).
-        body-bytes (if bodyless nil (bytes-concat (or (get resp :body) "")))
+        body-bytes (if bodyless nil (bytes/concat (or (get resp :body) "")))
         headers (get resp :headers {})
         ; A 1xx/204/304 MUST NOT carry a body/Content-Length (RFC 7230 §3.3): strip any the
         ; handler set, or a stray Content-Length desyncs a keep-alive client (it reads that
@@ -57,7 +57,7 @@
       ; (ADR-141), doubling it and truncating at the too-short Content-Length; encoding to
       ; `bytes` up front sends each body byte exactly once. `(bytes-concat …)` materialises
       ; the whole response for a caller (e.g. a test) that wants one value.
-      (let (head-bytes (string->utf8-bytes head-block))
+      (let (head-bytes (string/->bytes head-block))
         (if (or bodyless head?)
           head-bytes
           [head-bytes body-bytes])))))
@@ -86,15 +86,15 @@
   the payload's byte length in hex, CRLF, the payload bytes, CRLF — returned as an iolist that
   `tcp/send` flattens. An empty payload returns nil (a 0-length chunk would prematurely end the
   stream, so the caller skips a nil), keeping `last-chunk` the sole terminator."
-  (let (bs (bytes-concat data)
+  (let (bs (bytes/concat data)
         n (count bs))
     (if (= n 0)
       nil
-      [(string->utf8-bytes (str (int->hex n) "\r\n")) bs (string->utf8-bytes "\r\n")])))
+      [(string/->bytes (str (int->hex n) "\r\n")) bs (string/->bytes "\r\n")])))
 
 (defn last-chunk ()
   "The terminating zero-length chunk that ends a chunked-transfer body: `0 CRLF CRLF`."
-  (string->utf8-bytes "0\r\n\r\n"))
+  (string/->bytes "0\r\n\r\n"))
 
 (defn format-stream-head (resp)
   "Serialize the status line + headers for a chunked streaming response: `Transfer-Encoding:
@@ -107,7 +107,7 @@
         headers (if (contains? headers :content-type)
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8")))
-    (string->utf8-bytes (str "HTTP/1.1 "
+    (string/->bytes (str "HTTP/1.1 "
                           status
                           " "
                           (status-text status)

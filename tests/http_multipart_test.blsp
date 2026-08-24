@@ -3,14 +3,14 @@
   (:use http/util)
   (:use test))
 
-(defn b (s) (string->utf8-bytes s))
+(defn b (s) (string/->bytes s))
 
 ;; A realistic multipart body: one text field ("title") and one binary file part ("avatar")
 ;; whose content deliberately includes 0xFF (invalid UTF-8) and embedded CR/LF bytes — to
 ;; prove the parser splits on the boundary (not on CRLF) and keeps binary content intact.
 (def png-bytes (bytes [137 80 78 71 0 255 13 10]))
 (def body
-  (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n")
+  (bytes/concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n")
     (b (str "--BOUND\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n"
          "Content-Type: image/png\r\n\r\n"))
     png-bytes
@@ -35,7 +35,7 @@
       (assert= (get f :content-type) "image/png")))
   (test "file content is kept as raw bytes, byte-for-byte (binary + embedded CRLF survive)"
     (let (f (get-in (parse body "BOUND") [:files "avatar"]))
-      (assert= (into [] (bytes->list (get f :bytes))) [137 80 78 71 0 255 13 10])))
+      (assert= (into [] (bytes/->list (get f :bytes))) [137 80 78 71 0 255 13 10])))
   (test "a body with no boundary present yields empty maps"
     (assert= (parse (b "not multipart at all") "BOUND") {:fields {} :files {}}))
   (test "a blank boundary yields empty maps"
@@ -44,20 +44,20 @@
 ;; A file part whose binary content contains a bare `--BOUND` (not CRLF-preceded) must NOT
 ;; be split there — the delimiter is CRLF-anchored (`\r\n--BOUND`).
 (def body-boundary-in-content
-  (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f.bin\"\r\n\r\n")
+  (bytes/concat (b "--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f.bin\"\r\n\r\n")
     (b "data--BOUNDstill-data")
     (b "\r\n--BOUND--\r\n")))
 
 (describe "multipart parse: robustness"
   (test "a bare --boundary inside a part's content is not treated as a delimiter"
     (let (f (get-in (parse body-boundary-in-content "BOUND") [:files "file"]))
-      (assert= (utf8-bytes->string (get f :bytes)) "data--BOUNDstill-data")))
+      (assert= (string/bytes-> (get f :bytes)) "data--BOUNDstill-data")))
   ; A part with only `filename` and no `name` (malformed per RFC 7578) must be dropped, not
   ; mis-filed — `cd-param … "name"` must not match the `name="` inside `filename="`.
   (test "cd-param name does not match inside filename"
     (assert= (cd-param "form-data; filename=\"orphan.txt\"" "name") nil))
   (test "a nameless file part is dropped"
-    (assert= (parse (bytes-concat (b "--BOUND\r\nContent-Disposition: form-data; filename=\"orphan.txt\"\r\n\r\n")
+    (assert= (parse (bytes/concat (b "--BOUND\r\nContent-Disposition: form-data; filename=\"orphan.txt\"\r\n\r\n")
                       (b "content")
                       (b "\r\n--BOUND--\r\n"))
                "BOUND")

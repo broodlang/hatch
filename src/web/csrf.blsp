@@ -63,7 +63,7 @@
   "True if the submitted token is present and matches the session token (constant-time)."
   (let (want (token conn)
         got (submitted-token conn))
-    (and want got (constant-time-equal? (string->utf8-bytes want) (string->utf8-bytes got)))))
+    (and want got (constant-time-equal? (string/->bytes want) (string/->bytes got)))))
 
 (defn reject (conn)
   "A halted 403 for a missing/invalid CSRF token."
