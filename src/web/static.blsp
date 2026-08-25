@@ -214,12 +214,12 @@
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
-  validate the digits ourselves rather than trust `string->number`, which also parses floats
+  validate the digits ourselves rather than trust `string/->number`, which also parses floats
   (`\"1.5\"` → 1.5) — and a float offset would later blow up `substring` (int-only), turning a
   crafted `Range` header into a 500. So anything non-integer (floats, signs, hex, spaces) is
   rejected here and the range is ignored."
   (if (and (not (string/blank? s)) (= (string/span s 0 "0123456789") (string/length s)))
-    (string->number s)
+    (string/->number s)
     nil))
 
 (defn parse-range (spec len)

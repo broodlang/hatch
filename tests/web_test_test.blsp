@@ -69,14 +69,14 @@
 
 ; ---- live views ------------------------------------------------------------
 
-(deflive (mount (params) {:count (string->number (get params "start" "0"))})
+(deflive (mount (params) {:count (string/->number (get params "start" "0"))})
   (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
   (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))
   (handle-info (msg model) (assoc model :count (+ (get model :count) msg)))
   (unmount (model) (send (self) [:unmounted (get model :count)]))
   (on-mount-guard (conn) (if (get-cookie conn "session") nil "/login"))
-  (handle-params (params model) (assoc model :page (string->number (get params "page" "1")))))
+  (handle-params (params model) (assoc model :page (string/->number (get params "page" "1")))))
 
 (describe "live-view harness"
   (test "live-mount builds the initial model from params"

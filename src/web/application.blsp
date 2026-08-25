@@ -72,7 +72,7 @@
               (nil? (os/getenv "NO_COLOR")) application-color-line
               else application-text-line))
     {:level (valid-level (os/getenv "LOG_LEVEL"))
-     :backends [(fn-backend (fn (line) (print line)) {:format fmt})]}))
+     :backends [(fn-backend (fn (line) (io/print line)) {:format fmt})]}))
 
 (defn start (config)
   "Boot a Hatch application from `config` and park the main process.

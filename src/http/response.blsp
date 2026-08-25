@@ -108,12 +108,12 @@
                   headers
                   (assoc headers :content-type "text/html; charset=utf-8")))
     (string/->bytes (str "HTTP/1.1 "
-                          status
-                          " "
-                          (status-text status)
-                          "\r\n"
-                          (string/join "" (map format-header (map-pairs headers)))
-                          "\r\n"))))
+                      status
+                      " "
+                      (status-text status)
+                      "\r\n"
+                      (string/join "" (map format-header (map-pairs headers)))
+                      "\r\n"))))
 
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect

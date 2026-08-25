@@ -20,8 +20,7 @@
 
 ; :isolated — starts the shared :telemetry and :logger processes, so it must run alone.
 (describe "access log — telemetry to structured log line"
-  :isolated
-  (test "a [:hatch :request :stop] event becomes one log line at the status-derived level"
+  :isolated (test "a [:hatch :request :stop] event becomes one log line at the status-derived level"
     (do
       (let (me (self))
         ; a capturing logger: the backend forwards each record's (level, msg, meta) to us

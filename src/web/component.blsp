@@ -34,8 +34,7 @@
   ; into a still-loading web/live mid-cycle, which the loader rejects. A subset refer
   ; resolves lazily and is cycle-safe.
   (:use-internals web/live
-    :only
-    [deflive-clause
+    :only [deflive-clause
       deflive-clauses deflive-render-expr deflive-handle-event-body])
   ; render — lowers a component's Hiccup to HTML (the wrapper open tag, and the fallback
   ; whole-component render for a spec with no static/dynamic split)
