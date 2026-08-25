@@ -133,8 +133,7 @@
 ; kill/restart window. Isolated units run alone, serially, first — mirroring production, where
 ; the router registers every route at load, before any connection looks a path up.
 (describe "live-route registry"
-  :isolated
-  (test "register, look up, and miss"
+  :isolated (test "register, look up, and miss"
     (do
       (register-live "/reg-test" (fn () {:ok true}) :admin)
       ; its live-session group
@@ -156,8 +155,7 @@
       else (do (sleep 10) (wait-live-route path (- tries 1))))))
 
 (describe "live-route registry survives a crash"
-  :isolated
-  (test "a registered route is still there after the registry process is killed"
+  :isolated (test "a registered route is still there after the registry process is killed"
     (do
       (register-live "/crash-test" (fn () {:ok true}) :customer)
       (assert= (get (lookup-live "/crash-test") :session) :customer)

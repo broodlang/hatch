@@ -101,8 +101,7 @@
         body (if gzip? (zlib/gzip raw) raw)
         block-size (get opts :block-size 65536)
         conn (put-resp-header conn
-               :content-type
-               (get opts :content-type "application/octet-stream"))
+               :content-type (get opts :content-type "application/octet-stream"))
         conn (if gzip?
                (put-resp-header (put-resp-header conn :content-encoding "gzip")
                  :vary "Accept-Encoding")

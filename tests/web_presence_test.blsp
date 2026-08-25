@@ -238,8 +238,7 @@
   (snooze 100000))
 
 (describe "observe / unobserve"
-  :isolated
-  (test "an observer is pushed the roster but never joins it"
+  :isolated (test "an observer is pushed the roster but never joins it"
     (let (me (self)
           obs (spawn (observer-relay "obs:room" me)))
       (receive (:observing nil) (after 2000 nil))

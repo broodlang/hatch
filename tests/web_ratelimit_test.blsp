@@ -51,8 +51,7 @@
 
 ; :isolated — the plug hits the shared :hatch-ratelimit singleton.
 (describe "rate-limit plug (end to end)"
-  :isolated
-  (test "passes the burst, then 429s with Retry-After"
+  :isolated (test "passes the burst, then 429s with Retry-After"
     (let (plug (rate-limit {:rate 1 :per 100000 :burst 2 :key-fn client-key})
           ; a key unique to this test so other buckets can't interfere
           k "e2e-burst-1"

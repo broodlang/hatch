@@ -199,8 +199,8 @@
 
 (defn jp-num-finish (acc cs)
   "Convert the gathered number chars to a value. Empty (a stray non-number at value
-  position in malformed input) yields nil rather than erroring on `(string->number \"\")`."
-  (if (nil? acc) [nil cs] [(string->number (jp-join acc)) cs]))
+  position in malformed input) yields nil rather than erroring on `(string/->number \"\")`."
+  (if (nil? acc) [nil cs] [(string/->number (jp-join acc)) cs]))
 
 (defn jp-object (cs)
   "Parse a JSON object; `{` heads `cs`. `[map rest]`."
@@ -307,7 +307,7 @@
       ([:reap] [:reap (bytes/concat buf (reverse pieces))]))))
 
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
-; A `tick` interval is a native `send-interval` timer (Erlang parity, prelude): a tiny
+; A `tick` interval is a native `timer/send-interval` timer (Erlang parity, prelude): a tiny
 ; green process on the scheduler's timer wheel that posts `[:tick ms gen]` to the session
 ; every `ms` and self-cleans when the session dies (it monitors the target). `ms` keys the
 ; beat so a session with several tickers can tell which fired; `gen` lets the session drop
@@ -412,17 +412,17 @@
 ; ---- session actor ----
 
 (defn start-tickers (ticks gen)
-  "Start one native `send-interval` timer per interval in `ticks`, each posting
+  "Start one native `timer/send-interval` timer per interval in `ticks`, each posting
   `[:tick ms gen]` to this (the calling) session on a steady beat, stamped with the session
   generation `gen`. Returns their timer handles so they can be cancelled when the session
   navigates to another view (otherwise the old view's tickers would linger and accumulate
   across navigations); each is self-cleaning if the session dies first."
   (let (me (self))
-    (map (fn (ms) (send-interval ms me [:tick ms gen])) (or ticks (list)))))
+    (map (fn (ms) (timer/send-interval ms me [:tick ms gen])) (or ticks (list)))))
 
 (defn stop-tickers (handles)
   "Cancel the given interval timers — used when a session swaps to a different view."
-  (dolist (h handles) (proc/cancel-timer h)))
+  (dolist (h handles) (timer/cancel h)))
 
 ;; ---- the connection's Conn, reachable from view code ----------------------------------
 ;; A live view's `mount`/`render`/handlers take only their own arguments, so until now the
@@ -1377,8 +1377,7 @@
                          (apply vector
                            (map (fn (d)
                                   (if (nil? model-sym)
-                                    :all
-                                    (web/parts/form-deps d model-sym)))
+                                    :all (web/parts/form-deps d model-sym)))
                              (get parts :dynamics))))
         ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
         ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
