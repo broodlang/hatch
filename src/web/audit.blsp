@@ -1,0 +1,150 @@
+; log/warn
+(defmodule web/audit
+  "Dev-only structural audits of a rendered page.
+
+  These catch a class of bug the server cannot otherwise see: a response that is complete,
+  correct, 200-OK HTML, and still does not work when a person uses it. Nothing about the
+  request/response cycle is wrong, so no test that asserts on status, headers or markup
+  presence will fail — the page simply does nothing.
+
+  The audit that motivated the module is [[inert-controls]]. A reusable renderer emitted a
+  fragment containing a `Filter…` search box plus a separate companion script, the host
+  page inlined the stylesheet and forgot the script, and the box shipped inert for months:
+  present in the markup, focusable, accepts typing, wired to nothing.
+
+  Audits run in dev only and never alter the response — they log a warning naming the
+  element. Every one of them is written to have no false positives rather than to catch
+  everything: a lint that cries wolf is a lint people stop reading, so each rule declines
+  to judge whatever it cannot prove."
+  (:use web/conn))
+
+(def- *controls* ["<input" "<select" "<textarea" "<button"])
+
+(defn dev? ()
+  "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`)."
+  (= (or (os/getenv "HATCH_ENV") "dev") "dev"))
+
+(defn- tag-text
+  (document start)
+  "The source text of the tag opening at `start`, `<input …>` inclusive. Stops at the first
+  `>`, which is wrong only for an attribute value containing a literal `>` — that truncates
+  a snippet, it does not mis-detect a tag."
+  (let (end (index-of document ">" start))
+    (if (< end 0)
+      (string/substring document start (count document))
+      (string/substring document start (inc end)))))
+
+(defn- attr-value
+  (tag name)
+  "The value of double-quoted attribute `name` in `tag`, or nil."
+  ;; match ` name="` so `id="x"` is found but `data-id="x"` is not
+  (let (at (index-of tag (str " " name "=\"")))
+    (if (< at 0)
+      nil
+      (let (from (+ at (count name) 3)
+            end (index-of tag "\"" from))
+        (if (< end 0) nil (string/substring tag from end))))))
+
+(defn- has-inline-handler?
+  (tag)
+  "Whether `tag` carries an inline `on…=` event handler."
+  (let (scan (fn (from)
+               (let (at (index-of tag " on" from))
+                 (cond
+                   (< at 0) false
+                   ;; ` on` must be followed by letters then `=` to be a handler
+                   ;; attribute rather than a value like ` only="…"`.
+                   (>= (index-of tag "=" at) 0) true
+                   else (scan (+ at 3))))))
+    (scan 0)))
+
+(defn- ranges
+  (document open close width from acc)
+  "Index ranges of every `open`…`close` region in `document`, as `[start end]` pairs."
+  (let (start (index-of document open from))
+    (if (< start 0)
+      (reverse acc)
+      (let (end (index-of document close start))
+        (if (< end 0)
+          (reverse (cons [start (count document)] acc))
+          (ranges document open close width (+ end width) (cons [start end] acc)))))))
+
+(defn- within?
+  (position rs)
+  "Whether `position` falls inside any `[start end]` range in `rs`."
+  (> (count (filter (fn (r) (and (> position (first r)) (< position (second r)))) rs)) 0))
+
+(defn- inline-script-text
+  (document)
+  "Every inline `<script>` body in `document`, concatenated. External scripts contribute
+  nothing here — see [[inert-controls]], which declines to judge a page that has any."
+  (fold (fn (acc r)
+          (let (body-start (index-of document ">" (first r)))
+            (if (< body-start 0)
+              acc
+              (str acc " " (string/substring document (inc body-start) (second r))))))
+    ""
+    (ranges document "<script" "</script>" 9 0 nil)))
+
+(defn inert-controls (document)
+  "Every interactive control in `document` that provably cannot do anything, as a list of
+  maps carrying `:tag`, `:id` and `:snippet`.
+
+  A control does something if it submits a form, if an inline `on…=` handler fires, or if
+  page script reaches it. A control that has none of those three is not a style question or
+  a matter of taste — it is inert, and shipping it is always a bug.
+
+  The rule declines to judge rather than guess, so it returns nothing at all for:
+
+  - a fragment (no `<html`), whose script is the embedding page's business;
+  - a page carrying any external `<script src=…>`, whose contents are not readable here;
+  - a control with no `id` on a page that does have inline script, which could be reached
+    by a tag or class selector this cannot see.
+
+  What is left is exact: an `id`'d control outside any form, with no inline handler, whose
+  id appears in no script on the page.
+
+      (inert-controls \"<html><body><input id=\\\"q\\\"></body></html>\")
+        → ({:tag \"input\" :id \"q\" :snippet \"<input id=\\\"q\\\">\"})"
+  (if (< (index-of document "<html") 0)
+    nil
+    (let (external? (>= (index-of document "<script src=\"") 0)
+          script-text (inline-script-text document)
+          form-ranges (ranges document "<form" "</form>" 7 0 nil))
+      (if external?
+        nil
+        (fold (fn (acc control)
+                (let (collect (fn (from found)
+                                (let (at (index-of document control from))
+                                  (if (< at 0)
+                                    found
+                                    (let (tag (tag-text document at)
+                                          id (attr-value tag "id")
+                                          unreachable? (and (not (within? at form-ranges))
+                                                         (not (has-inline-handler? tag))
+                                                         (if (= script-text "")
+                                                           true
+                                                           (and id (< (index-of script-text id) 0)))))
+                                      (collect (+ at (count control))
+                                        (if unreachable?
+                                          (cons {:tag (string/substring control 1 (count control))
+                                                 :id id
+                                                 :snippet tag}
+                                            found)
+                                          found)))))))
+                  (append acc (reverse (collect 0 nil)))))
+          nil *controls*)))))
+
+(defn warn-inert! (document)
+  "Log a dev warning for every control [[inert-controls]] proves dead in `document`.
+  A no-op outside dev and a no-op when the page is clean. Returns `document` unchanged, so
+  it drops into a render pipeline without altering the response."
+  (when (dev?)
+    (doseq (finding (inert-controls document))
+      (log/warn (str "[audit] inert control: <"
+                  (get finding :tag)
+                  (if (get finding :id) (str " id=\"" (get finding :id) "\"") "")
+                  "> is outside any form, has no inline handler, and no script on the page "
+                  "references it — it accepts input and does nothing. "
+                  "If its behaviour comes from a companion script, the page is missing it."))))
+  document)

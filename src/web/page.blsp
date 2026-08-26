@@ -5,8 +5,15 @@
   a handler that renders Hiccup to a response, so this module is a single thin helper."
   ; html
   (:use web/template)
-  (:use web/conn))
+  (:use web/conn)
+  ; warn-inert! — the dev-only audit for controls nothing can reach
+  (:alias web/audit))
 (defn page (conn node)
   "Render a Hiccup node to a full HTML-document response (doctype + markup) on `conn`.
-  The non-live counterpart to a live view's render — `(page conn (layout title body))`."
-  (html-resp conn (html node)))
+  The non-live counterpart to a live view's render — `(page conn (layout title body))`.
+
+  In dev the rendered document passes through `web/audit/warn-inert!`, which warns about
+  an interactive control no form, handler or script can reach. That costs nothing in prod
+  and never changes the response; it exists because such a page is correct in every way a
+  test usually checks and still does nothing when a person uses it."
+  (html-resp conn (audit/warn-inert! (html node))))
