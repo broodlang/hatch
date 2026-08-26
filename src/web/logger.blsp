@@ -50,6 +50,26 @@
        :status status
        :duration_ms (get measurements :duration 0)})))
 
+(defn- log-exception
+  (metadata)
+  "Log a handler crash at :error, carrying the message the handler raised.
+
+  `http/server` catches a handler exception, emits it as `[:hatch :request :exception]`, and
+  replies with whatever `:error-handler` returns — a generic 500 that deliberately leaks no
+  internals. Nothing subscribed to that event, so the message went nowhere: the access log
+  recorded THAT a request 500'd and never why, and an operator watching the log saw a 500
+  with no cause. hive ran that way for months."
+  (log/log :error
+    (str (get metadata :method "?")
+      " "
+      (get metadata :path "?")
+      " raised: "
+      (get metadata :error "unknown error"))
+    {:method (get metadata :method)
+     :path (get metadata :path)
+     :status 500
+     :error (get metadata :error)}))
+
 (defn- log-bad-request
   (measurements metadata)
   "Log a rejected (malformed) request at :warn — the head never parsed, so only the parser's
@@ -75,6 +95,11 @@
       (telemetry/attach (keyword (str (name id) "-bad"))
         [:hatch :request :bad-request]
         (fn (_event measurements metadata) (log-bad-request measurements metadata))))
+    ;; Not optional, unlike the bad-request line: a 500 whose cause is nowhere in the log is
+    ;; the one failure an operator cannot act on, and `http/server` already emits the message.
+    (telemetry/attach (keyword (str (name id) "-exception"))
+      [:hatch :request :exception]
+      (fn (_event _measurements metadata) (log-exception metadata)))
     id))
 
 (defn detach-access-log (&optional (opts {}))
@@ -82,4 +107,5 @@
   (let (id (get opts :id :hatch-access-log))
     (telemetry/detach id)
     (telemetry/detach (keyword (str (name id) "-bad")))
+    (telemetry/detach (keyword (str (name id) "-exception")))
     nil))
