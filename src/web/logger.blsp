@@ -65,7 +65,7 @@
     :level  — a fixed log level for every request, or nil (default) to derive from the status
     :log-bad-requests — also log rejected/malformed requests at :warn (default true)"
   (when (nil? (telemetry/pid))
-    (telemetry/start-telemetry))
+    (telemetry/start))
   (let (id (get opts :id :hatch-access-log)
         fixed (get opts :level))
     (telemetry/attach id

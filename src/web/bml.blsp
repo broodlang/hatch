@@ -479,12 +479,12 @@
   Multiple top-level nodes become a `(list …)`; one node is returned bare; an empty
   template is `nil`."
   (binding (*bml-source* src)
-    (let ([nodes rest] (parse-nodes (skip-ws src)))
+    (let ([node/list rest] (parse-nodes (skip-ws src)))
       (cond
         (not (string/blank? rest)) (bml-error rest "unexpected trailing content: " rest)
-        (empty? nodes) nil
-        (= (count nodes) 1) (first nodes)
-        else (cons 'list nodes)))))
+        (empty? node/list) nil
+        (= (count node/list) 1) (first node/list)
+        else (cons 'list node/list)))))
 
 ; ---- compile-time wiring: resolve a sibling .bml and turn it into a function body
 ; ---- Shared by `deflive`'s `(template …)` clause and the `deftemplate` macro below.
