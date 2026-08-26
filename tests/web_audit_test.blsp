@@ -1,0 +1,60 @@
+(defmodule web-audit-test (:use web/audit) (:use test))
+
+;; The bug this exists for: a page that is complete, correct, 200-OK HTML and still does
+;; nothing when a person uses it. brood.fly.dev served its language reference with a
+;; `Filter…` search box for months — present in the markup, focusable, wired to nothing,
+;; because the fragment carrying the input and the script driving it came from one renderer
+;; and the host page inlined only the stylesheet.
+
+(defn- page-with (body) (str "<html><body>" body "</body></html>"))
+
+(describe "audit: inert controls"
+  (test "an id'd control with no form, no handler and no script is inert"
+    (let (found (inert-controls (page-with "<input id=\"q\" type=\"search\">")))
+      (assert= (count found) 1)
+      (assert= (get (first found) :tag) "input")
+      (assert= (get (first found) :id) "q")))
+
+  ;; The exact shape that shipped: input in the fragment, script never inlined.
+  (test "the reference-page regression: a filter box with no script on the page"
+    (let (found (inert-controls (page-with (str "<div class=\"docsite\"><aside>"
+                                             "<input id=\"docsite-filter\" type=\"search\" placeholder=\"Filter…\">"
+                                             "</aside></div>"))))
+      (assert= (count found) 1)
+      (assert= (get (first found) :id) "docsite-filter")))
+
+  (test "the same page is clean once the companion script is present"
+    (assert= (inert-controls (page-with (str "<input id=\"docsite-filter\" type=\"search\">"
+                                          "<script>document.getElementById('docsite-filter')"
+                                          ".addEventListener('input',function(){});</script>")))
+      nil))
+
+  (test "a control inside a form submits, so it is never inert"
+    (assert= (inert-controls (page-with "<form method=\"get\" action=\"/packages\"><input name=\"q\"><button>Go</button></form>"))
+      nil))
+
+  (test "an inline on-handler counts as reachable"
+    (assert= (inert-controls (page-with "<button id=\"b\" onclick=\"go()\">Go</button>")) nil)))
+
+(describe "audit: what it refuses to judge"
+  ;; Every one of these is a case the rule cannot PROVE, and a lint that guesses is a lint
+  ;; people stop reading. Each must stay silent.
+  (test "a fragment is the embedding page's business, not ours"
+    (assert= (inert-controls "<div><input id=\"q\"></div>") nil))
+
+  (test "an external script's contents are unreadable, so nothing is judged"
+    (assert= (inert-controls (page-with "<input id=\"q\"><script src=\"/static/app.js\"></script>"))
+      nil))
+
+  (test "a control with no id may be reached by a tag or class selector"
+    (assert= (inert-controls (page-with "<input type=\"search\"><script>document.querySelector('input')</script>"))
+      nil))
+
+  (test "an id that appears anywhere in script text is treated as reached"
+    (assert= (inert-controls (page-with "<textarea id=\"editor\"></textarea><script>var x='editor';</script>"))
+      nil)))
+
+(describe "audit: warn-inert! is a pass-through"
+  (test "it returns the document unchanged so it drops into a render pipeline"
+    (let (document (page-with "<input id=\"q\">"))
+      (assert= (warn-inert! document) document))))
