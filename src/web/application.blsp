@@ -67,12 +67,12 @@
                     unrecognized value falls back to `:debug`, see `valid-level`)
   - `$LOG_FORMAT` — `\"json\"` for NDJSON (log shippers), else colored text
   - `$NO_COLOR`   — set to disable ANSI colors (the no-color.org convention)"
-  (let (fmt (cond
-              (= (os/getenv "LOG_FORMAT") "json") application-json-line
-              (nil? (os/getenv "NO_COLOR")) application-color-line
-              else application-text-line))
+  (let (string/interp (cond
+                        (= (os/getenv "LOG_FORMAT") "json") application-json-line
+                        (nil? (os/getenv "NO_COLOR")) application-color-line
+                        else application-text-line))
     {:level (valid-level (os/getenv "LOG_LEVEL"))
-     :backends [(fn-backend (fn (line) (io/print line)) {:format fmt})]}))
+     :backends [(fn-backend (fn (line) (io/write line)) {:format string/interp})]}))
 
 (defn start (config)
   "Boot a Hatch application from `config` and park the main process.

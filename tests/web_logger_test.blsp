@@ -41,7 +41,7 @@
             (assert= (get (nth line 2) :path) "/users"))
           (after 2000 (assert= :got-a-line :timeout))))
       (detach-access-log)
-      (telemetry/stop-telemetry)
+      (telemetry/stop)
       (log/stop-logger)))
   (test "a 5xx logs at :error"
     (do
@@ -58,7 +58,7 @@
           ([:line lvl] (assert= lvl :error))
           (after 2000 (assert= :got-a-line :timeout))))
       (detach-access-log)
-      (telemetry/stop-telemetry)
+      (telemetry/stop)
       (log/stop-logger)))
   (test "a rejected request logs a 400 line at :warn"
     (do
@@ -74,5 +74,5 @@
             (assert= (includes? (nth line 1) "400 bad request") true))
           (after 2000 (assert= :got-a-line :timeout))))
       (detach-access-log)
-      (telemetry/stop-telemetry)
+      (telemetry/stop)
       (log/stop-logger))))
