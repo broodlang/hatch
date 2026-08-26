@@ -76,3 +76,36 @@
       (detach-access-log)
       (telemetry/stop)
       (log/stop-logger))))
+
+;; `http/server` catches a handler crash, emits `[:hatch :request :exception]` carrying the
+;; message, and replies with a generic 500 that deliberately leaks no internals. Nothing
+;; subscribed to that event, so the message went nowhere and the access log recorded a 500
+;; with no cause — which is why hive's API failures were undiagnosable for months.
+(describe "access log — a handler crash names its cause"
+  :isolated (test "a [:hatch :request :exception] event logs the raised message at :error"
+    (do
+      (let (me (self))
+        (log/start-logger {:level :debug
+                           :backends [(log/fn-backend (fn (line) (send me [:line line]))
+                                        {:format (fn (rec)
+                                                   [(get rec :level) (get rec :msg) (get rec :meta)])})]})
+        (attach-access-log)
+        (telemetry/emit [:hatch :request :exception]
+          {}
+          {:method "GET"
+           :path "/api/v1/packages"
+           :error "empty?: expected collection, got int (1114114)"})
+        (telemetry/sync)
+        (receive
+          ([:line line] (assert= (nth line 0) :error)
+            ;; the message itself must survive into the line — a 500 whose cause is not in
+            ;; the log is the one failure an operator cannot act on
+            (is (includes? (nth line 1) "empty?: expected collection"))
+            (is (includes? (nth line 1) "/api/v1/packages"))
+            (assert= (get (nth line 2) :status) 500)
+            (assert= (get (nth line 2) :error)
+              "empty?: expected collection, got int (1114114)"))
+          (after 2000 (assert= :got-a-line :timeout))))
+      (detach-access-log)
+      (telemetry/stop)
+      (log/stop-logger))))
