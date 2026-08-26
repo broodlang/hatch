@@ -79,6 +79,27 @@
   live connection count."
   (keyword (str "http-workers-" port)))
 
+(defn- await-listening
+  (port budget-ms)
+  "Return once `port` actually ACCEPTS a connection, or when `budget-ms` run out.
+
+Replaces a fixed `(sleep 50)`. Fifty milliseconds is a guess about how fast the listener
+binds, and on a loaded machine it is simply wrong: `start` returned before the socket was
+accepting and the caller's first `tcp/connect` got ECONNREFUSED. It surfaced as a CI
+failure in `http_upload_test` and never locally — the guess holds on an idle desktop,
+which is what makes it the wrong kind of assumption rather than merely a tight one.
+
+The probe connects and immediately closes: that is the portable way to ask whether a port
+is accepting yet. A budget rather than a spin, so a listener that never binds (a taken
+port) still returns and lets the caller fail on its own terms."
+  (cond
+    (<= budget-ms 0) nil
+    else
+      (let (probe (try (tcp/connect "127.0.0.1" port) (catch _ nil)))
+        (if probe
+          (do (tcp/close probe) nil)
+          (do (sleep 10) (await-listening port (- budget-ms 10)))))))
+
 (defn start (port handler &optional (ws-handler nil) (config {}))
   "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
   Optional `ws-handler` receives `(sock request)` on WebSocket upgrades. Optional
@@ -103,7 +124,7 @@
                                 :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
     (register (supervisor-name port) sup)
-    (sleep 50)
+    (await-listening port 5000)
     sup))
 
 (defn listen-and-serve (port handler ws-handler config)
