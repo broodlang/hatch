@@ -53,7 +53,7 @@
   inside this process so its [:proc …] messages land in this mailbox."
   (let (cmd (get w :cmd)
         handle (try
-                 (proc/spawn (first cmd) (rest cmd) (proc-opts w))
+                 (os/spawn (first cmd) (rest cmd) (proc-opts w))
                  (catch e
                    (do
                      (log/error (str "[assets] cannot start watcher `"
@@ -76,7 +76,7 @@
     ([:proc ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:stop] (do
-               (try (proc/close handle) (catch _ nil))
+               (try (os/close handle) (catch _ nil))
                (log/info (str "[assets] stopped watching: " label))))
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
@@ -99,7 +99,7 @@
     (when (and marker (includes? line marker)) (web/live/notify-reload-css))))
 
 (defn proc-opts (w)
-  "The proc/spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
+  "The os/spawn opts map for watcher `w`: `:cwd`/`:env` if present, else empty."
   (let (base (if (get w :cwd) {:cwd (get w :cwd)} {}))
     (if (get w :env) (assoc base :env (get w :env)) base)))
 
