@@ -90,7 +90,7 @@
           ; a 20 000-byte body: big enough that it cannot land in one packet, and its bytes
           ; cycle 0..99 so a dropped/duplicated/mis-ordered read changes the checksum
           n 20000
-          body-bytes (bytes (map (fn (i) (mod i 100)) (range 0 n)))
+          body-bytes (bytes (map (fn (i) (math/mod i 100)) (range 0 n)))
           expected-sum (fold + 0 (seq body-bytes))
           head (b (str "POST /u HTTP/1.1\r\nHost: x\r\n"
                     "Content-Length: " n "\r\nConnection: close\r\n\r\n"))

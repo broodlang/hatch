@@ -90,7 +90,7 @@
   (hatch/web/upload/percent 0 0) ;=> 0"
   (if (or (nil? total) (<= total 0))
     0
-    (min 100 (max 0 (quot (* got 100) total)))))
+    (math/min 100 (math/max 0 (math/quot (* got 100) total)))))
 
 (defn progress-message (measurements metadata)
   "The `handle-info` payload for one progress event: `{:upload {:token :got :total :percent

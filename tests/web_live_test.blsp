@@ -93,39 +93,40 @@
   "A masked client frame (16-bit length form) as a `bytes` value: FIN+opcode, masked|126, the
   big-endian length, the 4-byte mask, then payload XORed with key[i%4]."
   (let (n (count payload-vals)
-        masked (map (fn (i) (bit/xor (nth payload-vals i) (nth key (mod i 4)))) (range n)))
-    (bytes (append [(+ 128 opcode) (+ 128 126) (quot n 256) (mod n 256)] key masked))))
+        masked (map (fn (i) (bit/xor (nth payload-vals i) (nth key (math/mod i 4)))) (range n)))
+    (bytes (append [(+ 128 opcode) (+ 128 126) (math/quot n 256) (math/mod n 256)] key masked))))
 
 (defn feed-tcp (sock frame chunk)
   "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
   as the socket layer would deliver them."
   (let (flen (bytes/length frame))
     (fold (fn (_ k)
-            (send (self) [:tcp sock (bytes/slice frame (* k chunk) (min flen (* (+ k 1) chunk)))]))
+            (send (self)
+              [:tcp sock (bytes/slice frame (* k chunk) (math/min flen (* (+ k 1) chunk)))]))
       nil
-      (range (quot (+ flen (- chunk 1)) chunk)))))
+      (range (math/quot (+ flen (- chunk 1)) chunk)))))
 
 (describe "recv-frame--loop: a large frame gathered across many reads"
   (test "reassembles a 300-byte masked text frame split into 50-byte reads"
-    (let (payload (into [] (map (fn (i) (mod i 100)) (range 300)))
+    (let (payload (into [] (map (fn (i) (math/mod i 100)) (range 300)))
           frame (ws-masked-frame 1 payload [17 34 51 68])
           sock :sock
           _ (feed-tcp sock frame 50))
       (match (web/live/recv-frame-loop sock (bytes []))
-        ([:ok opcode payload-out rem] (do
-                                        (assert= opcode 1)
-                                        (assert= (count rem) 0)
-                                        (assert= (into [] (seq payload-out)) payload)))
+        ([:ok opcode payload-out math/rem] (do
+                                             (assert= opcode 1)
+                                             (assert= (count math/rem) 0)
+                                             (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
-    (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
+    (let (payload (into [] (map (fn (i) (math/mod (+ i 7) 100)) (range 200)))
           frame (ws-masked-frame 1 payload [9 88 200 3])
           sock :sock
           _ (feed-tcp sock frame 1))
       (match (web/live/recv-frame-loop sock (bytes []))
-        ([:ok _opcode payload-out rem] (do
-                                         (assert= (count rem) 0)
-                                         (assert= (into [] (seq payload-out)) payload)))
+        ([:ok _opcode payload-out math/rem] (do
+                                              (assert= (count math/rem) 0)
+                                              (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; :isolated — registering and looking up both touch the shared :hatch-live-routes process,

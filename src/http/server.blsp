@@ -585,9 +585,9 @@ port) still returns and lets the caller fail on its own terms."
                               got2
                               clen
                               deadline
-                              (progress-tick prog (min got2 clen)))))
+                              (progress-tick prog (math/min got2 clen)))))
       ([:tcp-closed ^sock] nil)
-      (after (min (get config :read-timeout-ms) (max 1 (- deadline (os/now))))
+      (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
         (do
           (tcp/send sock
             (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
@@ -647,8 +647,8 @@ port) still returns and lets the caller fail on its own terms."
                                                          dlen
                                                          deadline))
                                    ([:tcp-closed ^sock] nil)
-                                   (after (min (get config :read-timeout-ms)
-                                            (max 1 (- deadline (os/now))))
+                                   (after (math/min (get config :read-timeout-ms)
+                                            (math/max 1 (- deadline (os/now))))
                                      (do
                                        (tcp/send sock
                                          (format-response {:status 408
@@ -687,7 +687,7 @@ port) still returns and lets the caller fail on its own terms."
     (let (path (spool-path config)
           already (bytes/slice buf body-start (count buf))
           alen (count already)
-          take (min alen clen)
+          take (math/min alen clen)
           prefix (if (= take alen) already (bytes/slice already 0 take)))
       ; the prefix is already `bytes` (the read loop keeps the buffer as bytes end to end).
       ; Later chunks arrive as `bytes` off the binary socket and are appended verbatim.
@@ -717,7 +717,7 @@ port) still returns and lets the caller fail on its own terms."
       (spool-dispatch sock handler config head path clen))
     (receive
       ([:tcp ^sock chunk] (let (n (count chunk)
-                                take (min n (- clen written))
+                                take (math/min n (- clen written))
                                 piece (if (= take n) chunk (bytes/slice chunk 0 take))
                                 written2 (+ written take))
                             (spool-append path piece)
@@ -732,7 +732,7 @@ port) still returns and lets the caller fail on its own terms."
                               deadline
                               (progress-tick prog written2))))
       ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
-      (after (min (get config :read-timeout-ms) (max 1 (- deadline (os/now))))
+      (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
         (do
           (spool-cleanup path)
           (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))

@@ -73,8 +73,8 @@
   (n acc)
   (if (= n 0)
     acc
-    (let (d (rem n 16))
-      (int->hex-acc (quot n 16) (str (string/substring "0123456789abcdef" d (+ d 1)) acc)))))
+    (let (d (math/rem n 16))
+      (int->hex-acc (math/quot n 16) (str (string/substring "0123456789abcdef" d (+ d 1)) acc)))))
 
 (defn int->hex (n)
   "The lowercase hexadecimal string for a non-negative integer `n` (`0` → \"0\") — the size

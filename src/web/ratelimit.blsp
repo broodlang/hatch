@@ -35,7 +35,7 @@
         tokens (get bucket :tokens (* 1.0 burst))
         ts (get bucket :ts dnow)
         refilled (+ tokens (* (- dnow ts) per-ms)))
-    {:tokens (min (* 1.0 burst) refilled) :ts dnow}))
+    {:tokens (math/min (* 1.0 burst) refilled) :ts dnow}))
 
 (defn- spend
   (bucket cfg cost dnow)
@@ -120,4 +120,4 @@
     (fn (conn)
       (match (take-token (key-fn conn) cost cfg)
         (:ok conn)
-        ([:deny retry-ms] (on-limit conn (max 1 (math/ceil (/ retry-ms 1000.0)))))))))
+        ([:deny retry-ms] (on-limit conn (math/max 1 (math/ceil (/ retry-ms 1000.0)))))))))
