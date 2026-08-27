@@ -185,7 +185,7 @@
 
 (defn with-resp-headers (conn hmap)
   "Add every `keyword → value` in `hmap` as a response header."
-  (fold (fn (c kv) (put-resp-header c (first kv) (first (rest kv)))) conn (map-pairs hmap)))
+  (fold (fn (c kv) (put-resp-header c (first kv) (first (rest kv)))) conn (%map-pairs hmap)))
 
 (defn not-modified (conn tag cc)
   "A 304 Not Modified — no body, but it still carries the validators a cache needs to keep
@@ -488,7 +488,8 @@
   "Serialize a `logical → fingerprinted` map to the manifest line format — one
   `logical<TAB>fingerprinted` line per asset. The inverse of `parse-manifest`; written by
   `web/assets/fingerprint`."
-  (string/join "" (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (map-pairs manifest))))
+  (string/join ""
+    (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (%map-pairs manifest))))
 
 (defn parse-manifest (text)
   "Parse a manifest (one `logical<TAB>fingerprinted` line per asset) into a map."

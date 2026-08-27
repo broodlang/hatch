@@ -93,7 +93,7 @@
   "A masked client frame (16-bit length form) as a `bytes` value: FIN+opcode, masked|126, the
   big-endian length, the 4-byte mask, then payload XORed with key[i%4]."
   (let (n (count payload-vals)
-        masked (map (fn (i) (bit-xor (nth payload-vals i) (nth key (mod i 4)))) (range n)))
+        masked (map (fn (i) (bit/xor (nth payload-vals i) (nth key (mod i 4)))) (range n)))
     (bytes (append [(+ 128 opcode) (+ 128 126) (quot n 256) (mod n 256)] key masked))))
 
 (defn feed-tcp (sock frame chunk)
@@ -115,7 +115,7 @@
         ([:ok opcode payload-out rem] (do
                                         (assert= opcode 1)
                                         (assert= (count rem) 0)
-                                        (assert= (into [] (bytes/->list payload-out)) payload)))
+                                        (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
     (let (payload (into [] (map (fn (i) (mod (+ i 7) 100)) (range 200)))
@@ -125,7 +125,7 @@
       (match (web/live/recv-frame-loop sock (bytes []))
         ([:ok _opcode payload-out rem] (do
                                          (assert= (count rem) 0)
-                                         (assert= (into [] (bytes/->list payload-out)) payload)))
+                                         (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; :isolated — registering and looking up both touch the shared :hatch-live-routes process,
@@ -160,7 +160,7 @@
       (register-live "/crash-test" (fn () {:ok true}) :customer)
       (assert= (get (lookup-live "/crash-test") :session) :customer)
       ; hard-kill the route registry; the supervisor restarts it and it re-seeds from the vault
-      (exit (whereis :hatch-live-routes) :kill)
+      (exit (proc/whereis :hatch-live-routes) :kill)
       ; Poll for the supervised restart + re-seed rather than sleeping a guessed 80ms: the
       ; restart is async w.r.t. the kill, so a fixed wait is a race on a loaded machine.
       (let (e (wait-live-route "/crash-test" 200))
@@ -223,13 +223,14 @@
   (test "named escapes n/r/t/b/f and backslash/quote/slash"
     (assert= (json-decode "\"a\\nb\\tc\\\\d\\\"e\\/f\"") "a\nb\tc\\d\"e/f"))
   (test "\\uXXXX decodes to the codepoint (lowercase and uppercase hex)"
-    (assert= (json-decode "\"\\u0041\\u00e9\\u00C9\"") (str "A" (int->char 233) (int->char 201))))
+    (assert= (json-decode "\"\\u0041\\u00e9\\u00C9\"")
+      (str "A" (string/int->char 233) (string/int->char 201))))
   (test "\\u of a control char round-trips (e.g. tab via \\u0009)"
     (assert= (json-decode "\"x\\u0009y\"") "x\ty"))
   (test "a lone surrogate falls back to U+FFFD instead of crashing"
-    (assert= (json-decode "\"\\uD83D\"") (int->char 65533)))
+    (assert= (json-decode "\"\\uD83D\"") (string/int->char 65533)))
   (test "malformed hex falls back to U+FFFD"
-    (assert= (json-decode "\"\\uZZZZ\"") (int->char 65533)))
+    (assert= (json-decode "\"\\uZZZZ\"") (string/int->char 65533)))
   (test "\\u inside an object value"
     (assert= (json-decode "{\"k\":\"\\u0041\"}") {"k" "A"})))
 

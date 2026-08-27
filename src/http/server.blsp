@@ -123,7 +123,7 @@ port) still returns and lets the caller fail on its own terms."
                                                   handler ws-handler cfg)))
                                 :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
-    (register (supervisor-name port) sup)
+    (proc/register (supervisor-name port) sup)
     (await-listening port 5000)
     sup))
 
@@ -176,8 +176,8 @@ port) still returns and lets the caller fail on its own terms."
   "Gracefully stop the HTTP server on `port`: the listener stops accepting, lets in-flight
   connections finish (up to :shutdown-grace-ms, then hard-kills stragglers), and only then
   is the supervisor torn down — so a clean `stop` doesn't cut off active requests."
-  (let (sup (whereis (supervisor-name port))
-        listener (whereis (listener-name port)))
+  (let (sup (proc/whereis (supervisor-name port))
+        listener (proc/whereis (listener-name port)))
     (if sup
       (do
         (when listener (drain-and-wait listener))
@@ -749,7 +749,7 @@ port) still returns and lets the caller fail on its own terms."
   that lost write permission) delete the partial temp file before re-raising, so a failed
   upload can't leak an abandoned `hatch-upload-*` file (repeated failures → disk exhaustion)."
   (try
-    (bytes/append path piece)
+    (file/spit-bytes-append path piece)
     (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
 (defn- spool-dispatch

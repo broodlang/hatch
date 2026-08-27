@@ -109,7 +109,7 @@
 (defn param-name-char? (c)
   "True for a Content-Disposition parameter-name character (letter/digit/`-`) — used to tell a
   real parameter start from `name` appearing inside a longer token like `filename`."
-  (let (cp (char->int c))
+  (let (cp (string/char->int c))
     (or (and (>= cp 65) (<= cp 90))
       (and (>= cp 97) (<= cp 122))
       (and (>= cp 48) (<= cp 57))

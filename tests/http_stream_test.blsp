@@ -46,9 +46,12 @@
   "Parse a lowercase/uppercase hex string to an int (small helper for the chunk-size line)."
   (fold (fn (acc c)
           (let (d (cond
-                    (and (>= (char->int c) 48) (<= (char->int c) 57)) (- (char->int c) 48)
-                    (and (>= (char->int c) 97) (<= (char->int c) 102)) (- (char->int c) 87)
-                    (and (>= (char->int c) 65) (<= (char->int c) 70)) (- (char->int c) 55)
+                    (and (>= (string/char->int c) 48) (<= (string/char->int c) 57))
+                      (- (string/char->int c) 48)
+                    (and (>= (string/char->int c) 97) (<= (string/char->int c) 102))
+                      (- (string/char->int c) 87)
+                    (and (>= (string/char->int c) 65) (<= (string/char->int c) 70))
+                      (- (string/char->int c) 55)
                     else nil))
             (if (nil? d) acc (+ (* acc 16) d))))
     0

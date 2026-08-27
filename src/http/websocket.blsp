@@ -42,14 +42,14 @@
   value; convert it here at the receive boundary so the existing string-based readers
   (frame parser, request reader) keep working unchanged. Built with `join` rather than
   `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
-  (string/join "" (map byte->char (bytes/->list b))))
+  (string/join "" (map byte->char (seq b))))
 
 (defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
   frame/request parser's form) or a first-class `bytes` value (an outbound frame)."
   (if (bytes? s)
     (get s i)
-    (char->int (string/char-at s i))))
+    (string/char->int (string/char-at s i))))
 
 ; ---- handshake ----
 
@@ -112,7 +112,7 @@
 ; `tcp/send` UTF-8-encodes a *string* leaf (ADR-141) — which would re-encode an
 ; already-encoded payload, doubling every byte ≥ 0x80 (multibyte chars AND the frame's
 ; own header/length bytes) and mis-sizing the frame. A `bytes` value bypasses that: the
-; payload is UTF-8-encoded exactly once (`string->utf8-bytes`), and the header bytes go
+; payload is UTF-8-encoded exactly once (`string/->bytes`), and the header bytes go
 ; out as-is.
 
 (defn utf8-byte-string (s)
@@ -121,7 +121,7 @@
   on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
   payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
   through a list first keeps this O(n)."
-  (string/join "" (map byte->char (bytes/->list (string/->bytes s)))))
+  (string/join "" (map byte->char (seq (string/->bytes s)))))
 
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
@@ -238,11 +238,11 @@
       [:incomplete]
       (let (byte0 (carrier-byte-at buf 0)
             byte1 (carrier-byte-at buf 1)
-            fin (bit-shift-right byte0 7)
-            rsv (bit-and (bit-shift-right byte0 4) 7)
-            opcode (bit-and byte0 15)
-            masked (bit-shift-right byte1 7)
-            plen7 (bit-and byte1 127))
+            fin (bit/shift-right byte0 7)
+            rsv (bit/and (bit/shift-right byte0 4) 7)
+            opcode (bit/and byte0 15)
+            masked (bit/shift-right byte1 7)
+            plen7 (bit/and byte1 127))
         (cond
           ; §5.2: RSV1-3 must be 0 unless an extension negotiated them (none here).
           (not (= rsv 0)) [:error "websocket: reserved bits set"]
@@ -331,8 +331,8 @@
     (if (< buflen 2)
       nil
       (let (byte1 (carrier-byte-at buf 1)
-            masked (bit-shift-right byte1 7)
-            plen7 (bit-and byte1 127))
+            masked (bit/shift-right byte1 7)
+            plen7 (bit/and byte1 127))
         (cond
           (= plen7 126) (if (< buflen 4)
                           nil
@@ -350,5 +350,5 @@
               (get buf (+ key-offset 2))
               (get buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (bytes (map (fn (i) (bit-xor (get buf (+ data-start i)) (get key (mod i 4))))
+    (bytes (map (fn (i) (bit/xor (get buf (+ data-start i)) (get key (mod i 4))))
              (range plen)))))

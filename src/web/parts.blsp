@@ -230,7 +230,7 @@
       (let (attrs (if has-attrs second {})
             cstart (if has-attrs 2 1)
             st (emit-static st (str "<" tag))
-            st (fold emit-attr st (map-pairs attrs))
+            st (fold emit-attr st (%map-pairs attrs))
             st (emit-static st ">"))
         (if (contains? *void-tags* (keyword tag))
           st
