@@ -62,8 +62,8 @@
   "The session signing secret, read from `$var` and validated by `check-secret`: a strong
   secret in any environment, the labeled dev default when it's missing/weak in dev, or a loud
   boot failure when it's missing/weak outside dev. Prefer this over a hand-rolled
-  `(or (os/getenv …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
-  (check-secret (os/getenv var) (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
+  `(or (os/env …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
+  (check-secret (os/env var) (= (or (os/env "HATCH_ENV") "dev") "dev")))
 
 ; ---- signing / verification ----
 
@@ -175,7 +175,7 @@
   in prod the auth cookie is sent only over HTTPS (a network attacker can't read it off a
   plaintext request and replay it) while local HTTP dev still works. An explicit `:secure`
   opt overrides."
-  (not (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
+  (not (= (or (os/env "HATCH_ENV") "dev") "dev")))
 
 (defn session-cookie-opts (opts)
   "The put-cookie options for the session cookie, defaulting to a secure-by-default shape

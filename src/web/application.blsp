@@ -68,10 +68,10 @@
   - `$LOG_FORMAT` — `\"json\"` for NDJSON (log shippers), else colored text
   - `$NO_COLOR`   — set to disable ANSI colors (the no-color.org convention)"
   (let (string/interp (cond
-                        (= (os/getenv "LOG_FORMAT") "json") application-json-line
-                        (nil? (os/getenv "NO_COLOR")) application-color-line
+                        (= (os/env "LOG_FORMAT") "json") application-json-line
+                        (nil? (os/env "NO_COLOR")) application-color-line
                         else application-text-line))
-    {:level (valid-level (os/getenv "LOG_LEVEL"))
+    {:level (valid-level (os/env "LOG_LEVEL"))
      :backends [(fn-backend (fn (line) (io/write line)) {:format string/interp})]}))
 
 (defn start (config)

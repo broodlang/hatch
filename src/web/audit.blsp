@@ -22,7 +22,7 @@
 
 (defn dev? ()
   "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`)."
-  (= (or (os/getenv "HATCH_ENV") "dev") "dev"))
+  (= (or (os/env "HATCH_ENV") "dev") "dev"))
 
 (defn- tag-text
   (document start)

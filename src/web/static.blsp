@@ -107,7 +107,7 @@
   "True unless $HATCH_ENV names the dev environment (the zero-config default). Mirrors the
   endpoint's `dev?`; it lives here too so the static layer can pick its cache policy without
   the app threading an env flag through every call."
-  (not (= (or (os/getenv "HATCH_ENV") "dev") "dev")))
+  (not (= (or (os/env "HATCH_ENV") "dev") "dev")))
 
 ; ---- caching ----
 
