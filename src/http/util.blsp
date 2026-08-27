@@ -5,7 +5,7 @@
 
 (defn hex-char->int (c)
   "Convert a single hex digit character to its integer value (0–15)."
-  (let (code (char->int c))
+  (let (code (string/char->int c))
     (cond
       (and (>= code 48) (<= code 57)) (- code 48)
       (and (>= code 65) (<= code 70)) (- code 55)
@@ -39,7 +39,7 @@
     (("%" h l & rest) (url-decode-acc rest
                         (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
     (("+" & rest) (url-decode-acc rest (cons 32 acc)))
-    ((c & rest) (let (cp (char->int c))
+    ((c & rest) (let (cp (string/char->int c))
                   (if (< cp 128)
                     (url-decode-acc rest (cons cp acc))
                     (url-decode-acc rest
@@ -75,7 +75,7 @@
   "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
   the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
   upload) from the parsed carrier body."
-  (bytes (map char->int (string/->list carrier))))
+  (bytes (map string/char->int (string/->list carrier))))
 
 (defn carrier->text (carrier)
   "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
@@ -148,7 +148,7 @@
     (map? v)
       (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
         {}
-        (map-pairs v))
+        (%map-pairs v))
     (vector? v) (mapv stringify-keys v)
     else v))
 

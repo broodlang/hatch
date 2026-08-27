@@ -182,7 +182,7 @@
   "Decode head-block `bytes` to a Latin-1 carrier string (one codepoint 0-255 per byte), so the
   string-based head parser runs byte-faithfully. Applied only to the request HEAD, which is
   bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`."
-  (string/join "" (map int->char (bytes/->list b))))
+  (string/join "" (map string/int->char (seq b))))
 
 (defn try-parse-bytes (buf)
   "Bytes-native `try-parse`: `buf` is a `bytes` value. Returns `[:ok request remainder]`,
@@ -282,7 +282,7 @@
 
 (defn hex-digit-val (c)
   "The value 0–15 of hex digit char `c`, or nil if it isn't one."
-  (let (n (char->int c))
+  (let (n (string/char->int c))
     (cond
       (and (>= n 48) (<= n 57)) (- n 48)
       ; 0-9
@@ -357,7 +357,8 @@
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
   (and (not (string/blank? s))
-    (empty? (filter (fn (c) (let (n (char->int c)) (or (< n 48) (> n 57)))) (string/->list s)))))
+    (empty? (filter (fn (c) (let (n (string/char->int c)) (or (< n 48) (> n 57))))
+              (string/->list s)))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
@@ -497,4 +498,4 @@
     (fold (fn (m kv)
             (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
       {}
-      (map-pairs grouped))))
+      (%map-pairs grouped))))

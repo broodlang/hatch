@@ -25,7 +25,7 @@
   reaches the wire intact. tcp/send UTF-8-encodes a string leaf (ADR-141), which would mangle
   every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
   verbatim — the same reason the server builds its frames as `bytes`."
-  (bytes (map char->int (string/->list carrier))))
+  (bytes (map string/char->int (string/->list carrier))))
 
 (defn read-one-frame (sock buf)
   "Block until one complete WebSocket frame is buffered; return its decoded payload,
@@ -276,7 +276,7 @@
 (defn wait-unregistered (nm tries)
   "Poll until `nm` is no longer registered — true if it went away within `tries` x 10ms."
   (cond
-    (nil? (whereis nm)) true
+    (nil? (proc/whereis nm)) true
     (<= tries 0) false
     else (do (sleep 10) (wait-unregistered nm (- tries 1)))))
 
@@ -289,7 +289,7 @@
           sock (tcp/connect "127.0.0.1" port)
           _ (tcp/send sock "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
           _resp (drain sock "")
-          sup (whereis (server/worker-supervisor-name port))
+          sup (proc/whereis (server/worker-supervisor-name port))
           n (supervisor/count-children sup))
       (tcp/close sock)
       (server/stop port)
@@ -298,7 +298,7 @@
   (test "the worker supervisor is torn down when the server stops"
     (let (port 24772
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
-          up? (pid? (whereis (server/worker-supervisor-name port)))
+          up? (pid? (proc/whereis (server/worker-supervisor-name port)))
           _ (server/stop port)
           ; POLL rather than sleeping a fixed 50ms: the teardown is async w.r.t. `stop`, so a
           ; fixed wait is a race that loses every ~15th run on a loaded machine (observed).

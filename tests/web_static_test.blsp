@@ -192,7 +192,7 @@
   (test "Range on a multibyte body falls back to a full 200"
     (let (
           ; em-dash: 3 bytes, 1 char
-          body (str "ab" (int->char 8212) "cd")
+          body (str "ab" (string/int->char 8212) "cd")
           resp (serve-body (conn-with {} {:range "bytes=0-2"}) "text/plain" body "f.txt"))
       (assert= (get resp :status) 200)
       (assert= (get resp :resp-body) body)))

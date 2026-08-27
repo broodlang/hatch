@@ -19,7 +19,7 @@
   "Block until `nm` is registered (supervisor children start asynchronously). Gives up after
   `tries` × 5ms — callers treat a miss as 'not up yet' rather than erroring."
   (cond
-    (whereis nm) :ok
+    (proc/whereis nm) :ok
     (<= tries 0) :ok
     else (do (sleep 5) (await nm (- tries 1)))))
 
@@ -27,11 +27,11 @@
   "The pid registered as `wait-name`. On first use (or after a teardown) start the supervisor
   for `children` — idempotent via its `:name`, so concurrent callers and hot reloads converge
   on one — and wait through the brief async-start window."
-  (or (whereis wait-name)
+  (or (proc/whereis wait-name)
     (do
       (supervisor/start children {:name sup-name :strategy :one-for-one})
       (await wait-name 60)
-      (whereis wait-name))))
+      (proc/whereis wait-name))))
 
 (defn vault-loop (snapshot)
   "A durable mirror: holds the latest snapshot pushed via `[:set s]` and serves it on
@@ -43,7 +43,7 @@
 (defn pull-snapshot (vault-name default)
   "Pull the vault's snapshot — the registry calls this on boot to recover. `default` if the
   vault isn't up yet (first boot) or doesn't answer in time."
-  (let (v (whereis vault-name))
+  (let (v (proc/whereis vault-name))
     (if (nil? v)
       default
       (do
@@ -55,6 +55,6 @@
 (defn mirror (vault-name snapshot)
   "Push the current snapshot to the vault (best-effort; the vault may be mid-restart, in
   which case the next mirror repopulates it). Returns nil."
-  (let (v (whereis vault-name))
+  (let (v (proc/whereis vault-name))
     (when v (send v [:set snapshot])))
   nil)

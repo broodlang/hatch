@@ -12,7 +12,7 @@
 (defn encode-bytes (bytes)
   "Base64-encode a list or vector of byte integers (0-255).
 
-  (hatch/http/base64/encode-bytes (string->utf8-bytes \"hello\")) ;=> \"aGVsbG8=\""
+  (hatch/http/base64/encode-bytes (string/->bytes \"hello\")) ;=> \"aGVsbG8=\""
   ; Accumulate 4-char groups in a list (most-recent first), then reverse + join once.
   ; O(n): first/rest stepping, no per-step `count`, no per-step whole-string rebuild;
   ; the recursion stays in tail position.
@@ -24,17 +24,17 @@
     (empty? bytes) acc
     (empty? (rest bytes))
       (let (a (first bytes))
-        (cons (str (b64-char (bit-shift-right a 2))
-                (b64-char (bit-shift-left (bit-and a 3) 4))
+        (cons (str (b64-char (bit/shift-right a 2))
+                (b64-char (bit/shift-left (bit/and a 3) 4))
                 "==")
           acc))
     (empty? (rest (rest bytes)))
       (let (a (first bytes)
             b (first (rest bytes)))
-        (cons (str (b64-char (bit-shift-right a 2))
-                (b64-char (bit-or (bit-shift-left (bit-and a 3) 4)
-                            (bit-shift-right b 4)))
-                (b64-char (bit-shift-left (bit-and b 15) 2))
+        (cons (str (b64-char (bit/shift-right a 2))
+                (b64-char (bit/or (bit/shift-left (bit/and a 3) 4)
+                            (bit/shift-right b 4)))
+                (b64-char (bit/shift-left (bit/and b 15) 2))
                 "=")
           acc))
     else
@@ -43,10 +43,10 @@
             c (first (rest (rest bytes)))
             tail (rest (rest (rest bytes))))
         (encode-bytes-acc tail
-          (cons (str (b64-char (bit-shift-right a 2))
-                  (b64-char (bit-or (bit-shift-left (bit-and a 3) 4) (bit-shift-right b 4)))
-                  (b64-char (bit-or (bit-shift-left (bit-and b 15) 2) (bit-shift-right c 6)))
-                  (b64-char (bit-and c 63)))
+          (cons (str (b64-char (bit/shift-right a 2))
+                  (b64-char (bit/or (bit/shift-left (bit/and a 3) 4) (bit/shift-right b 4)))
+                  (b64-char (bit/or (bit/shift-left (bit/and b 15) 2) (bit/shift-right c 6)))
+                  (b64-char (bit/and c 63)))
             acc)))))
 
 (defn encode-sha1 (hex-sha1)

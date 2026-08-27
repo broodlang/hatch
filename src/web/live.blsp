@@ -68,7 +68,7 @@
 (impl Encode :string (encode [s] (json-str s)))
 (impl Encode :vector (encode [v] (str "[" (string/join "," (map encode v)) "]")))
 (impl Encode :pair (encode [v] (str "[" (string/join "," (map encode v)) "]")))
-(impl Encode :map (encode [m] (str "{" (string/join "," (map encode-entry (map-pairs m))) "}")))
+(impl Encode :map (encode [m] (str "{" (string/join "," (map encode-entry (%map-pairs m))) "}")))
 ; keywords, symbols, …
 (impl Encode :default (encode [v] (json-str (str v))))
 (defn- encode-entry
@@ -152,12 +152,12 @@
     (= e "n") "\n"
     (= e "r") "\r"
     (= e "t") "\t"
-    (= e "b") (int->char 8)
-    (= e "f") (int->char 12)
+    (= e "b") (string/int->char 8)
+    (= e "f") (string/int->char 12)
     else e))
 
 ; U+FFFD, substituted for a \uXXXX escape we can't represent (see jp-str-uni).
-(def- json-replacement-char (int->char 65533))
+(def- json-replacement-char (string/int->char 65533))
 
 (defn- json-hex-val
   (c)
@@ -178,7 +178,7 @@
                             (if (or (< v0 0) (< v1 0) (< v2 0) (< v3 0))
                               (jp-str-acc rest (cons json-replacement-char acc))
                               (let (cp (+ (* 4096 v0) (* 256 v1) (* 16 v2) v3)
-                                    ch (try (int->char cp) (catch e json-replacement-char)))
+                                    ch (try (string/int->char cp) (catch e json-replacement-char)))
                                 (jp-str-acc rest (cons ch acc))))))
     (_ [(jp-join (cons json-replacement-char acc)) nil])))
 
@@ -363,8 +363,8 @@
   absent (supervisor never started, or torn down), (re)start the supervisor — idempotent
   via its `:name` — and wait through the brief async-start / restart window. In normal
   operation the first `whereis` hits, so nothing competes with the supervisor's child."
-  (or (whereis nm)
-    (do (start-live-registries) (live-await nm 60) (whereis nm))))
+  (or (proc/whereis nm)
+    (do (start-live-registries) (live-await nm 60) (proc/whereis nm))))
 
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
 ; Hot reload already rebinds the view's globals (docs/shared-code.md); we just need
@@ -391,14 +391,14 @@
 
 (defn- live-unregister
   (pid)
-  (let (r (whereis :hatch-live)) (when r (send r [:unregister pid])))
+  (let (r (proc/whereis :hatch-live)) (when r (send r [:unregister pid])))
   nil)
 
 (defn notify-reload ()
   "Signal every open live session to re-render with freshly hot-reloaded code. A
   `deflive` sentinel calls this on each (re)load of the view module; a no-op when no
   registry/sessions are running (e.g. the first load at startup)."
-  (let (r (whereis :hatch-live)) (when r (send r [:reload])))
+  (let (r (proc/whereis :hatch-live)) (when r (send r [:reload])))
   nil)
 
 (defn notify-reload-css ()
@@ -406,7 +406,7 @@
   state is untouched (the client just re-stamps each <link rel=stylesheet> href). The
   asset watcher (web/assets) calls this on each finished CSS rebuild; a no-op when no
   registry/sessions are running."
-  (let (r (whereis :hatch-live)) (when r (send r [:reload-css])))
+  (let (r (proc/whereis :hatch-live)) (when r (send r [:reload-css])))
   nil)
 
 ; ---- session actor ----
@@ -691,7 +691,7 @@
   been delivered to our mailbox by the time it replies — a barrier a following `drain-oob` then
   relies on. A no-op when the registry isn't up (this app doesn't use it); bounded by a short
   timeout so a wedged registry can't hang a navigate."
-  (let (reg (whereis nm))
+  (let (reg (proc/whereis nm))
     (when reg
       (let (r (ref))
         (send reg [:sync (self) r])
@@ -796,8 +796,8 @@
   `\"x\"`, or `[1,2,3]`) would kill the session actor before `close-session` runs, leaking its
   registry entry and component table per connection.
 
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}
-  (hatch/web/live/parse-client-frame (string->utf8-bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}"
+  (hatch/web/live/parse-client-frame (string/->bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}
+  (hatch/web/live/parse-client-frame (string/->bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}"
   (let (decoded (try (json-decode (string/bytes-> payload)) (catch _ nil))
         msg (if (map? decoded) decoded {})
         raw-params (get msg "params" {}))
@@ -998,7 +998,7 @@
   (table/new)
   (receive
     ; mirror every change to the vault, so the table survives this process crashing
-    ([:put path entry] (let (v (whereis :hatch-live-routes-vault))
+    ([:put path entry] (let (v (proc/whereis :hatch-live-routes-vault))
                          (when v (send v [:put path entry])))
       (live-routes-loop (assoc table/new path entry)))
     ; reply keyed by the caller's ref `r` so a late reply from a timed-out :get can't be
@@ -1007,9 +1007,9 @@
     ; the vault we monitor died: once the supervisor restarts it, re-mirror our whole
     ; table so the backup is whole again, and re-watch the fresh vault
     ([:down _ _ _] (live-await :hatch-live-routes-vault 60)
-      (let (v (whereis :hatch-live-routes-vault))
+      (let (v (proc/whereis :hatch-live-routes-vault))
         (when v
-          (dolist (kv (map-pairs table/new)) (send v [:put (first kv) (second kv)]))
+          (dolist (kv (%map-pairs table/new)) (send v [:put (first kv) (second kv)]))
           (monitor v)))
       (live-routes-loop table/new))))
 
@@ -1041,7 +1041,7 @@
   (nm)
   "Request a `{path -> entry}` snapshot from the process registered `nm`, or `{}` if it
   isn't up or doesn't answer in time. Run in the new process at (re)start to recover."
-  (let (p (whereis nm))
+  (let (p (proc/whereis nm))
     (if (nil? p)
       {}
       (do
@@ -1052,7 +1052,7 @@
   ()
   "Monitor the route vault from the registry, so the registry is told (`[:down …]`) when
   the vault dies and can re-mirror its table to the restarted vault."
-  (let (v (whereis :hatch-live-routes-vault)) (when v (monitor v))))
+  (let (v (proc/whereis :hatch-live-routes-vault)) (when v (monitor v))))
 
 (defn- live-routes-boot
   ()
@@ -1071,7 +1071,7 @@
   "Block until `nm` is registered (the supervisor starts children asynchronously), so the
   caller can rely on the registries being up. Gives up after `tries` × 5ms."
   (cond
-    (whereis nm) :ok
+    (proc/whereis nm) :ok
     (<= tries 0) :ok
     else (do (sleep 5) (live-await nm (- tries 1)))))
 

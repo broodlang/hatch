@@ -70,7 +70,7 @@
 (defn- url-scheme-noise?
   (c)
   "True for a leading char a browser strips before parsing a URL scheme (whitespace/controls)."
-  (<= (char->int c) 32))
+  (<= (string/char->int c) 32))
 
 (defn- safe-data-image?
   (s)
@@ -119,7 +119,7 @@
   an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
   value path already defends but the name path otherwise emits verbatim."
   (and (> (string/length n) 0)
-    (not (any? (fn (c) (unsafe-attr-name-cp? (char->int c))) (string/->list n)))))
+    (not (any? (fn (c) (unsafe-attr-name-cp? (string/char->int c))) (string/->list n)))))
 
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.
@@ -140,7 +140,7 @@
 
 (defn render-attrs (attrs)
   "Serialize an attribute map to an HTML attribute string."
-  (string/join "" (map render-attr (map-pairs attrs))))
+  (string/join "" (map render-attr (%map-pairs attrs))))
 
 ;; The seam for an app's OWN type in a template. `render`'s `else` used to escape
 ;; `(str node)`, which for a record is its internal map — `{:__id__ :app/money, :cents 250}`

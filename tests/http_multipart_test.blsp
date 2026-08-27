@@ -35,7 +35,7 @@
       (assert= (get f :content-type) "image/png")))
   (test "file content is kept as raw bytes, byte-for-byte (binary + embedded CRLF survive)"
     (let (f (get-in (parse body "BOUND") [:files "avatar"]))
-      (assert= (into [] (bytes/->list (get f :bytes))) [137 80 78 71 0 255 13 10])))
+      (assert= (into [] (seq (get f :bytes))) [137 80 78 71 0 255 13 10])))
   (test "a body with no boundary present yields empty maps"
     (assert= (parse (b "not multipart at all") "BOUND") {:fields {} :files {}}))
   (test "a blank boundary yields empty maps"
