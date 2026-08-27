@@ -30,7 +30,7 @@
 
 (impl Renderable
   web-template-test/money
-  (render-html [m] (str "<span class=\"money\">$" (quot (get m :cents) 100) "</span>")))
+  (render-html [m] (str "<span class=\"money\">$" (math/quot (get m :cents) 100) "</span>")))
 
 (defrecord plain-thing (v))
 

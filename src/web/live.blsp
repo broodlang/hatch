@@ -41,7 +41,9 @@
     (= cp 12) "\\f"
     (= cp 13) "\\r"
     else
-      (str "\\u00" (string/char-at *json-hex* (quot cp 16)) (string/char-at *json-hex* (mod cp 16)))))
+      (str "\\u00"
+        (string/char-at *json-hex* (math/quot cp 16))
+        (string/char-at *json-hex* (math/mod cp 16)))))
 
 (defn json-str (s)
   "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
@@ -257,7 +259,7 @@
   missing bytes into a list and joins once — O(n) — rather than re-`str`ing the whole buffer on
   every socket read (which was O(n²) up to the message-size cap)."
   (match (parse-frame buf)
-    ([:ok opcode payload rem] [:ok opcode payload rem])
+    ([:ok opcode payload math/rem] [:ok opcode payload math/rem])
     ([:incomplete] (recv-frame-fill sock buf (list) 0 (frame-shortfall buf)))
     ([:error msg] [:error msg])))
 
@@ -722,9 +724,9 @@
         (session-recv sock view buf)
         (close-session sock view)))
     ; client message
-    ([:ok 1 payload rem] (kick-watchdog view) (session-dispatch sock view rem payload))
+    ([:ok 1 payload math/rem] (kick-watchdog view) (session-dispatch sock view math/rem payload))
     ; other opcodes (e.g. a pong, opcode 0xA) — ignored, but still client liveness
-    ([:ok _ _ rem] (kick-watchdog view) (session-recv sock view rem))
+    ([:ok _ _ math/rem] (kick-watchdog view) (session-recv sock view math/rem))
     ; A generation-stamped beat. Drop it if it's from a view we've navigated away from
     ; (its ticker was killed, but this beat was already in the mailbox) — otherwise it'd
     ; fire the new view's handle-tick with the old view's interval key.

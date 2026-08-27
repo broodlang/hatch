@@ -244,7 +244,7 @@
                   (let (n (range-int hi))
                     (if (or (nil? n) (<= n 0))
                       nil
-                      [(max 0 (- len n)) (- len 1)]))
+                      [(math/max 0 (- len n)) (- len 1)]))
                 ; bytes=a- → a..end
                 (string/blank? hi)
                   (let (a (range-int lo))
@@ -259,7 +259,7 @@
                     (cond
                       (or (nil? a) (nil? b) (> a b)) nil
                       (>= a len) :unsatisfiable
-                      else [a (min b (- len 1))]))))))))))
+                      else [a (math/min b (- len 1))]))))))))))
 
 (defn serve-range (conn content-type body tag cc len)
   "Honour a `Range` request when we safely can. Byte ranges are byte offsets, but the body

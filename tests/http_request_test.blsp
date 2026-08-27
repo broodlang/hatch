@@ -69,8 +69,8 @@
     (let ([_ req _] (try-parse "GET / HTTP/1.1\r\nContent-Type: text/html\r\n\r\n"))
       (assert= (get (get req :headers) :content-type) "text/html")))
   (test "empty remainder when no pipeline"
-    (let ([_ _ rem] (try-parse "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
-      (assert= rem ""))))
+    (let ([_ _ math/rem] (try-parse "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (assert= math/rem ""))))
 
 (describe "try-parse: POST with body"
   (test "body extracted"
@@ -79,8 +79,8 @@
       (assert= (get req :body) "hello")))
   (test "remainder empty after full body"
     (let (raw "POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
-          [_ _ rem] (try-parse raw))
-      (assert= rem "")))
+          [_ _ math/rem] (try-parse raw))
+      (assert= math/rem "")))
   (test "incomplete when body not yet fully arrived"
     (let (raw "POST /data HTTP/1.1\r\nContent-Length: 100\r\n\r\nshort")
       (assert= (try-parse raw) [:incomplete]))))
@@ -89,8 +89,8 @@
   (test "remainder is second request"
     (let (raw (str "GET /first HTTP/1.1\r\nHost: x\r\n\r\n"
                 "GET /second HTTP/1.1\r\nHost: x\r\n\r\n")
-          [_ _ rem] (try-parse raw))
-      (assert= rem "GET /second HTTP/1.1\r\nHost: x\r\n\r\n"))))
+          [_ _ math/rem] (try-parse raw))
+      (assert= math/rem "GET /second HTTP/1.1\r\nHost: x\r\n\r\n"))))
 
 ; Audit hardening — see docs/tcp-http-audit.md (#3 Content-Length, #6 Transfer-Encoding,
 ; #10 header colon). Each malformed input must NOT crash the worker; it returns :error
@@ -111,11 +111,11 @@
       (assert= tag :ok)
       (assert= (get req :body) "Wiki")))
   (test "trailers are consumed and the pipelined remainder preserved"
-    (let ([tag req rem] (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
-                                     "4\r\nWiki\r\n0\r\nX-Trailer: y\r\n\r\nNEXT")))
+    (let ([tag req math/rem] (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                          "4\r\nWiki\r\n0\r\nX-Trailer: y\r\n\r\nNEXT")))
       (assert= tag :ok)
       (assert= (get req :body) "Wiki")
-      (assert= rem "NEXT")))
+      (assert= math/rem "NEXT")))
   (test "Transfer-Encoding + Content-Length is rejected (smuggling guard)"
     (assert= (first (try-parse (str "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n"
                                  "Content-Length: 4\r\n\r\nWiki")))
@@ -153,7 +153,7 @@
 (describe "dechunk-step: incremental de-chunk"
   (test "decodes complete chunks and returns the body + pipelined remainder at the terminator"
     (match (dechunk-step "5\r\nhello\r\n0\r\n\r\nNEXT" 0 (list) 0)
-      ([:ok body rem] (do (assert= body "hello") (assert= rem "NEXT")))
+      ([:ok body math/rem] (do (assert= body "hello") (assert= math/rem "NEXT")))
       (o (assert= o :ok))))
   (test "returns :more with only the undecoded tail — decoded pieces are carried, not re-scanned"
     (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
@@ -166,7 +166,9 @@
   (test "resuming from a :more tail completes the body without re-decoding the first chunk"
     (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
       ([:more tail decoded dlen] (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
-                                   ([:ok body rem] (do (assert= body "helloabc") (assert= rem "")))
+                                   ([:ok body math/rem] (do
+                                                          (assert= body "helloabc")
+                                                          (assert= math/rem "")))
                                    (o (assert= o :ok))))
       (o (assert= o :more))))
   (test "an incomplete size line yields :more (needs the rest of the line)"

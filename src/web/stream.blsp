@@ -86,7 +86,7 @@
   "Write `data` (bytes) to the socket in `block-size`-byte chunks, from `offset` to the end."
   (let (n (count data))
     (when (< offset n)
-      (let (end (min n (+ offset block-size)))
+      (let (end (math/min n (+ offset block-size)))
         (write (bytes/slice data offset end))
         (write-blocks write data block-size end)))))
 

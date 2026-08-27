@@ -94,15 +94,15 @@
     (assert= (parse-frame (bytes [129])) [:incomplete]))
   (test "parses a small masked text frame"
     (let (frame (cframe 1 1 "hello")
-          [tag opcode payload rem] (parse-frame frame))
+          [tag opcode payload math/rem] (parse-frame frame))
       (assert= tag :ok)
       (assert= opcode 1)
       (assert= (string/bytes-> payload) "hello")
-      (assert= (count rem) 0)))
+      (assert= (count math/rem) 0)))
   (test "remainder extracted correctly"
     (let (frame (bytes/concat (cframe 1 1 "abc") (cframe 1 1 "def"))
-          [_ _ _ rem] (parse-frame frame))
-      (assert= rem (cframe 1 1 "def")))))
+          [_ _ _ math/rem] (parse-frame frame))
+      (assert= math/rem (cframe 1 1 "def")))))
 
 (describe "parse-frame: RFC 6455 framing is enforced"
   (test "an unmasked client frame is rejected (MUST)"
@@ -174,11 +174,11 @@
 (describe "parse-frame: fragmentation + size caps"
   (test "reassembles a fragmented text message into one"
     (let (buf (bytes/concat (cframe 0 1 "Hel") (cframe 0 0 "lo ") (cframe 1 0 "world"))
-          [tag opcode payload rem] (parse-frame buf))
+          [tag opcode payload math/rem] (parse-frame buf))
       (assert= tag :ok)
       (assert= opcode 1)
       (assert= (string/bytes-> payload) "Hello world")
-      (assert= (count rem) 0)))
+      (assert= (count math/rem) 0)))
   (test "incomplete until the final (FIN) fragment arrives"
     (assert= (parse-frame (bytes/concat (cframe 0 1 "Hel") (cframe 0 0 "lo "))) [:incomplete]))
   (test "a non-continuation frame mid-message is rejected"
@@ -215,7 +215,7 @@
 (defn masked-frame (opcode payload key)
   (let (pb (string/->bytes payload)
         n (count pb)
-        masked (bytes (map (fn (i) (bit/xor (get pb i) (get key (mod i 4)))) (range n))))
+        masked (bytes (map (fn (i) (bit/xor (get pb i) (get key (math/mod i 4)))) (range n))))
     (bytes/concat (bytes [(+ 128 opcode) (+ 128 n)]) (bytes key) masked)))
 
 (describe "parse-frame: unmask (non-zero key)"

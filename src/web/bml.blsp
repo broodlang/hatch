@@ -151,7 +151,7 @@
 
 (defn read-expr (s)
   "Read embedded Brood text into a form, expanding the `@name` assign shorthand first."
-  (read-string (expand-assigns s)))
+  (reflect/read-string (expand-assigns s)))
 
 ; ---- {expr} interpolation ----
 ; Find the brace that closes the interpolation, balancing nested `{}` (Brood maps
@@ -342,7 +342,7 @@
 ; the component places with `(get assigns :children)`.
 
 (defn build-component (name attrs children)
-  (let (callee (read-string name)
+  (let (callee (reflect/read-string name)
         assigns (if (and children (not (empty? children)))
                   (assoc attrs :children (cons 'list children))
                   attrs))

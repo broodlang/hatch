@@ -192,14 +192,14 @@
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
-    ([:ok fin opcode payload rem]
+    ([:ok fin opcode payload math/rem]
       (cond
         ; control frames are never fragmented — deliver standalone
-        (control-opcode? opcode) [:ok opcode payload rem]
+        (control-opcode? opcode) [:ok opcode payload math/rem]
         ; a complete (FIN) data frame is the whole message
-        (= fin 1) [:ok opcode payload rem]
+        (= fin 1) [:ok opcode payload math/rem]
         ; otherwise it's the head of a fragmented message — gather continuations
-        else (reassemble rem opcode (list payload) (count payload) maxf maxm)))))
+        else (reassemble math/rem opcode (list payload) (count payload) maxf maxm)))))
 
 (defn reassemble (buf msg-opcode pieces acclen maxf maxm)
   "Accumulate continuation frames (opcode 0) until the FIN frame, capping the total at `maxm`.
@@ -209,23 +209,23 @@
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
-    ([:ok fin opcode payload rem] (cond
-                                    (not (= opcode 0))
-                                      [:error "websocket: expected continuation frame"]
-                                    (> (+ acclen (count payload)) maxm)
-                                      [:error "websocket: message too large"]
-                                    (= fin 1)
-                                      [:ok
-                                        msg-opcode
-                                        (bytes/concat (reverse (cons payload pieces)))
-                                        rem]
-                                    else
-                                      (reassemble rem
-                                        msg-opcode
-                                        (cons payload pieces)
-                                        (+ acclen (count payload))
-                                        maxf
-                                        maxm)))))
+    ([:ok fin opcode payload math/rem] (cond
+                                         (not (= opcode 0))
+                                           [:error "websocket: expected continuation frame"]
+                                         (> (+ acclen (count payload)) maxm)
+                                           [:error "websocket: message too large"]
+                                         (= fin 1)
+                                           [:ok
+                                             msg-opcode
+                                             (bytes/concat (reverse (cons payload pieces)))
+                                             math/rem]
+                                         else
+                                           (reassemble math/rem
+                                             msg-opcode
+                                             (cons payload pieces)
+                                             (+ acclen (count payload))
+                                             maxf
+                                             maxm)))))
 
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload
@@ -350,5 +350,5 @@
               (get buf (+ key-offset 2))
               (get buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (bytes (map (fn (i) (bit/xor (get buf (+ data-start i)) (get key (mod i 4))))
+    (bytes (map (fn (i) (bit/xor (get buf (+ data-start i)) (get key (math/mod i 4))))
              (range plen)))))

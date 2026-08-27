@@ -201,9 +201,9 @@
 (describe "bytes parser — golden output"
   (test "Content-Length body is returned as the exact bytes"
     (match (try-parse-bytes (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body))
-      ([:ok req rem] (assert= (get req :body) bin-body)
+      ([:ok req math/rem] (assert= (get req :body) bin-body)
         (assert= (get req :method) "POST")
-        (assert= (count rem) 0))
+        (assert= (count math/rem) 0))
       (_ (is false))))
   (test "chunked body decodes to the concatenated chunk bytes"
     (match (try-parse-bytes (build "POST /c HTTP/1.1"
@@ -216,7 +216,7 @@
                                              ["Host: x" "Content-Length: 3"]
                                              "abc")
                                             (string/->bytes "GET /n HTTP/1.1\r\n")]))
-      ([:ok _ rem] (assert= (string/bytes-> rem) "GET /n HTTP/1.1\r\n"))
+      ([:ok _ math/rem] (assert= (string/bytes-> math/rem) "GET /n HTTP/1.1\r\n"))
       (_ (is false))))
   (test "try-parse-head-bytes classifies a chunked head without the body"
     (assert= (first (try-parse-head-bytes (build "POST /c HTTP/1.1"
