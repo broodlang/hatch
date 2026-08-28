@@ -128,7 +128,7 @@
   attribute whose NAME contains an unsafe character is dropped entirely (an unsafe name can't
   be escaped the way a value can)."
   (let ([k v] kv
-        n (name k))
+        n (->string k))
     (cond
       (not (safe-attr-name? n)) ""
       (= v true) (str " " n)
@@ -187,7 +187,7 @@
         has-map (and (not (nil? tail)) (map? (first tail)))
         attrs (if has-map (first tail) {})
         children (if has-map (rest tail) tail)
-        tag-name (name tag)
+        tag-name (->string tag)
         attr-str (render-attrs attrs))
     (if (contains? *void-tags* tag)
       (str "<" tag-name attr-str ">")

@@ -139,7 +139,7 @@
 
 (defn header-name (k)
   "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."
-  (string/join "-" (map capitalize-first (string/split (name k) "-"))))
+  (string/join "-" (map capitalize-first (string/split (->string k) "-"))))
 
 (defn capitalize-first (s)
   "Uppercase the first character of `s`, leaving the rest unchanged (unlike the prelude's

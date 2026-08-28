@@ -146,7 +146,7 @@
   and vectors — so a parsed JSON body is string-keyed all the way down."
   (cond
     (map? v)
-      (fold (fn (m kv) (assoc m (name (first kv)) (stringify-keys (first (rest kv)))))
+      (fold (fn (m kv) (assoc m (->string (first kv)) (stringify-keys (first (rest kv)))))
         {}
         (%map-pairs v))
     (vector? v) (mapv stringify-keys v)

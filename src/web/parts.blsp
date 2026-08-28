@@ -103,7 +103,7 @@
   a round-trip — comparing those would report every render as a different component)."
   (list 'web/component/render-slot
     (list 'quote (nth node 1))
-    (symbol (str (name (nth node 1)) "/live-component-spec"))
+    (symbol (str (->string (nth node 1)) "/live-component-spec"))
     (nth node 2)
     'live-components))
 
@@ -219,7 +219,7 @@
     else (emit-dynamic st (list 'web/template/render (rewrite-components node)))))
 
 (defn walk-element (st node)
-  (let (tag (name (first node))
+  (let (tag (->string (first node))
         n (count node)
         second (if (> n 1) (nth node 1) nil)
         has-attrs (map? second)
