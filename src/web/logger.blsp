@@ -92,12 +92,12 @@
       [:hatch :request :stop]
       (fn (_event measurements metadata) (log-request fixed measurements metadata)))
     (when (get opts :log-bad-requests true)
-      (telemetry/attach (keyword (str (name id) "-bad"))
+      (telemetry/attach (keyword (str (->string id) "-bad"))
         [:hatch :request :bad-request]
         (fn (_event measurements metadata) (log-bad-request measurements metadata))))
     ;; Not optional, unlike the bad-request line: a 500 whose cause is nowhere in the log is
     ;; the one failure an operator cannot act on, and `http/server` already emits the message.
-    (telemetry/attach (keyword (str (name id) "-exception"))
+    (telemetry/attach (keyword (str (->string id) "-exception"))
       [:hatch :request :exception]
       (fn (_event _measurements metadata) (log-exception metadata)))
     id))
@@ -106,6 +106,6 @@
   "Remove the access-log handlers attached by `attach-access-log` (matching `:id`)."
   (let (id (get opts :id :hatch-access-log))
     (telemetry/detach id)
-    (telemetry/detach (keyword (str (name id) "-bad")))
-    (telemetry/detach (keyword (str (name id) "-exception")))
+    (telemetry/detach (keyword (str (->string id) "-bad")))
+    (telemetry/detach (keyword (str (->string id) "-exception")))
     nil))

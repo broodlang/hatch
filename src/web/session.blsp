@@ -130,7 +130,7 @@
   the normalization must be deep, not just top-level."
   (cond
     (map? v)
-      (fold (fn (acc kv) (assoc acc (name (first kv)) (stringify-keys (first (rest kv)))))
+      (fold (fn (acc kv) (assoc acc (->string (first kv)) (stringify-keys (first (rest kv)))))
         {}
         (%map-pairs v))
     (vector? v) (mapv stringify-keys v)

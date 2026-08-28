@@ -39,7 +39,7 @@
       (keyword? p)
         (match-path-acc (rest pattern)
           (rest segments)
-          (assoc acc (name p) (http/util/url-decode (first segments))))
+          (assoc acc (->string p) (http/util/url-decode (first segments))))
       (= p (first segments)) (match-path-acc (rest pattern) (rest segments) acc)
       else nil)))
 
@@ -224,7 +224,7 @@
   (let (verb (first clause)
         path (first (rest clause))
         handler (first (rest (rest clause)))
-        method (if (= verb 'any) "*" (string/upper (name verb))))
+        method (if (= verb 'any) "*" (string/upper (->string verb))))
     {:route (list 'make-route method path (list 'fn (list 'route-conn) (list handler 'route-conn)))
      :setup nil}))
 
@@ -238,7 +238,7 @@
         opts (rest (rest (rest clause)))
         session (or (plist-get opts :session) session)
         title (plist-get opts :title)
-        spec (symbol (str (name module) "/live-spec"))
+        spec (symbol (str (->string module) "/live-spec"))
         body (vector :div {:data-live path} (vector :p {} "Connecting…"))
         handler (list 'fn
                   (list 'conn)
@@ -329,7 +329,7 @@
         ; parses each pattern once. (A `through` group's plug expression is likewise
         ; evaluated once now — plug factories like `(basic-auth …)` are pure config, so
         ; reusing the built plug across requests is correct and cheaper.)
-        routes-sym (symbol (str (name router-name) "--routes")))
+        routes-sym (symbol (str (->string router-name) "--routes")))
     (cons 'do
       (append setup-forms
         (list (list 'def routes-sym (cons 'list route-forms))
