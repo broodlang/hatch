@@ -1166,7 +1166,9 @@
   is a mistake (a second one would be silently ignored), so it's an error at macro-expansion."
   (let (matches (filter (fn (c) (= (first c) tag)) clauses))
     (if (> (count matches) 1)
-      (error (str "deflive: duplicate `" (->string tag) "` clause — a view declares it at most once"))
+      (error (str "deflive: duplicate `"
+               (->string tag)
+               "` clause — a view declares it at most once"))
       (first matches))))
 
 (defn- deflive-clauses
