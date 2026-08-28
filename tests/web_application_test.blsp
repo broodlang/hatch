@@ -68,7 +68,7 @@
                                                        :msg "slow"
                                                        :ts 1000
                                                        :meta {:request_id "r1" :duration_ms 4.2}})
-          parsed (json/parse line))
+          parsed (json/decode line))
       (assert= (get parsed :timestamp) 1000)
       (assert= (get parsed :level) "warn")
       (assert= (get parsed :message) "slow")
@@ -76,7 +76,7 @@
       (assert= (get parsed :duration_ms) 4.2)
       (assert= (includes? line "\n") true)))
   (test "an unrecognized level falls back to \"info\""
-    (assert= (get (json/parse (web/application/application-json-line {:level :bogus
+    (assert= (get (json/decode (web/application/application-json-line {:level :bogus
                                                                       :msg "x"
                                                                       :ts 0
                                                                       :meta {}}))
