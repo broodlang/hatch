@@ -2,7 +2,7 @@
 
 ; Render a parsed BML form against `model` — the same lowering `deflive` uses.
 (defn render-bml (src model)
-  (render (eval (list 'let (list 'model model) (parse src)))))
+  (render (reflect/eval (list 'let (list 'model model) (parse src)))))
 
 ; A trivial component for the component tests: an assigns-map → Hiccup function.
 (defn card (assigns)
@@ -10,7 +10,7 @@
 
 ; Render BML with `card` (and `model`) in scope, so components resolve.
 (defn render-bml* (src model)
-  (render (eval (list 'let (list 'model model 'card card) (parse src)))))
+  (render (reflect/eval (list 'let (list 'model model 'card card) (parse src)))))
 
 (defn parse-error (src)
   (try (do (parse src) nil) (catch e (error-message e))))
