@@ -104,8 +104,7 @@
   What is left is exact: an `id`'d control outside any form, with no inline handler, whose
   id appears in no script on the page.
 
-      (inert-controls \"<html><body><input id=\\\"q\\\"></body></html>\")
-        → ({:tag \"input\" :id \"q\" :snippet \"<input id=\\\"q\\\">\"})"
+      (inert-controls \"<html><body><input id=\\\"q\\\"></body></html>\")   → ({:tag \"input\" :id \"q\" :snippet \"<input id=\\\"q\\\">\"})"
   (if (< (index-of document "<html") 0)
     nil
     (let (external? (>= (index-of document "<script src=\"") 0)
