@@ -29,8 +29,7 @@
 (describe "start-children"
   (test "calls each child thunk in order"
     (do
-      (start-children [(fn () (send (self) :first))
-                        (fn () (send (self) :second))]
+      (start-children [(fn () (send (self) :first)) (fn () (send (self) :second))]
         0)
       (assert= (receive (m m) (after 200 :timeout)) :first)
       (assert= (receive (m m) (after 200 :timeout)) :second)))
@@ -77,9 +76,9 @@
       (assert= (includes? line "\n") true)))
   (test "an unrecognized level falls back to \"info\""
     (assert= (get (json/decode (web/application/application-json-line {:level :bogus
-                                                                      :msg "x"
-                                                                      :ts 0
-                                                                      :meta {}}))
+                                                                       :msg "x"
+                                                                       :ts 0
+                                                                       :meta {}}))
                :level)
       "info")))
 

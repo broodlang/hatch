@@ -136,8 +136,7 @@
 
 ; ---- render-slot: called from a parent's render-dynamic for a (component …) hole ----
 
-(defn- slot-state
-  (module spec-thunk assigns components-table)
+(defn- slot-state (module spec-thunk assigns components-table)
   "The component's current state for this id, mounting it on first sight. Shared by both
   render entry points below.
 

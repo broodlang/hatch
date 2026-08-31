@@ -101,9 +101,12 @@
     ; a present secret is used as-is in dev, even if weak (dev is permissive)
     (assert= (check-secret "short" true) "short"))
   (test "prod raises on a missing secret"
-    (assert= (try (do (check-secret nil false) false) (catch _ true)) true))
+    (assert= (check-allow :discarded-catch (try (do (check-secret nil false) false) (catch _ true)))
+      true))
   (test "prod raises on a too-short secret"
-    (assert= (try (do (check-secret "short" false) false) (catch _ true)) true)))
+    (assert= (check-allow :discarded-catch
+               (try (do (check-secret "short" false) false) (catch _ true)))
+      true)))
 
 (describe "flash one-shot lifetime"
   (test "put-flash on request 1 → readable on request 2 → gone on request 3"

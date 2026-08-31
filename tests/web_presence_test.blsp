@@ -22,7 +22,7 @@
   (receive ([:never] nil) (after ms nil)))
 
 (defn roster-keys (topic)
-  (map (fn (e) (get e :key)) (roster topic)))
+  (map (roster topic) (fn (e) (get e :key))))
 
 (defn wait-key (topic key tries)
   (cond
@@ -38,7 +38,7 @@
 
 (defn meta-status (topic key)
   "The :status of `key`'s roster entry on `topic`, or nil if absent."
-  (let (e (first (filter (fn (x) (= (get x :key) key)) (roster topic))))
+  (let (e (first (filter (roster topic) (fn (x) (= (get x :key) key)))))
     (if e (get (get e :meta) :status) nil)))
 
 (defn wait-meta (topic key val tries)
@@ -67,7 +67,7 @@
 (defn relay-loop (parent)
   (receive
     ([:info m] (do
-                 (send parent [:roster (map (fn (e) (get e :key)) (get m :presence))])
+                 (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))])
                  (relay-loop parent)))
     (after 15000 nil)))
 
@@ -101,7 +101,7 @@
     (do
       (track "pres:m" "m1" {:color "blue"})
       (wait-key "pres:m" "m1" 60)
-      (let (e (first (filter (fn (x) (= (get x :key) "m1")) (roster "pres:m"))))
+      (let (e (first (filter (roster "pres:m") (fn (x) (= (get x :key) "m1")))))
         (untrack "pres:m")
         (assert= (get (get e :meta) :color) "blue"))))
   (test "re-tracking the same process replaces its entry (updated meta, no duplicate)"
@@ -112,7 +112,7 @@
       ; poll until the meta reflects the update
       (assert= (wait-meta "pres:r" "r1" "online" 60) true)
       ; exactly one entry for this pid (no duplicate from re-track)
-      (assert= (count (filter (fn (e) (= (get e :key) "r1")) (roster "pres:r"))) 1)
+      (assert= (count (filter (roster "pres:r") (fn (e) (= (get e :key) "r1")))) 1)
       (untrack "pres:r"))))
 
 (describe "auto-leave on death"
@@ -148,14 +148,14 @@
     (let (state (web/presence/presence-put {} "room" 1 "local-a" {})
           remotes {:nodeB {"room" (list {:key "remote-b" :meta {}})}
                    :nodeC {"room" (list {:key "remote-c" :meta {}})}}
-          keys (map (fn (e) (get e :key)) (web/presence/presence-merged state remotes "room")))
+          keys (map (web/presence/presence-merged state remotes "room") (fn (e) (get e :key))))
       (assert= (includes? keys "local-a") true)
       (assert= (includes? keys "remote-b") true)
       (assert= (includes? keys "remote-c") true)
       (assert= (count keys) 3)))
   (test "a topic with only remote members still merges"
     (let (remotes {:nodeB {"room" (list {:key "b" :meta {}})}})
-      (assert= (map (fn (e) (get e :key)) (web/presence/presence-merged {} remotes "room"))
+      (assert= (map (web/presence/presence-merged {} remotes "room") (fn (e) (get e :key)))
         (list "b"))))
   (test "remote-topics-of lists the topics a departed peer was on"
     (let (remotes {:nodeB {"r1" (list {:key "b" :meta {}}) "r2" (list {:key "b" :meta {}})}}
@@ -215,7 +215,7 @@
   "Forward each pushed roster's keys to parent; on `:stop-observing`, unobserve and idle."
   (receive
     ([:info m] (do
-                 (send parent [:roster (map (fn (e) (get e :key)) (get m :presence))])
+                 (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))])
                  (observer-loop topic parent)))
     (:stop-observing (do (unobserve topic) (snooze 100000)))
     (after 15000 nil)))

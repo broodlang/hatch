@@ -35,27 +35,26 @@
   failing rule recorded per field (later rules for a field already in error are skipped —
   one message per field, matching how every hand-rolled per-field validator in this
   codebase already shows just one reason at a time)."
-  (let (errors (fold (fn (errs rule)
-                       (let (field (nth rule 0)
-                             valid? (nth rule 1)
-                             message (nth rule 2))
-                         (if (or (contains? errs field) (valid? (get params field "")))
-                           errs
-                           (assoc errs field message))))
+  (let (errors (fold rules
                  {}
-                 rules))
+                 (fn (errs rule)
+                   (let (field (nth rule 0)
+                         valid? (nth rule 1)
+                         message (nth rule 2))
+                     (if (or (contains? errs field) (valid? (get params field "")))
+                       errs
+                       (assoc errs field message))))))
     (if (= (count errors) 0) [:ok params] [:error errors])))
 
 ; ---- built-in validators — each (fn (value) bool) ----
 
 (defn required? (v) (not (string/blank? v)))
 
-(defn- no-space-or-control?
-  (v)
+(defn- no-space-or-control? (v)
   "True when `v` holds no space, tab, CR, LF, or other control character (any codepoint
   ≤ 32). Rejecting the whole control range — not just the space — keeps a validated address
   from smuggling a CR/LF into a downstream mail header (header injection)."
-  (not (any? (fn (c) (<= (string/char->int c) 32)) (string/->list v))))
+  (not (any? (string/->list v) (fn (c) (<= (string/char->int c) 32)))))
 
 (defn email? (v)
   "A deliberately simple email check: one `@` with text before it and a dotted domain

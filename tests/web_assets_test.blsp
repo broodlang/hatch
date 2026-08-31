@@ -42,7 +42,7 @@
 (describe "fingerprint"
   (test "writes content-addressed copies and a manifest"
     (let (dir "/tmp/hatch-assets-fp-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           content "body{color:red}"
           _ (file/spit (str dir "/app.css") content)
           manifest (fingerprint {:dir dir :files ["app.css"]})
@@ -75,8 +75,8 @@
   ; sibling — assert each exists, is smaller, and round-trips back to the original bytes.
   (test "a fingerprinted compressible asset gets smaller .br and .gz siblings"
     (let (dir "/tmp/hatch-fp-gz-test"
-          _ (try (file/mkdir dir) (catch _ nil))
-          body (string/join "" (map (fn (_) "body { color: red; }\n") (range 0 200)))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
+          body (string/join (map (range 0 200) (fn (_) "body { color: red; }\n")) "")
           _ (file/spit (str dir "/app.css") body)
           fp (fingerprint-file dir "app.css")
           gz (str dir "/" fp ".gz")

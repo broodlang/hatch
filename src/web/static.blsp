@@ -84,7 +84,7 @@
 (defn has-control-byte? (s)
   "True if `s` contains any control byte (< 0x20) or DEL (0x7f) — e.g. a NUL, which can
   truncate a path at the OS layer and on which `file-stat` may raise."
-  (not (empty? (filter (fn (cp) (or (< cp 32) (= cp 127))) (string/->codepoints s)))))
+  (not (empty? (filter (string/->codepoints s) (fn (cp) (or (< cp 32) (= cp 127)))))))
 
 (defn unsafe-segment? (s)
   "True if a (percent-decoded) path segment would escape the root or is otherwise unsafe:
@@ -97,9 +97,9 @@
   is unsafe — a path-traversal attempt like `../../etc/passwd`, `..%2f..`, or `%2e%2e`. Decode
   is per-segment so a `%2f` becomes a literal `/` *inside* a segment (rejected by
   `unsafe-segment?`) rather than a new separator."
-  (let (segs (map http/util/url-decode
-               (filter (fn (s) (not (string/blank? s))) (string/split rel "/"))))
-    (if (empty? (filter unsafe-segment? segs)) segs nil)))
+  (let (segs (map (filter (string/split rel "/") (fn (s) (not (string/blank? s))))
+               http/util/url-decode))
+    (if (empty? (filter segs unsafe-segment?)) segs nil)))
 
 ; ---- environment ----
 
@@ -126,8 +126,7 @@
 ; registry process would funnel every read through one mailbox).
 (def *etag-cache* (table/new))
 
-(defn- cached-etag-via
-  (path fresh-fn)
+(defn- cached-etag-via (path fresh-fn)
   "The ETag for `path`, reusing the cached hash while the file's mtime+size are unchanged and
   recomputing it (via `fresh-fn`, called only on a miss) after an edit. One `file-stat` (a
   cheap syscall) replaces hashing the whole body on every hit. Shared by the text and binary
@@ -185,7 +184,7 @@
 
 (defn with-resp-headers (conn hmap)
   "Add every `keyword → value` in `hmap` as a response header."
-  (fold (fn (c kv) (put-resp-header c (first kv) (first (rest kv)))) conn (%map-pairs hmap)))
+  (fold (%map-pairs hmap) conn (fn (c kv) (put-resp-header c (first kv) (first (rest kv))))))
 
 (defn not-modified (conn tag cc)
   "A 304 Not Modified — no body, but it still carries the validators a cache needs to keep
@@ -209,8 +208,8 @@
       false
       (let (want (string/trim inm))
         (or (= want "*")
-          (not (empty? (filter (fn (t) (= (strip-weak (string/trim t)) tag))
-                         (string/split want ",")))))))))
+          (not (empty? (filter (string/split want ",")
+                         (fn (t) (= (strip-weak (string/trim t)) tag))))))))))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
@@ -322,7 +321,7 @@
   slurping the file. nil if the file is uncached, changed, or unstattable (the caller then
   reads + hashes it). `file-stat` is guarded: a path the OS rejects (an interior NUL that
   slipped a check, an odd encoding) fails closed to 404 rather than crashing the worker."
-  (let (st (try (file/stat path) (catch _ nil)))
+  (let (st (check-allow :discarded-catch (try (file/stat path) (catch _ nil))))
     (if (nil? st)
       nil
       (let (hit (table/get *etag-cache* path))
@@ -363,7 +362,7 @@
     (when variant
       (let (coding (first variant)
             sibling (nth variant 1)
-            body (try (file/slurp-bytes sibling) (catch _ nil)))
+            body (check-allow :discarded-catch (try (file/slurp-bytes sibling) (catch _ nil))))
         (when body
           (let (tag (cached-bytes-etag sibling body)
                 cc (cache-control path root))
@@ -392,7 +391,7 @@
   (let (segs (safe-segments rel))
     (if (or (nil? segs) (empty? segs))
       (not-found-resp conn)
-      (let (path (str root "/" (string/join "/" segs)))
+      (let (path (str root "/" (string/join segs "/")))
         (or (serve-encoded conn path root)
           (let (fresh (fresh-cached-etag path))
             (if (and fresh (if-none-match? conn fresh))
@@ -405,7 +404,7 @@
 
 (defn serve-text (conn path root)
   "Serve a text asset at `path`: read as a UTF-8 string and hand to `serve-body`."
-  (let (body (try (file/slurp path) (catch _ nil)))
+  (let (body (check-allow :discarded-catch (try (file/slurp path) (catch _ nil))))
     (if (nil? body)
       (not-found-resp conn)
       (serve-body conn (mime-type path) body path root (cached-etag path body)))))
@@ -413,7 +412,7 @@
 (defn serve-binary (conn path root)
   "Serve a binary asset at `path`: read the raw bytes (byte-faithful, never UTF-8-mangled) and
   hand to `serve-binary-body`."
-  (let (body (try (file/slurp-bytes path) (catch _ nil)))
+  (let (body (check-allow :discarded-catch (try (file/slurp-bytes path) (catch _ nil))))
     (if (nil? body)
       (not-found-resp conn)
       (serve-binary-body conn (mime-type path) body path root (cached-bytes-etag path body)))))
@@ -488,19 +487,19 @@
   "Serialize a `logical → fingerprinted` map to the manifest line format — one
   `logical<TAB>fingerprinted` line per asset. The inverse of `parse-manifest`; written by
   `web/assets/fingerprint`."
-  (string/join ""
-    (map (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")) (%map-pairs manifest))))
+  (string/join (map (%map-pairs manifest) (fn (kv) (str (first kv) "\t" (first (rest kv)) "\n")))
+    ""))
 
 (defn parse-manifest (text)
   "Parse a manifest (one `logical<TAB>fingerprinted` line per asset) into a map."
-  (fold (fn (m line)
-          (let (tab (index-of line "\t"))
-            (if (= tab -1)
-              m
-              (assoc m
-                (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))
+  (fold (filter (string/split text "\n") (fn (l) (not (string/blank? l))))
     {}
-    (filter (fn (l) (not (string/blank? l))) (string/split text "\n"))))
+    (fn (m line)
+      (let (tab (index-of line "\t"))
+        (if (= tab -1)
+          m
+          (assoc m
+            (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))))
 
 ; Process-shared cache (ETS) of `dir → parsed manifest`. The manifest is immutable for a
 ; deployment's lifetime (a new build means a new process), so this is read once per dir and
@@ -514,7 +513,7 @@
   empty/miss result), so a hot path reads the file at most once."
   (if (table/has? *manifest-cache* dir)
     (table/get *manifest-cache* dir)
-    (let (text (try (file/slurp (manifest-path dir)) (catch _ nil))
+    (let (text (check-allow :discarded-catch (try (file/slurp (manifest-path dir)) (catch _ nil)))
           m (if (nil? text) {} (parse-manifest text)))
       (table/put *manifest-cache* dir m)
       m)))

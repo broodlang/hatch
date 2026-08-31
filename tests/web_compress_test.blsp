@@ -1,7 +1,7 @@
 (defmodule web-compress-test (:use web/compress) (:use web/conn) (:use test))
 
 ; A body comfortably over the 1024-byte floor so the size gate never masks a behaviour test.
-(def big-body (string/join "" (map (fn (_) "Hello, compression! ") (range 0 200))))
+(def big-body (string/join (map (range 0 200) (fn (_) "Hello, compression! ")) ""))
 
 (defn req (&optional (headers {:accept-encoding "gzip"}))
   "A GET conn-request map with the given request headers."

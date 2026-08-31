@@ -129,7 +129,7 @@
 
 (defn deps-seq (forms model-sym)
   "Merge the dependencies of every form in `forms`."
-  (fold (fn (acc x) (deps-merge acc (deps-of x model-sym))) (list) forms))
+  (fold forms (list) (fn (acc x) (deps-merge acc (deps-of x model-sym)))))
 
 (defn deps-of (form model-sym)
   "The model keys `form` reads, or `:all` for any opaque model use. See the section comment.
@@ -141,13 +141,12 @@
   (cond
     (model-get-form? form model-sym)
     ; the pinned key, plus deps in any args past the key (e.g. a default expression)
-    (deps-merge (list (first (rest (rest form))))
-      (deps-seq (rest (rest (rest form))) model-sym))
-      (= form model-sym)
-    :all (= form 'live-components)
-    :all (pair? form)
-    (deps-seq form model-sym) (vector? form)
-    (deps-seq form model-sym)
+      (deps-merge (list (first (rest (rest form))))
+        (deps-seq (rest (rest (rest form))) model-sym))
+    (= form model-sym) :all
+    (= form 'live-components) :all
+    (pair? form) (deps-seq form model-sym)
+    (vector? form) (deps-seq form model-sym)
     ; a map literal in the form (e.g. an attrs map inside a comprehension body) — its keys
     ; and values can themselves read the model
     (map? form) (deps-merge (deps-seq (keys form) model-sym) (deps-seq (vals form) model-sym))
@@ -175,7 +174,7 @@
 
 (defn elem-children (node start)
   "The child forms of element `node`, from index `start` to the end."
-  (map (fn (i) (nth node i)) (range start (count node))))
+  (map (range start (count node)) (fn (i) (nth node i))))
 
 (defn emit-attr (st kv)
   "Emit one attribute: a literal value folds into the static segment; a dynamic value
@@ -200,8 +199,8 @@
   render-static + render-dynamic rather than re-walking render-expr itself (see deflive)."
   (cond
     (component-form? form) (list 'web/template/raw (component-slot-form-html form))
-    (pair? form) (map rewrite-components form)
-    (vector? form) (mapv rewrite-components form)
+    (pair? form) (map form rewrite-components)
+    (vector? form) (mapv form rewrite-components)
     else form))
 
 (defn walk (st node)
@@ -215,7 +214,7 @@
     (elem? node) (walk-element st node)
     (for-form? node) (emit-dynamic st (comp-form node))
     (component-form? node) (emit-dynamic st (component-slot-form node))
-    (list-form? node) (fold walk st (rest node))
+    (list-form? node) (fold (rest node) st walk)
     else (emit-dynamic st (list 'web/template/render (rewrite-components node)))))
 
 (defn walk-element (st node)
@@ -230,11 +229,11 @@
       (let (attrs (if has-attrs second {})
             cstart (if has-attrs 2 1)
             st (emit-static st (str "<" tag))
-            st (fold emit-attr st (%map-pairs attrs))
+            st (fold (%map-pairs attrs) st emit-attr)
             st (emit-static st ">"))
         (if (contains? *void-tags* (keyword tag))
           st
-          (let (st (fold walk st (elem-children node cstart)))
+          (let (st (fold (elem-children node cstart) st walk))
             (emit-static st (str "</" tag ">"))))))))
 
 (defn compile-parts (form)
@@ -297,7 +296,7 @@
   weaves its own statics and dynamics (recursively — a component's inner slots may themselves
   be comprehensions or nested components), and a scalar slot is already its HTML string."
   (cond
-    (comp? v) (string/join "" (comp-items v))
+    (comp? v) (string/join (comp-items v) "")
     (kslot? v) (weave (get v :s) (get v :d))
     else v))
 
@@ -307,10 +306,9 @@
   "Assemble the full HTML from `statics` and the rendered `dynamics`: s0 d0 s1 … sn.
   Collects the pieces in a list and `join`s once — a per-slot `(str acc …)` fold re-copies the
   whole growing HTML each step, O(n²) in the slot count (and this runs on every re-render)."
-  (string/join "" (reverse (weave-at statics dynamics 0 (count statics) (list)))))
+  (string/join (reverse (weave-at statics dynamics 0 (count statics) (list))) ""))
 
-(defn- weave-at
-  (statics dynamics i n acc)
+(defn- weave-at (statics dynamics i n acc)
   (if (>= i n)
     acc
     (let (acc (cons (nth statics i) acc)
@@ -331,7 +329,7 @@
   concatenate alike can't collide, and the NUL separator can't occur in rendered HTML.
 
   (hatch/web/parts/statics-fingerprint [\"<p>\" \"</p>\"]) ;=> \"f461e62bd2db8219\""
-  (string/substring (hash/sha256 (str (count statics) "\x00" (string/join "\x00" statics))) 0 16))
+  (string/substring (hash/sha256 (str (count statics) "\x00" (string/join statics "\x00"))) 0 16))
 
 (defn diff-dynamics (old new)
   "A map `{index → value}` of the dynamic slots that changed from `old` to `new`. The hole
@@ -342,8 +340,7 @@
     (diff-at old new 0 (count new) {})
     (diff-at (list) new 0 (count new) {})))
 
-(defn- diff-at
-  (old new i n acc)
+(defn- diff-at (old new i n acc)
   (if (>= i n)
     acc
     (let (nv (nth new i)
@@ -379,8 +376,7 @@
   {:__cdiff__ (comp-diff-at old-items new-items 0 (count new-items) {})
    :n (count new-items)})
 
-(defn- comp-diff-at
-  (old new i n acc)
+(defn- comp-diff-at (old new i n acc)
   (if (>= i n)
     acc
     (comp-diff-at old

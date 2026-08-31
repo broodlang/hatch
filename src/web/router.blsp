@@ -9,7 +9,7 @@
 
 (defn path-segments (path)
   "Split a path into segments, dropping empty strings from leading slash."
-  (filter (fn (s) (not (string/blank? s))) (string/split path "/")))
+  (filter (string/split path "/") (fn (s) (not (string/blank? s)))))
 
 (defn match-path (pattern segments)
   "Match a pattern list against path segments.
@@ -23,15 +23,14 @@
   "True if a parsed pattern element is a `[:splat name]` catch-all."
   (and (vector? p) (= (first p) :splat)))
 
-(defn- match-path-acc
-  (pattern segments acc)
+(defn- match-path-acc (pattern segments acc)
   (let (p (first pattern))
     (cond
       ; A splat consumes everything that remains (including nothing), each segment decoded.
       (splat? p)
         (assoc acc
           (first (rest p))
-            (if (nil? segments) "" (string/join "/" (map http/util/url-decode segments))))
+            (if (nil? segments) "" (string/join (map segments http/util/url-decode) "/")))
       (and (nil? pattern) (nil? segments)) acc
       (or (nil? pattern) (nil? segments)) nil
       ; A `:param` captures one segment, percent-decoded (matching literals stays on the raw
@@ -46,15 +45,14 @@
 (defn parse-pattern (path)
   "Parse a route pattern string into a segment list. `:name` becomes a one-segment
   capture keyword; `*name` (or bare `*`) becomes a `[:splat name]` catch-all."
-  (map (fn (seg)
-         (cond
-           (string/starts-with? seg ":") (keyword (string/substring seg 1 (string/length seg)))
-           (string/starts-with? seg "*") [:splat (parse-pattern-splat-name seg)]
-           else seg))
-    (path-segments path)))
+  (map (path-segments path)
+    (fn (seg)
+      (cond
+        (string/starts-with? seg ":") (keyword (string/substring seg 1 (string/length seg)))
+        (string/starts-with? seg "*") [:splat (parse-pattern-splat-name seg)]
+        else seg))))
 
-(defn- parse-pattern-splat-name
-  (seg)
+(defn- parse-pattern-splat-name (seg)
   "The capture name for a `*name` splat segment; bare `*` captures as `splat`."
   (let (n (string/substring seg 1 (string/length seg)))
     (if (string/blank? n) "splat" n)))
@@ -105,25 +103,24 @@
 (defn path-methods (routes segments)
   "The distinct declared methods of every route whose *path* matches `segments`
   (regardless of HTTP method) — the raw material for a 405 `Allow` header."
-  (uniq (map (fn (r) (get r :method))
-          (filter (fn (r) (match-path (get r :pattern) segments)) routes))))
+  (uniq (map (filter routes (fn (r) (match-path (get r :pattern) segments)))
+          (fn (r) (get r :method)))))
 
 (defn mem? (x xs)
   "True if `x` is `=` to some element of list `xs`."
-  (not (empty? (filter (fn (y) (= y x)) xs))))
+  (not (empty? (filter xs (fn (y) (= y x))))))
 
 (defn uniq (xs)
   "`xs` with later duplicates removed, order preserved."
-  (reverse (fold (fn (acc x) (if (mem? x acc) acc (cons x acc))) (list) xs)))
+  (reverse (fold xs (list) (fn (acc x) (if (mem? x acc) acc (cons x acc))))))
 
 (defn allow-header (methods)
   "The `Allow` header value for a path serving `methods`: the declared methods, plus
   `HEAD` wherever `GET` is served, plus `OPTIONS` (which we answer automatically)."
   (let (with-head (if (mem? "GET" methods) (append methods (list "HEAD")) methods))
-    (string/join ", " (uniq (append with-head (list "OPTIONS"))))))
+    (string/join (uniq (append with-head (list "OPTIONS"))) ", ")))
 
-(defn- dispatch-no-match
-  (routes conn method segments)
+(defn- dispatch-no-match (routes conn method segments)
   "No route matched the method+path. If the path exists for other methods, answer 405
   (or, for an OPTIONS probe, a 204) with an `Allow` header; otherwise 404."
   (let (methods (path-methods routes segments))
@@ -132,7 +129,7 @@
         (str "<h1>404 Not Found</h1><p>No route for "
           (escape-html method)
           " /"
-          (escape-html (string/join "/" segments))
+          (escape-html (string/join segments "/"))
           "</p>"))
       (let (allow (allow-header methods)
             conn (put-resp-header conn :allow allow))
@@ -176,7 +173,7 @@
     (let (segs (path-segments path))
       (if (empty? segs)
         "Home"
-        (string/join " " (map string/capitalize segs))))))
+        (string/join (map segs string/capitalize) " ")))))
 
 (defn plist-get (plist key)
   "Look `key` up in a flat keyword/value list `(:a 1 :b 2)`; nil if absent."
@@ -197,7 +194,7 @@
 
 (defn compile-routes (clauses ctx)
   "Flatten `clauses` into a list of `{:route :setup}` maps under context `ctx`."
-  (apply append (map (fn (c) (compile-clause c ctx)) clauses)))
+  (apply append (map clauses (fn (c) (compile-clause c ctx)))))
 
 (defn compile-clause (clause ctx)
   (let (head (first clause))
@@ -321,8 +318,8 @@
   Every admin route then runs behind the auth plug (HTTP side) and shares the `admin`
   live-session (socket side) — neither the mount nor live-navigation can skip auth."
   (let (compiled (compile-routes routes empty-route-ctx)
-        route-forms (map (fn (clause) (get clause :route)) compiled)
-        setup-forms (apply append (map (fn (clause) (or (get clause :setup) (list))) compiled))
+        route-forms (map compiled (fn (clause) (get clause :route)))
+        setup-forms (apply append (map compiled (fn (clause) (or (get clause :setup) (list)))))
         ; Build the route table ONCE at load, not on every request. Previously the
         ; `(make-route …)` calls sat in the router body, so `parse-pattern` re-split and
         ; re-allocated every pattern per request; hoisting them to a module-level def

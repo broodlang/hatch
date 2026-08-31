@@ -27,23 +27,19 @@
 (def- application-colors {:debug "\x1b[90m" :info "\x1b[36m" :warn "\x1b[33m" :error "\x1b[31m"})
 (def- application-reset "\x1b[0m")
 
-(defn- application-line-body
-  (rec)
+(defn- application-line-body (rec)
   (str "[" (or (get application-labels (get rec :level)) "?") "] " (get rec :msg)))
 
-(defn- application-text-line
-  (rec)
+(defn- application-text-line (rec)
   (str (application-line-body rec) "\n"))
 
-(defn- application-color-line
-  (rec)
+(defn- application-color-line (rec)
   (str (or (get application-colors (get rec :level)) "")
     (application-line-body rec)
     application-reset
     "\n"))
 
-(defn- application-json-line
-  (rec)
+(defn- application-json-line (rec)
   "One NDJSON object per record — compatible with Grafana Loki, Datadog, AppSignal."
   (str (json/encode (merge (get rec :meta)
                       {:timestamp (get rec :ts)

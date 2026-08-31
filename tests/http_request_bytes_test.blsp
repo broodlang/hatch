@@ -44,7 +44,7 @@
   "A raw request `bytes`: request `line`, `headers` (a list of \"Name: Value\"), CRLF, then `body`
   (a string or bytes)."
   (bytes/concat [(str line "\r\n")
-                  (string/join "" (map (fn (h) (str h "\r\n")) headers))
+                  (string/join (map headers (fn (h) (str h "\r\n"))) "")
                   "\r\n"
                   body]))
 
@@ -56,8 +56,7 @@
 (defn chunked-body (datas &optional (trailer ""))
   "A chunked body: one chunk per `data`, then the 0-chunk, an optional `trailer` line, and the
   terminating CRLF."
-  (bytes/concat (append (map chunk-of datas)
-                  (list "0\r\n" trailer "\r\n"))))
+  (bytes/concat (append (map datas chunk-of) (list "0\r\n" trailer "\r\n"))))
 
 ; a binary body with bytes the carrier must round-trip exactly (NUL, high bytes, a bare CR/LF)
 (def bin-body (bytes [0 1 255 13 10 200 127 128 0]))
@@ -154,7 +153,7 @@
     ["error: header line without a colon"
       (build "GET / HTTP/1.1" ["Host: x" "NoColonHere"] "")]
     ["error: too many headers"
-      (build "GET / HTTP/1.1" (map (fn (i) (str "H" i ": v")) (range 0 101)) "")]])
+      (build "GET / HTTP/1.1" (map (range 0 101) (fn (i) (str "H" i ": v"))) "")]])
 
 (describe "bytes parser agrees with the carrier parser across the corpus"
   ; one named test per case, so a divergence names the exact request that failed

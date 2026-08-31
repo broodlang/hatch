@@ -67,13 +67,11 @@
 ; raster-image `data:` URL pass through (so a legitimate inline image still works).
 (def *url-attrs* {:href true :src true :action true :formaction true :poster true :ping true})
 
-(defn- url-scheme-noise?
-  (c)
+(defn- url-scheme-noise? (c)
   "True for a leading char a browser strips before parsing a URL scheme (whitespace/controls)."
   (<= (string/char->int c) 32))
 
-(defn- safe-data-image?
-  (s)
+(defn- safe-data-image? (s)
   "True when normalized `s` is a `data:` URL declaring a raster image type we allow inline
   (png/apng/jpeg/gif/webp/bmp/x-icon). Deliberately EXCLUDES `image/svg+xml` (SVG can carry
   script) and every text/*, application/*, or type-less `data:` URL (those default to a
@@ -93,8 +91,9 @@
   `data:image/svg+xml,…` are caught). Whitespace and control characters are removed first and
   case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
   `javascript:`)."
-  (let (s (string/lower (string/join ""
-                          (filter (fn (c) (not (url-scheme-noise? c))) (string/->list (str v))))))
+  (let (s (string/lower (string/join (filter (string/->list (str v))
+                                       (fn (c) (not (url-scheme-noise? c))))
+                          "")))
     (or (string/starts-with? s "javascript:")
       (string/starts-with? s "vbscript:")
       (and (string/starts-with? s "data:") (not (safe-data-image? s))))))
@@ -105,21 +104,19 @@
   `href`/`src`/`action`/… in `render`; use it explicitly for a URL in another context."
   (if (dangerous-url? v) "#" v))
 
-(defn- unsafe-attr-name-cp?
-  (cp)
+(defn- unsafe-attr-name-cp? (cp)
   "True for a codepoint that must never appear in an HTML attribute name — whitespace/control
   (≤ 32) or a delimiter that could break out of the attribute list (`\"` `'` `/` `&` `<` `=`
   `>` backtick)."
   (or (<= cp 32) (= cp 34) (= cp 38) (= cp 39) (= cp 47) (= cp 60) (= cp 61) (= cp 62) (= cp 96)))
 
-(defn- safe-attr-name?
-  (n)
+(defn- safe-attr-name? (n)
   "True when `n` is a non-empty attribute name with no character that could escape the
   attribute list. Hiccup keys are normally compile-time literals; this guards the case where
   an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
   value path already defends but the name path otherwise emits verbatim."
   (and (> (string/length n) 0)
-    (not (any? (fn (c) (unsafe-attr-name-cp? (string/char->int c))) (string/->list n)))))
+    (not (any? (string/->list n) (fn (c) (unsafe-attr-name-cp? (string/char->int c)))))))
 
 (defn render-attr (kv)
   "Serialize one `[keyword value]` attribute pair.
@@ -134,13 +131,13 @@
       (= v true) (str " " n)
       (= v false) ""
       (nil? v) ""
-      (vector? v) (str " " n "=\"" (escape-html (string/join " " (map str v))) "\"")
+      (vector? v) (str " " n "=\"" (escape-html (string/join (map v str) " ")) "\"")
       (contains? *url-attrs* k) (str " " n "=\"" (escape-html (str (safe-url v))) "\"")
       else (str " " n "=\"" (escape-html (str v)) "\""))))
 
 (defn render-attrs (attrs)
   "Serialize an attribute map to an HTML attribute string."
-  (string/join "" (map render-attr (%map-pairs attrs))))
+  (string/join (map (%map-pairs attrs) render-attr) ""))
 
 ;; The seam for an app's OWN type in a template. `render`'s `else` used to escape
 ;; `(str node)`, which for a record is its internal map — `{:__id__ :app/money, :cents 250}`
@@ -177,11 +174,10 @@
     (float? node) (str node)
     (bool? node) ""
     (vector? node) (render-element node)
-    (pair? node) (string/join "" (map render node))
+    (pair? node) (string/join (map node render) "")
     else (render-html node)))
 
-(defn- render-element
-  (node)
+(defn- render-element (node)
   (let (tag (first node)
         tail (rest node)
         has-map (and (not (nil? tail)) (map? (first tail)))
@@ -200,9 +196,8 @@
         tag-name
         ">"))))
 
-(defn- render-children
-  (children)
-  (string/join "" (map render (seq/flatten children))))
+(defn- render-children (children)
+  (string/join (map (seq/flatten children) render) ""))
 
 (defn html (node)
   "Render a Hiccup node and prepend the HTML5 doctype declaration.

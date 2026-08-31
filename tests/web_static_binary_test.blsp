@@ -28,7 +28,7 @@
 
 (defn with-file (dir name content thunk)
   "Write `content` (bytes) to dir/name, run (thunk path), clean up."
-  (try (file/mkdir dir) (catch _ nil))
+  (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
   (file/spit-bytes (str dir "/" name) content)
   (let (r (thunk))
     (file/rm (str dir "/" name))
@@ -106,7 +106,7 @@
   (test "a PNG GET returns the raw bytes on the wire, byte-for-byte"
     (let (dir "/tmp/hatch-staticbin-e2e"
           content (bytes [137 80 78 71 13 10 0 255 42 13 10 7]))
-      (try (file/mkdir dir) (catch _ nil))
+      (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
       (file/spit-bytes (str dir "/pic.png") content)
       (let (port 24831
             _sup (server/start port (static-handler dir))

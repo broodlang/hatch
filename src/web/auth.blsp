@@ -38,11 +38,12 @@
   (let (raw (header conn :authorization)
         prefix "Basic ")
     (if (and raw (string/starts-with? raw prefix))
-      (try
-        (base64-decode (string/trim (string/substring raw
-                                      (string/length prefix)
-                                      (string/length raw))))
-        (catch _e nil))
+      (check-allow :discarded-catch
+        (try
+          (base64-decode (string/trim (string/substring raw
+                                        (string/length prefix)
+                                        (string/length raw))))
+          (catch _e nil)))
       nil)))
 
 (defn realm-safe (realm)

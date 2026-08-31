@@ -42,12 +42,7 @@
 
 (defn conn-for (key)
   "A conn whose client-key resolves to `key` (via X-Real-IP)."
-  (conn/build {:method "GET"
-               :path "/"
-               :query ""
-               :params {}
-               :headers {:x-real-ip key}
-               :body ""}))
+  (conn/build {:method "GET" :path "/" :query "" :params {} :headers {:x-real-ip key} :body ""}))
 
 ; :isolated — the plug hits the shared :hatch-ratelimit singleton.
 (describe "rate-limit plug (end to end)"

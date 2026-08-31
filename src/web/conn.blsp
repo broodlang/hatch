@@ -27,7 +27,7 @@
         ; `:body` is `bytes` from the parser (empty `bytes` for no body); a spooled request carries
         ; the empty string "" — coerce either to bytes, then decode text for form/JSON handlers.
         body-bytes (if (bytes? raw) raw (string/->bytes raw))
-        body-text (try (string/bytes-> body-bytes) (catch _e ""))
+        body-text (check-allow :discarded-catch (try (string/bytes-> body-bytes) (catch _e "")))
         parsed (parse-conn-body headers body-text body-bytes)
         body-params (get parsed :params))
     {:method (get request :method)
@@ -66,17 +66,15 @@
   (let (raw (get headers :cookie))
     (if (or (nil? raw) (string/blank? raw))
       {}
-      (fold (fn (m pair)
-              (let (eq (index-of pair "="))
-                (if (= eq -1)
-                  m
-                  (assoc m
-                    (string/trim (string/substring pair 0 eq))
-                      (string/trim (string/substring pair
-                                     (+ eq 1)
-                                     (string/length pair)))))))
+      (fold (string/split raw ";")
         {}
-        (string/split raw ";")))))
+        (fn (m pair)
+          (let (eq (index-of pair "="))
+            (if (= eq -1)
+              m
+              (assoc m
+                (string/trim (string/substring pair 0 eq))
+                  (string/trim (string/substring pair (+ eq 1) (string/length pair)))))))))))
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."
@@ -217,7 +215,7 @@
 
 (defn run-before-send (conn)
   "Run the conn's registered before-send callbacks left-to-right, threading the conn."
-  (fold (fn (c f) (f c)) conn (get conn :before-send (list))))
+  (fold (get conn :before-send (list)) conn (fn (c f) (f c))))
 
 (defn send-resp (conn status body)
   "Set the response status and body on the conn, returning the conn. The web layer

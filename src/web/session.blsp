@@ -130,10 +130,10 @@
   the normalization must be deep, not just top-level."
   (cond
     (map? v)
-      (fold (fn (acc kv) (assoc acc (->string (first kv)) (stringify-keys (first (rest kv)))))
+      (fold (%map-pairs v)
         {}
-        (%map-pairs v))
-    (vector? v) (mapv stringify-keys v)
+        (fn (acc kv) (assoc acc (->string (first kv)) (stringify-keys (first (rest kv))))))
+    (vector? v) (mapv v stringify-keys)
     else v))
 
 ; ---- the fetch-session plug ----
