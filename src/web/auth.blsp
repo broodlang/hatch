@@ -38,12 +38,13 @@
   (let (raw (header conn :authorization)
         prefix "Basic ")
     (if (and raw (string/starts-with? raw prefix))
-      (check-allow :discarded-catch
-        (try
-          (base64-decode (string/trim (string/substring raw
-                                        (string/length prefix)
-                                        (string/length raw))))
-          (catch _e nil)))
+      ;; `base64-decode` answers a falsy `failure` on bad input rather than throwing
+      ;; (brood ADR-310), so there is nothing to catch — normalise it to the `nil` this
+      ;; function's contract promises.
+      (let (decoded (base64-decode (string/trim (string/substring raw
+                                                  (string/length prefix)
+                                                  (string/length raw)))))
+        (if (failure? decoded) nil decoded))
       nil)))
 
 (defn realm-safe (realm)

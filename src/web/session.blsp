@@ -119,7 +119,7 @@
   parse failure, or if the payload isn't a JSON object."
   (try
     (let (json (base64-url-decode payload)
-          parsed (if (nil? json) nil (json/decode json)))
+          parsed (if json (json/decode json) nil))
       (if (map? parsed) (stringify-keys parsed) {}))
     (catch _e {})))
 
