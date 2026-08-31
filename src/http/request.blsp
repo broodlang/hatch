@@ -428,7 +428,7 @@
 
 (defn content-length-value (cl)
   "The integer Content-Length, or 0 when absent. Assumes `valid-content-length?`."
-  (if (nil? cl) 0 (string/->number (string/trim cl))))
+  (or (and cl (string/->number (string/trim cl))) 0))
 
 (defn http-version (token)
   "Extract the numeric HTTP version ('1.1', '1.0') from a request-line version token like
