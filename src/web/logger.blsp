@@ -37,8 +37,7 @@
     (get measurements :duration 0)
     "ms"))
 
-(defn- log-request
-  (fixed measurements metadata)
+(defn- log-request (fixed measurements metadata)
   "Log one handled-request line at the fixed level or the status-derived one, carrying the
   request fields as structured `:meta`."
   (let (status (get metadata :status 200)
@@ -50,8 +49,7 @@
        :status status
        :duration_ms (get measurements :duration 0)})))
 
-(defn- log-exception
-  (metadata)
+(defn- log-exception (metadata)
   "Log a handler crash at :error, carrying the message the handler raised.
 
   `http/server` catches a handler exception, emits it as `[:hatch :request :exception]`, and
@@ -70,8 +68,7 @@
      :status 500
      :error (get metadata :error)}))
 
-(defn- log-bad-request
-  (measurements metadata)
+(defn- log-bad-request (measurements metadata)
   "Log a rejected (malformed) request at :warn — the head never parsed, so only the parser's
   reason is known (method/path are unavailable)."
   (log/log :warn

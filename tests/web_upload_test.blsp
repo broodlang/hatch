@@ -135,11 +135,11 @@
         ; at exactly 100%.
         (assert= (>= (count events) 1) true)
         ; every event is for our token, and counts never exceed the declared total
-        (assert= (seq/filterv (fn (e) (not (= (get e :token) tok))) events) [])
-        (assert= (seq/filterv (fn (e) (> (get e :got) 30)) events) [])
+        (assert= (seq/filterv events (fn (e) (not (= (get e :token) tok)))) [])
+        (assert= (seq/filterv events (fn (e) (> (get e :got) 30))) [])
         ; monotonic: a bar must never go backwards
-        (assert= (map (fn (e) (get e :got)) events)
-          (sort (map (fn (e) (get e :got)) events)))
+        (assert= (map events (fn (e) (get e :got)))
+          (sort (map events (fn (e) (get e :got)))))
         ; the final event is unthrottled and complete, so a bar always lands on 100%
         (assert= (get final :got) 30)
         (assert= (get final :total) 30)

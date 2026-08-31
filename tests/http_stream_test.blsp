@@ -44,18 +44,18 @@
 
 (defn parse-hex (s)
   "Parse a lowercase/uppercase hex string to an int (small helper for the chunk-size line)."
-  (fold (fn (acc c)
-          (let (d (cond
-                    (and (>= (string/char->int c) 48) (<= (string/char->int c) 57))
-                      (- (string/char->int c) 48)
-                    (and (>= (string/char->int c) 97) (<= (string/char->int c) 102))
-                      (- (string/char->int c) 87)
-                    (and (>= (string/char->int c) 65) (<= (string/char->int c) 70))
-                      (- (string/char->int c) 55)
-                    else nil))
-            (if (nil? d) acc (+ (* acc 16) d))))
+  (fold (string/->list (string/trim s))
     0
-    (string/->list (string/trim s))))
+    (fn (acc c)
+      (let (d (cond
+                (and (>= (string/char->int c) 48) (<= (string/char->int c) 57))
+                  (- (string/char->int c) 48)
+                (and (>= (string/char->int c) 97) (<= (string/char->int c) 102))
+                  (- (string/char->int c) 87)
+                (and (>= (string/char->int c) 65) (<= (string/char->int c) 70))
+                  (- (string/char->int c) 55)
+                else nil))
+        (if (nil? d) acc (+ (* acc 16) d))))))
 
 ; ---- handlers ----
 
@@ -67,8 +67,7 @@
 
 (defn conn-stream-handler (request)
   "The conn-level path: build a conn, stream via stream-resp."
-  (conn->response (stream-resp (build request)
-                    (fn (write) (write "alpha") (write "beta")))))
+  (conn->response (stream-resp (build request) (fn (write) (write "alpha") (write "beta")))))
 
 (defn sse-handler (request)
   "An SSE endpoint: emit a plain event, a named event, then finish."
@@ -145,13 +144,13 @@
 (defn big-body-stream (_request)
   "Stream a payload larger than the block size, forcing multiple chunks."
   (conn->response (stream/stream-bytes (build _request)
-                    (string/join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
+                    (string/join (map (range 0 500) (fn (i) (str "line-" i "\n"))) "")
                     {:content-type "text/plain" :block-size 64})))
 
 (defn gzip-stream (request)
   "Stream a payload gzip-compressed when the client accepts it."
   (conn->response (stream/stream-bytes (build request)
-                    (string/join "" (map (fn (_) "compress me ") (range 0 500)))
+                    (string/join (map (range 0 500) (fn (_) "compress me ")) "")
                     {:gzip true :content-type "text/plain"})))
 
 (defn file-stream (request)
@@ -162,7 +161,7 @@
 
 (describe "stream-bytes"
   (test "splits a large body into multiple chunks that reassemble exactly"
-    (let (want (string/join "" (map (fn (i) (str "line-" i "\n")) (range 0 500)))
+    (let (want (string/join (map (range 0 500) (fn (i) (str "line-" i "\n"))) "")
           port 24817
           _ (server/start port big-body-stream)
           resp (get-raw port "/"))
@@ -171,7 +170,7 @@
       (assert= (includes? resp "Content-Type: text/plain\r\n") true)
       (assert= (unchunk (body-of resp) "") want)))
   (test "gzip: negotiated, Content-Encoding set, and the body inflates to the original"
-    (let (want (string/join "" (map (fn (_) "compress me ") (range 0 500)))
+    (let (want (string/join (map (range 0 500) (fn (_) "compress me ")) "")
           port 24818
           _ (server/start port gzip-stream)
           sock (tcp/connect "127.0.0.1" port)
@@ -189,7 +188,7 @@
 (describe "stream-file"
   (test "streams a file's bytes, reassembling exactly"
     (let (path "/tmp/hatch-stream-file-test.txt"
-          want (string/join "" (map (fn (i) (str "row " i "\n")) (range 0 300)))
+          want (string/join (map (range 0 300) (fn (i) (str "row " i "\n"))) "")
           _ (file/spit path want)
           port 24819
           _ (server/start port file-stream)

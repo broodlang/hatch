@@ -41,30 +41,26 @@
 ; drops, so monitors don't pile up as a long-lived session subscribes/unsubscribes across
 ; live-navigations).
 
-(defn- pubsub-watch-vault
-  ()
+(defn- pubsub-watch-vault ()
   "Monitor the vault so its death delivers a `[:down]` here, letting the registry re-mirror to
   the restarted vault. Returns the monitor ref, or nil if the vault isn't up yet."
   (let (v (proc/whereis vault-name)) (if v (monitor v) nil)))
 
-(defn- pubsub-boot
-  ()
+(defn- pubsub-boot ()
   "Start (or restart) the registry: recover subscriptions from the vault, re-establish a monitor
   on each restored pid (one that died during the crash window re-fires [:down] at once and is
   cleaned up), monitor the vault, then enter the loop."
   (await vault-name 60)
   (let (subs (pull-snapshot vault-name {})
-        refs (fold (fn (m pid) (assoc m pid (monitor pid))) {} (pubsub-all-pids subs)))
+        refs (fold (pubsub-all-pids subs) {} (fn (m pid) (assoc m pid (monitor pid)))))
     (pubsub-loop subs refs (pubsub-watch-vault))))
 
-(defn- pubsub-save
-  (subs refs vault-ref)
+(defn- pubsub-save (subs refs vault-ref)
   "Mirror the new subscriptions to the vault, then continue the loop."
   (mirror vault-name subs)
   (pubsub-loop subs refs vault-ref))
 
-(defn- pubsub-loop
-  (subs refs vault-ref)
+(defn- pubsub-loop (subs refs vault-ref)
   (receive
     ([:subscribe topic pid] (let (refs2 (if (contains? refs pid)
                                           refs
@@ -124,58 +120,52 @@
 (defn remote-nodes ()
   "The connected peer node names, or an empty list when this runtime isn't a distributed
   node (so cross-node fan-out is a safe no-op)."
-  (or (try (node/list) (catch _e nil)) (list)))
+  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
 
-(defn- pubsub-fanout-remote
-  (topic payload)
+(defn- pubsub-fanout-remote (topic payload)
   "Replicate a locally-originated broadcast to every peer node's registry — once each, marked
   `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
   O(node/list) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
   that just dropped, is skipped rather than failing the publish."
   (dolist (n (remote-nodes))
-    (try
-      (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])
-      (catch _e nil))))
+    (check-allow :discarded-catch
+      (try
+        (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])
+        (catch _e nil)))))
 
-(defn- pubsub-subscribed?
-  (subs pid)
+(defn- pubsub-subscribed? (subs pid)
   "True if `pid` is still subscribed to any topic (O(log n) per topic set)."
-  (not (empty? (filter (fn (kv) (contains? (first (rest kv)) pid)) (%map-pairs subs)))))
+  (not (empty? (filter (%map-pairs subs) (fn (kv) (contains? (first (rest kv)) pid))))))
 
-(defn- pubsub-drop-ref
-  (refs pid)
+(defn- pubsub-drop-ref (refs pid)
   "Demonitor `pid` (its last subscription is gone) and drop its ref."
   (let (ref (get refs pid))
     (when ref (demonitor ref)))
   (dissoc refs pid))
 
-(defn- pubsub-add
-  (subs topic pid)
+(defn- pubsub-add (subs topic pid)
   "Add `pid` to `topic`'s subscriber set (idempotent — set membership dedupes)."
   (assoc subs topic (conj (get subs topic #{}) pid)))
 
-(defn- pubsub-remove
-  (subs topic pid)
+(defn- pubsub-remove (subs topic pid)
   "Remove `pid` from `topic`'s subscriber set, dropping the topic key entirely once it has
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
   (let (remaining (disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 
-(defn- pubsub-remove-pid
-  (subs pid)
+(defn- pubsub-remove-pid (subs pid)
   "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are
   dropped (not left as dead keys)."
-  (fold (fn (m kv)
-          (let (remaining (disj (first (rest kv)) pid))
-            (if (empty? remaining) m (assoc m (first kv) remaining))))
+  (fold (%map-pairs subs)
     {}
-    (%map-pairs subs)))
+    (fn (m kv)
+      (let (remaining (disj (first (rest kv)) pid))
+        (if (empty? remaining) m (assoc m (first kv) remaining))))))
 
-(defn- pubsub-all-pids
-  (subs)
+(defn- pubsub-all-pids (subs)
   "Every distinct subscriber pid across all topics, as a set — for re-monitoring on recovery
   (the union of every topic's subscriber set; already distinct, no dedupe pass)."
-  (fold (fn (acc kv) (set/union acc (first (rest kv)))) #{} (%map-pairs subs)))
+  (fold (%map-pairs subs) #{} (fn (acc kv) (set/union acc (first (rest kv))))))
 
 (defn pubsub ()
   "The PubSub registry pid — a supervised, vault-backed singleton. Started on first use and

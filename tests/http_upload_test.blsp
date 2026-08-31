@@ -80,7 +80,7 @@
       (send reporter
         [:body
           {:len (count bytes)
-           :sum (fold + 0 (seq bytes))}])
+           :sum (fold (seq bytes) 0 +)}])
       {:status 200 :headers {} :body "ok"})))
 
 (describe "large non-chunked body streamed over several reads"
@@ -90,8 +90,8 @@
           ; a 20 000-byte body: big enough that it cannot land in one packet, and its bytes
           ; cycle 0..99 so a dropped/duplicated/mis-ordered read changes the checksum
           n 20000
-          body-bytes (bytes (map (fn (i) (math/mod i 100)) (range 0 n)))
-          expected-sum (fold + 0 (seq body-bytes))
+          body-bytes (bytes (map (range 0 n) (fn (i) (math/mod i 100))))
+          expected-sum (fold (seq body-bytes) 0 +)
           head (b (str "POST /u HTTP/1.1\r\nHost: x\r\n"
                     "Content-Length: " n "\r\nConnection: close\r\n\r\n"))
           _sup (server/start port (body-echo-handler me))
@@ -101,12 +101,12 @@
       (send-raw client head)
       (sleep 20)
       ; then the body in 40 separate 500-byte writes, pausing so each is its own read
-      (fold (fn (_ k)
-              (do
-                (send-raw client (bytes/slice body-bytes (* k 500) (* (+ k 1) 500)))
-                (sleep 2)))
+      (fold (range 0 40)
         nil
-        (range 0 40))
+        (fn (_ k)
+          (do
+            (send-raw client (bytes/slice body-bytes (* k 500) (* (+ k 1) 500)))
+            (sleep 2))))
       (let (info (receive ([:body d] d) (after 5000 :timeout)))
         (tcp/close client)
         (server/stop port)
@@ -138,16 +138,16 @@
       (send-raw client head)
       (sleep 20)
       ; each 10-byte chunk (hex size "a") in its own write, so each is a distinct read
-      (fold (fn (_ _k)
-              (do
-                (send-raw client (b (str "a\r\n" part "\r\n")))
-                (sleep 2)))
+      (fold (range 0 reps)
         nil
-        (range 0 reps))
+        (fn (_ _k)
+          (do
+            (send-raw client (b (str "a\r\n" part "\r\n")))
+            (sleep 2))))
       (send-raw client (b "0\r\n\r\n"))
       (let (info (receive ([:chunked d] d) (after 5000 :timeout)))
         (tcp/close client)
         (server/stop port)
         (assert= (count (get info :body)) (* reps 10))
         (assert= (string/bytes-> (get info :body))
-          (string/join "" (map (fn (_) part) (range 0 reps))))))))
+          (string/join (map (range 0 reps) (fn (_) part)) ""))))))

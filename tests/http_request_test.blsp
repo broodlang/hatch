@@ -143,7 +143,7 @@
 
 (describe "try-parse: header-count cap"
   (test "a request with more than *max-header-count* header lines is rejected"
-    (let (head (string/join "" (map (fn (i) (str "X-" i ": v\r\n")) (range 150))))
+    (let (head (string/join (map (range 150) (fn (i) (str "X-" i ": v\r\n"))) ""))
       (assert= (first (try-parse (str "GET / HTTP/1.1\r\n" head "\r\n"))) :error))))
 
 ; The incremental de-chunker behind the server's O(n) chunked drain: decode each chunk exactly

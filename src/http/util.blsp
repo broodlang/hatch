@@ -14,8 +14,8 @@
 
 (defn hex-str->bytes (hex)
   "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
-  (map (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))
-    (partition 2 (string/->list hex))))
+  (map (partition (string/->list hex) 2)
+    (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))))
 
 ;; ---- URL decode ----
 
@@ -32,8 +32,7 @@
     (string/bytes-> (vec (reverse (url-decode-acc (string/->list s) nil))))
     (catch _e s)))
 
-(defn- url-decode-acc
-  (chars acc)
+(defn- url-decode-acc (chars acc)
   (match chars
     (nil acc)
     (("%" h l & rest) (url-decode-acc rest
@@ -43,7 +42,7 @@
                   (if (< cp 128)
                     (url-decode-acc rest (cons cp acc))
                     (url-decode-acc rest
-                      (fold (fn (a b) (cons b a)) acc (seq (string/->bytes c)))))))))
+                      (fold (seq (string/->bytes c)) acc (fn (a b) (cons b a)))))))))
 
 ;; ---- query-string parser ----
 
@@ -53,17 +52,15 @@
   (hatch/http/util/parse-query \"a=1&b=two\") ;=> {\"a\" \"1\" \"b\" \"two\"}"
   (if (or (nil? s) (string/blank? s))
     {}
-    (fold (fn (m pair)
-            (let (eq (index-of pair "="))
-              (if (= eq -1)
-                (assoc m (url-decode pair) "")
-                (assoc m
-                  (url-decode (string/substring pair 0 eq))
-                    (url-decode (string/substring pair
-                                  (+ eq 1)
-                                  (string/length pair)))))))
+    (fold (string/split s "&")
       {}
-      (string/split s "&"))))
+      (fn (m pair)
+        (let (eq (index-of pair "="))
+          (if (= eq -1)
+            (assoc m (url-decode pair) "")
+            (assoc m
+              (url-decode (string/substring pair 0 eq))
+                (url-decode (string/substring pair (+ eq 1) (string/length pair))))))))))
 
 ;; ---- carrier <-> bytes (byte-faithful request bodies) ----
 ; The server reads connections in binary mode and accumulates the request as a *carrier*
@@ -75,7 +72,7 @@
   "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
   the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
   upload) from the parsed carrier body."
-  (bytes (map string/char->int (string/->list carrier))))
+  (bytes (map (string/->list carrier) string/char->int)))
 
 (defn carrier->text (carrier)
   "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
@@ -101,8 +98,7 @@
       nil
       (ct-param-find (rest (string/split ct ";")) (string/lower key)))))
 
-(defn- ct-param-find
-  (parts key)
+(defn- ct-param-find (parts key)
   (if (empty? parts)
     nil
     (let (p (string/trim (first parts))
@@ -111,8 +107,7 @@
         (ct-param-unquote (string/trim (string/substring p (+ eq 1) (string/length p))))
         (ct-param-find (rest parts) key)))))
 
-(defn- ct-param-unquote
-  (v)
+(defn- ct-param-unquote (v)
   (if (and (>= (string/length v) 2) (string/starts-with? v "\"") (string/ends-with? v "\""))
     (string/substring v 1 (- (string/length v) 1))
     v))
@@ -146,10 +141,10 @@
   and vectors — so a parsed JSON body is string-keyed all the way down."
   (cond
     (map? v)
-      (fold (fn (m kv) (assoc m (->string (first kv)) (stringify-keys (first (rest kv)))))
+      (fold (%map-pairs v)
         {}
-        (%map-pairs v))
-    (vector? v) (mapv stringify-keys v)
+        (fn (m kv) (assoc m (->string (first kv)) (stringify-keys (first (rest kv))))))
+    (vector? v) (mapv v stringify-keys)
     else v))
 
 ;; ---- status codes ----

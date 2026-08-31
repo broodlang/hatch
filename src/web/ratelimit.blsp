@@ -26,8 +26,7 @@
 
 ; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
 
-(defn- refill
-  (bucket cfg dnow)
+(defn- refill (bucket cfg dnow)
   "Refill `bucket` to time `dnow`: add the tokens accrued since its timestamp, capped at the
   bucket's capacity (`:burst`). A fresh key starts full."
   (let (burst (get cfg :burst)
@@ -37,8 +36,7 @@
         refilled (+ tokens (* (- dnow ts) per-ms)))
     {:tokens (math/min (* 1.0 burst) refilled) :ts dnow}))
 
-(defn- spend
-  (bucket cfg cost dnow)
+(defn- spend (bucket cfg cost dnow)
   "Try to spend `cost` tokens from a refilled `bucket`. Returns `[new-bucket :ok]` when it had
   enough, else `[unchanged-bucket [:deny retry-ms]]` with the ms until `cost` tokens accrue."
   (let (b (refill bucket cfg dnow)
@@ -50,8 +48,7 @@
             retry-ms (math/ceil (/ deficit per-ms)))
         [b [:deny retry-ms]]))))
 
-(defn- ratelimit-loop
-  (buckets)
+(defn- ratelimit-loop (buckets)
   "Serialize every bucket read-refill-spend. `[:take key cost cfg dnow from r]` replies
   `[:take r :ok]` or `[:take r [:deny retry-ms]]`; `[:reset from r]` clears all buckets (tests)."
   (receive
@@ -85,8 +82,7 @@
 
 ; ---- key selection ----
 
-(defn- first-hop
-  (xff)
+(defn- first-hop (xff)
   "The first address in an `X-Forwarded-For` list (the original client), trimmed."
   (if (or (nil? xff) (string/blank? xff)) nil (string/trim (first (string/split xff ",")))))
 

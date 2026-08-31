@@ -37,7 +37,7 @@
 (defn sse-data (data)
   "The `data:` lines for a payload. Each embedded newline starts a new `data:` line, per the
   SSE spec — so a multi-line payload arrives as one event with newlines preserved."
-  (string/join "" (map (fn (line) (str "data: " line "\n")) (string/split (str data) "\n"))))
+  (string/join (map (string/split (str data) "\n") (fn (line) (str "data: " line "\n"))) ""))
 
 (defn sse-event (data &optional (opts {}))
   "Format one SSE event frame from `data` and `opts` (`:event`, `:id`, `:retry`), terminated by
@@ -54,8 +54,7 @@
   keepalive that stops an idle proxy from closing the connection."
   (emit {:raw (str ": " text "\n\n")}))
 
-(defn- format-message
-  (msg)
+(defn- format-message (msg)
   "Format one value passed to `emit`: a string is a plain `data:` event; a map may carry
   `:data`/`:event`/`:id`/`:retry`, or `:raw` for a pre-formatted frame (comments/keepalives)."
   (cond
@@ -81,8 +80,7 @@
   (let (ae (get (get conn :headers) :accept-encoding))
     (and (string? ae) (includes? ae "gzip"))))
 
-(defn- write-blocks
-  (write data block-size offset)
+(defn- write-blocks (write data block-size offset)
   "Write `data` (bytes) to the socket in `block-size`-byte chunks, from `offset` to the end."
   (let (n (count data))
     (when (< offset n)

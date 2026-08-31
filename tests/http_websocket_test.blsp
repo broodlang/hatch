@@ -46,7 +46,7 @@
   (test "text-frame returns a bytes value (sent verbatim by tcp/send, not re-encoded)"
     (assert= (bytes? (text-frame "hello")) true))
   (test "small frame payload"
-    (assert= (string/bytes-> (bytes (drop 2 (seq (text-frame "hello"))))) "hello"))
+    (assert= (string/bytes-> (bytes (drop (seq (text-frame "hello")) 2))) "hello"))
   (test "empty payload"
     (assert= (count (text-frame "")) 2))
   (test "125-byte max small frame"
@@ -82,7 +82,7 @@
           f (text-frame text)
           expected (count (string/->bytes text)))
       (assert= (carrier-byte-at f 1) expected)
-      (assert= (string/bytes-> (bytes (drop 2 (seq f)))) text))))
+      (assert= (string/bytes-> (bytes (drop (seq f) 2))) text))))
 
 ; The inbound parser is bytes-native (ADR-141): frames are `bytes` and a parsed payload/rem
 ; are `bytes`. `cframe`/`masked-frame` build `bytes`; payload assertions decode via
@@ -215,7 +215,7 @@
 (defn masked-frame (opcode payload key)
   (let (pb (string/->bytes payload)
         n (count pb)
-        masked (bytes (map (fn (i) (bit/xor (get pb i) (get key (math/mod i 4)))) (range n))))
+        masked (bytes (map (range n) (fn (i) (bit/xor (get pb i) (get key (math/mod i 4)))))))
     (bytes/concat (bytes [(+ 128 opcode) (+ 128 n)]) (bytes key) masked)))
 
 (describe "parse-frame: unmask (non-zero key)"

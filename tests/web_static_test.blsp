@@ -61,7 +61,7 @@
 (describe "cached-etag"
   (test "matches a direct hash, reuses it, and re-tags after the file changes"
     (let (dir "/tmp/hatch-etag-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           f (str dir "/a.txt")
           _ (file/spit f "hello")
           t1 (cached-etag f "hello"))
@@ -95,7 +95,7 @@
   ; shaped look-alike that isn't in the manifest must NOT be cached forever.
   (test "manifest value → yes; shaped look-alike & plain name → no"
     (let (dir "/tmp/hatch-fp2-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/cache-manifest") "app.css\tapp.1a2b3c4d.css\n"))
       (assert= (fingerprinted? (str dir "/app.1a2b3c4d.css") dir) true)
       (assert= (fingerprinted? (str dir "/chunk.deadbeef.js") dir) false)
@@ -217,7 +217,7 @@
 (describe "load-manifest (memoized)"
   (test "reads once, serves from cache even after the file is removed; clear re-reads"
     (let (dir "/tmp/hatch-manifest-memo-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/cache-manifest") "app.css\tapp.abcd1234.css\n")
           loaded (load-manifest dir))
       (assert= loaded {"app.css" "app.abcd1234.css"})
@@ -239,7 +239,7 @@
   ; a fine fixture; we assert on the negotiation, headers, and which body is chosen.
   (test "Accept-Encoding: gzip + a .gz sibling → the gzip variant"
     (let (dir "/tmp/hatch-gz-serve-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/x.css") "body{color:red}")
           _ (file/spit (str dir "/x.css.gz") "PRECOMPRESSED-BYTES")
           resp (serve (conn-with {} {:accept-encoding "gzip"}) dir "x.css")
@@ -255,7 +255,7 @@
       (file/rm (str dir "/x.css"))))
   (test "no Accept-Encoding → identity body, but still Vary: Accept-Encoding"
     (let (dir "/tmp/hatch-gz-serve-test2"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/x.css") "body{color:red}")
           _ (file/spit (str dir "/x.css.gz") "PRECOMPRESSED-BYTES")
           resp (serve (conn-with {}) dir "x.css")
@@ -268,7 +268,7 @@
       (file/rm (str dir "/x.css"))))
   (test "Accept-Encoding: gzip but no .gz on disk → identity"
     (let (dir "/tmp/hatch-gz-serve-test3"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/y.css") "body{color:blue}")
           resp (serve (conn-with {} {:accept-encoding "gzip"}) dir "y.css")
           headers (get resp :resp-headers))
@@ -280,7 +280,7 @@
 (describe "serve-encoded (brotli content negotiation, preferred over gzip)"
   (test "Accept-Encoding: br + a .br sibling → the brotli variant"
     (let (dir "/tmp/hatch-br-serve-test"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/x.css") "body{color:red}")
           _ (file/spit (str dir "/x.css.br") "BROTLI-BYTES")
           resp (serve (conn-with {} {:accept-encoding "br, gzip"}) dir "x.css")
@@ -293,7 +293,7 @@
       (file/rm (str dir "/x.css"))))
   (test "br preferred over gzip when the client accepts both and both siblings exist"
     (let (dir "/tmp/hatch-br-serve-test2"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/x.css") "body{color:red}")
           _ (file/spit (str dir "/x.css.gz") "GZIP-BYTES")
           _ (file/spit (str dir "/x.css.br") "BROTLI-BYTES")
@@ -306,7 +306,7 @@
       (file/rm (str dir "/x.css"))))
   (test "Accept-Encoding: br but only a .gz on disk → falls back to gzip"
     (let (dir "/tmp/hatch-br-serve-test3"
-          _ (try (file/mkdir dir) (catch _ nil))
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
           _ (file/spit (str dir "/x.css") "body{color:red}")
           _ (file/spit (str dir "/x.css.gz") "GZIP-BYTES")
           resp (serve (conn-with {} {:accept-encoding "br, gzip"}) dir "x.css")

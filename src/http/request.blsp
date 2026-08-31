@@ -50,8 +50,7 @@
                       ; Chunked Transfer-Encoding: de-chunk the body. Any other TE coding
                       ; (gzip, …) we don't decode, so reject rather than mis-frame it.
                       (contains? headers :transfer-encoding)
-                        (if (chunked? (get headers
-                                        :transfer-encoding))
+                        (if (chunked? (get headers :transfer-encoding))
                           ; one decoder for both paths: `dechunk-step`
                           ; (its `:more` = "need more bytes" = `:incomplete`
                           ; for a single whole-buffer parse)
@@ -182,7 +181,7 @@
   "Decode head-block `bytes` to a Latin-1 carrier string (one codepoint 0-255 per byte), so the
   string-based head parser runs byte-faithfully. Applied only to the request HEAD, which is
   bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`."
-  (string/join "" (map string/int->char (seq b))))
+  (string/join (map (seq b) string/int->char) ""))
 
 (defn try-parse-bytes (buf)
   "Bytes-native `try-parse`: `buf` is a `bytes` value. Returns `[:ok request remainder]`,
@@ -296,15 +295,14 @@
   "Parse hex string `s` to a non-negative integer, or nil if empty/invalid."
   (if (string/blank? s)
     nil
-    (fold (fn (acc c)
-            (if (nil? acc)
-              nil
-              (let (d (hex-digit-val c)) (if (nil? d) nil (+ (* acc 16) d)))))
+    (fold (string/->list s)
       0
-      (string/->list s))))
+      (fn (acc c)
+        (if (nil? acc)
+          nil
+          (let (d (hex-digit-val c)) (if (nil? d) nil (+ (* acc 16) d))))))))
 
-(defn- dechunk-trailers
-  (buf pos buflen)
+(defn- dechunk-trailers (buf pos buflen)
   "Skip any trailer headers after the last (0-size) chunk; return the index past the
   terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
   (let (eol (idx-from buf "\r\n" pos))
@@ -340,7 +338,7 @@
             (let (end (dechunk-trailers buf (+ eol 2) buflen))
               (if (= end -1)
                 [:more (string/substring buf pos buflen) decoded dlen]
-                [:ok (string/join "" (reverse decoded)) (string/substring buf end buflen)]))
+                [:ok (string/join (reverse decoded) "") (string/substring buf end buflen)]))
           else
             (let (data-start (+ eol 2)
                   data-end (+ data-start size)
@@ -357,8 +355,8 @@
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
   (and (not (string/blank? s))
-    (empty? (filter (fn (c) (let (n (string/char->int c)) (or (< n 48) (> n 57))))
-              (string/->list s)))))
+    (empty? (filter (string/->list s)
+              (fn (c) (let (n (string/char->int c)) (or (< n 48) (> n 57))))))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
@@ -372,10 +370,10 @@
 (defn obs-fold? (header-lines)
   "True if any header line begins with a space or tab — an obs-fold continuation line, which
   RFC 7230 §3.2.4 says a server must reject in a request (it's a header-desync primitive)."
-  (not (empty? (filter (fn (line)
-                         (and (> (string/length line) 0)
-                           (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))
-                 header-lines))))
+  (not (empty? (filter header-lines
+                 (fn (line)
+                   (and (> (string/length line) 0)
+                     (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))))))
 
 (defn ws-before-colon? (line)
   "True when a header `line` has a space or tab immediately before its field-name colon.
@@ -389,14 +387,14 @@
 
 (defn any-ws-before-colon? (header-lines)
   "True if any header line puts whitespace before its colon (see `ws-before-colon?`)."
-  (not (empty? (filter ws-before-colon? header-lines))))
+  (not (empty? (filter header-lines ws-before-colon?))))
 
 (defn bare-line-break? (lines)
   "True if any already-CRLF-split `lines` (the request-line or a header line) still holds a
   bare CR or bare LF. RFC 7230 §3.5: only CRLF terminates a line, so a bare LF/CR embedded in
   the head means a proxy that DOES split on it parses a different header set — a smuggling
   primitive. Every legitimate CRLF was consumed by the split, so a leftover CR/LF is bare."
-  (not (empty? (filter (fn (l) (or (includes? l "\r") (includes? l "\n"))) lines))))
+  (not (empty? (filter lines (fn (l) (or (includes? l "\r") (includes? l "\n")))))))
 
 (defn colonless-header? (header-lines)
   "True if any header line has no colon at all — a malformed field with no name/value split.
@@ -404,23 +402,23 @@
   it (as a bare field, or by joining it to a neighbour) from disagreeing with us, the same
   desync posture as the other malformed-header rejections. Obs-fold continuation lines start
   with SP/HTAB and are caught by `obs-fold?` first, so this only fires on a non-folded line."
-  (not (empty? (filter (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))
-                 header-lines))))
+  (not (empty? (filter header-lines
+                 (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))))))
 
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
   (a proxy may honor a different occurrence than our last-wins map), a smuggling vector."
-  (> (count (filter (fn (line) (not (nil? (header-value-for line "transfer-encoding"))))
-              header-lines))
+  (> (count (filter header-lines
+              (fn (line) (not (nil? (header-value-for line "transfer-encoding"))))))
     1))
 
 (defn content-length-conflict? (header-lines)
   "True if `Content-Length` appears more than once with differing values — ambiguous
   framing (RFC 7230), a request-smuggling vector. Duplicate identical values are fine."
-  (let (vals (filter (fn (v) (not (nil? v)))
-               (map (fn (line) (header-value-for line "content-length")) header-lines)))
+  (let (vals (filter (map header-lines (fn (line) (header-value-for line "content-length")))
+               (fn (v) (not (nil? v)))))
     (and (> (count vals) 1)
-      (not (empty? (filter (fn (v) (not (= v (first vals)))) (rest vals)))))))
+      (not (empty? (filter (rest vals) (fn (v) (not (= v (first vals))))))))))
 
 (defn valid-content-length? (cl)
   "True if the Content-Length header value `cl` is absent (nil), or present and a
@@ -472,7 +470,7 @@
   §3.2.2 (`; ` for `Cookie`, `, ` otherwise)."
   (if (= k :content-length)
     (first values)
-    (string/join (header-join-sep k) values)))
+    (string/join values (header-join-sep k))))
 
 (defn parse-headers (lines)
   "Parse a list of raw header lines into a keyword→string map. Splits on the first
@@ -484,18 +482,16 @@
   Values are gathered per key and `join`ed ONCE, so a field repeated N times is O(N),
   not the O(N²) of a per-line `(str acc v)` fold — that quadratic was a repeated-header
   CPU-exhaustion vector (bounded only by the byte cap, i.e. minutes of CPU per request)."
-  (let (grouped (fold (fn (m line)
-                        (let (ci (index-of line ":"))
-                          (if (= ci -1)
-                            m
-                            (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
-                                  v (string/trim (string/substring line
-                                                   (+ ci 1)
-                                                   (string/length line))))
-                              (assoc m k (cons v (get m k (list))))))))
+  (let (grouped (fold lines
                   {}
-                  lines))
-    (fold (fn (m kv)
-            (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv))))))
+                  (fn (m line)
+                    (let (ci (index-of line ":"))
+                      (if (= ci -1)
+                        m
+                        (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
+                              v (string/trim (string/substring line (+ ci 1) (string/length line))))
+                          (assoc m k (cons v (get m k (list))))))))))
+    (fold (%map-pairs grouped)
       {}
-      (%map-pairs grouped))))
+      (fn (m kv)
+        (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv)))))))))

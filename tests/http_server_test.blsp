@@ -25,7 +25,7 @@
   reaches the wire intact. tcp/send UTF-8-encodes a string leaf (ADR-141), which would mangle
   every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
   verbatim — the same reason the server builds its frames as `bytes`."
-  (bytes (map string/char->int (string/->list carrier))))
+  (bytes (map (string/->list carrier) string/char->int)))
 
 (defn read-one-frame (sock buf)
   "Block until one complete WebSocket frame is buffered; return its decoded payload,
@@ -326,7 +326,7 @@
           ; the deadline fires anyway. On a loaded machine the 150ms sleep can overshoot the
           ; 250ms deadline, in which case the socket is already closed and this send would
           ; raise — failing a test whose assertion (a 408) the server has in fact satisfied.
-          _ (try (tcp/send sock "X: y\r\n") (catch _e nil))
+          _ (check-allow :discarded-catch (try (tcp/send sock "X: y\r\n") (catch _e nil)))
           resp (drain sock ""))
       (tcp/close sock)
       (server/stop port)
@@ -347,7 +347,7 @@
           _ (tcp/send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
           _ (sleep 150)
           ; best-effort, same reason as the head-timeout case above
-          _ (try (tcp/send sock "C") (catch _e nil))
+          _ (check-allow :discarded-catch (try (tcp/send sock "C") (catch _e nil)))
           resp (drain sock ""))
       (tcp/close sock)
       (server/stop port)

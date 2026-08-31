@@ -79,8 +79,7 @@
   live connection count."
   (keyword (str "http-workers-" port)))
 
-(defn- await-listening
-  (port budget-ms)
+(defn- await-listening (port budget-ms)
   "Return once `port` actually ACCEPTS a connection, or when `budget-ms` run out.
 
 Replaces a fixed `(sleep 50)`. Fifty milliseconds is a guess about how fast the listener
@@ -95,7 +94,7 @@ port) still returns and lets the caller fail on its own terms."
   (cond
     (<= budget-ms 0) nil
     else
-      (let (probe (try (tcp/connect "127.0.0.1" port) (catch _ nil)))
+      (let (probe (check-allow :discarded-catch (try (tcp/connect "127.0.0.1" port) (catch _ nil))))
         (if probe
           (do (tcp/close probe) nil)
           (do (sleep 10) (await-listening port (- budget-ms 10)))))))
@@ -119,8 +118,7 @@ port) still returns and lets the caller fail on its own terms."
         sup (supervisor/start [{:id :http-listener
                                 :name (listener-name port)
                                 :start (fn ()
-                                         (spawn (listen-and-serve port
-                                                  handler ws-handler cfg)))
+                                         (spawn (listen-and-serve port handler ws-handler cfg)))
                                 :restart :transient}]
               {:strategy :one-for-one :max-restarts 5 :max-seconds 10}))
     (proc/register (supervisor-name port) sup)
@@ -190,18 +188,15 @@ port) still returns and lets the caller fail on its own terms."
 ; it on the worker's `[:down …]`, refuses (closes) a connection over `:max-connections`
 ; rather than spawning unboundedly, and on `:drain` (graceful `stop`) waits for those
 ; workers to finish before letting the process exit.
-(defn- listener-without
-  (workers pid)
+(defn- listener-without (workers pid)
   "`workers` minus `pid` — order is irrelevant, it's a bag of in-flight worker pids."
-  (fold (fn (acc w) (if (= w pid) acc (cons w acc))) (list) workers))
+  (fold workers (list) (fn (acc w) (if (= w pid) acc (cons w acc)))))
 
-(defn- listener-kill-all
-  (workers)
+(defn- listener-kill-all (workers)
   "Hard-kill every worker in `workers` (drain deadline reached). Returns nil."
-  (fold (fn (_ w) (exit w :kill) nil) nil workers))
+  (fold workers nil (fn (_ w) (exit w :kill) nil)))
 
-(defn- listener-drain
-  (workers deadline from)
+(defn- listener-drain (workers deadline from)
   "Wait for the in-flight `workers` to finish, up to `deadline` (ms epoch); past it, hard-
   kill the stragglers. Either way reply `:drained` to `from` and let the listener exit.
   Late `[:tcp-accept]`s (a connection that slipped in as we closed the socket) are refused."
@@ -215,8 +210,7 @@ port) still returns and lets the caller fail on its own terms."
           ([:tcp-accept _ client] (do (tcp/close client) (listener-drain workers deadline from)))
           (after remaining (do (listener-kill-all workers) (send from :drained))))))))
 
-(defn- listener-loop
-  (lsock handler ws-handler config workers sup)
+(defn- listener-loop (lsock handler ws-handler config workers sup)
   (receive
     ([:tcp-accept ^lsock client]
       (if (>= (count workers) (get config :max-connections))
@@ -248,10 +242,7 @@ port) still returns and lets the caller fail on its own terms."
                      (tcp/close lsock)
                      (listener-drain workers (+ (os/now) (get config :shutdown-grace-ms)) from)
                      (gen/stop sup)))
-    (:stop (do
-             (tcp/close lsock)
-             (gen/stop sup)
-             (io/puts "http/server: stopped")))))
+    (:stop (do (tcp/close lsock) (gen/stop sup) (io/puts "http/server: stopped")))))
 
 (defn head-complete? (buf)
   "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` (a `bytes` value) —
@@ -264,8 +255,7 @@ port) still returns and lets the caller fail on its own terms."
   (let (n (count b))
     (if (<= n 3) b (bytes/slice b (- n 3) n))))
 
-(defn- worker-run
-  (sock handler ws-handler config buf)
+(defn- worker-run (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head
   with `tcp/read-until` — seeded with whatever `buf` already holds from a pipelined request —
   then hands off to `worker-dispatch`, which routes the body to the spool / in-memory-drain /
@@ -299,8 +289,7 @@ port) still returns and lets the caller fail on its own terms."
     ; the head grew past the request cap without a terminator
     ([:too-large _acc] (do
                          (tcp/send sock
-                           (format-response {:status 413
-                                             :body "<h1>413 Payload Too Large</h1>"}))
+                           (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
                          (tcp/close sock)))
     ; peer hung up mid-head (or between keep-alive requests) — nothing to answer
     ([:closed _acc] nil)
@@ -327,10 +316,10 @@ port) still returns and lets the caller fail on its own terms."
   many HTTP libraries) holds its body waiting for the interim while the server waits for the
   body — a deadlock that only breaks when the read timeout answers 408 and the upload fails."
   (when (expects-continue? head)
-    (try (tcp/send sock (string/->bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil))))
+    (check-allow :discarded-catch
+      (try (tcp/send sock (string/->bytes "HTTP/1.1 100 Continue\r\n\r\n")) (catch _ nil)))))
 
-(defn- worker-dispatch
-  (sock handler ws-handler config buf)
+(defn- worker-dispatch (sock handler ws-handler config buf)
   "Dispatch a request whose head is fully buffered in `buf`. Parses the head ONCE, then routes
   the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
   so no path re-buffers the body. A body that already landed whole (and every WebSocket upgrade)
@@ -444,8 +433,7 @@ port) still returns and lets the caller fail on its own terms."
           (worker-run sock handler ws-handler config remainder)
           (tcp/close sock))))))
 
-(defn- stream-response
-  (sock request response)
+(defn- stream-response (sock request response)
   "Send a chunked (Transfer-Encoding: chunked) streaming response: the head, then the handler's
   `:stream` function driving a `write` callback (each call sends one chunk), then the terminating
   chunk. `write` takes a string/`bytes`/iolist. A HEAD request gets the head only. The connection
@@ -455,11 +443,12 @@ port) still returns and lets the caller fail on its own terms."
         head? (= (get request :method) "HEAD"))
     (tcp/send sock (format-stream-head response))
     (when (not head?)
-      (try
-        (do
-          ((get response :stream) (fn (data) (let (c (chunk data)) (when c (tcp/send sock c)))))
-          (tcp/send sock (last-chunk)))
-        (catch _e nil)))
+      (check-allow :discarded-catch
+        (try
+          (do
+            ((get response :stream) (fn (data) (let (c (chunk data)) (when c (tcp/send sock c)))))
+            (tcp/send sock (last-chunk)))
+          (catch _e nil))))
     (tcp/close sock)))
 
 ; ---- O(n) in-memory body drain (non-chunked bodies that arrive over several reads) ----
@@ -494,8 +483,7 @@ port) still returns and lets the caller fail on its own terms."
   marker that makes a body read report its progress."
   (get (parse-query (get head :query "")) upload-token-param))
 
-(defn- progress-begin
-  (config head clen)
+(defn- progress-begin (config head clen)
   "Progress state for one body read — `{:token :total :next}` (`:next` is the epoch-ms the next
   event is due) — or nil when this request didn't ask for progress, which switches every
   `progress-tick` below off at zero cost."
@@ -504,16 +492,14 @@ port) still returns and lets the caller fail on its own terms."
       nil
       {:token tok :total clen :interval (get config :progress-interval-ms 250) :next 0})))
 
-(defn- progress-emit
-  (prog got)
+(defn- progress-emit (prog got)
   "Emit one progress event. Fire-and-forget; never raises into the read loop."
   (telemetry/emit [:hatch :upload :progress]
     {:got got :total (get prog :total)}
     {:token (get prog :token)})
   nil)
 
-(defn- progress-tick
-  (prog got)
+(defn- progress-tick (prog got)
   "Emit a progress event if one is due and return the advanced state (unchanged when it isn't,
   nil when this request doesn't report). Throttled to one event per `:interval` ms — a socket
   read can be a single MTU, so an unthrottled emit would be thousands of events (and thousands
@@ -521,12 +507,12 @@ port) still returns and lets the caller fail on its own terms."
   (cond
     (nil? prog) nil
     (< (os/now) (get prog :next)) prog
-    else (do
-           (progress-emit prog got)
-           (assoc prog :next (+ (os/now) (get prog :interval))))))
+    else
+      (do
+        (progress-emit prog got)
+        (assoc prog :next (+ (os/now) (get prog :interval))))))
 
-(defn- progress-finish
-  (prog got)
+(defn- progress-finish (prog got)
   "Emit the final, unthrottled event for a completed body, so a progress bar always lands on
   100% instead of stopping at whatever the last throttled tick happened to report."
   (when prog (progress-emit prog got))
@@ -540,8 +526,7 @@ port) still returns and lets the caller fail on its own terms."
     (< (count buf) (+ body-start clen))
     (not (and ws-handler (upgrade-request? head)))))
 
-(defn- buffered-begin
-  (sock handler ws-handler config buf head body-start clen)
+(defn- buffered-begin (sock handler ws-handler config buf head body-start clen)
   "Start an O(n) in-memory body drain: reject if the declared request size blows the cap,
   else seed the drain with the body bytes already in `buf` and read the rest by length."
   (if (> (+ body-start clen) (get config :max-request-bytes))
@@ -560,8 +545,7 @@ port) still returns and lets the caller fail on its own terms."
         (+ (os/now) (get config :body-timeout-ms))
         (progress-begin config head clen)))))
 
-(defn- buffered-drain
-  (sock handler ws-handler config head chunks got clen deadline prog)
+(defn- buffered-drain (sock handler ws-handler config head chunks got clen deadline prog)
   "Accumulate incoming body reads (`bytes` chunks, newest-first) in `chunks` until `clen`
   bytes are in hand, then `join` once, split off any pipelined `remainder`, and dispatch.
   Bounds the idle wait AND the total body time (both slow-loris → 408) and the size (→ 413,
@@ -602,8 +586,7 @@ port) still returns and lets the caller fail on its own terms."
 ; Chunked bodies have no Content-Length (so they can't be spooled by size); this is their
 ; in-memory, memory-capped reader.
 
-(defn- chunked-begin
-  (sock handler ws-handler config buf head body-start)
+(defn- chunked-begin (sock handler ws-handler config buf head body-start)
   "Start an incremental de-chunk drain, seeded with the body bytes already in `buf`."
   (chunked-drain sock
     handler
@@ -615,8 +598,7 @@ port) still returns and lets the caller fail on its own terms."
     0
     (+ (os/now) (get config :body-timeout-ms))))
 
-(defn- chunked-drain
-  (sock handler ws-handler config head pending decoded dlen deadline)
+(defn- chunked-drain (sock handler ws-handler config head pending decoded dlen deadline)
   "Decode whatever chunks are fully present in `pending`, keep only the undecoded tail, and read
   more until the terminating 0-size chunk. `decoded` holds decoded pieces (newest-first), `dlen`
   their total length — capped at :max-request-bytes (a chunked body has no Content-Length, so this
@@ -671,13 +653,11 @@ port) still returns and lets the caller fail on its own terms."
       (body-method? (get head :method))
       (not (and ws-handler (upgrade-request? head))))))
 
-(defn- spool-path
-  (config)
+(defn- spool-path (config)
   "A fresh unique temp path under :spool-dir for one spooled request body."
   (str (get config :spool-dir "/tmp") "/hatch-upload-" (rand/token 16)))
 
-(defn- spool-begin
-  (sock handler ws-handler config buf head body-start clen)
+(defn- spool-begin (sock handler ws-handler config buf head body-start clen)
   "Start spooling: reject if the declared length blows the request cap, else write the body
   bytes already sitting in `buf` to a fresh temp file and stream the rest off the socket."
   (if (> clen (get config :max-request-bytes))
@@ -703,8 +683,7 @@ port) still returns and lets the caller fail on its own terms."
         (+ (os/now) (get config :body-timeout-ms))
         (progress-begin config head clen)))))
 
-(defn- spool-drain
-  (sock handler ws-handler config head path written clen deadline prog)
+(defn- spool-drain (sock handler ws-handler config head path written clen deadline prog)
   "Append incoming body chunks to `path` until `clen` bytes are stored, then dispatch. Bounds
   the idle wait AND the total body time (both slow-loris → 408, whichever comes first) and
   deletes the partial spool on a stalled/closed socket. `deadline` is the absolute epoch-ms the
@@ -738,13 +717,11 @@ port) still returns and lets the caller fail on its own terms."
           (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
           (tcp/close sock))))))
 
-(defn- spool-cleanup
-  (path)
+(defn- spool-cleanup (path)
   "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."
-  (try (file/rm path) (catch _e nil)))
+  (check-allow :discarded-catch (try (file/rm path) (catch _e nil))))
 
-(defn- spool-append
-  (path piece)
+(defn- spool-append (path piece)
   "Append `piece` (bytes) to the spool file `path`; on a write error (disk full, a spool-dir
   that lost write permission) delete the partial temp file before re-raising, so a failed
   upload can't leak an abandoned `hatch-upload-*` file (repeated failures → disk exhaustion)."
@@ -752,8 +729,7 @@ port) still returns and lets the caller fail on its own terms."
     (file/spit-bytes-append path piece)
     (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
-(defn- spool-dispatch
-  (sock handler config head path clen)
+(defn- spool-dispatch (sock handler config head path clen)
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
   remove the temp file unless the handler moved it. A spooled request always closes the
   connection afterwards — no keep-alive/pipelining bookkeeping across a multi-megabyte body."

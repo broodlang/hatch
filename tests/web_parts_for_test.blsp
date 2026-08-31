@@ -18,14 +18,11 @@
   ; that the `(for …)` slot renders per-item and weave joins the items.
   (test "weave(static, dynamic) == full render, for several item lists"
     (let (spec (live-spec))
-      (assert= (weave (get spec :render-static)
-                 ((get spec :render-dynamic) {:items ["a" "b" "c"]}))
+      (assert= (weave (get spec :render-static) ((get spec :render-dynamic) {:items ["a" "b" "c"]}))
         (live-render spec {:items ["a" "b" "c"]}))
-      (assert= (weave (get spec :render-static)
-                 ((get spec :render-dynamic) {:items []}))
+      (assert= (weave (get spec :render-static) ((get spec :render-dynamic) {:items []}))
         (live-render spec {:items []}))
-      (assert= (weave (get spec :render-static)
-                 ((get spec :render-dynamic) {:items ["only"]}))
+      (assert= (weave (get spec :render-static) ((get spec :render-dynamic) {:items ["only"]}))
         (live-render spec {:items ["only"]}))))
   (test "the for slot renders as a comprehension slot, not one opaque string"
     (let (spec (live-spec)

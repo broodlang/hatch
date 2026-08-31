@@ -76,8 +76,7 @@
 
 (defdyn *bml-source* "")
 
-(defn- line-col-at
-  (i off line col)
+(defn- line-col-at (i off line col)
   (if (>= i off)
     [line col]
     (if (= (string/char-at *bml-source* i) "\n")
@@ -122,8 +121,7 @@
   literals (and `~@` splices) untouched."
   (expand-assigns-at s 0 ""))
 
-(defn- expand-assigns-at
-  (s i acc)
+(defn- expand-assigns-at (s i acc)
   (if (>= i (string/length s))
     acc
     (let (c (string/char-at s i))
@@ -218,9 +216,7 @@
   (cond
     (= (string/length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
     (and (= (string/char-at s 0) "\\") (> (string/length s) 1) (brace-char? (string/char-at s 1)))
-      (attr-parts (string/substring s
-                    2
-                    (string/length s))
+      (attr-parts (string/substring s 2 (string/length s))
         acc
         (str lit
           (string/char-at s
@@ -262,9 +258,7 @@
     (if (< idx 0)
       (error "bml: :for needs `x <- coll`, got: " spec)
       [(read-expr (string/trim (string/substring spec 0 idx)))
-        (read-expr (string/trim (string/substring spec
-                                  (+ idx 2)
-                                  (string/length spec))))])))
+        (read-expr (string/trim (string/substring spec (+ idx 2) (string/length spec))))])))
 
 (defn apply-directives (form directives)
   "Wrap an element form per its directive attributes. `:for` becomes a `for`
@@ -397,9 +391,10 @@
         (string/starts-with? s3 ">")
           (let (after (string/substring s3 1 (string/length s3)))
             (cond
-              (void-tag? tag) [(apply-directives (build-elem tag attrs nil)
-                                 directives)
-                                after]
+              (void-tag? tag)
+                [(apply-directives (build-elem tag attrs nil)
+                   directives)
+                  after]
               (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
               else
                 (let ([children s4] (parse-nodes after)
@@ -430,8 +425,7 @@
   Whitespace-only text between tags is dropped."
   (parse-nodes-acc s nil))
 
-(defn- parse-nodes-acc
-  (s acc)
+(defn- parse-nodes-acc (s acc)
   (cond
     (= (string/length s) 0) [(reverse acc) s]
     (string/starts-with? s "</") [(reverse acc) s]
@@ -453,16 +447,13 @@
   literal braces (so a `{` need not start an interpolation)."
   (parse-text-at s ""))
 
-(defn- parse-text-at
-  (s acc)
+(defn- parse-text-at (s acc)
   (cond
     (= (string/length s) 0) [acc s]
     (= (string/char-at s 0) "<") [acc s]
     (= (string/char-at s 0) "{") [acc s]
     (and (= (string/char-at s 0) "\\") (> (string/length s) 1) (brace-char? (string/char-at s 1)))
-      (parse-text-at (string/substring s
-                       2
-                       (string/length s))
+      (parse-text-at (string/substring s 2 (string/length s))
         (str acc
           (string/char-at s
             1)))
@@ -494,7 +485,7 @@
   module that invoked a template macro). Call only at macro-expansion time, where
   `(current-file)` is that module's source."
   (let (parts (string/split (reflect/current-file) "/")
-        dir (string/join "/" (take (- (count parts) 1) parts)))
+        dir (string/join (take parts (- (count parts) 1)) "/"))
     (str dir "/" filename)))
 
 (defn compile-template (filename)

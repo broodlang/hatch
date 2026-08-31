@@ -111,9 +111,7 @@
   ; rendered dynamic slots reproduces the full render exactly, for any model.
   (test "weave(static, dynamic(model)) == full render"
     (let (spec (live-spec))
-      (assert= (web/parts/weave (get spec :render-static)
-                 ((get spec :render-dynamic) {:count 7}))
+      (assert= (web/parts/weave (get spec :render-static) ((get spec :render-dynamic) {:count 7}))
         (live-render spec {:count 7}))
-      (assert= (web/parts/weave (get spec :render-static)
-                 ((get spec :render-dynamic) {:count -3}))
+      (assert= (web/parts/weave (get spec :render-static) ((get spec :render-dynamic) {:count -3}))
         (live-render spec {:count -3})))))

@@ -30,7 +30,7 @@
 ; `char-at` on the (multibyte) table returns a fresh view string each time, and joining tens
 ; of thousands of those into one frame body blows up super-linearly (a >64 KB render could
 ; allocate gigabytes and OOM the session). Joining references to 256 shared strings is linear.
-(def *byte-strs* (mapv (fn (n) (string/char-at *byte-table* n)) (range 256)))
+(def *byte-strs* (mapv (range 256) (fn (n) (string/char-at *byte-table* n))))
 
 (defn byte->char (n)
   "Convert byte value 0-255 to a 1-char string."
@@ -42,7 +42,7 @@
   value; convert it here at the receive boundary so the existing string-based readers
   (frame parser, request reader) keep working unchanged. Built with `join` rather than
   `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
-  (string/join "" (map byte->char (seq b))))
+  (string/join (map (seq b) byte->char) ""))
 
 (defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
@@ -121,7 +121,7 @@
   on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
   payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
   through a list first keeps this O(n)."
-  (string/join "" (map byte->char (seq (string/->bytes s)))))
+  (string/join (map (seq (string/->bytes s)) byte->char) ""))
 
 (defn byte-string->utf8 (s)
   "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
@@ -283,8 +283,7 @@
       (= n 1) false
       else (valid-close-code? (bytes/uint payload 0 2)))))
 
-(defn- one-frame-sized
-  (buf buflen fin opcode masked plen7 maxf)
+(defn- one-frame-sized (buf buflen fin opcode masked plen7 maxf)
   (cond
     ; Control frames (close/ping/pong) must be ≤125 bytes — reject an extended length
     ; rather than let an oversized ping drive a huge unmask / overflow `pong-frame`.
@@ -304,8 +303,7 @@
       (let (hlen (if (= masked 1) 6 2))
         (one-frame-payload buf buflen fin opcode masked plen7 hlen maxf))))
 
-(defn- one-frame-payload
-  (buf buflen fin opcode masked plen hlen maxf)
+(defn- one-frame-payload (buf buflen fin opcode masked plen hlen maxf)
   (if (> plen maxf)
     [:error "websocket: frame too large"]
     (let (total (+ hlen plen))
@@ -334,9 +332,10 @@
             masked (bit/shift-right byte1 7)
             plen7 (bit/and byte1 127))
         (cond
-          (= plen7 126) (if (< buflen 4)
-                          nil
-                          (+ (if (= masked 1) 8 4) (bytes/uint buf 2 2)))
+          (= plen7 126)
+            (if (< buflen 4)
+              nil
+              (+ (if (= masked 1) 8 4) (bytes/uint buf 2 2)))
           (= plen7 127) nil
           else (+ (if (= masked 1) 6 2) plen7))))))
 
@@ -350,5 +349,4 @@
               (get buf (+ key-offset 2))
               (get buf (+ key-offset 3))]
         data-start (+ key-offset 4))
-    (bytes (map (fn (i) (bit/xor (get buf (+ data-start i)) (get key (math/mod i 4))))
-             (range plen)))))
+    (bytes (map (range plen) (fn (i) (bit/xor (get buf (+ data-start i)) (get key (math/mod i 4))))))))

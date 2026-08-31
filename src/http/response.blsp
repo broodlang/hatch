@@ -49,7 +49,7 @@
                        " "
                        (status-text status)
                        "\r\n"
-                       (string/join "" (map format-header (%map-pairs headers)))
+                       (string/join (map (%map-pairs headers) format-header) "")
                        "\r\n"))
       ; Return an ADR-139 iolist: `tcp/send` flattens `[head, body]` straight onto the
       ; socket with no monolithic combined buffer. Leaves are `bytes` (already UTF-8), so a
@@ -69,8 +69,7 @@
 ; blob the handler produces, then `last-chunk` to close the body. Lets a response be produced
 ; incrementally (SSE, a large file read block-by-block) without buffering it whole.
 
-(defn- int->hex-acc
-  (n acc)
+(defn- int->hex-acc (n acc)
   (if (= n 0)
     acc
     (let (d (math/rem n 16))
@@ -112,7 +111,7 @@
                       " "
                       (status-text status)
                       "\r\n"
-                      (string/join "" (map format-header (%map-pairs headers)))
+                      (string/join (map (%map-pairs headers) format-header) "")
                       "\r\n"))))
 
 (defn header-safe (v)
@@ -130,7 +129,7 @@
   (let (k (first kv)
         v (first (rest kv)))
     (if (or (list? v) (vector? v))
-      (string/join "" (map (fn (one) (format-header-line k one)) v))
+      (string/join (map v (fn (one) (format-header-line k one))) "")
       (format-header-line k v))))
 
 (defn format-header-line (k v)
@@ -139,7 +138,7 @@
 
 (defn header-name (k)
   "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."
-  (string/join "-" (map capitalize-first (string/split (->string k) "-"))))
+  (string/join (map (string/split (->string k) "-") capitalize-first) "-"))
 
 (defn capitalize-first (s)
   "Uppercase the first character of `s`, leaving the rest unchanged (unlike the prelude's

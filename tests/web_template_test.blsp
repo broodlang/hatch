@@ -134,7 +134,7 @@
 (describe "render: lists of children"
   (test "list rendered as concatenation"
     (let (items ["a" "b" "c"]
-          node [:ul {} (map (fn (x) [:li {} x]) items)])
+          node [:ul {} (map items (fn (x) [:li {} x]))])
       (assert= (render node) "<ul><li>a</li><li>b</li><li>c</li></ul>")))
   (test "nested list flattened"
     (assert= (render [:div {} (list [:span {} "1"] [:span {} "2"])])

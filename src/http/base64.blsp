@@ -16,10 +16,9 @@
   ; Accumulate 4-char groups in a list (most-recent first), then reverse + join once.
   ; O(n): first/rest stepping, no per-step `count`, no per-step whole-string rebuild;
   ; the recursion stays in tail position.
-  (string/join "" (reverse (encode-bytes-acc bytes (list)))))
+  (string/join (reverse (encode-bytes-acc bytes (list))) ""))
 
-(defn- encode-bytes-acc
-  (bytes acc)
+(defn- encode-bytes-acc (bytes acc)
   (cond
     (empty? bytes) acc
     (empty? (rest bytes))
@@ -32,8 +31,7 @@
       (let (a (first bytes)
             b (first (rest bytes)))
         (cons (str (b64-char (bit/shift-right a 2))
-                (b64-char (bit/or (bit/shift-left (bit/and a 3) 4)
-                            (bit/shift-right b 4)))
+                (b64-char (bit/or (bit/shift-left (bit/and a 3) 4) (bit/shift-right b 4)))
                 (b64-char (bit/shift-left (bit/and b 15) 2))
                 "=")
           acc))

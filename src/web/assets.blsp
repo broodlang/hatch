@@ -40,7 +40,7 @@
   pipes the bundler's output to the log and, on a finished rebuild, hot-swaps CSS in
   open live sessions. Returns the manager pids; pass them to `stop-watchers` to shut the
   bundler subprocesses down. Call from the endpoint when running in dev — see the module doc."
-  (map (fn (w) (spawn (fn () (watcher-loop w)))) (or (get config :watchers) (list))))
+  (map (or (get config :watchers) (list)) (fn (w) (spawn (fn () (watcher-loop w))))))
 
 (defn stop-watchers (managers)
   "Stop watcher managers started by `watch`: each closes its bundler subprocess and exits, so
@@ -57,13 +57,13 @@
                  (catch e
                    (do
                      (log/error (str "[assets] cannot start watcher `"
-                                  (string/join " " cmd)
+                                  (string/join cmd " ")
                                   "`: "
                                   (error-message e)))
                      nil))))
     (when handle
-      (log/info (str "[assets] watching: " (string/join " " cmd)))
-      (watcher-recv handle (get w :reload-on *default-reload-marker*) (string/join " " cmd) ""))))
+      (log/info (str "[assets] watching: " (string/join cmd " ")))
+      (watcher-recv handle (get w :reload-on *default-reload-marker*) (string/join cmd " ") ""))))
 
 (defn watcher-recv (handle marker label buf)
   "Drain a watcher child's piped stdout/stderr, accumulating a `buf` of the trailing partial
@@ -76,12 +76,11 @@
     ([:proc ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:stop] (do
-               (try (os/close handle) (catch _ nil))
+               (check-allow :discarded-catch (try (os/close handle) (catch _ nil)))
                (log/info (str "[assets] stopped watching: " label))))
     ([:proc-closed ^handle code] (do
                                    (emit-line buf marker)
-                                   (log/warn (str "[assets] watcher exited (code "
-                                               code "): " label))))))
+                                   (log/warn (str "[assets] watcher exited (code " code "): " label))))))
 
 (defn on-output (buf marker)
   "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that
@@ -132,7 +131,7 @@
   (fonts, images, wasm) are copied and hashed byte-faithfully (see `fingerprint-file`)."
   (let (dir (get spec :dir "static")
         files (or (get spec :files) (list))
-        manifest (fold (fn (m file) (assoc m file (fingerprint-file dir file))) {} files))
+        manifest (fold files {} (fn (m file) (assoc m file (fingerprint-file dir file)))))
     (write-manifest (str dir "/cache-manifest") (static/render-manifest manifest))
     manifest))
 
@@ -173,7 +172,7 @@
   build/boot host without one no longer degrades to uncompressed serving. Overwrites stale
   siblings from a previous build. A read/compress/write failure is logged and skipped, so serving
   still works uncompressed."
-  (let (raw (try (file/slurp-bytes path) (catch e :error)))
+  (let (raw (check-allow :discarded-catch (try (file/slurp-bytes path) (catch e :error))))
     (if (= raw :error)
       (log/warn (str "[assets] precompress could not read " path "; serving uncompressed"))
       (do
@@ -203,7 +202,7 @@
     (if (< (count parts) 2)
       (str file "." digest)
       (let (ext (first (reverse parts))
-            base (string/join "." (reverse (rest (reverse parts)))))
+            base (string/join (reverse (rest (reverse parts))) "."))
         (str base "." digest "." ext)))))
 
 (defn install (config)
@@ -230,8 +229,7 @@
   (fail-loud), not this."
   (try
     (do
-      (when (and (get config :install-probe)
-              (not (file/exists? (get config :install-probe))))
+      (when (and (get config :install-probe) (not (file/exists? (get config :install-probe))))
         (log/info (str "[assets] toolchain missing ("
                     (get config :install-probe)
                     ") — running one-time install"))
@@ -247,8 +245,8 @@
   "Run each argv in `cmds` with `os/run-process` (inherited stdio), in order; raise on the
   first non-zero exit."
   (dolist (cmd cmds)
-    (log/info (str "[assets] " label ": " (string/join " " cmd)))
+    (log/info (str "[assets] " label ": " (string/join cmd " ")))
     (let (code (os/run-process (first cmd) (rest cmd)))
       (when (not (= code 0))
-        (error "[assets] " label " failed (exit " code "): " (string/join " " cmd)))))
+        (error "[assets] " label " failed (exit " code "): " (string/join cmd " ")))))
   nil)

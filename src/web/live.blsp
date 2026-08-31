@@ -30,8 +30,7 @@
 
 (def *json-hex* "0123456789abcdef")
 
-(defn- json-esc-control
-  (cp)
+(defn- json-esc-control (cp)
   "The JSON escape for a C0 control codepoint `cp` (0x00–0x1F): the named short form where one
   exists, else `\\u00XX`."
   (cond
@@ -52,11 +51,11 @@
   user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
   the whole frame — a per-field server↔client desync with no error surfaced."
   (str "\""
-    (fold (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp)))
+    (fold (range 32)
       (-> s
         (string/replace "\\" "\\\\")
         (string/replace "\"" "\\\""))
-      (range 32))
+      (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp))))
     "\""))
 
 (defability Encode
@@ -68,13 +67,12 @@
 (impl Encode :int (encode [n] (str n)))
 (impl Encode :float (encode [n] (str n)))
 (impl Encode :string (encode [s] (json-str s)))
-(impl Encode :vector (encode [v] (str "[" (string/join "," (map encode v)) "]")))
-(impl Encode :pair (encode [v] (str "[" (string/join "," (map encode v)) "]")))
-(impl Encode :map (encode [m] (str "{" (string/join "," (map encode-entry (%map-pairs m))) "}")))
+(impl Encode :vector (encode [v] (str "[" (string/join (map v encode) ",") "]")))
+(impl Encode :pair (encode [v] (str "[" (string/join (map v encode) ",") "]")))
+(impl Encode :map (encode [m] (str "{" (string/join (map (%map-pairs m) encode-entry) ",") "}")))
 ; keywords, symbols, …
 (impl Encode :default (encode [v] (json-str (str v))))
-(defn- encode-entry
-  (kv)
+(defn- encode-entry (kv)
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (->string k) (str k))) ":" (encode val))))
 
@@ -126,7 +124,7 @@
 
 (defn jp-join (acc)
   "Assemble a reversed list of chars into a string in one linear pass."
-  (string/join "" (reverse acc)))
+  (string/join (reverse acc) ""))
 
 (defn jp-string (cs)
   "Parse the JSON string whose opening quote is the head of `cs`. `[value rest]`."
@@ -161,8 +159,7 @@
 ; U+FFFD, substituted for a \uXXXX escape we can't represent (see jp-str-uni).
 (def- json-replacement-char (string/int->char 65533))
 
-(defn- json-hex-val
-  (c)
+(defn- json-hex-val (c)
   "Hex digit (0-9, a-f, case-insensitive) → its value 0-15, or -1 for a non-hex char."
   (index-of "0123456789abcdef" (string/lower c)))
 
@@ -195,9 +192,7 @@
 (defn jp-num-acc (cs acc)
   (match cs
     (nil (jp-num-finish acc nil))
-    ((c & rest) (if (jp-num-char? c)
-                  (jp-num-acc rest (cons c acc))
-                  (jp-num-finish acc cs)))))
+    ((c & rest) (if (jp-num-char? c) (jp-num-acc rest (cons c acc)) (jp-num-finish acc cs)))))
 
 (defn jp-num-finish (acc cs)
   "Convert the gathered number chars to a value. Empty (a stray non-number at value
@@ -237,8 +232,7 @@
       (nil [(vec (reverse acc)) nil])
       (("]" & rest) [(vec (reverse acc)) rest])
       (("," & rest) (jp-arr-entries rest acc))
-      (_ (let ([v cs1] (jp-value cs))
-           (jp-arr-entries cs1 (cons v acc)))))))
+      (_ (let ([v cs1] (jp-value cs)) (jp-arr-entries cs1 (cons v acc)))))))
 
 ; ---- wire protocol messages ----
 
@@ -246,10 +240,10 @@
   "Encode `msg-map` as JSON and send it as a WebSocket text frame. Returns true on
   success, false if the write failed — a peer that vanished mid-write (broken pipe)
   then ends the session cleanly instead of crashing the worker with an uncaught error."
-  (try (do (tcp/send sock (text-frame (encode msg-map))) true) (catch _ false)))
+  (check-allow :discarded-catch
+    (try (do (tcp/send sock (text-frame (encode msg-map))) true) (catch _ false))))
 
-(defn- recv-frame-loop
-  (sock buf)
+(defn- recv-frame-loop (sock buf)
   "Block until a complete WebSocket frame arrives; returns `[:ok opcode payload
   remainder]`, `[:closed]`, `[:error msg]`, or `[:tick buf]` when the session's
   ticker process posts a `[:tick]` (carrying the partial frame read so far, so the
@@ -269,8 +263,7 @@
   (let (sz (frame-size buf))
     (if (nil? sz) nil (- sz (count buf)))))
 
-(defn- recv-frame-fill
-  (sock buf pieces got need)
+(defn- recv-frame-fill (sock buf pieces got need)
   "Gather socket reads (`bytes` `pieces`, newest-first; `got` bytes so far) until the current
   frame's `need` more bytes are in hand, then `bytes-concat` once and re-enter `recv-frame-loop`.
   `need` nil means the frame isn't sized yet (header still arriving) — append one read and
@@ -291,7 +284,8 @@
                               (+ got (count chunk))
                               need)))
       ([:tcp-closed ^sock] [:closed])
-      ([:ws-send ^sock frame] (if (try (do (tcp/send sock frame) true) (catch _ false))
+      ([:ws-send ^sock frame] (if (check-allow :discarded-catch
+                                    (try (do (tcp/send sock frame) true) (catch _ false)))
                                 (recv-frame-fill sock buf pieces got need)
                                 [:closed]))
       ([:tick key gen] [:tick key gen (bytes/concat buf (reverse pieces))])
@@ -334,8 +328,7 @@
   (monitor session)
   (idle-watchdog-loop session sock misses))
 
-(defn- idle-watchdog-loop
-  (session sock misses)
+(defn- idle-watchdog-loop (session sock misses)
   (receive
     ([:alive] (idle-watchdog-loop session sock 0))
     ([:down _ _ _] nil)
@@ -359,8 +352,7 @@
 ; ---- named singleton processes ----
 ; Both live registries below are "get-or-spawn a process registered under a name".
 
-(defn- live-ensure
-  (nm)
+(defn- live-ensure (nm)
   "Resolve registry `nm` — the supervised child (started by the `defonce` below). If it's
   absent (supervisor never started, or torn down), (re)start the supervisor — idempotent
   via its `:name` — and wait through the brief async-start / restart window. In normal
@@ -375,24 +367,21 @@
 ; on every (re)load of the view module, and the registry forwards a [:reload] to each
 ; session. No-op until a session connects.
 
-(defn- live-registry-loop
-  (pids)
+(defn- live-registry-loop (pids)
   (receive
     ([:register p] (live-registry-loop (cons p pids)))
-    ([:unregister p] (live-registry-loop (filter (fn (q) (not (= q p))) pids)))
+    ([:unregister p] (live-registry-loop (filter pids (fn (q) (not (= q p))))))
     ([:reload] (dolist (p pids) (send p [:reload])) (live-registry-loop pids))
     ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live-registry-loop pids))))
 
-(defn- live-registry
-  ()
+(defn- live-registry ()
   "The reload-registry pid — the supervised `:hatch-live` (see `start-live-registries`),
   waiting through a restart window; lazily spawned only if no supervisor is running."
   (live-ensure :hatch-live))
 
 (defn- live-register (pid) (send (live-registry) [:register pid]) nil)
 
-(defn- live-unregister
-  (pid)
+(defn- live-unregister (pid)
   (let (r (proc/whereis :hatch-live)) (when r (send r [:unregister pid])))
   nil)
 
@@ -420,7 +409,7 @@
   navigates to another view (otherwise the old view's tickers would linger and accumulate
   across navigations); each is self-cleaning if the session dies first."
   (let (me (self))
-    (map (fn (ms) (timer/send-interval ms me [:tick ms gen])) (or ticks (list)))))
+    (map (or ticks (list)) (fn (ms) (timer/send-interval ms me [:tick ms gen])))))
 
 (defn stop-tickers (handles)
   "Cancel the given interval timers — used when a session swaps to a different view."
@@ -467,7 +456,7 @@
   `send-info` and `web/component/send-update`: a fan-out caller (a PubSub/Presence
   registry looping over subscribers) must not crash because one of them just vanished —
   the registry's monitor cleans the stale pid up moments later anyway."
-  (try (send pid msg) (catch _ nil))
+  (check-allow :discarded-catch (try (send pid msg) (catch _ nil)))
   nil)
 
 (defn send-info (session payload)
@@ -517,8 +506,7 @@
     ([:push-effect msg] (do (send-msg sock msg) (flush-effects sock)))
     (after 0 nil)))
 
-(defn- live-handler-error
-  (phase key e fallback)
+(defn- live-handler-error (phase key e fallback)
   "A view lifecycle handler (`phase` = \"event\"/\"tick\"/\"info\"/\"unmount\", `key` its
   event/message key) raised. Emit a `[:hatch :live :exception]` telemetry event — the same
   observability seam http/server uses for a raising request handler — so the failure is
@@ -603,8 +591,7 @@
     true
     (slot-dirty?-at dep old-model model 0 (count dep))))
 
-(defn- slot-dirty?-at
-  (dep old-model model i n)
+(defn- slot-dirty?-at (dep old-model model i n)
   (if (>= i n)
     false
     (if (not (= (get old-model (nth dep i)) (get model (nth dep i))))
@@ -626,11 +613,11 @@
     (if (or (nil? slots) (nil? deps) (nil? old-model))
       ((get view :render-dynamic) model components)
       (into []
-        (map (fn (i)
-               (if (slot-dirty? (nth deps i) old-model model)
-                 ((nth slots i) model components)
-                 (nth old i)))
-          (range (count old)))))))
+        (map (range (count old))
+          (fn (i)
+            (if (slot-dirty? (nth deps i) old-model model)
+              ((nth slots i) model components)
+              (nth old i))))))))
 
 (defn push-diff (sock view buf)
   "Re-render the dynamic slots that a state change actually touched and send only those that
@@ -658,15 +645,15 @@
 (defn close-socket (sock)
   "Send a close frame and close the TCP socket. Best-effort throughout — the peer may
   already be gone (a broken pipe), so a failed write here is never itself an error."
-  (try (tcp/send sock (close-frame)) (catch _ nil))
-  (try (tcp/close sock) (catch _ nil))
+  (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
+  (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
   nil)
 
 (defn close-session (sock view)
   "Drop out of the reload registry, free the session's live component table (web/component),
   and close the socket."
   (live-unregister (self))
-  (try (table/drop (get view :components)) (catch _ nil))
+  (check-allow :discarded-catch (try (table/drop (get view :components)) (catch _ nil)))
   (close-socket sock))
 
 (defn redirect-and-close (sock path)
@@ -674,7 +661,8 @@
   `path`) and close the socket. Used when an `on-mount-guard` vetoes a fresh connect, before
   any session state exists — so there's no live-registry registration to undo, unlike
   `close-session`."
-  (try (send-msg sock {:event "redirect" :path path :sfp nil}) (catch _ nil))
+  (check-allow :discarded-catch
+    (try (send-msg sock {:event "redirect" :path path :sfp nil}) (catch _ nil)))
   (close-socket sock))
 
 (defn redirect-and-continue (sock view buf path)
@@ -720,7 +708,8 @@
     ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
     ; is best-effort: a failed write means the peer is gone, so end the session.
     ([:ok 9 payload _] (kick-watchdog view)
-      (if (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false))
+      (if (check-allow :discarded-catch
+            (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
         (session-recv sock view buf)
         (close-session sock view)))
     ; client message
@@ -772,7 +761,8 @@
                                               (push-update sock view buf2 "diff" (get view :model)))
                                             (session-recv sock view buf2)))
     ([:reload buf2] (if (get view :mounted?)
-                      (let (spec (try ((get view :spec-fn)) (catch _ nil))
+                      (let (spec (check-allow :discarded-catch
+                                   (try ((get view :spec-fn)) (catch _ nil)))
                             view (if spec (merge view spec) view))
                         (push-update sock view buf2 "render" (get view :model)))
                       (session-recv sock view buf2)))
@@ -800,7 +790,8 @@
 
   (hatch/web/live/parse-client-frame (string/->bytes \"5\")) ;=> {:event \"\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}
   (hatch/web/live/parse-client-frame (string/->bytes \"{\\\"event\\\":\\\"tick\\\"}\")) ;=> {:event \"tick\" :params {} :name \"\" :cid nil :path \"\" :sfp nil}"
-  (let (decoded (try (json-decode (string/bytes-> payload)) (catch _ nil))
+  (let (decoded (check-allow :discarded-catch
+                  (try (json-decode (string/bytes-> payload)) (catch _ nil)))
         msg (if (map? decoded) decoded {})
         raw-params (get msg "params" {}))
     ; The frame carries every field the dispatcher routes on: `:event` (the frame type) and
@@ -919,7 +910,8 @@
                         ; free the old view's LiveComponent table and start the new view with a
                         ; fresh one: carrying it leaked every navigated-away view's component
                         ; state and let a same-id component in the new view silently reuse it.
-                        _drop (try (table/drop (get view :components)) (catch _ nil))
+                        _drop (check-allow :discarded-catch
+                                (try (table/drop (get view :components)) (catch _ nil)))
                         ; bump the generation so a beat still queued from the OLD view's ticker
                         ; (killed just above, but a message already sent lingers) is dropped
                         ; rather than dispatched into the new view's handle-tick.
@@ -968,7 +960,8 @@
         ; (handle-info/tick/unmount) is guarded against a user-code exception
         guard-result (try ((get spec :mount-guard) conn) (catch _ :hatch/guard-error)))
     (cond
-      (= guard-result :hatch/guard-error) (try (tcp/close sock) (catch _ nil))
+      (= guard-result :hatch/guard-error)
+        (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
       guard-result (redirect-and-close sock guard-result)
       ; Do NOT mount here: the paramless upgrade request (the WS URL carries no query string)
       ; would build the model with the wrong params, and the client's first frame — `join` —
@@ -996,8 +989,7 @@
 ; named process holds the table because the router registers at load while the worker
 ; dispatches per request — different processes that need to share the mapping.
 
-(defn- live-routes-loop
-  (table/new)
+(defn- live-routes-loop (table/new)
   (receive
     ; mirror every change to the vault, so the table survives this process crashing
     ([:put path entry] (let (v (proc/whereis :hatch-live-routes-vault))
@@ -1015,8 +1007,7 @@
           (monitor v)))
       (live-routes-loop table/new))))
 
-(defn- live-routes
-  ()
+(defn- live-routes ()
   "The live-route registry pid — the supervised `:hatch-live-routes` (see
   `start-live-registries`), waiting through a restart window; lazily spawned only if no
   supervisor is running."
@@ -1030,8 +1021,7 @@
 ; it *monitors* the vault so it can re-mirror the whole table when the vault restarts. Both
 ; run under one supervisor (below), which also bounds a crash loop.
 
-(defn- live-vault-loop
-  (table/new)
+(defn- live-vault-loop (table/new)
   "The durable mirror of the route table: it only stores `:put`s and serves `:get-snapshot`
   (the registry's boot-time pull), so it's far simpler — and less crash-prone — than the
   registry it backs. It never pulls, so registry and vault can't deadlock at boot."
@@ -1039,8 +1029,7 @@
     ([:put path entry] (live-vault-loop (assoc table/new path entry)))
     ([:get-snapshot from] (send from [:snapshot table/new]) (live-vault-loop table/new))))
 
-(defn- live-pull
-  (nm)
+(defn- live-pull (nm)
   "Request a `{path -> entry}` snapshot from the process registered `nm`, or `{}` if it
   isn't up or doesn't answer in time. Run in the new process at (re)start to recover."
   (let (p (proc/whereis nm))
@@ -1050,26 +1039,22 @@
         (send p [:get-snapshot (self)])
         (receive ([:snapshot t] t) (after 300 {}))))))
 
-(defn- live-watch-vault
-  ()
+(defn- live-watch-vault ()
   "Monitor the route vault from the registry, so the registry is told (`[:down …]`) when
   the vault dies and can re-mirror its table to the restarted vault."
   (let (v (proc/whereis :hatch-live-routes-vault)) (when v (monitor v))))
 
-(defn- live-routes-boot
-  ()
+(defn- live-routes-boot ()
   ; recover the table from the vault, then watch the vault for its own restarts
   (let (table/new (live-pull :hatch-live-routes-vault))
     (live-watch-vault)
     (live-routes-loop table/new)))
 
-(defn- live-vault-boot
-  ()
+(defn- live-vault-boot ()
   ; the vault never pulls (it's repopulated by the registry's mirroring) — no deadlock
   (live-vault-loop {}))
 
-(defn- live-await
-  (nm tries)
+(defn- live-await (nm tries)
   "Block until `nm` is registered (the supervisor starts children asynchronously), so the
   caller can rely on the registries being up. Gives up after `tries` × 5ms."
   (cond
@@ -1122,8 +1107,7 @@
       ([:entry ^r e] e)
       (after 1000 nil))))
 
-(defn- live-ws-path
-  (req-path)
+(defn- live-ws-path (req-path)
   "The app path a `/live/ws<path>` WebSocket URL targets. brood_live.js connects to
   `/live/ws` + the page's `data-live` path, so `/live/ws/counter` → `/counter`."
   (let (prefix "/live/ws")
@@ -1158,27 +1142,24 @@
 
 ; ---- shared macro-time expansion, used by both deflive and deflive-component ----
 
-(defn- deflive-clause
-  (tag clauses)
+(defn- deflive-clause (tag clauses)
   "The single clause in `clauses` headed by symbol `tag` (e.g. `'mount`), or nil — the
   singular clauses (`mount`/`render`/`template`/`handle-info`/`unmount`/`on-mount-guard`/
   `handle-params`), of which a deflive/deflive-component form has at most one each. A duplicate
   is a mistake (a second one would be silently ignored), so it's an error at macro-expansion."
-  (let (matches (filter (fn (c) (= (first c) tag)) clauses))
+  (let (matches (filter clauses (fn (c) (= (first c) tag))))
     (if (> (count matches) 1)
       (error (str "deflive: duplicate `"
                (->string tag)
                "` clause — a view declares it at most once"))
       (first matches))))
 
-(defn- deflive-clauses
-  (tag clauses)
+(defn- deflive-clauses (tag clauses)
   "Every clause in `clauses` headed by symbol `tag` — the repeatable ones (`on`/`tick`),
   of which a deflive/deflive-component form can have several."
-  (filter (fn (c) (= (first c) tag)) clauses))
+  (filter clauses (fn (c) (= (first c) tag))))
 
-(defn- deflive-render-expr
-  (render-clause template-clause)
+(defn- deflive-render-expr (render-clause template-clause)
   "The macro-time render expression: an inline `(render …)` clause's body (`do`-wrapped
   if more than one form), or — failing that — a `(template \"file.bml\")` clause compiled
   to Hiccup here at expansion time. Shared by `deflive` and `deflive-component` so the
@@ -1188,33 +1169,32 @@
       (if (= (count render-body) 1) (first render-body) (cons 'do render-body)))
     (compile-template (first (rest template-clause)))))
 
-(defn- deflive-handle-event-body
-  (on-clauses)
+(defn- deflive-handle-event-body (on-clauses)
   "The macro-time `handle-event` body: one `match` arm per `(on \"name\" (args…) …)`
   clause, keyed by the client's event name, falling through to an identity default (an
   unrecognized event name is a no-op, not an error). Shared by `deflive` and
   `deflive-component` — an `on` clause reads the same either way, just with a different
   second binding (`model` for a view, `state` for a component)."
-  (let (event-arms (map (fn (c)
-                          (let (ev-name (first (rest c))
-                                args (first (rest (rest c)))
-                                body (rest (rest (rest c))))
-                            (list ev-name args body)))
-                     on-clauses))
+  (let (event-arms (map on-clauses
+                     (fn (c)
+                       (let (ev-name (first (rest c))
+                             args (first (rest (rest c)))
+                             body (rest (rest (rest c))))
+                         (list ev-name args body)))))
     (cons 'match
       (cons 'event-name
-        (append (map (fn (arm)
-                       (let (ev-name (first arm)
-                             args (first (rest arm))
-                             body (first (rest (rest arm))))
-                         (list ev-name
-                           (list 'let
-                             (list (first args)
-                               'event-params
-                               (first (rest args))
-                               'event-model)
-                             (cons 'do body)))))
-                  event-arms)
+        (append (map event-arms
+                  (fn (arm)
+                    (let (ev-name (first arm)
+                          args (first (rest arm))
+                          body (first (rest (rest arm))))
+                      (list ev-name
+                        (list 'let
+                          (list (first args)
+                            'event-params
+                            (first (rest args))
+                            'event-model)
+                          (cons 'do body))))))
           (list (list '_ 'event-model)))))))
 
 ; ---- deflive macro ----
@@ -1295,15 +1275,15 @@
         handle-body (deflive-handle-event-body on-clauses)
         ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
         ; tick-model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
-        tick-arms (map (fn (c)
-                         (let (ms (first (rest c))
-                               msym (first (first (rest (rest c))))
-                               body (rest (rest (rest c))))
-                           (list ms
-                             (list 'let
-                               (list msym 'tick-model)
-                               (cons 'do body)))))
-                    tick-clauses)
+        tick-arms (map tick-clauses
+                    (fn (c)
+                      (let (ms (first (rest c))
+                            msym (first (first (rest (rest c))))
+                            body (rest (rest (rest c))))
+                        (list ms
+                          (list 'let
+                            (list msym 'tick-model)
+                            (cons 'do body))))))
         handle-tick-body (cons 'match
                            (cons 'tick-key
                              (append tick-arms (list (list '_ 'tick-model)))))
@@ -1374,15 +1354,15 @@
         render-slots-defn (list 'def
                             'render-slots
                             (cons 'vector
-                              (map (fn (d) (list 'fn render-with-components-args d))
-                                (get parts :dynamics))))
+                              (map (get parts :dynamics)
+                                (fn (d) (list 'fn render-with-components-args d)))))
         slot-deps-defn (list 'def
                          'slot-deps
                          (apply vector
-                           (map (fn (d)
-                                  (if (nil? model-sym)
-                                    :all (web/parts/form-deps d model-sym)))
-                             (get parts :dynamics))))
+                           (map (get parts :dynamics)
+                             (fn (d)
+                               (if (nil? model-sym)
+                                 :all (web/parts/form-deps d model-sym))))))
         ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
         ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
         ; view that doesn't opt in just ignores such messages, keeping its model.
@@ -1445,7 +1425,7 @@
       unmount-defn
       mount-guard-defn
       handle-params-defn
-      (list 'def 'live-ticks (apply vector (map (fn (c) (first (rest c))) tick-clauses)))
+      (list 'def 'live-ticks (apply vector (map tick-clauses (fn (c) (first (rest c))))))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
       (list 'defn
@@ -1485,7 +1465,7 @@
 
 (defn client-js ()
   "The framework's brood_live.js source, or nil if it can't be located."
-  (try (file/slurp (asset-path)) (catch _ nil)))
+  (check-allow :discarded-catch (try (file/slurp (asset-path)) (catch _ nil))))
 
 (defn client-js-handler ()
   "A conn handler that serves hatch's brood_live.js with the right content-type, so an
