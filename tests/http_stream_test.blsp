@@ -37,7 +37,9 @@
       acc
       (let (size (parse-hex (string/substring s 0 nl))
             after-size (string/substring s (+ nl 2) (string/length s)))
-        (if (or (nil? size) (= size 0))
+        ;; `parse-hex` folds from 0, so it answers an int and never nil — the `nil?` arm
+        ;; it used to carry could not fire (brood's impossible-predicate lint, ADR-313).
+        (if (= size 0)
           acc
           (unchunk (string/substring after-size (+ size 2) (string/length after-size))
             (str acc (string/substring after-size 0 size))))))))
