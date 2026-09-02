@@ -218,7 +218,11 @@
   crafted `Range` header into a 500. So anything non-integer (floats, signs, hex, spaces) is
   rejected here and the range is ignored."
   (if (and (not (string/blank? s)) (= (string/span s 0 "0123456789") (string/length s)))
-    (string/->number s)
+    ;; The span check above means this parse cannot fail — but `string/->number` answers
+    ;; `number | failure`, a failure is TRUTHY, and every caller here guards with
+    ;; `(nil? a)`. Say nil, as the docstring does, so the guards mean what they say.
+    (let (n (string/->number s))
+      (when (int? n) n))
     nil))
 
 (defn parse-range (spec len)
