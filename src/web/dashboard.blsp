@@ -1,0 +1,120 @@
+(defmodule web/dashboard
+  "A metrics page for a running Hatch app — what `web/metrics` collected, rendered.
+
+  `http/server` has always emitted a duration, method, path and status per request, and
+  nothing read it but the access log. So the answer to \"which route is slow\", or \"did that
+  deploy make anything worse\", existed in the process and could only be got at by
+  reproducing the traffic by hand. This is that data, on a page.
+
+  Self-contained: inline styles, no assets, no JavaScript, and it renders from a snapshot
+  rather than holding anything open, so mounting it costs a route and nothing else.
+
+      (through [(auth/allow-ips (dashboard-ips))]
+        (get \"/dashboard\" (dashboard/handler)))
+
+  **Put it behind something.** It reports paths and status counts — a map of the app and how
+  well it is working — which is exactly what someone probing it would like. `web/auth`'s
+  `allow-ips` is the coarse outer gate; `basic-auth` behind it is the one that actually
+  authenticates."
+  (:use web/conn)
+  (:alias web/metrics)
+  (:alias web/template))
+
+(def- *styles*
+  (str "body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;"
+    "background:#0f1115;color:#d7dae0}" ".wrap{max-width:64rem;margin:0 auto;padding:2rem 1.25rem}"
+    "h1{font-size:1.1rem;letter-spacing:.08em;text-transform:uppercase;color:#8b93a1;margin:0 0 1.25rem}"
+    ".cards{display:flex;flex-wrap:wrap;gap:.75rem;margin-bottom:1.5rem}"
+    ".card{background:#161a21;border:1px solid #232833;border-radius:8px;padding:.75rem 1rem;min-width:7rem}"
+    ".card b{display:block;font-size:1.5rem;font-weight:600}"
+    ".card span{color:#8b93a1;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em}"
+    "table{width:100%;border-collapse:collapse}"
+    "th{text-align:left;font-weight:500;color:#8b93a1;font-size:.75rem;text-transform:uppercase;"
+    "letter-spacing:.06em;padding:.5rem .6rem;border-bottom:1px solid #232833}"
+    "td{padding:.45rem .6rem;border-bottom:1px solid #1a1e26}"
+    "td.n{text-align:right;font-variant-numeric:tabular-nums}"
+    ".err{color:#f0776c}.warn{color:#e3b341}.dim{color:#5c6370}"
+    "footer{color:#5c6370;font-size:.75rem;margin-top:1.5rem}"))
+
+(defn- card (label value &optional (class ""))
+  [:div {:class "card"} [:b {:class class} (str value)] [:span {} label]])
+
+(defn- ms (value) (if (= value :over) "5000+" (str value)))
+
+(defn- row (r)
+  [:tr
+    {}
+    [:td {} (get r :route)]
+    [:td {:class "n"} (str (get r :count))]
+    [:td {:class "n"} (ms (get r :mean))]
+    [:td {:class "n"} (ms (get r :p50))]
+    [:td {:class "n"} (ms (get r :p95))]
+    [:td {:class "n"} (ms (get r :p99))]
+    [:td {:class "n"} (str (get r :max))]
+    [:td {:class (if (> (get r :client-error) 0) "n warn" "n dim")} (str (get r :client-error))]
+    [:td {:class (if (> (get r :server-error) 0) "n err" "n dim")} (str (get r :server-error))]])
+
+(defn page (title)
+  "The dashboard as an HTML string, from a snapshot of the current metrics."
+  (let (rows (web/metrics/snapshot)
+        t (web/metrics/totals))
+    (web/template/render [:html
+                           {:lang "en"}
+                           [:head
+                             {}
+                             [:meta {:charset "utf-8"}]
+                             [:meta
+                               {:name "viewport" :content "width=device-width, initial-scale=1"}]
+                             [:meta {:name "robots" :content "noindex, nofollow"}]
+                             [:title {} title]
+                             [:style {} (web/template/raw *styles*)]]
+                           [:body
+                             {}
+                             [:div
+                               {:class "wrap"}
+                               [:h1 {} title]
+                               [:div
+                                 {:class "cards"}
+                                 (card "requests" (get t :count))
+                                 (card "routes" (get t :routes))
+                                 (card "2xx/3xx" (get t :ok))
+                                 (card "4xx"
+                                   (get t :client-error)
+                                   (if (> (get t :client-error) 0) "warn" ""))
+                                 (card "5xx"
+                                   (get t :server-error)
+                                   (if (> (get t :server-error) 0) "err" ""))]
+                               (if (empty? rows)
+                                 [:p {:class "dim"} "No requests recorded yet."]
+                                 [:table
+                                   {}
+                                   [:thead
+                                     {}
+                                     [:tr
+                                       {}
+                                       [:th {} "route"]
+                                       [:th {} "n"]
+                                       [:th {} "mean"]
+                                       [:th {} "p50"]
+                                       [:th {} "p95"]
+                                       [:th {} "p99"]
+                                       [:th {} "max"]
+                                       [:th {} "4xx"]
+                                       [:th {} "5xx"]]]
+                                   [:tbody {} (map rows row)]])
+                               [:footer
+                                 {}
+                                 "Durations in milliseconds. Percentiles are histogram upper bounds. "
+                                 "Counters are since this process started."]]]])))
+
+(defn handler (&optional (opts {}))
+  "A conn handler serving the dashboard. `:title` names the page.
+
+  Never cached: it reports the state of this process at this moment, and a stored copy is a
+  stale answer to the only question anyone asks it."
+  (let (title (get opts :title "Hatch metrics"))
+    (fn (conn)
+      (-> conn
+        (put-resp-header :cache-control "no-store")
+        (put-resp-header :content-type "text/html; charset=utf-8")
+        (send-resp 200 (page title))))))
