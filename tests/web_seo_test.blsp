@@ -122,6 +122,15 @@
     (assert= (apply vector (fixed-get-paths seo-test-router--routes))
       (apply vector (fixed-get-paths (fn () seo-test-router--routes)))))
 
+  ;; Freshness matters here specifically: a crawler fetches both of these before every
+  ;; crawl, and with no Cache-Control each is a full round trip for bytes that change only
+  ;; on redeploy.
+  (test "the sitemap declares its own freshness"
+    (let (resp (call (sitemap-handler *site* (fn () seo-test-router--routes) {})
+                 (conn-for "GET" "/sitemap.xml")))
+      (is (includes? (resp-header resp :cache-control) "max-age=3600"))
+      (is (includes? (resp-header resp :cache-control) "public"))))
+
   (test "the handler serves xml"
     (let (resp (call (sitemap-handler *site* seo-test-router--routes {})
                  (conn-for "GET" "/sitemap.xml")))
@@ -146,4 +155,13 @@
     (let (resp (call (robots-handler *site* {}) (conn-for "GET" "/robots.txt")))
       (assert= 200 (status resp))
       (is (includes? (resp-header resp :content-type) "text/plain"))
-      (is (body-contains? resp "User-agent")))))
+      (is (body-contains? resp "User-agent"))))
+
+  (test "it declares its own freshness, overridable"
+    (is (includes? (resp-header (call (robots-handler *site* {}) (conn-for "GET" "/robots.txt"))
+                     :cache-control)
+          "max-age=3600"))
+    (is (includes? (resp-header (call (robots-handler *site* {:max-age 60})
+                                  (conn-for "GET" "/robots.txt"))
+                     :cache-control)
+          "max-age=60"))))

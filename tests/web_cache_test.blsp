@@ -1,0 +1,118 @@
+;; web/cache — validators and freshness for dynamic responses.
+;;
+;; The failure this module exists for is silent: `no-cache` is CORRECT on a page whose nav
+;; changes with the session, but with no validator on it every mandated revalidation is a
+;; full 200 with the whole body. Nothing errors; the bytes just go out again, forever.
+(defmodule web-cache-test (:use test) (:use web/cache) (:use web/conn))
+
+(defn- req (&optional (headers {}))
+  (build {:method "GET" :path "/" :query "" :params {} :headers headers :body ""}))
+
+(defn- resp (&optional (body "hello world") (headers {}))
+  {:status 200 :body body :headers headers})
+
+(describe "strong-etag"
+  (test "is content-addressed — same bytes, same tag"
+    (assert= (strong-etag "abc") (strong-etag "abc")))
+  (test "different bytes, different tag"
+    (is (not (= (strong-etag "abc") (strong-etag "abd")))))
+  (test "is quoted, as an entity-tag must be"
+    (is (string/starts-with? (strong-etag "abc") "\""))
+    (is (string/ends-with? (strong-etag "abc") "\""))))
+
+;; RFC 9110 §8.8.3: an ETag identifies a REPRESENTATION. A br body and a gzip body of the
+;; same page are different representations; a validator that ignored the coding would match
+;; across them, and a client could revalidate a br entity over a gzip connection, be told
+;; 304, and decode the wrong bytes.
+(describe "etag-for distinguishes content codings"
+  (test "each coding gets its own tag"
+    (let (identity-tag (etag-for "body" nil)
+          gzip-tag (etag-for "body" "gzip")
+          br-tag (etag-for "body" "br"))
+      (is (not (= identity-tag gzip-tag)))
+      (is (not (= gzip-tag br-tag)))
+      (is (not (= identity-tag br-tag)))))
+  (test "the coding rides inside the quotes"
+    (is (string/ends-with? (etag-for "body" "br") "-br\"")))
+  (test "an empty coding is identity"
+    (assert= (etag-for "body" nil) (etag-for "body" ""))))
+
+(describe "not-modified?"
+  (test "an exact match"
+    (is (not-modified? (req {:if-none-match (strong-etag "x")}) (strong-etag "x"))))
+  (test "a different tag does not match"
+    (is (not (not-modified? (req {:if-none-match "\"other\""}) (strong-etag "x")))))
+  (test "one tag among a list matches"
+    (is (not-modified? (req {:if-none-match "\"a\", \"b\", \"c\""}) "\"b\"")))
+  ;; §13.1.2 prescribes WEAK comparison for If-None-Match, so W/ matches its strong twin.
+  (test "a weak tag matches its strong twin"
+    (is (not-modified? (req {:if-none-match "W/\"abc\""}) "\"abc\"")))
+  (test "the wildcard matches anything"
+    (is (not-modified? (req {:if-none-match "*"}) "\"whatever\"")))
+  (test "no header means no match"
+    (is (not (not-modified? (req) "\"abc\"")))))
+
+(describe "conditional"
+  (test "a first request is tagged and sent"
+    (let ([outcome tagged] (conditional (req) (resp) nil))
+      (assert= :send outcome)
+      (is (not (nil? (get (get tagged :headers) :etag))))))
+
+  (test "a client holding the representation gets a bodyless 304"
+    (let ([_ tagged] (conditional (req) (resp) "br")
+          tag (get (get tagged :headers) :etag)
+          [outcome not-modified] (conditional (req {:if-none-match tag}) (resp) "br"))
+      (assert= :not-modified outcome)
+      (assert= 304 (get not-modified :status))
+      (assert= "" (get not-modified :body))
+      (assert= tag (get (get not-modified :headers) :etag))))
+
+  ;; Holding the gzip representation says nothing about the br one.
+  (test "a tag from another coding does not satisfy the request"
+    (let ([_ gzipped] (conditional (req) (resp) "gzip")
+          gzip-tag (get (get gzipped :headers) :etag)
+          [outcome _] (conditional (req {:if-none-match gzip-tag}) (resp) "br"))
+      (assert= :send outcome)))
+
+  (test "the 304 keeps caching metadata and drops content headers"
+    (let (source (resp "hello world"
+                   {:cache-control "private, no-cache"
+                    :vary "Cookie"
+                    :content-type "text/html"})
+          [_ tagged] (conditional (req) source nil)
+          tag (get (get tagged :headers) :etag)
+          [_ not-modified] (conditional (req {:if-none-match tag}) source nil)
+          headers (get not-modified :headers))
+      (assert= "private, no-cache" (get headers :cache-control))
+      (assert= "Cookie" (get headers :vary))
+      (is (nil? (get headers :content-type)))))
+
+  (test "an ETag a handler already chose is left alone"
+    (let ([_ untouched] (conditional (req) (resp "b" {:etag "\"handler\""}) nil))
+      (assert= "\"handler\"" (get (get untouched :headers) :etag))))
+
+  (test "a non-string body is passed through untagged"
+    (let ([outcome untouched] (conditional (req)
+                                {:status 200 :body (string/->bytes "x") :headers {}}
+                                nil))
+      (assert= :send outcome)
+      (is (nil? (get (get untouched :headers) :etag)))))
+
+  (test "a redirect is not tagged"
+    (let ([_ untouched] (conditional (req) {:status 302 :body "" :headers {}} nil))
+      (is (nil? (get (get untouched :headers) :etag))))))
+
+(describe "cache-control constructors"
+  (test "immutable never revalidates"
+    (is (includes? (immutable) "immutable"))
+    (is (includes? (immutable) "max-age=31536000")))
+  (test "public-for bounds staleness"
+    (assert= "public, max-age=60" (public-for 60)))
+  ;; no-store is not no-cache: one forbids keeping it, the other requires revalidating it.
+  (test "no-store forbids storage"
+    (assert= "no-store" (no-store)))
+  (test "put-cache-control never overrides a handler's own choice"
+    (assert= "public, max-age=5"
+      (get (get (put-cache-control {:headers {:cache-control "public, max-age=5"}} "no-store")
+             :headers)
+        :cache-control))))
