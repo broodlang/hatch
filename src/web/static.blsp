@@ -160,14 +160,31 @@
         (and (>= (string/length h) 8)
           (= (string/span h 0 "0123456789abcdef") (string/length h)))))))
 
+(defn relative-to (path dir)
+  "`path` with a leading `dir/` removed — the form the fingerprint manifest keys and values
+  use. `serve` builds a path as `dir/rel`, so this recovers `rel`."
+  (let (prefix (str dir "/"))
+    (if (string/starts-with? path prefix)
+      (string/substring path (count prefix) (count path))
+      path)))
+
 (defn fingerprinted? (path dir)
-  "True if `path` is an asset hatch actually content-fingerprinted — its basename appears as
-  a value in `dir`'s manifest. Authoritative, not a guess: a fingerprint-*shaped* look-alike
-  that hatch didn't produce (a vendored `chunk.a1b2c3d4.js` you hashed yourself) is NOT
-  treated as immutable, so it can't get stuck in caches for a year if its bytes later change.
-  The structural pre-check means only a fingerprint-shaped URL ever reads the manifest."
+  "True if `path` is an asset hatch actually content-fingerprinted — its path RELATIVE to
+  `dir` appears as a value in `dir`'s manifest. Authoritative, not a guess: a
+  fingerprint-*shaped* look-alike that hatch didn't produce (a vendored `chunk.a1b2c3d4.js`
+  you hashed yourself) is NOT treated as immutable, so it can't get stuck in caches for a
+  year if its bytes later change. The structural pre-check means only a fingerprint-shaped
+  URL ever reads the manifest.
+
+  Relative path, not basename. `fingerprint-name` keeps an asset where it was —
+  `fonts/body.woff2` fingerprints to `fonts/body.<sha>.woff2`, and that whole string is what
+  the manifest stores. Comparing only the basename therefore never matched anything in a
+  SUBDIRECTORY, so a nested asset was fingerprinted, linked by its immutable URL, and then
+  served `no-cache` — revalidated on every page load for the life of the deploy, with
+  nothing to indicate it was happening. Flat assets matched by accident, because for them
+  the basename and the relative path are the same string."
   (and (fingerprint-shaped? path)
-    (includes? (vals (load-manifest dir)) (last (string/split path "/")))))
+    (includes? (vals (load-manifest dir)) (relative-to path dir))))
 
 (defn cache-control (path dir)
   "The Cache-Control for a static asset at `path` (served from `dir`). In prod a

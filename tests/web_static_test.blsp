@@ -315,3 +315,34 @@
       (assert= (string/bytes-> (get resp :resp-body)) "GZIP-BYTES")
       (file/rm (str dir "/x.css.gz"))
       (file/rm (str dir "/x.css")))))
+
+;; A nested asset fingerprints to `fonts/body.<sha>.woff2`, and the manifest stores that
+;; whole string — but `fingerprinted?` compared only the BASENAME, so nothing under a
+;; subdirectory ever matched. The asset was fingerprinted, linked by its immutable URL, and
+;; then served `no-cache`: revalidated on every page load, silently. Flat assets matched by
+;; accident, because for them basename and relative path are the same string.
+(describe "fingerprinted? matches nested assets, not just flat ones"
+
+  (defn- with-manifest (entries body-fn)
+    (let (dir (str "/tmp/hatch-fp-" (uuid/v4)))
+      (file/mkdir dir)
+      (file/spit (str dir "/cache-manifest") (render-manifest entries))
+      (let (result (body-fn dir)) result)))
+
+  (test "a flat fingerprinted asset is immutable"
+    (with-manifest {"app.css" "app.deadbeef.css"}
+      (fn (dir) (is (fingerprinted? (str dir "/app.deadbeef.css") dir)))))
+
+  (test "a nested fingerprinted asset is immutable too"
+    (with-manifest {"fonts/body.woff2" "fonts/body.deadbeef.woff2"}
+      (fn (dir) (is (fingerprinted? (str dir "/fonts/body.deadbeef.woff2") dir)))))
+
+  ;; The guarantee that stops a look-alike being cached for a year must survive the fix.
+  (test "a fingerprint-shaped name hatch did not produce is still not immutable"
+    (with-manifest {"app.css" "app.deadbeef.css"}
+      (fn (dir) (is (not (fingerprinted? (str dir "/vendor/chunk.a1b2c3d4.js") dir))))))
+
+  (test "relative-to strips only a leading dir"
+    (assert= "fonts/body.woff2" (relative-to "static/fonts/body.woff2" "static"))
+    (assert= "app.css" (relative-to "static/app.css" "static"))
+    (assert= "other/app.css" (relative-to "other/app.css" "static"))))
