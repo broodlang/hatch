@@ -7,6 +7,9 @@
   request/response cycle is wrong, so no test that asserts on status, headers or markup
   presence will fail — the page simply does nothing.
 
+  Two audits live here. [[inert-controls]] catches a control nothing can reach;
+  [[first-flight]] catches a page that cannot paint in one network round trip.
+
   The audit that motivated the module is [[inert-controls]]. A reusable renderer emitted a
   fragment containing a `Filter…` search box plus a separate companion script, the host
   page inlined the stylesheet and forgot the script, and the box shipped inert for months:
@@ -19,6 +22,18 @@
   (:use web/conn))
 
 (def- *controls* ["<input" "<select" "<textarea" "<button"])
+
+;; TCP opens a connection with a congestion window of 10 segments (RFC 6928) and cannot
+;; send more until the client acknowledges. At the usual 1460-byte MSS that is 14 600 bytes
+;; on the wire; 14 336 (14 KiB) is the conventional budget, leaving room for response
+;; headers. A document that fits arrives in ONE round trip after the handshake; a document
+;; that does not waits for an acknowledgement it could have avoided.
+;;
+;; `initcwnd` itself is a kernel route setting (`ip route change … initcwnd N`) — no server
+;; process can raise it, and hatch does not pretend to. What a framework CAN do is tell an
+;; app when it has stopped fitting, which is otherwise invisible: nothing about a 60 KB page
+;; fails, it is just a slower first paint than it needs to be.
+(def *first-flight-budget* 14336)
 
 (defn dev? ()
   "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`)."
@@ -142,3 +157,109 @@
                   "references it — it accepts input and does nothing. "
                   "If its behaviour comes from a companion script, the page is missing it."))))
   document)
+
+;; ---- first flight -----------------------------------------------------------
+
+(defn- render-blocking-refs (head)
+  "Every ABSOLUTE-URL resource in `head` that blocks the first paint, as
+  `{:kind :url}` maps.
+
+  Only two shapes block: a `rel=\"stylesheet\"` link, and a classic `<script src>` with
+  neither `async` nor `defer` (a `type=\"module\"` script is deferred by definition). A
+  `preconnect`/`dns-prefetch`/`preload` hint blocks nothing and is deliberately not
+  reported — it is the mitigation, not the problem."
+  (append (blocking-links head) (blocking-scripts head)))
+
+(defn- absolute? (url)
+  (or (string/starts-with? url "https://") (string/starts-with? url "http://")))
+
+(defn- scan-tags (document open collect from acc)
+  "Fold `collect` over every tag opening with `open` in `document`."
+  (let (at (index-of document open from))
+    (if (< at 0)
+      (reverse acc)
+      (let (tag (tag-text document at))
+        (scan-tags document open collect (+ at (count open)) (collect acc tag))))))
+
+(defn- blocking-links (head)
+  (scan-tags head
+    "<link"
+    (fn (acc tag)
+      (let (href (attr-value tag "href")
+            rel (attr-value tag "rel"))
+        (if (and href (= rel "stylesheet") (absolute? href))
+          (cons {:kind "stylesheet" :url href} acc)
+          acc)))
+    0
+    nil))
+
+(defn- blocking-scripts (head)
+  (scan-tags head
+    "<script"
+    (fn (acc tag)
+      (let (src (attr-value tag "src"))
+        (if (and src
+              (absolute? src)
+              (< (index-of tag " async") 0)
+              (< (index-of tag " defer") 0)
+              (not (= (attr-value tag "type") "module")))
+          (cons {:kind "script" :url src} acc)
+          acc)))
+    0
+    nil))
+
+(defn head-of (document)
+  "The `<head>` section of `document`, or the whole thing when there is no `</head>` — a
+  fragment has no head, and scanning all of it is the conservative reading."
+  (let (end (index-of document "</head>"))
+    (if (< end 0) document (string/substring document 0 end))))
+
+(defn first-flight (document)
+  "How `document` fares against the initial congestion window, as
+  `{:bytes :compressed :budget :over? :blocking}`.
+
+  `:compressed` is the real gzipped length, not an estimate — the wire carries the
+  compressed bytes, so an estimate would be the wrong number to budget against. `:over?`
+  compares it with [[*first-flight-budget*]]. `:blocking` lists the absolute-URL
+  render-blocking resources in the `<head>`; each one on another origin costs a DNS lookup,
+  a TCP handshake and a TLS handshake BEFORE the first paint, which routinely costs more
+  than the document itself.
+
+  A pure measurement — call it from a test or a script, not only from the dev warning."
+  (let (compressed (count (zlib/gzip document)))
+    {:bytes (count document)
+     :compressed compressed
+     :budget *first-flight-budget*
+     :over? (> compressed *first-flight-budget*)
+     :blocking (render-blocking-refs (head-of document))}))
+
+(defn warn-first-flight! (document)
+  "Log a dev warning when `document` cannot paint in one round trip. A no-op outside dev
+  and a no-op when the page is within budget and has no third-party render-blocking
+  resource. Returns `document` unchanged.
+
+  Deliberately advisory. A reference manual or a changelog is legitimately large, and being
+  over budget is a trade an app is allowed to make knowingly — what it should not be is a
+  thing nobody measured."
+  (when (dev?)
+    (let (report (first-flight document))
+      (when (get report :over?)
+        (log/warn (str "[audit] first flight: "
+                    (get report :compressed)
+                    " gzipped bytes over a "
+                    (get report :budget)
+                    "-byte initial congestion window — this document needs more than one "
+                    "network round trip before it can start painting.")))
+      (doseq (ref (get report :blocking))
+        (log/warn (str "[audit] render-blocking "
+                    (get ref :kind)
+                    " in <head>: "
+                    (get ref :url)
+                    " — an absolute URL blocks the first paint on a DNS lookup plus a TCP "
+                    "and TLS handshake to that origin. Self-host it, or preconnect.")))))
+  document)
+
+(defn warn-page! (document)
+  "Run every page audit and return `document` unchanged — the single hook a renderer calls.
+  Currently [[warn-inert!]] and [[warn-first-flight!]]."
+  (warn-first-flight! (warn-inert! document)))

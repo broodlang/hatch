@@ -58,3 +58,72 @@
   (test "it returns the document unchanged so it drops into a render pipeline"
     (let (document (page-with "<input id=\"q\">"))
       (assert= (warn-inert! document) document))))
+
+;; ---- first flight -----------------------------------------------------------
+;;
+;; TCP cannot send more than the initial congestion window (10 segments, ~14 KB) before the
+;; client acknowledges. `initcwnd` is a kernel route setting no server process can raise —
+;; what hatch can do is say when a page has stopped fitting, which nothing else reports.
+
+(describe "first-flight measures the document against the congestion window"
+
+  (test "a small page fits in one round trip"
+    (let (report (first-flight "<html><head></head><body>hello</body></html>"))
+      (is (not (get report :over?)))
+      (is (< (get report :compressed) (get report :budget)))))
+
+  ;; Incompressible bytes, so the gzipped size really is over budget — a page of repeated
+  ;; text would compress to nothing and prove the opposite of what this asserts.
+  (test "a page past the window is reported as over"
+    (let (big (apply str (map (range 3000) (fn (_) (uuid/v4))))
+          report (first-flight (str "<html><head></head><body>" big "</body></html>")))
+      (is (get report :over?))
+      (is (> (get report :compressed) (get report :budget)))))
+
+  (test "the compressed size is measured, not estimated"
+    ;; a highly compressible page is far smaller on the wire than its byte count
+    (let (document (str "<html><head></head><body>" (string/repeat "a" 60000) "</body></html>")
+          report (first-flight document))
+      (assert= (count document) (get report :bytes))
+      (is (< (get report :compressed) 1000))
+      (is (not (get report :over?))))))
+
+(describe "first-flight finds what blocks the first paint"
+
+  (test "a third-party stylesheet in the head blocks"
+    (let (blocking (get (first-flight "<html><head><link rel=\"stylesheet\" href=\"https://fonts.example/x.css\"></head><body></body></html>")
+                     :blocking))
+      (assert= 1 (count blocking))
+      (assert= "stylesheet" (get (first blocking) :kind))))
+
+  (test "a classic third-party script in the head blocks"
+    (is (= 1
+          (count (get (first-flight "<html><head><script src=\"https://cdn.example/a.js\"></script></head><body></body></html>")
+                   :blocking)))))
+
+  ;; The hints are the mitigation, not the problem — reporting them would be the kind of
+  ;; false positive that makes a lint unreadable.
+  (test "preconnect and dns-prefetch block nothing"
+    (is (empty? (get (first-flight "<html><head><link rel=\"preconnect\" href=\"https://fonts.example\"><link rel=\"dns-prefetch\" href=\"https://fonts.example\"></head><body></body></html>")
+                  :blocking))))
+
+  (test "async, defer and module scripts do not block"
+    (for (tag ["<script src=\"https://cdn.example/a.js\" async></script>"
+                "<script src=\"https://cdn.example/a.js\" defer></script>"
+                "<script src=\"https://cdn.example/a.js\" type=\"module\"></script>"])
+      (is (empty? (get (first-flight (str "<html><head>" tag "</head><body></body></html>"))
+                    :blocking)))))
+
+  (test "a same-origin relative asset is not an extra connection"
+    (is (empty? (get (first-flight "<html><head><link rel=\"stylesheet\" href=\"/static/app.css\"></head><body></body></html>")
+                  :blocking))))
+
+  (test "only the head is scanned — a body script blocks nothing above it"
+    (is (empty? (get (first-flight "<html><head></head><body><script src=\"https://cdn.example/a.js\"></script></body></html>")
+                  :blocking)))))
+
+(describe "audit: warn-first-flight! and warn-page! are pass-throughs"
+  (test "the document is returned unchanged"
+    (let (document "<html><head><link rel=\"stylesheet\" href=\"https://fonts.example/x.css\"></head><body></body></html>")
+      (assert= (warn-first-flight! document) document)
+      (assert= (warn-page! document) document))))
