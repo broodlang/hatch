@@ -31,7 +31,8 @@
         (match (conditional conn resp coding)
           ([:not-modified r] r)
           ([:send r] (compress-response conn r))))"
-  (:use web/conn))
+  (:use web/conn)
+  (:alias table))
 
 ;; ---- validators -------------------------------------------------------------
 
@@ -133,3 +134,47 @@
           [:not-modified (not-modified-response tagged tag)]
           [:send tagged]))
       [:send resp])))
+
+;; ---- memoised fragments -----------------------------------------------------
+;;
+;; The other half of caching, and the one no amount of `Cache-Control` covers: work the
+;; SERVER repeats. A validator makes a repeat visit cheap for the client, but the response
+;; still has to be built to know its ETag — so a page whose content cannot change is
+;; rebuilt, in full, for every request that asks for it.
+;;
+;; Measured on a hive page: rendering the shared layout chrome — nav, head, footer, byte for
+;; byte identical on every page — was 2.18 ms of a 3.00 ms render. A changelog built from a
+;; file baked into the image cost 290 ms per request, half parsing markdown and half
+;; rendering hiccup, for output that had not changed since the image was built.
+;;
+;; Process-shared (Brood's `table`, the same store `web/static` memoises ETags in), so every
+;; request worker sees one copy and a value is computed once per key for the life of the
+;; process — not once per process.
+
+(def- *fragments* (table/new))
+
+(defn fetch (key build)
+  "The cached value for `key`, computing it with `build` on the first ask.
+
+  For output that is a pure function of something that cannot change while the process
+  lives: a rendered layout, a page built from a file baked into the image, a static
+  fragment. NOT for anything user-specific — one entry serves every request, so a value
+  that varies per session or per user belongs nowhere near this.
+
+  There is no expiry and no bound. That is deliberate for the intended use — a fixed set of
+  keys, each computed once — and makes it the wrong tool for anything keyed by user input,
+  which would grow without limit."
+  (if (table/has? *fragments* key)
+    (table/get *fragments* key)
+    (let (value (build))
+      (table/put *fragments* key value)
+      value)))
+
+(defn invalidate (key)
+  "Drop one cached fragment, so the next `fetch` rebuilds it."
+  (table/delete *fragments* key))
+
+(defn clear ()
+  "Drop every cached fragment — for tests, and for a dev reload that changed a template."
+  (dolist (key (keys (table/snapshot *fragments*)))
+    (table/delete *fragments* key)))
