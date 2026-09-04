@@ -1,0 +1,158 @@
+(defmodule web/metrics
+  "Per-route request metrics, collected from the telemetry `http/server` already emits.
+
+  `[:hatch :request :stop]` carries a duration and the method, path and status of every
+  request, and until now the access log was the only thing listening — so the information
+  needed to answer \"which route is slow\" existed, per request, and was thrown away. An
+  operator's only recourse was to reproduce it by hand.
+
+  `attach` accumulates it instead: counts, status classes, and a latency histogram per
+  route, readable with `snapshot`. `web/dashboard` renders it.
+
+  ## Two things that have to be bounded, and are
+
+  **Keys.** A path is per-request data — `/packages/clutch` and `/packages/hatch` are
+  different strings — so keying on it raw is an unbounded map fed by whatever anyone asks
+  for, which is a memory leak a stranger controls. Requests are counted under the ROUTE
+  PATTERN the router matched (`/packages/:name`), which is bounded by the route table
+  itself; a request that reached no router falls back to its path, and beyond
+  `*max-routes*` distinct keys everything lands in one `other` bucket rather than growing.
+
+  **Latency.** Percentiles from stored samples need the samples, which is again unbounded.
+  A fixed bucket histogram gives p50/p95/p99 close enough to act on, in constant memory,
+  which is the trade every metrics system makes."
+  (:alias telemetry)
+  (:alias table))
+
+;; Upper edges in milliseconds. The last bucket is everything slower.
+(def *buckets* [1 2 5 10 25 50 100 250 500 1000 2500 5000])
+
+(def *max-routes* 200)
+
+(def- *stats* (table/new))
+
+(defn route-key (method route path)
+  "The key a request is counted under: `method` plus the ROUTE pattern the router matched,
+  falling back to the path when there is none.
+
+  The pattern is what makes this bounded and honest. A path is per-request data —
+  `/packages/clutch` and `/packages/hatch` are different strings — so counting by it is
+  either an unbounded map fed by whatever strangers ask for, or a guess about which
+  segments were values. Guessing gets it wrong in both directions: `/api/v1/publish` reads
+  as a value because `v1` has a digit in it, while `/packages/clutch` reads as a route.
+  The router already knows, so it says (`web/router/dispatch` assigns `:route`).
+
+  The fallback matters for requests that never reached a router — a 404 on no route, a
+  malformed request — and those are exactly the ones an unbounded key space would come
+  from, which is what `*max-routes*` is for."
+  (str method " " (if (and (string? route) (not (= route ""))) route path)))
+
+(defn- bucket-of (ms)
+  (let (index (fold *buckets* 0 (fn (n edge) (if (> ms edge) (+ n 1) n))))
+    (%min index (count *buckets*))))
+
+(defn- empty-stat ()
+  {:count 0
+   :total 0
+   :max 0
+   :ok 0
+   :client-error 0
+   :server-error 0
+   :buckets (apply vector (map (range (+ (count *buckets*) 1)) (fn (_) 0)))})
+
+(defn- bump (stat ms status)
+  (let (index (bucket-of ms)
+        buckets (get stat :buckets)
+        class (cond (>= status 500) :server-error (>= status 400) :client-error else :ok))
+    (assoc stat
+      :count (+ (get stat :count) 1)
+      :total (+ (get stat :total) ms)
+      :max (%max (get stat :max) ms)
+      class (+ (get stat class) 1)
+      :buckets (assoc buckets index (+ (get buckets index) 1)))))
+
+(defn record (method route path status ms)
+  "Fold one request into the stats. Called by the telemetry handler; public so a test can
+  drive it without a live server."
+  (let (shape (route-key method route path)
+        key (if (or (table/has? *stats* shape)
+                  (< (count (keys (table/snapshot *stats*))) *max-routes*))
+              shape
+              "other")
+        stat (or (table/get *stats* key) (empty-stat)))
+    (table/put *stats* key (bump stat ms status))
+    key))
+
+(defn- percentile (stat p)
+  "The bucket edge at or below which `p` of requests fall — an upper bound, since a
+  histogram knows the bucket and not the sample."
+  (let (count-total (get stat :count)
+        target (%max 1 (math/floor (* count-total p)))
+        buckets (get stat :buckets))
+    (fold (range (count buckets))
+      nil
+      (fn (found index)
+        (if found
+          found
+          (let (seen (fold (range (+ index 1)) 0 (fn (n i) (+ n (nth buckets i)))))
+            (if (>= seen target)
+              (if (< index (count *buckets*)) (nth *buckets* index) :over)
+              nil)))))))
+
+(defn snapshot ()
+  "Every route's stats, busiest first: `{:route :count :mean :max :p50 :p95 :p99 :ok
+  :client-error :server-error}`."
+  (apply vector
+    (reverse (sort-by (map (keys (table/snapshot *stats*))
+                        (fn (key)
+                          (let (stat (table/get *stats* key))
+                            {:route key
+                             :count (get stat :count)
+                             :mean (if (= 0 (get stat :count))
+                                     0
+                                     (math/floor (/ (get stat :total) (get stat :count))))
+                             :max (get stat :max)
+                             :p50 (percentile stat 0.5)
+                             :p95 (percentile stat 0.95)
+                             :p99 (percentile stat 0.99)
+                             :ok (get stat :ok)
+                             :client-error (get stat :client-error)
+                             :server-error (get stat :server-error)})))
+               (fn (row) (get row :count))))))
+
+(defn totals ()
+  "Aggregate counters across every route."
+  (fold (snapshot)
+    {:count 0 :ok 0 :client-error 0 :server-error 0 :routes 0}
+    (fn (acc row)
+      (assoc acc
+        :count (+ (get acc :count) (get row :count))
+        :ok (+ (get acc :ok) (get row :ok))
+        :client-error (+ (get acc :client-error) (get row :client-error))
+        :server-error (+ (get acc :server-error) (get row :server-error))
+        :routes (+ (get acc :routes) 1)))))
+
+(defn reset ()
+  "Drop every recorded route. For tests, and for an operator starting a fresh window."
+  (dolist (key (keys (table/snapshot *stats*))) (table/delete *stats* key))
+  nil)
+
+(defn attach (&optional (opts {}))
+  "Start collecting. Idempotent — re-attaching replaces the handler."
+  (when (nil? (telemetry/pid))
+    (telemetry/start))
+  (let (id (get opts :id :hatch-metrics))
+    (telemetry/attach id
+      [:hatch :request :stop]
+      (fn (_event measurements metadata)
+        (record (get metadata :method "?")
+          (get metadata :route)
+          (get metadata :path "/")
+          (get metadata :status 200)
+          (get measurements :duration 0))))
+    id))
+
+(defn detach (&optional (opts {}))
+  "Stop collecting."
+  (telemetry/detach (get opts :id :hatch-metrics))
+  nil)

@@ -1,0 +1,77 @@
+;; web/metrics — per-route stats from the telemetry http/server already emits.
+;;
+;; The information needed to answer "which route is slow" was emitted per request and
+;; thrown away; the access log was the only listener. An operator's recourse was to
+;; reproduce it by hand.
+(defmodule web-metrics-test (:use test) (:use web/metrics))
+
+(describe "route-key bounds the key space"
+  ;; A path is per-request data, so counting by it is either an unbounded map fed by
+  ;; strangers or a guess about which segments were values. The router knows; it says.
+  (test "the matched pattern is the key"
+    (assert= "GET /packages/:name" (route-key "GET" "/packages/:name" "/packages/clutch")))
+
+  ;; The guess this replaced got both directions wrong: `v1` reads as a value because it
+  ;; has a digit, and a package name reads as a route.
+  (test "a fixed segment with a digit in it stays fixed"
+    (assert= "POST /api/v1/publish" (route-key "POST" "/api/v1/publish" "/api/v1/publish")))
+
+  (test "no matched route falls back to the path"
+    (assert= "GET /nope" (route-key "GET" nil "/nope"))
+    (assert= "GET /nope" (route-key "GET" "" "/nope")))
+
+  (test "the method is part of the key"
+    (is (not (= (route-key "GET" "/x" "/x") (route-key "POST" "/x" "/x"))))))
+
+(describe "recording"
+  :serial (test "counts, mean and max per route"
+    (reset)
+    (record "GET" "/a" "/a" 200 10)
+    (record "GET" "/a" "/a" 200 30)
+    (let (row (first (snapshot)))
+      (assert= "GET /a" (get row :route))
+      (assert= 2 (get row :count))
+      (assert= 20 (get row :mean))
+      (assert= 30 (get row :max))))
+
+  (test "status classes are separated"
+    (reset)
+    (record "GET" "/a" "/a" 200 1)
+    (record "GET" "/a" "/a" 404 1)
+    (record "GET" "/a" "/a" 500 1)
+    (let (row (first (snapshot)))
+      (assert= 1 (get row :ok))
+      (assert= 1 (get row :client-error))
+      (assert= 1 (get row :server-error))))
+
+  (test "busiest route first"
+    (reset)
+    (record "GET" "/quiet" "/quiet" 200 1)
+    (for (i (range 5)) (record "GET" "/busy" "/busy" 200 1))
+    (assert= "GET /busy" (get (first (snapshot)) :route)))
+
+  ;; Percentiles from stored samples need the samples, which is unbounded; a fixed
+  ;; histogram trades exactness for constant memory, which is the trade worth making.
+  (test "percentiles come from the histogram"
+    (reset)
+    (for (i (range 99)) (record "GET" "/a" "/a" 200 5))
+    (record "GET" "/a" "/a" 200 4000)
+    (let (row (first (snapshot)))
+      (is (<= (get row :p50) 5))
+      (is (>= (get row :p99) 5))
+      (assert= 4000 (get row :max))))
+
+  (test "totals aggregate every route"
+    (reset)
+    (record "GET" "/a" "/a" 200 1)
+    (record "GET" "/b" "/b" 500 1)
+    (let (t (totals))
+      (assert= 2 (get t :count))
+      (assert= 2 (get t :routes))
+      (assert= 1 (get t :server-error))))
+
+  (test "reset empties it"
+    (reset)
+    (record "GET" "/a" "/a" 200 1)
+    (reset)
+    (assert= [] (snapshot))))

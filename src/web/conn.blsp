@@ -235,7 +235,10 @@
         headers (if (empty? cookies) headers (assoc headers :set-cookie cookies))
         base {:status (or (get conn :status) 200)
               :headers headers
-              :body (get conn :resp-body "")})
+              :body (get conn :resp-body "")}
+        ;; Carried through so the server's telemetry can name the ROUTE rather than the
+        ;; path — the difference between one row per route and one per URL anyone visits.
+        base (if (contains? conn :route) (assoc base :route (get conn :route)) base))
     (if (contains? conn :stream) (assoc base :stream (get conn :stream)) base)))
 
 (defn stream-resp (conn stream-fn &optional (status 200))

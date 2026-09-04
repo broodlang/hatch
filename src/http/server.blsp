@@ -418,7 +418,9 @@ port) still returns and lets the caller fail on its own terms."
       {:duration (- (os/now) t0)}
       {:method (get request :method)
        :path (get request :path)
-       :status (get response :status 200)})
+       :status (get response :status 200)
+       ;; the matched route pattern when a router set one — see web/router/dispatch
+       :route (get response :route)})
     ; A response carrying a `:stream` function is sent chunked (Transfer-Encoding: chunked) and
     ; always closes the connection — no keep-alive across an open-ended stream (SSE, a long
     ; download). Everything else is a buffered response: decide keep-alive once, then stamp the
@@ -750,7 +752,9 @@ port) still returns and lets the caller fail on its own terms."
       {:duration (- (os/now) t0)}
       {:method (get request :method)
        :path (get request :path)
-       :status (get response :status 200)})
+       :status (get response :status 200)
+       ;; the matched route pattern when a router set one — see web/router/dispatch
+       :route (get response :route)})
     (tcp/send sock (format-response response (= (get head :method) "HEAD")))
     (spool-cleanup path)
     (tcp/close sock)))

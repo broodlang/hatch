@@ -1,0 +1,36 @@
+;; web/dashboard — the metrics page.
+(defmodule web-dashboard-test
+  (:use test)
+  (:use web/dashboard)
+  (:use web/test)
+  (:alias web/metrics))
+
+(describe "the dashboard page"
+  :serial (test "says so when nothing has been recorded"
+    (web/metrics/reset)
+    (is (includes? (page "T") "No requests recorded yet.")))
+
+  (test "reports each route with its latency and error counts"
+    (web/metrics/reset)
+    (for (i (range 3)) (web/metrics/record "GET" "/reference" "/reference" 200 12))
+    (web/metrics/record "POST" "/api/v1/publish" "/api/v1/publish" 500 300)
+    (let (html (page "T"))
+      (is (includes? html "GET /reference"))
+      (is (includes? html "POST /api/v1/publish"))
+      ;; the 5xx is surfaced, not buried in a total
+      (is (includes? html "err"))))
+
+  ;; It maps the app and how well it is working — exactly what a prober wants, and never
+  ;; something a search engine should hold.
+  (test "is noindex and never stored"
+    (web/metrics/reset)
+    (is (includes? (page "T") "noindex, nofollow"))
+    (let (resp (call (handler) (conn-for "GET" "/dashboard")))
+      (assert= 200 (status resp))
+      (assert= "no-store" (resp-header resp :cache-control))
+      (is (includes? (resp-header resp :content-type) "text/html"))))
+
+  (test "the title is the caller's"
+    (web/metrics/reset)
+    (is (includes? (body (call (handler {:title "hive metrics"}) (conn-for "GET" "/dashboard")))
+          "hive metrics"))))

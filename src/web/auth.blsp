@@ -61,3 +61,74 @@
     (put-resp-header :www-authenticate
       (str "Basic realm=\"" (realm-safe realm) "\", charset=\"UTF-8\""))
     (send-resp 401 "<h1>401 Unauthorized</h1>")))
+
+;; ---- address allow-lists ----------------------------------------------------
+
+(def *client-ip-headers* [:fly-client-ip :x-real-ip :cf-connecting-ip])
+
+(defn client-ip (conn)
+  "The originating client's address, or nil.
+
+  Behind a proxy the socket peer is the PROXY, so an allow-list compared against it would
+  admit everyone or no one. The address has to come from a header the proxy sets:
+  `Fly-Client-IP`, `X-Real-IP`, `CF-Connecting-IP`, then the first entry of
+  `X-Forwarded-For`.
+
+  Only trustworthy because the proxy OVERWRITES these on the way in. Read them from a
+  request that did not come through one — a direct connection, a misconfigured route — and
+  they are whatever the client typed, so an allow-list built on this must be the outer of
+  two defences and never the only one."
+  (let (headers (get conn :headers {})
+        direct (first (filter (map *client-ip-headers* (fn (h) (get headers h)))
+                        (fn (v) (and (string? v) (not (= v ""))))))
+        forwarded (get headers :x-forwarded-for))
+    (cond
+      direct (string/trim direct)
+      (and (string? forwarded) (not (= forwarded "")))
+        (string/trim (first (string/split forwarded ",")))
+      else nil)))
+
+(defn- normalise-ip (address)
+  "Lowercased and stripped of a `[…]` wrapper or a `:port` suffix on a v4 address, so a
+  configured address and a header value compare equal."
+  (let (lower (string/lower (string/trim address))
+        unbracketed (if (string/starts-with? lower "[")
+                      (let (close (index-of lower "]"))
+                        (if (< close 0) lower (string/substring lower 1 close)))
+                      lower)
+        ;; a single colon is a v4 host:port; several mean it is v6, where colons are the
+        ;; address itself
+        colons (count (filter (string/->list unbracketed) (fn (c) (= c ":")))))
+    (if (= colons 1) (first (string/split unbracketed ":")) unbracketed)))
+
+(defn allowed-ip? (conn allowed)
+  "Whether this request's client address is one of `allowed` (a list of address strings).
+  An empty list allows nothing, and an unknown address is not allowed — a gate that cannot
+  identify the caller must not admit them."
+  (let (address (client-ip conn))
+    (and address
+      (includes? (map allowed normalise-ip) (normalise-ip address)))))
+
+(defn allow-ips (allowed &optional (opts {}))
+  "A plug admitting only requests from `allowed` addresses.
+
+  Everything else gets a 404, not a 403: a 403 confirms the endpoint exists and is worth
+  attacking, which for an admin surface is the one thing not to volunteer. Pass
+  `:status`/`:body` to say otherwise.
+
+      (through [(auth/allow-ips (string/split (os/env \"DASHBOARD_IPS\") \",\"))]
+        (get \"/dashboard\" dashboard/index))
+
+  Give it the addresses at runtime — from an environment variable or a secret — rather than
+  baking them in: a residential address changes, and an allow-list in the image needs a
+  deploy to fix while locking you out in the meantime.
+
+  An address gate is a coarse outer defence. It stops the internet; it does not stop anyone
+  who shares your network, and it rests on a proxy header (see `client-ip`). Put real
+  authentication behind it for anything that matters."
+  (let (status (get opts :status 404)
+        body (get opts :body "<h1>404 Not Found</h1>"))
+    (fn (conn)
+      (if (allowed-ip? conn allowed)
+        conn
+        (halt (send-resp conn status body))))))

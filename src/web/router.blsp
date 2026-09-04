@@ -84,9 +84,28 @@
     (if found
       (let (route (first found)
             matched (second found)
-            conn (assoc conn :params (into (get conn :params {}) matched)))
+            ;; The matched PATTERN, recorded for anything downstream that needs to name this
+            ;; route — telemetry above all. A request path is per-request data
+            ;; (`/packages/clutch`, `/packages/hatch`), so grouping by it means either an
+            ;; unbounded key space or guessing which segments were values. The router is the
+            ;; one place that does not have to guess.
+            conn (assoc conn
+                   :params (into (get conn :params {}) matched)
+                   :route (pattern->string (get route :pattern))))
         (->resp-conn conn ((get route :handler) conn)))
       (dispatch-no-match routes conn method segments))))
+
+(defn pattern->string (pattern)
+  "A parsed route pattern as the string it was written as — `(\"packages\" :name)` becomes
+  `\"/packages/:name\"`. Stable and bounded: one value per declared route."
+  (str "/"
+    (string/join (map pattern
+                   (fn (segment)
+                     (cond
+                       (string? segment) segment
+                       (keyword? segment) (str ":" (->string segment))
+                       else (str "*" (second segment)))))
+      "/")))
 
 (defn find-route (routes method segments)
   "The first route whose method and path both match, as `[route params]`, or nil."

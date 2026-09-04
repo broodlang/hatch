@@ -52,3 +52,58 @@
       (assert= (includes? challenge "evil") true) ; the realm text, minus the stray quote
       (assert= (includes? challenge "\r") false)
       (assert= (includes? challenge "\n") false))))
+
+;; ---- address allow-lists ----------------------------------------------------
+;;
+;; Behind a proxy the socket peer is the PROXY, so an allow-list compared against it admits
+;; everyone or no one. The address has to come from a header the proxy sets — and is only
+;; trustworthy because the proxy overwrites it.
+(defn- ip-conn (headers)
+  (build {:method "GET" :path "/dashboard" :query "" :params {} :headers headers :body ""}))
+
+(describe "client-ip"
+  (test "prefers the proxy's own header"
+    (assert= "1.2.3.4" (client-ip (ip-conn {:fly-client-ip "1.2.3.4"}))))
+
+  (test "falls back through the other proxy headers"
+    (assert= "5.6.7.8" (client-ip (ip-conn {:x-real-ip "5.6.7.8"})))
+    (assert= "9.9.9.9" (client-ip (ip-conn {:cf-connecting-ip "9.9.9.9"}))))
+
+  ;; X-Forwarded-For is a chain; the client is the first entry.
+  (test "takes the first entry of a forwarded chain"
+    (assert= "1.1.1.1" (client-ip (ip-conn {:x-forwarded-for "1.1.1.1, 10.0.0.1, 10.0.0.2"}))))
+
+  (test "no header at all means unknown"
+    (is (nil? (client-ip (ip-conn {}))))))
+
+(describe "allowed-ip?"
+  (test "an allowed v4 address passes"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4"}) ["1.2.3.4"])))
+
+  (test "a v6 address compares case-insensitively"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "2C0F:EF18::1"}) ["2c0f:ef18::1"])))
+
+  (test "a bracketed or port-suffixed address still matches"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4:5555"}) ["1.2.3.4"]))
+    (is (allowed-ip? (ip-conn {:fly-client-ip "[2c0f:ef18::1]"}) ["2c0f:ef18::1"])))
+
+  (test "a different address does not"
+    (is (not (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.5"}) ["1.2.3.4"]))))
+
+  ;; A gate that cannot identify the caller must not admit them.
+  (test "an unknown address is not allowed"
+    (is (not (allowed-ip? (ip-conn {}) ["1.2.3.4"]))))
+
+  (test "an empty list allows nothing"
+    (is (not (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4"}) [])))))
+
+(describe "allow-ips"
+  ;; 404 rather than 403: a 403 confirms the endpoint exists and is worth attacking.
+  (test "a stranger gets 404, not 403"
+    (let (resp ((allow-ips ["1.2.3.4"]) (ip-conn {:fly-client-ip "9.9.9.9"})))
+      (assert= 404 (get resp :status))
+      (is (halted? resp))))
+
+  (test "an allowed address passes through unhalted"
+    (let (resp ((allow-ips ["1.2.3.4"]) (ip-conn {:fly-client-ip "1.2.3.4"})))
+      (is (not (halted? resp))))))
