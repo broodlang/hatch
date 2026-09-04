@@ -35,11 +35,31 @@
     "application/atom+xml" "application/manifest+json" "application/ld+json"
     "application/vnd.api+json" "image/svg+xml"})
 
+(defn- refused? (accept-encoding coding)
+  "True when `accept-encoding` lists `coding` with an explicit `q=0` weight — an RFC 7231
+  refusal (`gzip;q=0`, `br;q=0.0`, with optional whitespace). A *positive* weight, however
+  small (`q=0.001`), is not a refusal and is not matched.
+
+  A client that goes to the trouble of saying `q=0` means it, and it is usually saying so
+  for a reason — a proxy that mangles a coding, or a debugging session. Honouring it costs
+  one pass over a short header."
+  (any? (string/split accept-encoding ",")
+    (fn (entry)
+      (let (bare (string/lower (string/replace entry " " "")))
+        (any? ["=0" "=0.0" "=0.00" "=0.000"]
+          (fn (zero) (= bare (str coding ";q" zero))))))))
+
 (defn accepts? (conn coding)
-  "True if the request's `Accept-Encoding` offers `coding` (a crude substring test — a
-  `coding;q=0` opt-out is the only false positive and is vanishingly rare)."
+  "True if the request's `Accept-Encoding` offers `coding` and does not refuse it with an
+  explicit `q=0` weight. A missing header means no compression.
+
+  The `q=0` check is what separates this from a substring test. A client sending
+  `gzip;q=0` is asking NOT to be gzipped, and a substring test reads that as a yes —
+  which is the one false positive worth removing, because it inverts the client's request."
   (let (accept-encoding (get (get conn :headers) :accept-encoding))
-    (and (string? accept-encoding) (includes? accept-encoding coding))))
+    (and (string? accept-encoding)
+      (includes? accept-encoding coding)
+      (not (refused? accept-encoding coding)))))
 
 (defn chosen-encoding (conn)
   "The content-coding to compress with, preferring brotli (`\"br\"`) over gzip (`\"gzip\"`) when

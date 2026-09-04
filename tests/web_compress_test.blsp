@@ -99,3 +99,28 @@
     (let (r (respond (req {:accept-encoding "gzip"}) big-body))
       (assert= (get-in r [:headers :content-encoding]) "gzip")
       (assert= (string/bytes-> (zlib/gunzip (get r :body))) big-body))))
+
+;; RFC 7231: `coding;q=0` is a refusal, and a substring test reads it as consent — which
+;; inverts what the client asked for. A positive weight, however small, is not a refusal.
+(describe "accepts? honours an explicit q=0 refusal"
+  (test "a plain offer is accepted"
+    (is (accepts? (build (req {:accept-encoding "gzip, br"})) "gzip"))
+    (is (accepts? (build (req {:accept-encoding "gzip, br"})) "br")))
+
+  (test "q=0 refuses that coding only"
+    (let (conn (build (req {:accept-encoding "gzip;q=0, br"})))
+      (is (not (accepts? conn "gzip")))
+      (is (accepts? conn "br"))))
+
+  (test "spacing and decimal zeroes are all refusals"
+    (for (header ["gzip;q=0" "gzip; q=0.0" "gzip ; q=0.00" "GZIP;Q=0"])
+      (is (not (accepts? (build (req {:accept-encoding header})) "gzip")))))
+
+  (test "a small positive weight is not a refusal"
+    (is (accepts? (build (req {:accept-encoding "gzip;q=0.001"})) "gzip")))
+
+  (test "a refused brotli falls back to gzip rather than to nothing"
+    (assert= "gzip" (chosen-encoding (build (req {:accept-encoding "br;q=0, gzip"})))))
+
+  (test "no header means no compression"
+    (is (nil? (chosen-encoding (build (req {})))))))
