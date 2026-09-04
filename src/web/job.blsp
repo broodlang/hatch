@@ -1,0 +1,91 @@
+(defmodule web/job
+  "Background work that must not compete with serving requests.
+
+  An app's boot often has one-off work to do — backfilling a table, warming a cache,
+  importing what a build step generated. It is tempting to spawn it and call that safe. It
+  is not, and the failure is severe rather than slow: on a single shared vCPU, with green
+  threads that yield only where the runtime lets them, a long native call — a 300 KB
+  `json/decode`, a renderer building a 350 KB string — does not SHARE the CPU with the HTTP
+  listener, it takes it. Spawning keeps such work off the boot *sequence*; it does nothing
+  about the CPU that answers `/health`, and a health check that times out gets the machine
+  replaced, which starts the work again.
+
+  This module is the other way round: the work is fine, it is the DENSITY that is not. A
+  paced job does one unit, sleeps, and does the next — so a job that costs twelve seconds of
+  CPU spreads over a minute and never holds the scheduler long enough for a health check to
+  miss. It finishes later and nobody notices, which for backfill work is the correct trade.
+
+  Pace between UNITS, and make a unit small. Sleeping between batches does not help if one
+  batch is a single call that runs for a second — the pause has to land where the runtime
+  can actually take it.
+
+      (start
+        {:name :reference-seed
+         :units reference/pending-seeds        ; a thunk: the work items
+         :run   reference/seed-file            ; one item
+         :pace-ms 3000                         ; breathe between items
+         :delay-ms 15000})                     ; and let boot settle first
+
+  Wire it into `web/application`'s `:children`. Every unit is wrapped, so one failure is
+  logged and the job carries on; the job is supervised, so a hard fault restarts it and it
+  re-reads its units (make them idempotent — the natural shape is \"what is still missing\").
+  A job that has nothing to do exits immediately and quietly."
+  (:alias supervisor))
+
+(def *default-pace-ms* 1000)
+(def *default-delay-ms* 5000)
+
+(defn- run-unit (name run unit index total)
+  (match (try [:ok (run unit)] (catch e [:error (error-message e)]))
+    ([:ok _] true)
+    ([:error message] (log/warn (str "[job] "
+                                  (->string name)
+                                  ": unit "
+                                  (+ index 1)
+                                  "/"
+                                  total
+                                  " failed: "
+                                  message))
+      false)))
+
+(defn run-now (spec)
+  "Run `spec`'s units, paced, in the CURRENT process. `start` is this behind a supervised,
+  delayed spawn; call this directly from a task or a test where waiting is the point."
+  (let (name (get spec :name :job)
+        run (get spec :run)
+        pace-ms (get spec :pace-ms *default-pace-ms*)
+        units (let (u (get spec :units)) (if (fn? u) (u) (or u []))))
+    (if (empty? units)
+      (do (log/info (str "[job] " (->string name) ": nothing to do")) 0)
+      (do
+        (log/info (str "[job] " (->string name) ": " (count units) " unit(s), " pace-ms "ms apart"))
+        (drain-list name units run pace-ms 0)
+        (log/info (str "[job] " (->string name) ": done"))
+        (count units)))))
+
+(defn- drain-list (name units run pace-ms index)
+  (if (empty? units)
+    index
+    (do
+      (run-unit name run (first units) index (+ index (count units)))
+      (when (not (empty? (rest units)))
+        (sleep pace-ms))
+      (drain-list name (rest units) run pace-ms (+ index 1)))))
+
+(defn start (spec)
+  "Start `spec` as a supervised background job and return the supervisor pid. Suitable for
+  `web/application`'s `:children`.
+
+  `:delay-ms` passes before the first unit, so the job does not compete with the burst of
+  work a process does while it is still coming up. `:restart :transient` — a job that
+  finishes is done, and only a crash brings it back."
+  (let (name (get spec :name :job)
+        delay-ms (get spec :delay-ms *default-delay-ms*))
+    (supervisor/start [{:id name
+                        :restart :transient
+                        :start (fn ()
+                                 (spawn (fn ()
+                                          (sleep delay-ms)
+                                          (check-allow :discarded-catch
+                                            (try (run-now spec) (catch _ nil))))))}]
+      {:strategy :one-for-one :max-restarts 3 :max-seconds 60})))

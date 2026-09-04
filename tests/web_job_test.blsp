@@ -1,0 +1,81 @@
+;; web/job — paced background work.
+;;
+;; The failure this exists for: spawning bulk work at boot keeps it off the boot SEQUENCE and
+;; does nothing about the CPU that answers /health. On a single shared vCPU with cooperative
+;; green threads, a long native call takes the scheduler rather than sharing it, the health
+;; check times out, and the machine is replaced — which starts the work again.
+(defmodule web-job-test (:use test) (:use web/job))
+
+;; Units report by message rather than through shared state: the job may run in another
+;; process, and a mailbox is the one thing that crosses that boundary in Brood.
+(defn- reporter (to) (fn (unit) (send to [:ran unit])))
+
+(defn- collected (n acc)
+  "Drain `n` `[:ran unit]` messages, in arrival order. Returns early on timeout so a test
+  asserts on what actually happened rather than hanging."
+  (if (= n 0)
+    (apply vector (reverse acc))
+    (receive
+      ([:ran unit] (collected (- n 1) (cons unit acc)))
+      (after 2000 (apply vector (reverse acc))))))
+
+(describe "run-now"
+  (test "runs every unit, in order"
+    (run-now {:name :t :units [1 2 3] :run (reporter (self)) :pace-ms 1})
+    (assert= [1 2 3] (collected 3 nil)))
+
+  (test "reports how many units it ran"
+    (assert= 3 (run-now {:name :t :units [1 2 3] :run (fn (_) nil) :pace-ms 1})))
+
+  (test "units may be a thunk, read when the job starts"
+    (run-now {:name :t :units (fn () [:a :b]) :run (reporter (self)) :pace-ms 1})
+    (assert= [:a :b] (collected 2 nil)))
+
+  (test "nothing to do is not an error"
+    (assert= 0 (run-now {:name :t :units [] :run (fn (_) (error "never")) :pace-ms 1})))
+
+  ;; A backfill that dies on one bad row is a backfill that never completes, and the next
+  ;; boot starts it again from the same row.
+  (test "a failing unit is logged and the job carries on"
+    (let (to (self))
+      (run-now {:name :t
+                :units [1 2 3]
+                :run (fn (n) (when (= n 2) (error "unit 2 is bad")) (send to [:ran n]))
+                :pace-ms 1})
+      (assert= [1 3] (collected 2 nil))))
+
+  ;; The point of the module: the pause is what keeps the scheduler available, so it has to
+  ;; actually happen — between units, and not after the last one.
+  (test "it paces between units and does not pause after the last"
+    (let (t0 (os/now)
+          _ (run-now {:name :t :units [1 2 3] :run (fn (_) nil) :pace-ms 60})
+          elapsed (- (os/now) t0))
+      ;; two gaps for three units, not three
+      (is (>= elapsed 110))
+      (is (< elapsed 240))))
+
+  (test "a single unit is not paced at all"
+    (let (t0 (os/now)
+          _ (run-now {:name :t :units [1] :run (fn (_) nil) :pace-ms 200})
+          elapsed (- (os/now) t0))
+      (is (< elapsed 100)))))
+
+(describe "start"
+  (test "returns a supervisor and the job runs after its delay"
+    (let (sup (start {:name :delayed-job
+                      :units [1 2]
+                      :run (reporter (self))
+                      :pace-ms 1
+                      :delay-ms 60}))
+      (is (pid? sup))
+      ;; nothing yet — the delay is the point, so boot is not competed with
+      (assert= [] (receive ([:ran u] [u]) (after 20 [])))
+      (assert= [1 2] (collected 2 nil))))
+
+  (test "a job that raises outright does not take its supervisor down"
+    (let (sup (start {:name :bad-job
+                      :units (fn () (error "cannot read units"))
+                      :run (fn (_) nil)
+                      :delay-ms 10}))
+      (sleep 120)
+      (is (pid? sup)))))
