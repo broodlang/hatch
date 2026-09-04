@@ -18,7 +18,8 @@
                     (fn () (serve))]}))"
   (:use log :only [start-logger fn-backend])
   (:alias web/logger)
-  (:alias web/upload))
+  (:alias web/upload)
+  (:alias web/metrics))
 
 ;; ---- log formatters ---------------------------------------------------------
 
@@ -82,6 +83,9 @@
   `:upload-progress` — `true` to push upload progress to live views (via
                   `web/upload`), or an opts map passed to `attach-progress`.
                   Omit/`false` to skip. Starts telemetry if needed.
+  `:metrics`    — `true` to accumulate per-route counts and latency percentiles
+                  (`web/metrics`), or an opts map passed to `attach`. Serve them
+                  with `web/dashboard`. Omit/`false` to skip.
   `:children`   — list of zero-arg fns called in order at startup (open DB,
                   boot endpoint, start background workers, …).
 
@@ -89,6 +93,7 @@
   (let (logger-opts (get config :logger nil)
         access-log (get config :access-log nil)
         upload-progress (get config :upload-progress nil)
+        metrics (get config :metrics nil)
         children (get config :children []))
     (when logger-opts
       (start-logger logger-opts))
@@ -96,6 +101,8 @@
       (web/logger/attach-access-log (if (map? access-log) access-log {})))
     (when upload-progress
       (web/upload/attach-progress (if (map? upload-progress) upload-progress {})))
+    (when metrics
+      (web/metrics/attach (if (map? metrics) metrics {})))
     (start-children children 0)
     (receive (:shutdown nil))))
 
