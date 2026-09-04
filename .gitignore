@@ -8,3 +8,4 @@ _deps/
 # Generated documentation site (`nest docs`) and the check/image cache
 doc/
 .brood/
+.brood_crash_dump
