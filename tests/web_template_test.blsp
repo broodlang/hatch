@@ -158,3 +158,34 @@
       (assert= (string/starts-with? r "<link") true)
       (assert= (includes? r "rel=\"stylesheet\"") true)
       (assert= (includes? r "href=\"/static/app.css\"") true))))
+
+;; Rendering an element measured ~25µs, and two of those came from work repeated on every
+;; render: a per-character scan of an attribute name that is nearly always a source literal,
+;; and five string/replace passes over a value that usually needs none of them.
+(describe "escaping short-circuits on the clean case"
+  (test "a string with nothing to escape comes back unchanged"
+    (assert= "class names here" (escape-html "class names here"))
+    (assert= "" (escape-html "")))
+
+  (test "every special character is still escaped"
+    (assert= "&amp;&lt;&gt;&quot;&#39;" (escape-html "&<>\"'")))
+
+  (test "a mixed string escapes only what needs it"
+    (assert= "a&lt;b c&amp;d" (escape-html "a<b c&d")))
+
+  (test "non-strings are still coerced and escaped"
+    (assert= "42" (escape-html 42))))
+
+;; The name memo is bounded: a template can build an attribute name from data, and an
+;; unbounded memo keyed by that is a leak the app's input controls.
+(describe "attribute names are still checked once memoised"
+  (test "a normal name renders"
+    (assert= "<p class=\"a\"></p>" (render [:p {:class "a"} ""])))
+
+  (test "an unsafe name is dropped, however often it is seen"
+    (for (i (range 3))
+      (is (not (includes? (render [:p {(keyword "a b") "x"} ""]) "a b")))))
+
+  (test "many distinct names do not break rendering"
+    (for (i (range 40))
+      (is (includes? (render [:p {(keyword (str "data-x" i)) "v"} ""]) (str "data-x" i))))))

@@ -53,13 +53,27 @@
 (defn escape-html (s)
   "Escape HTML special characters: & < > \" '.
 
+  Most strings contain none of them — a class list, a URL path, ordinary prose — and the
+  five `string/replace` passes cost the same whether or not they find anything, because the
+  cost is per CALL and not per byte: escaping a ONE-character value measured 5µs, which was
+  a fifth of the total cost of rendering an element. So the clean case is answered by five
+  searches that allocate nothing, and the replaces run only when there is something to
+  replace.
+
   (hatch/web/template/escape-html \"a<b&c\") ;=> \"a&lt;b&amp;c\""
-  (string/replace (string/replace (string/replace (string/replace (string/replace (str s)
-                                                                    "&" "&amp;")
-                                                    "<" "&lt;")
-                                    ">" "&gt;")
-                    "\"" "&quot;")
-    "'" "&#39;"))
+  (let (text (str s))
+    (if (or (includes? text "&")
+          (includes? text "<")
+          (includes? text ">")
+          (includes? text "\"")
+          (includes? text "'"))
+      (string/replace (string/replace (string/replace (string/replace (string/replace text
+                                                                        "&" "&amp;")
+                                                        "<" "&lt;")
+                                        ">" "&gt;")
+                        "\"" "&quot;")
+        "'" "&#39;")
+      text)))
 
 ; Attributes whose value is a URL — a `javascript:`/`vbscript:` value (or a `data:` document)
 ; here executes script on click/load, which escaping does NOT stop (the scheme survives
@@ -110,7 +124,28 @@
   `>` backtick)."
   (or (<= cp 32) (= cp 34) (= cp 38) (= cp 39) (= cp 47) (= cp 60) (= cp 61) (= cp 62) (= cp 96)))
 
+;; Attribute names are keywords written in source — `:class`, `:href`, the same handful on
+;; every element of every page — so the character scan below answers the same question about
+;; the same strings for the life of the process. It measured 4.2µs per attribute, a sixth of
+;; the cost of rendering an element. Memoised, it is a table lookup.
+(def- *safe-names* (table/new))
+
+;; Bounded, because a name is not guaranteed to come from source: a template can build one
+;; from data, and an unbounded memo keyed by that is a leak an app's INPUT controls. Past the
+;; cap the scan simply runs — slower, still correct. The cap is far above the number of
+;; distinct attribute names any real template uses.
+(def- *max-safe-names* 512)
+
 (defn- safe-attr-name? (n)
+  (cond
+    (table/has? *safe-names* n) (table/get *safe-names* n)
+    (>= (table/count *safe-names*) *max-safe-names*) (safe-attr-name-scan? n)
+    else
+      (let (safe (safe-attr-name-scan? n))
+        (table/put *safe-names* n safe)
+        safe)))
+
+(defn- safe-attr-name-scan? (n)
   "True when `n` is a non-empty attribute name with no character that could escape the
   attribute list. Hiccup keys are normally compile-time literals; this guards the case where
   an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
