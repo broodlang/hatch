@@ -1,0 +1,261 @@
+(defmodule web/seo
+  "Search-engine and social metadata: the `<head>` block, `robots.txt`, and a
+  `sitemap.xml` **derived from the router's own route table**.
+
+  A server-rendered Hatch app is already most of the way to being indexable — the HTML is
+  the content, not a shell a crawler has to execute JavaScript to fill. What it usually
+  lacks is the part no framework can guess: which of several URLs for the same content is
+  the canonical one, what each page is ABOUT (as opposed to what the site is about), and
+  where the list of pages lives. That is what this module is for.
+
+  Three pieces, usable independently:
+
+  - `head-tags` — one call rendering description, canonical, robots, the Open Graph and
+    Twitter card, and any JSON-LD. It takes a SITE map (constant per app) and a PAGE map
+    (per request), so the per-page half is the only thing a view has to think about.
+  - `robots-handler` — `robots.txt`, pointing at the sitemap.
+  - `sitemap-handler` — `sitemap.xml`, listing every parameterless `GET` route the router
+    declares, plus whatever dynamic URLs the app supplies.
+
+  The sitemap reading the ROUTE TABLE is the point. A hand-maintained URL list is a second
+  copy of the routes, and the copy is always the one that goes stale — silently, because a
+  missing sitemap entry looks exactly like a page nobody linked to. `defrouter` already
+  builds its table as a `def` (`<router-name>--routes`), and a pattern segment is a literal
+  string, a `:param` keyword, or a `[:splat name]`; a route whose every segment is a string
+  is a fixed URL, and those are exactly the ones a sitemap can name without help.
+
+  ## Canonical vs noindex
+
+  Both answer \"do not rank this URL\", and they must not be used together. `rel=canonical`
+  is a HINT that consolidates duplicates onto one URL; `noindex` is a DIRECTIVE that keeps
+  a page out of the index. Together they contradict each other — one says credit that other
+  page, the other says drop this one — and the documented failure is the `noindex` being
+  carried across to the canonical target. So: a page that IS the canonical one carries
+  `:canonical`; a variant that should never be a landing page carries `:robots \"noindex,
+  follow\"` and no canonical. `head-tags` enforces this rather than trusting the caller —
+  passing both drops the canonical.
+
+  ## Example
+
+      (def *site*
+        {:url \"https://example.com\"
+         :name \"Example\"
+         :description \"What the site is, in one sentence.\"
+         :image \"/og.png\"
+         :twitter-card \"summary_large_image\"})
+
+      (head-tags *site* {:title \"Widgets\" :description \"Every widget we sell.\"
+                         :canonical \"/widgets\"})
+
+      (defrouter app-router
+        (get \"/robots.txt\"  (seo/robots-handler *site* {}))
+        (get \"/sitemap.xml\" (seo/sitemap-handler *site* app-router--routes {}))
+        (get \"/widgets\"     widgets/index))"
+  (:use web/conn)
+  (:alias web/template))
+
+;; ---- the head block ---------------------------------------------------------
+
+(defn- present? (s) (and (string? s) (not (= s ""))))
+
+(defn absolute-url (site path)
+  "`path` as an absolute URL under the site's own origin. A path that is already absolute
+  is returned unchanged, so a caller may pass either — an OG image on a CDN, say, beside a
+  canonical on this host. Canonical and `og:url` MUST be absolute; this is what guarantees
+  it rather than hoping every call site remembered."
+  (cond
+    (not (present? path)) nil
+    (or (string/starts-with? path "http://") (string/starts-with? path "https://")) path
+    else (str (or (get site :url) "") path)))
+
+(defn page-description (site page)
+  "The page's own description, falling back to the site's.
+
+  The fallback is a floor, not a plan: a site whose every URL shares one description has,
+  to a search engine, one page's worth of distinguishing text. Give a page its own whenever
+  the page knows something — a product its summary, an article its lede, a package its
+  blurb."
+  (let (own (get page :description))
+    (if (present? own) own (get site :description))))
+
+(defn json-ld (data)
+  "One `application/ld+json` script element for `data` (a map, rendered as JSON).
+
+  Structured data is how a page says what KIND of thing it is — a `SoftwareApplication`, an
+  `Article`, a `BreadcrumbList` — rather than leaving a search engine to infer it from
+  prose. Returns \"\" for nil, so a page with nothing to declare costs nothing.
+
+  The JSON is escaped for a `<script>` context: `</` is broken up, because a `</script>`
+  appearing inside a JSON string value would otherwise end the element early and spill the
+  rest of the data into the document as markup."
+  (if (nil? data)
+    ""
+    [:script
+      {:type "application/ld+json"}
+      (web/template/raw (script-safe (json/encode data)))]))
+
+(defn- script-safe (s)
+  "JSON made safe to sit inside a `<script>` element."
+  (string/replace (string/replace s "</" "<\\/") "<!--" "<\\!--"))
+
+(defn- tag-when (present node) (if present node ""))
+
+(defn head-tags (site page)
+  "The whole SEO/social `<head>` block as a list of Hiccup nodes.
+
+  `site` (constant for the app): `:url` (origin, no trailing slash), `:name`,
+  `:description`, `:image` (default share image), `:twitter-card`, `:twitter-site`.
+
+  `page` (per request, every key optional): `:title`, `:description`, `:canonical` (a path
+  or absolute URL), `:robots` (e.g. `\"noindex, follow\"`), `:url` (the page's own address,
+  for `og:url`; defaults to `:canonical`), `:image`, `:image-alt`, `:type` (OG type,
+  default `\"website\"`), and `:json-ld` (a map, or a list of maps).
+
+  A page passing `:robots` gets no canonical — see the module docstring."
+  (let (description (page-description site page)
+        robots (get page :robots)
+        canonical (if (present? robots) nil (absolute-url site (get page :canonical)))
+        url (or canonical (absolute-url site (or (get page :url) (get page :canonical))))
+        image (absolute-url site (or (get page :image) (get site :image)))
+        title (or (get page :title) (get site :name))
+        card (get site :twitter-card "summary_large_image"))
+    (append (list (tag-when (present? description)
+                    [:meta {:name "description" :content description}])
+              (tag-when (present? robots) [:meta {:name "robots" :content robots}])
+              (tag-when canonical [:link {:rel "canonical" :href canonical}])
+              [:meta {:property "og:type" :content (get page :type "website")}]
+              (tag-when (present? (get site :name))
+                [:meta {:property "og:site_name" :content (get site :name)}])
+              [:meta {:property "og:title" :content title}]
+              (tag-when (present? description)
+                [:meta {:property "og:description" :content description}])
+              (tag-when url [:meta {:property "og:url" :content url}])
+              (tag-when image [:meta {:property "og:image" :content image}])
+              (tag-when (and image (present? (get page :image-alt)))
+                [:meta {:property "og:image:alt" :content (get page :image-alt)}])
+              [:meta {:name "twitter:card" :content card}]
+              (tag-when (present? (get site :twitter-site))
+                [:meta {:name "twitter:site" :content (get site :twitter-site)}])
+              [:meta {:name "twitter:title" :content title}]
+              (tag-when (present? description)
+                [:meta {:name "twitter:description" :content description}])
+              (tag-when image [:meta {:name "twitter:image" :content image}]))
+      (json-ld-nodes (get page :json-ld)))))
+
+(defn- json-ld-nodes (data)
+  "`:json-ld` accepts one map or several; both render as separate script elements, which is
+  what search engines expect (rather than one array)."
+  (cond
+    (nil? data) (list)
+    (map? data) (list (json-ld data))
+    else (map data json-ld)))
+
+;; ---- route-table introspection ---------------------------------------------
+
+(defn- fixed-segment? (segment) (string? segment))
+
+(defn fixed-path? (pattern)
+  "True when a parsed route pattern names ONE fixed URL — every segment a literal string.
+  A `:param` capture or a `[:splat …]` stands for unboundedly many URLs, which a sitemap
+  cannot enumerate without knowing the data behind them; those are the app's to supply."
+  (every? pattern fixed-segment?))
+
+(defn route-table (routes)
+  "`routes` as a list. Accepts the table itself or a zero-argument function returning it.
+
+  The thunk is not a convenience: the sitemap route is declared INSIDE the same `defrouter`
+  form that defines `<router-name>--routes`, so at the moment the handler is built the
+  table is not bound yet. `(fn () app-router--routes)` closes over the name and reads it
+  when the request arrives, by which point it exists."
+  (if (fn? routes) (routes) routes))
+
+(defn fixed-get-paths (routes)
+  "Every fixed URL path the route table serves on `GET`, in declaration order.
+
+  `routes` is the table `defrouter` defines — the `<router-name>--routes` global — or a
+  thunk returning it (see `route-table`). It is a plain list of `{:method :pattern
+  :handler}` maps."
+  (map (filter (route-table routes)
+         (fn (route)
+           (and (= (get route :method) "GET") (fixed-path? (get route :pattern)))))
+    (fn (route) (str "/" (string/join (get route :pattern) "/")))))
+
+;; ---- robots.txt -------------------------------------------------------------
+
+(defn robots-text (site opts)
+  "The `robots.txt` body. `opts`: `:disallow` (a list of path prefixes, default none),
+  `:sitemap` (the sitemap path, default `/sitemap.xml`; nil to omit the line).
+
+  Naming the sitemap here is the one line that matters — it is how a crawler finds the URL
+  list without being told out of band."
+  (let (disallow (get opts :disallow [])
+        sitemap (if (contains? opts :sitemap) (get opts :sitemap) "/sitemap.xml"))
+    (str "User-agent: *\n"
+      (if (empty? disallow)
+        "Disallow:\n"
+        (apply str (map disallow (fn (path) (str "Disallow: " path "\n")))))
+      (if (present? sitemap) (str "\nSitemap: " (absolute-url site sitemap) "\n") ""))))
+
+(defn robots-handler (site opts)
+  "A conn handler serving `robots-text`. Wire it as `(get \"/robots.txt\" (robots-handler
+  site {}))`."
+  (fn (conn) (text-resp conn (robots-text site opts))))
+
+;; ---- sitemap.xml ------------------------------------------------------------
+
+(defn- url-entry (site entry)
+  "One `<url>` element. `entry` is a path string, or a map `{:path :lastmod :changefreq
+  :priority}` — the extra keys are optional and omitted when absent."
+  (let (path (if (map? entry) (get entry :path) entry)
+        lastmod (when (map? entry) (get entry :lastmod))
+        changefreq (when (map? entry) (get entry :changefreq))
+        priority (when (map? entry) (get entry :priority)))
+    (str "  <url><loc>"
+      (web/template/escape-html (absolute-url site path))
+      "</loc>"
+      (if (present? lastmod) (str "<lastmod>" (web/template/escape-html lastmod) "</lastmod>") "")
+      (if (present? changefreq)
+        (str "<changefreq>" (web/template/escape-html changefreq) "</changefreq>")
+        "")
+      (if (nil? priority) "" (str "<priority>" priority "</priority>"))
+      "</url>\n")))
+
+(defn sitemap-xml (site entries)
+  "A `sitemap.xml` document for `entries` — each a path string or a
+  `{:path :lastmod :changefreq :priority}` map."
+  (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+    (apply str (map entries (fn (entry) (url-entry site entry))))
+    "</urlset>\n"))
+
+(defn sitemap-entries (site routes opts)
+  "The sitemap's entries: every fixed `GET` path in `routes`, minus `:exclude`, plus
+  `:extra`.
+
+  `routes` is the table or a thunk returning it (see `route-table`).
+
+  `opts`: `:exclude` (paths to drop — the machine-facing ones: `/robots.txt`,
+  `/sitemap.xml`, `/health`, an API prefix), `:extra` (a list, or a zero-argument function
+  returning one, of the dynamic URLs only the app can enumerate — a row per package, per
+  article, per user). `:extra` is a THUNK rather than a value so a listing is read when the
+  sitemap is requested rather than frozen at boot."
+  (let (exclude (get opts :exclude [])
+        extra (let (e (get opts :extra))
+                (cond (nil? e) (list) (fn? e) (e) else e))
+        excluded? (fn (path)
+                    (any? exclude
+                      (fn (prefix) (or (= path prefix) (string/starts-with? path prefix))))))
+    (append (filter (fixed-get-paths routes) (fn (path) (not (excluded? path)))) extra)))
+
+(defn sitemap-handler (site routes opts)
+  "A conn handler serving `sitemap.xml`, built from the router's own table.
+
+  Declared inside the router itself, pass the table as a thunk — the `def` it names has not
+  run yet at that point:
+
+      (get \"/sitemap.xml\"
+        (sitemap-handler *site* (fn () app-router--routes) {:exclude [\"/api\"]}))"
+  (fn (conn)
+    (send-resp (put-resp-header conn :content-type "application/xml; charset=utf-8")
+      200
+      (sitemap-xml site (sitemap-entries site routes opts)))))

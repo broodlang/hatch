@@ -1,0 +1,149 @@
+;; web/seo — the head block, robots.txt, and the router-derived sitemap.
+(defmodule web-seo-test
+  (:use test)
+  (:use web/seo)
+  (:use web/test)
+  (:use web/router)
+  (:use web/template :only [render]))
+
+(def *site*
+  {:url "https://example.com"
+   :name "Example"
+   :description "The site description."
+   :image "/og.png"
+   :twitter-card "summary_large_image"})
+
+(defn- head (page) (render [:head {} (head-tags *site* page)]))
+
+(describe "head-tags"
+  (test "a page with nothing of its own falls back to the site description"
+    (is (includes? (head {}) "content=\"The site description.\"")))
+
+  (test "a page's own description wins"
+    (let (out (head {:description "Just this page."}))
+      (is (includes? out "Just this page."))
+      (is (not (includes? out "The site description.")))))
+
+  (test "a relative canonical is emitted absolute"
+    (is (includes? (head {:canonical "/widgets"}) "href=\"https://example.com/widgets\"")))
+
+  (test "an absolute canonical passes through unchanged"
+    (is (includes? (head {:canonical "https://elsewhere.test/x"}) "https://elsewhere.test/x")))
+
+  (test "og:url defaults to the canonical"
+    (is (includes? (head {:canonical "/widgets"}) "content=\"https://example.com/widgets\"")))
+
+  ;; The rule the module exists to enforce: `noindex` is a directive and `rel=canonical` is
+  ;; a hint at the same question, and together the noindex can be carried to the canonical
+  ;; target. A page that says noindex must not also nominate a canonical.
+  (test "robots and canonical are never emitted together"
+    (let (out (head {:robots "noindex, follow" :canonical "/widgets"}))
+      (is (includes? out "noindex, follow"))
+      (is (not (includes? out "rel=\"canonical\"")))))
+
+  (test "the social card is complete"
+    (let (out (head {:title "Widgets" :canonical "/widgets"}))
+      (for (needle ["og:type"
+                     "og:site_name" "og:title" "og:description" "og:url" "og:image" "twitter:card"
+                     "twitter:title" "twitter:image"])
+        (is (includes? out needle)))))
+
+  (test "json-ld renders as a typed script element"
+    (let (out (head {:json-ld {:@context "https://schema.org" :@type "SoftwareApplication"}}))
+      (is (includes? out "application/ld+json"))
+      (is (includes? out "SoftwareApplication"))))
+
+  ;; A `</script>` inside a JSON string value would end the element and spill the rest of
+  ;; the data into the document as markup.
+  (test "json-ld cannot break out of its script element"
+    (let (out (head {:json-ld {:name "</script><img src=x>"}}))
+      (is (not (includes? out "</script><img")))
+      (is (includes? out "<\\/script>"))))
+
+  ;; Separate elements, not one array — that is the shape search engines read.
+  (test "several json-ld blocks render as separate scripts"
+    (let (out (head {:json-ld [{:@type "A"} {:@type "B"}]}))
+      ;; two occurrences of the marker split the document into three pieces
+      (assert= 3 (count (string/split out "application/ld+json")))
+      (is (includes? out "\"A\""))
+      (is (includes? out "\"B\""))))
+
+  (test "an absent image emits no image tags"
+    (is (not (includes? (render [:head {} (head-tags {:url "https://x.test"} {})]) "og:image")))))
+
+;; A router whose table the sitemap reads — fixed paths, a `:param` route, and a splat.
+(defrouter seo-test-router
+  (get "/" (fn (conn) "home"))
+  (get "/about" (fn (conn) "about"))
+  (get "/health" (fn (conn) "ok"))
+  (get "/widgets/:id" (fn (conn) "widget"))
+  (get "/static/*path" (fn (conn) "asset"))
+  (post "/widgets" (fn (conn) "created")))
+
+(describe "the sitemap reads the route table"
+
+  ;; The whole point: the URL list is the routes, not a second copy of them that goes
+  ;; stale silently.
+  (test "only parameterless GET routes are fixed URLs"
+    (assert= ["/" "/about" "/health"] (apply vector (fixed-get-paths seo-test-router--routes))))
+
+  (test "a :param route names unboundedly many URLs, so it is not one"
+    (is (not (fixed-path? (list "widgets" :id)))))
+
+  (test "a splat route is not one either"
+    (is (not (fixed-path? (list "static" [:splat "path"])))))
+
+  (test "machine-facing paths can be excluded"
+    (assert= ["/" "/about"]
+      (apply vector (sitemap-entries *site* seo-test-router--routes {:exclude ["/health"]}))))
+
+  ;; Dynamic URLs are the app's to enumerate, and a THUNK so the listing is read per
+  ;; request rather than frozen at boot.
+  (test "extra urls are appended, and a thunk is called"
+    (assert= ["/" "/about" "/health" "/widgets/1"]
+      (apply vector
+        (sitemap-entries *site* seo-test-router--routes {:extra (fn () ["/widgets/1"])}))))
+
+  (test "the document is well-formed and absolute"
+    (let (xml (sitemap-xml *site* ["/about"]))
+      (is (includes? xml "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"))
+      (is (includes? xml "<loc>https://example.com/about</loc>"))
+      (is (includes? xml "</urlset>"))))
+
+  (test "optional per-url hints are emitted only when given"
+    (let (xml (sitemap-xml *site* [{:path "/a" :lastmod "2026-01-01" :changefreq "daily"}]))
+      (is (includes? xml "<lastmod>2026-01-01</lastmod>"))
+      (is (includes? xml "<changefreq>daily</changefreq>"))
+      (is (not (includes? xml "<priority>")))))
+
+  ;; The sitemap route is declared inside the very `defrouter` that defines the table, so
+  ;; the handler cannot be handed a value that does not exist yet.
+  (test "the table may be a thunk, read when the request arrives"
+    (assert= (apply vector (fixed-get-paths seo-test-router--routes))
+      (apply vector (fixed-get-paths (fn () seo-test-router--routes)))))
+
+  (test "the handler serves xml"
+    (let (resp (call (sitemap-handler *site* seo-test-router--routes {})
+                 (conn-for "GET" "/sitemap.xml")))
+      (assert= 200 (status resp))
+      (is (includes? (resp-header resp :content-type) "application/xml"))
+      (is (body-contains? resp "<urlset")))))
+
+(describe "robots.txt"
+  (test "allows everything and names the sitemap by absolute URL"
+    (let (txt (robots-text *site* {}))
+      (is (includes? txt "User-agent: *"))
+      (is (includes? txt "Disallow:\n"))
+      (is (includes? txt "Sitemap: https://example.com/sitemap.xml"))))
+
+  (test "disallow prefixes are listed"
+    (is (includes? (robots-text *site* {:disallow ["/admin" "/api"]}) "Disallow: /admin")))
+
+  (test "the sitemap line can be omitted"
+    (is (not (includes? (robots-text *site* {:sitemap nil}) "Sitemap:"))))
+
+  (test "the handler serves plain text"
+    (let (resp (call (robots-handler *site* {}) (conn-for "GET" "/robots.txt")))
+      (assert= 200 (status resp))
+      (is (includes? (resp-header resp :content-type) "text/plain"))
+      (is (body-contains? resp "User-agent")))))
