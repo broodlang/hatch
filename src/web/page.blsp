@@ -6,14 +6,16 @@
   ; html
   (:use web/template)
   (:use web/conn)
-  ; warn-inert! — the dev-only audit for controls nothing can reach
+  ; warn-page! — the dev-only page audits (inert controls, first-flight budget)
   (:alias web/audit))
 (defn page (conn node)
   "Render a Hiccup node to a full HTML-document response (doctype + markup) on `conn`.
   The non-live counterpart to a live view's render — `(page conn (layout title body))`.
 
-  In dev the rendered document passes through `web/audit/warn-inert!`, which warns about
-  an interactive control no form, handler or script can reach. That costs nothing in prod
-  and never changes the response; it exists because such a page is correct in every way a
-  test usually checks and still does nothing when a person uses it."
-  (html-resp conn (audit/warn-inert! (html node))))
+  In dev the rendered document passes through `web/audit/warn-page!`: it warns about an
+  interactive control no form, handler or script can reach, about a document too large to
+  paint in one TCP round trip, and about a render-blocking third-party resource in the
+  `<head>`. All of that costs nothing in prod and never changes the response; it exists
+  because such a page is correct in every way a test usually checks and is still worse to
+  use than it needs to be."
+  (html-resp conn (audit/warn-page! (html node))))
