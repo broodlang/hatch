@@ -80,6 +80,15 @@
       (is (get report :over?))
       (is (> (get report :compressed) (get report :budget)))))
 
+  ;; Compression only shrinks, so a document already inside the budget is inside it whatever
+  ;; it compresses to — and this audit runs on every response in dev.
+  (test "a document already inside the budget is not compressed to find out"
+    (let (small "<html><head></head><body>small</body></html>"
+          report (first-flight small))
+      (assert= (count small) (get report :bytes))
+      (assert= (count small) (get report :compressed))
+      (is (not (get report :over?)))))
+
   (test "the compressed size is measured, not estimated"
     ;; a highly compressible page is far smaller on the wire than its byte count
     (let (document (str "<html><head></head><body>" (string/repeat "a" 60000) "</body></html>")
