@@ -1,0 +1,135 @@
+(defmodule web/cache
+  "Validators and freshness for DYNAMIC responses — the conditional-GET half of caching that
+  `web/static` already does for files on disk.
+
+  Two separate questions, and a response wants an answer to both:
+
+  - **Freshness** (`Cache-Control`) — may a cache reuse this without asking?
+  - **Validation** (`ETag` + `If-None-Match`) — when it must ask, can the answer be cheap?
+
+  Getting only the first right is the common failure, and it is silent. A page marked
+  `no-cache` is *correct*: it says store this, but revalidate before reuse. With no
+  validator on it, every one of those revalidations is a full 200 with the whole body —
+  so the header that was supposed to make repeat visits cheap makes them cost exactly what
+  a first visit costs, forever. Nothing errors; the bytes just go out again.
+
+  `conditional` closes that: it hangs a strong ETag on the finished response and turns a
+  matching `If-None-Match` into a bodyless 304.
+
+  **The ETag identifies a REPRESENTATION, not a resource** (RFC 9110 §8.8.3). A gzipped
+  body and a brotli body of the same page are different representations, so `etag-for`
+  takes the content-coding and suffixes the tag with it. Getting this wrong is how a client
+  ends up holding a br-encoded entity, revalidating over a gzip connection, being told 304,
+  and decoding the wrong bytes.
+
+  Ordering matters: compute against the body a cache would store. Ask `conditional` BEFORE
+  compressing — it takes the coding you are about to use, so a 304 skips the compression
+  work entirely rather than compressing a body that is never sent.
+
+      (let (resp (html-no-store rendered)
+            coding (compress/chosen-encoding conn))
+        (match (conditional conn resp coding)
+          ([:not-modified r] r)
+          ([:send r] (compress-response conn r))))"
+  (:use web/conn))
+
+;; ---- validators -------------------------------------------------------------
+
+(defn strong-etag (body)
+  "A strong ETag for `body` (a string or `bytes`): a quoted SHA-256 prefix.
+
+  Content-addressed, so it changes exactly when the bytes change — identical across
+  restarts and across replicas, unlike anything derived from an inode or a timestamp. That
+  is what lets a client's cached copy validate against whichever machine answers next."
+  (str "\""
+    (string/substring (if (bytes? body) (hash/sha256-bytes body) (hash/sha256 body)) 0 16)
+    "\""))
+
+(defn etag-for (body coding)
+  "`strong-etag` for `body`, distinguished by content-`coding` (`\"br\"`, `\"gzip\"`, or nil
+  for identity) — because the coded body is a different representation of the same
+  resource, and a validator that ignored the coding would match across them."
+  (let (base (strong-etag body))
+    (if (or (nil? coding) (= coding ""))
+      base
+      (str (string/substring base 0 (- (count base) 1)) "-" coding "\""))))
+
+(defn- etag-candidates (header)
+  "The entity-tags in an `If-None-Match` value, weak prefixes stripped."
+  (map (string/split header ",")
+    (fn (entry)
+      (let (trimmed (string/trim entry))
+        (if (string/starts-with? trimmed "W/")
+          (string/trim (string/substring trimmed 2 (count trimmed)))
+          trimmed)))))
+
+(defn not-modified? (conn tag)
+  "True when the request's `If-None-Match` matches `tag` — an exact entity-tag among the
+  listed ones, or the wildcard `*`. Weak comparison, which is what RFC 9110 §13.1.2
+  prescribes for `If-None-Match`, so a `W/`-prefixed tag matches its strong twin."
+  (let (header (header conn :if-none-match))
+    (and (string? header)
+      (let (candidates (etag-candidates header))
+        (or (includes? candidates "*") (includes? candidates tag))))))
+
+;; ---- freshness --------------------------------------------------------------
+
+(defn immutable (&optional (seconds 31536000))
+  "A `Cache-Control` for content that can never change at this URL — an archived version, a
+  content-addressed asset. `immutable` tells a browser not even to revalidate on a reload,
+  which is the difference between a fast back-button and a network round trip."
+  (str "public, max-age=" seconds ", immutable"))
+
+(defn public-for (seconds)
+  "A `Cache-Control` for content that is the same for everyone and may go stale for
+  `seconds`."
+  (str "public, max-age=" seconds))
+
+(defn no-store ()
+  "A `Cache-Control` for a response nothing may keep — a health probe, anything
+  per-request by nature. Distinct from `no-cache`, which means store it but revalidate."
+  "no-store")
+
+(defn put-cache-control (resp value)
+  "Set `Cache-Control` on a response map, without clobbering one a handler already chose."
+  (let (headers (get resp :headers {}))
+    (if (get headers :cache-control)
+      resp
+      (assoc resp :headers (assoc headers :cache-control value)))))
+
+;; ---- the conditional-GET step -----------------------------------------------
+
+(defn not-modified-response (resp tag)
+  "`resp` reduced to a 304: no body, and only the headers RFC 9110 §15.4.5 says to carry —
+  the validator and the caching metadata the client needs to refresh what it already holds.
+  Content headers are dropped, because there is no content."
+  (let (headers (get resp :headers {}))
+    {:status 304
+     :body ""
+     :headers (fold [:cache-control :vary :date :expires]
+                {:etag tag}
+                (fn (kept key)
+                  (let (value (get headers key)) (if value (assoc kept key value) kept))))}))
+
+(defn conditional (conn resp coding)
+  "Attach a validator to `resp` and answer a conditional request.
+
+  Returns `[:not-modified resp]` when the client already holds this exact representation —
+  send it as-is, and do no more work — or `[:send resp]` with the `ETag` and
+  `Vary: If-None-Match`-free headers set, to carry on with (compression, security headers).
+
+  Only bodies worth validating are tagged: a string body, on a status that carries one, with
+  no `ETag` already set. Everything else passes through untouched."
+  (let (body (get resp :body)
+        status (or (get resp :status) 200)
+        headers (get resp :headers {}))
+    (if (and (string? body)
+          (not (= body ""))
+          (or (= status 200) (= status 203))
+          (nil? (get headers :etag)))
+      (let (tag (etag-for body coding)
+            tagged (assoc resp :headers (assoc headers :etag tag)))
+        (if (not-modified? conn tag)
+          [:not-modified (not-modified-response tagged tag)]
+          [:send tagged]))
+      [:send resp])))

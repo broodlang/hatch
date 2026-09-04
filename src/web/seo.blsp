@@ -52,6 +52,7 @@
         (get \"/sitemap.xml\" (seo/sitemap-handler *site* app-router--routes {}))
         (get \"/widgets\"     widgets/index))"
   (:use web/conn)
+  (:alias web/cache)
   (:alias web/template))
 
 ;; ---- the head block ---------------------------------------------------------
@@ -198,8 +199,14 @@
 
 (defn robots-handler (site opts)
   "A conn handler serving `robots-text`. Wire it as `(get \"/robots.txt\" (robots-handler
-  site {}))`."
-  (fn (conn) (text-resp conn (robots-text site opts))))
+  site {}))`.
+
+  Cached for an hour by default (`:max-age`) — it is the same bytes for every requester and
+  a crawler fetches it before every crawl, so leaving its freshness undefined means every
+  one of those is a full round trip for a file that changes when the app is redeployed."
+  (fn (conn)
+    (text-resp (put-resp-header conn :cache-control (web/cache/public-for (get opts :max-age 3600)))
+      (robots-text site opts))))
 
 ;; ---- sitemap.xml ------------------------------------------------------------
 
@@ -256,6 +263,9 @@
       (get \"/sitemap.xml\"
         (sitemap-handler *site* (fn () app-router--routes) {:exclude [\"/api\"]}))"
   (fn (conn)
-    (send-resp (put-resp-header conn :content-type "application/xml; charset=utf-8")
+    (send-resp (-> conn
+                 (put-resp-header :content-type "application/xml; charset=utf-8")
+                 (put-resp-header :cache-control
+                   (web/cache/public-for (get opts :max-age 3600))))
       200
       (sitemap-xml site (sitemap-entries site routes opts)))))
