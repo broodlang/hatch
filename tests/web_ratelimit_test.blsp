@@ -67,3 +67,23 @@
       ; each key's first request passes despite burst 1
       (assert= (conn/halted? a1) false)
       (assert= (conn/halted? b1) false))))
+
+;; The key now comes from `web/auth/client-ip`, so the rate limiter and the address gate
+;; agree on which header names the caller. This module used to answer it itself and answered
+;; it differently — no `Fly-Client-IP` at all, and `X-Forwarded-For` (which the CLIENT writes)
+;; preferred over the headers a proxy overwrites.
+(describe "client-key follows the proxy headers, not the client's"
+  (test "Fly-Client-IP is honoured, and beats X-Forwarded-For"
+    (assert= "5.5.5.5" (client-key {:headers {:fly-client-ip "5.5.5.5"}}))
+    (assert= "5.5.5.5"
+      (client-key {:headers {:fly-client-ip "5.5.5.5" :x-forwarded-for "1.2.3.4"}})))
+
+  (test "a proxy-set X-Real-IP beats a client-supplied X-Forwarded-For"
+    (assert= "9.9.9.9"
+      (client-key {:headers {:x-real-ip "9.9.9.9" :x-forwarded-for "1.2.3.4"}})))
+
+  (test "X-Forwarded-For's first hop is still the fallback"
+    (assert= "1.2.3.4" (client-key {:headers {:x-forwarded-for "1.2.3.4, 10.0.0.1"}})))
+
+  (test "no identifying header means one shared bucket"
+    (assert= "global" (client-key {:headers {}}))))

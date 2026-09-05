@@ -22,7 +22,9 @@
   ; halt / send-resp / put-resp-header / header — reject a throttled request
   (:use web/conn)
   ; ensure-supervised — the buckets live in a supervised singleton
-  (:use web/registry))
+  (:use web/registry)
+  ; client-ip — the one implementation of "which header names the real client"
+  (:alias web/auth))
 
 ; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
 
@@ -82,18 +84,18 @@
 
 ; ---- key selection ----
 
-(defn- first-hop (xff)
-  "The first address in an `X-Forwarded-For` list (the original client), trimmed."
-  (if (or (nil? xff) (string/blank? xff)) nil (string/trim (first (string/split xff ",")))))
-
 (defn client-key (conn)
-  "The rate-limit key for `conn`: the client IP from `X-Forwarded-For` (first hop) or
-  `X-Real-IP` if a proxy set one, else the constant `\"global\"` (one shared bucket). Behind a
-  proxy, set one of those headers or every client shares the global bucket."
-  (let (headers (get conn :headers {}))
-    (or (first-hop (get headers :x-forwarded-for))
-      (get headers :x-real-ip)
-      "global")))
+  "The rate-limit key for `conn`: the client's address if a proxy named it, else the constant
+  `\"global\"` (one shared bucket). Behind a proxy, set one of the client-IP headers or every
+  client shares the global bucket.
+
+  `web/auth/client-ip` decides which header that is — `Fly-Client-IP`, `X-Real-IP`,
+  `CF-Connecting-IP`, then the first hop of `X-Forwarded-For`. This module used to answer the
+  question itself and answered it differently: it did not look at `Fly-Client-IP` at all, and
+  it preferred `X-Forwarded-For` — which the CLIENT can write — over the headers a proxy
+  overwrites. Whichever header identifies a caller for the auth gate is the one that should
+  identify them for the rate limiter."
+  (or (web/auth/client-ip conn) "global"))
 
 ; ---- the plug ----
 
