@@ -73,8 +73,8 @@
             (if (= eq -1)
               m
               (assoc m
-                (string/trim (string/substring pair 0 eq))
-                  (string/trim (string/substring pair (+ eq 1) (string/length pair)))))))))))
+                (trim-if-needed (string/substring pair 0 eq))
+                  (trim-if-needed (string/substring pair (+ eq 1) (string/length pair)))))))))))
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."

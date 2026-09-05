@@ -3,6 +3,36 @@
 
 ;; ---- hex helpers ----
 
+; The exact set `string/trim` strips — codepoints 9, 10, 13 and 32 — established by probing
+; all 256 single-byte codepoints, not assumed. `trim-if-needed` is only correct while this
+; matches: a character `string/trim` strips but this set omits would be silently left in place.
+(def *trim-chars* " \t\r\n")
+
+(defn trim-if-needed (s)
+  "`string/trim`, but only paying for it when there is something to trim.
+
+  `string/trim` costs 3.15us whether or not it finds anything, because the cost is per CALL
+  rather than per byte — and it is called twice per HEADER and twice per COOKIE on every
+  request, where the overwhelming majority of values have no surrounding whitespace at all.
+  Two `string/span` probes answer \"is there any?\" in about 0.7us, and the real `string/trim`
+  still runs whenever the answer is yes, so the result is identical either way.
+
+  (hatch/http/util/trim-if-needed \"  a b  \") ;=> \"a b\""
+  (let (n (string/length s))
+    (if (= n 0)
+      s
+      (let (start (string/span s 0 *trim-chars*))
+        (cond
+          ;; all whitespace
+          (= start n) ""
+          ;; the last char is not whitespace (the first char IN the set at or after the last
+          ;; index is past the end), so only the leading run needs removing — and `start`
+          ;; already says where it ends. `s` unchanged when there was no leading run either.
+          (= (string/span-until s (- n 1) *trim-chars*) n)
+            (if (= start 0) s (string/substring s start n))
+          ;; trailing whitespace is rare enough not to be worth a backwards scan of its own
+          else (string/trim s))))))
+
 (defn hex-char->int (c)
   "Convert a single hex digit character to its integer value (0–15)."
   (let (code (string/char->int c))

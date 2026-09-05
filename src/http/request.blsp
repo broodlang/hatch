@@ -376,8 +376,8 @@
   else nil. Splits on the first `:` (the space after it is optional)."
   (let (ci (index-of line ":"))
     (if (and (not (= ci -1))
-          (= (string/lower (string/trim (string/substring line 0 ci))) lower-key))
-      (string/trim (string/substring line (+ ci 1) (string/length line)))
+          (= (string/lower (trim-if-needed (string/substring line 0 ci))) lower-key))
+      (trim-if-needed (string/substring line (+ ci 1) (string/length line)))
       nil)))
 
 (defn obs-fold? (header-lines)
@@ -517,8 +517,8 @@ the failure would reach the body read as a length."
       (let (ci (index-of line ":"))
         (if (= ci -1)
           m
-          (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
-                v (string/trim (string/substring line (+ ci 1) (string/length line))))
+          (let (k (keyword (string/lower (trim-if-needed (string/substring line 0 ci))))
+                v (trim-if-needed (string/substring line (+ ci 1) (string/length line))))
             (assoc m k (cons v (get m k (list))))))))))
 
 (defn join-grouped-headers (grouped)
