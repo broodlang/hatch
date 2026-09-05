@@ -257,3 +257,31 @@
     (assert= true (session-cookie? {:headers {:cookie "a=1; _hatch_session=abc"}} "_hatch_session"))
     (assert= false (session-cookie? {:headers {:cookie "a=1; b=2"}} "_hatch_session"))
     (assert= false (session-cookie? {:headers {}} "_hatch_session"))))
+
+;; `*` is an ALTERNATIVE to the entity-tag list in RFC 9110's grammar
+;; (`If-None-Match = "*" / #entity-tag`), not a member of it — and `W/` is immediately
+;; followed by the opaque-tag. Both readings used to differ between this module and
+;; web/static, which is the drift that unifying them removed. Strictness is the safe
+;; direction: a wrongly-issued 304 leaves a client holding a stale copy, while a
+;; wrongly-issued 200 only costs bytes.
+(describe "not-modified?: the malformed cases"
+  (defn- inm (h) {:headers {:if-none-match h}})
+
+  (test "* matches only as the whole header value"
+    (assert= true (not-modified? (inm "*") "\"abc\""))
+    (assert= true (not-modified? (inm "  *  ") "\"abc\""))
+    (assert= false (not-modified? (inm "\"a\", *") "\"abc\""))
+    (assert= false (not-modified? (inm "*, \"a\"") "\"abc\""))
+    (assert= false (not-modified? (inm "**") "\"abc\"")))
+
+  (test "W/ must be immediately followed by the tag"
+    (assert= true (not-modified? (inm "W/\"abc\"") "\"abc\""))
+    (assert= false (not-modified? (inm "W/ \"abc\"") "\"abc\"")))
+
+  (test "the ordinary cases are unchanged"
+    (assert= true (not-modified? (inm "\"abc\"") "\"abc\""))
+    (assert= true (not-modified? (inm "\"x\", \"abc\", \"y\"") "\"abc\""))
+    (assert= true (not-modified? (inm "  \"abc\"  ") "\"abc\""))
+    (assert= false (not-modified? (inm "\"other\"") "\"abc\""))
+    (assert= false (not-modified? (inm "\"abcd\"") "\"abc\""))
+    (assert= false (not-modified? {:headers {}} "\"abc\""))))

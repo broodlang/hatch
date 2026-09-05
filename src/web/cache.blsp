@@ -59,22 +59,37 @@
       (str (string/substring base 0 (- (count base) 1)) "-" coding "\""))))
 
 (defn- etag-candidates (header)
-  "The entity-tags in an `If-None-Match` value, weak prefixes stripped."
+  "The entity-tags in an `If-None-Match` value, weak prefixes stripped.
+
+  `W/` is dropped without re-trimming what follows, because RFC 9110 §8.8.3 has the prefix
+  IMMEDIATELY followed by the opaque-tag: `W/ \"abc\"` with a space is malformed, and reading
+  it as `\"abc\"` would answer 304 to a request that did not properly ask."
   (map (string/split header ",")
     (fn (entry)
       (let (trimmed (trim-if-needed entry))
         (if (string/starts-with? trimmed "W/")
-          (trim-if-needed (string/substring trimmed 2 (count trimmed)))
+          (string/substring trimmed 2 (count trimmed))
           trimmed)))))
 
 (defn not-modified? (conn tag)
   "True when the request's `If-None-Match` matches `tag` — an exact entity-tag among the
   listed ones, or the wildcard `*`. Weak comparison, which is what RFC 9110 §13.1.2
-  prescribes for `If-None-Match`, so a `W/`-prefixed tag matches its strong twin."
+  prescribes for `If-None-Match`, so a `W/`-prefixed tag matches its strong twin.
+
+  `*` counts only as the WHOLE header value. The grammar is `If-None-Match = \"*\" / #entity-tag`
+  — the wildcard is an alternative to the list, not a member of it — so `\"a\", *` is malformed
+  and does not match. Reading it as a wildcard would answer 304 to a request that did not ask
+  for one, and a wrongly-issued 304 leaves the client on a stale copy; a wrongly-issued 200 only
+  costs bytes. Strictness is the safe direction here.
+
+  This is the one implementation of the rule. `web/static/if-none-match?` calls it, so the
+  file path and the dynamic path cannot drift apart on what counts as a match."
   (let (header (header conn :if-none-match))
     (and (string? header)
-      (let (candidates (etag-candidates header))
-        (or (includes? candidates "*") (includes? candidates tag))))))
+      (let (want (trim-if-needed header))
+        (if (= want "*")
+          true
+          (includes? (etag-candidates want) tag))))))
 
 ;; ---- freshness --------------------------------------------------------------
 
