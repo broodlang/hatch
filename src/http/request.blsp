@@ -20,7 +20,9 @@
               (match (parse-request-line req-line)
                 ([:error e] [:error e])
                 ([:ok method path query version]
-                  (let (headers (parse-headers header-lines)
+                  ;; Grouped ONCE — see `try-parse-head` for why.
+                  (let (grouped (group-headers header-lines)
+                        headers (join-grouped-headers grouped)
                         buflen (string/length buf))
                     (cond
                       ; A bare CR or LF in the head (only CRLF was split away) lets a proxy that
@@ -40,7 +42,7 @@
                       ; proxy honoring a different occurrence than we do (we keep the last) is a
                       ; smuggling vector. (A list value like "x, chunked" is already rejected
                       ; below, since `chunked?` requires the value to be exactly "chunked".)
-                      (duplicate-transfer-encoding? header-lines)
+                      (duplicate-transfer-encoding-grouped? grouped)
                         [:error "multiple Transfer-Encoding"]
                       ; Transfer-Encoding *and* Content-Length is ambiguous framing
                       ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
@@ -63,7 +65,8 @@
                                                     remainder]))
                           [:error "unsupported transfer-encoding"])
                       ; Conflicting Content-Length values → ambiguous framing.
-                      (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                      (content-length-conflict-grouped? grouped)
+                        [:error "conflicting Content-Length"]
                       ; Content-Length, when present, must be a non-negative
                       ; integer. Without this a negative value made body-end <
                       ; body-start and `substring` threw, crashing the worker.
@@ -105,13 +108,16 @@
               (match (parse-request-line req-line)
                 ([:error e] [:error e])
                 ([:ok method path query version]
-                  (let (headers (parse-headers header-lines))
+                  ;; Grouped ONCE. The joined map and both duplicate-field verdicts all come
+                  ;; from this, instead of three independent walks of the same lines.
+                  (let (grouped (group-headers header-lines)
+                        headers (join-grouped-headers grouped))
                     (cond
                       (bare-line-break? lines) [:error "bare CR or LF in header block"]
                       (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
                       (colonless-header? header-lines) [:error "header line without a colon"]
                       (obs-fold? header-lines) [:error "obs-fold header line"]
-                      (duplicate-transfer-encoding? header-lines)
+                      (duplicate-transfer-encoding-grouped? grouped)
                         [:error "multiple Transfer-Encoding"]
                       (and (contains? headers :transfer-encoding)
                         (contains? headers :content-length))
@@ -133,7 +139,8 @@
                            :version version
                            :headers headers}
                           body-start]
-                      (content-length-conflict? header-lines) [:error "conflicting Content-Length"]
+                      (content-length-conflict-grouped? grouped)
+                        [:error "conflicting Content-Length"]
                       (not (valid-content-length? (get headers :content-length)))
                         [:error "invalid Content-Length"]
                       else
@@ -180,8 +187,14 @@
 (defn head-carrier (b)
   "Decode head-block `bytes` to a Latin-1 carrier string (one codepoint 0-255 per byte), so the
   string-based head parser runs byte-faithfully. Applied only to the request HEAD, which is
-  bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`."
-  (string/join (map (seq b) string/int->char) ""))
+  bounded (`:max-request-bytes`) and ASCII/Latin-1 — never to the body, which stays `bytes`.
+
+  `string/codepoints->` IS this mapping: byte value 0-255 is Latin-1 codepoint 0-255. It used
+  to be spelled `(string/join (map (seq b) string/int->char) "
+  ")`, which allocated a
+  one-character string per byte and then joined them — about 900 allocations for a 450-byte
+  head, on every request. Verified identical over all 256 byte values."
+  (string/codepoints-> (seq b)))
 
 (defn try-parse-bytes (buf)
   "Bytes-native `try-parse`: `buf` is a `bytes` value. Returns `[:ok request remainder]`,
@@ -370,10 +383,10 @@
 (defn obs-fold? (header-lines)
   "True if any header line begins with a space or tab — an obs-fold continuation line, which
   RFC 7230 §3.2.4 says a server must reject in a request (it's a header-desync primitive)."
-  (not (empty? (filter header-lines
-                 (fn (line)
-                   (and (> (string/length line) 0)
-                     (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))))))
+  (any? header-lines
+    (fn (line)
+      (and (> (string/length line) 0)
+        (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))))
 
 (defn ws-before-colon? (line)
   "True when a header `line` has a space or tab immediately before its field-name colon.
@@ -387,14 +400,14 @@
 
 (defn any-ws-before-colon? (header-lines)
   "True if any header line puts whitespace before its colon (see `ws-before-colon?`)."
-  (not (empty? (filter header-lines ws-before-colon?))))
+  (any? header-lines ws-before-colon?))
 
 (defn bare-line-break? (lines)
   "True if any already-CRLF-split `lines` (the request-line or a header line) still holds a
   bare CR or bare LF. RFC 7230 §3.5: only CRLF terminates a line, so a bare LF/CR embedded in
   the head means a proxy that DOES split on it parses a different header set — a smuggling
   primitive. Every legitimate CRLF was consumed by the split, so a leftover CR/LF is bare."
-  (not (empty? (filter lines (fn (l) (or (includes? l "\r") (includes? l "\n")))))))
+  (any? lines (fn (l) (or (includes? l "\r") (includes? l "\n")))))
 
 (defn colonless-header? (header-lines)
   "True if any header line has no colon at all — a malformed field with no name/value split.
@@ -402,8 +415,7 @@
   it (as a bare field, or by joining it to a neighbour) from disagreeing with us, the same
   desync posture as the other malformed-header rejections. Obs-fold continuation lines start
   with SP/HTAB and are caught by `obs-fold?` first, so this only fires on a non-folded line."
-  (not (empty? (filter header-lines
-                 (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))))))
+  (any? header-lines (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))))
 
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
@@ -418,7 +430,7 @@
   (let (vals (filter (map header-lines (fn (line) (header-value-for line "content-length")))
                (fn (v) (not (nil? v)))))
     (and (> (count vals) 1)
-      (not (empty? (filter (rest vals) (fn (v) (not (= v (first vals))))))))))
+      (any? (rest vals) (fn (v) (not (= v (first vals))))))))
 
 (defn valid-content-length? (cl)
   "True if the Content-Length header value `cl` is absent (nil), or present and a
@@ -489,16 +501,54 @@ the failure would reach the body read as a length."
   Values are gathered per key and `join`ed ONCE, so a field repeated N times is O(N),
   not the O(N²) of a per-line `(str acc v)` fold — that quadratic was a repeated-header
   CPU-exhaustion vector (bounded only by the byte cap, i.e. minutes of CPU per request)."
-  (let (grouped (fold lines
-                  {}
-                  (fn (m line)
-                    (let (ci (index-of line ":"))
-                      (if (= ci -1)
-                        m
-                        (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
-                              v (string/trim (string/substring line (+ ci 1) (string/length line))))
-                          (assoc m k (cons v (get m k (list))))))))))
-    (fold (%map-pairs grouped)
-      {}
-      (fn (m kv)
-        (assoc m (first kv) (join-header-values (first kv) (reverse (first (rest kv)))))))))
+  (join-grouped-headers (group-headers lines)))
+
+(defn group-headers (lines)
+  "Raw header lines → `keyword → (value …)`, each key's values in the order they appeared.
+
+  The pre-join half of `parse-headers`, split out because it is the only thing that still knows
+  how many times a field occurred — which the joined map cannot say, and which the framing
+  rejections need. `duplicate-transfer-encoding?` and `content-length-conflict?` used to re-walk
+  every line and redo the split/trim/lower to recover it, at a cost within a rounding error of
+  parsing the headers a second and third time."
+  (fold lines
+    {}
+    (fn (m line)
+      (let (ci (index-of line ":"))
+        (if (= ci -1)
+          m
+          (let (k (keyword (string/lower (string/trim (string/substring line 0 ci))))
+                v (string/trim (string/substring line (+ ci 1) (string/length line))))
+            (assoc m k (cons v (get m k (list))))))))))
+
+(defn join-grouped-headers (grouped)
+  "A `group-headers` map with each key's values joined per RFC 7230 §3.2.2 — the `headers` map
+  every caller downstream sees.
+
+  A field that appeared once is passed through as-is rather than reversed and joined. That is
+  every field on almost every real request, and it is exactly equivalent: `join-header-values`
+  on a one-element list returns `(first values)` for Content-Length and `(string/join (list v)
+  sep)` — which is `v` — for everything else."
+  (fold (%map-pairs grouped)
+    {}
+    (fn (m kv)
+      (let (k (first kv)
+            values (first (rest kv)))
+        (assoc m
+          k
+            (if (= (count values) 1)
+              (first values)
+              (join-header-values k (reverse values))))))))
+
+(defn duplicate-transfer-encoding-grouped? (grouped)
+  "`duplicate-transfer-encoding?` answered from an already-grouped map: more than one
+  Transfer-Encoding line is ambiguous framing. Same verdict, no second pass over the lines."
+  (> (count (get grouped :transfer-encoding (list))) 1))
+
+(defn content-length-conflict-grouped? (grouped)
+  "`content-length-conflict?` answered from an already-grouped map: Content-Length present more
+  than once with differing values. Duplicate IDENTICAL values are fine, and \"all equal\" does
+  not care about order, so the grouped list answers this exactly as the per-line scan did."
+  (let (vals (get grouped :content-length (list)))
+    (and (> (count vals) 1)
+      (any? (rest vals) (fn (v) (not (= v (first vals))))))))
