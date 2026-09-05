@@ -223,10 +223,10 @@
   (let (inm (get (get conn :headers) :if-none-match))
     (if (nil? inm)
       false
-      (let (want (string/trim inm))
+      (let (want (http/util/trim-if-needed inm))
         (or (= want "*")
           (not (empty? (filter (string/split want ",")
-                         (fn (t) (= (strip-weak (string/trim t)) tag))))))))))
+                         (fn (t) (= (strip-weak (http/util/trim-if-needed t)) tag))))))))))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
