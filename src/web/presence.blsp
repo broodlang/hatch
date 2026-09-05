@@ -170,11 +170,11 @@
         (if (empty? remaining) m (assoc m (first kv) remaining))))))
 
 (defn- presence-has-pid? (entries pid)
-  (not (empty? (filter entries (fn (e) (= (get e :pid) pid))))))
+  (any? entries (fn (e) (= (get e :pid) pid))))
 
 (defn- presence-known? (state pid)
   "True if `pid` is tracked on any topic — used to monitor each session just once."
-  (not (empty? (filter (%map-pairs state) (fn (kv) (presence-has-pid? (first (rest kv)) pid))))))
+  (any? (%map-pairs state) (fn (kv) (presence-has-pid? (first (rest kv)) pid))))
 
 (defn- presence-topics-of (state pid)
   "The topics `pid` is tracked on (so a death only refreshes those)."
