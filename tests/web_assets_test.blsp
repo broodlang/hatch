@@ -144,3 +144,33 @@
 
   (test "a missing sibling is not fresh"
     (assert= (fresh-sibling? "/tmp/hatch-no-such-file.br" "/tmp/hatch-no-such-file") false)))
+
+;; The build-time twin of `precompress-spec`: loud where that one is best-effort. A build step
+;; that quietly produces nothing still exits 0 and ships an image, which is the failure this
+;; exists to prevent.
+(describe "precompress-verified"
+  (test "returns the file list when every sibling was written"
+    (let (dir "/tmp/hatch-precompress-verified-test"
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
+          body (string/join (map (range 0 300) (fn (i) (str "payload line " i "\n"))) ""))
+      (file/spit (str dir "/mod_bg.wasm") body)
+      (assert= ["mod_bg.wasm"]
+        (into [] (precompress-verified {:dir dir :files ["mod_bg.wasm"]})))
+      (assert= true (file/exists? (str dir "/mod_bg.wasm.br")))
+      (assert= true (file/exists? (str dir "/mod_bg.wasm.gz")))
+      (dolist (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
+        (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f))))))
+
+  ;; The whole point: a missing source produces no siblings, and that must STOP the build
+  ;; rather than log and carry on the way the runtime path does.
+  (test "errors when a declared file produced no siblings"
+    (let (dir "/tmp/hatch-precompress-verified-missing"
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
+          raised (check-allow :discarded-catch
+                   (try
+                     (do (precompress-verified {:dir dir :files ["not-there.wasm"]}) false)
+                     (catch _e true))))
+      (assert= true raised)))
+
+  (test "a nil spec is not an error"
+    (assert= [] (into [] (precompress-verified nil)))))

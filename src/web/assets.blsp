@@ -148,6 +148,52 @@
     (dolist (file (or (get spec :files) (list)))
       (precompress (str dir "/" file)))))
 
+(defn precompress-verified (spec)
+  "`precompress-spec`, but LOUD — for a build or release step rather than a boot.
+
+  `precompress` is best-effort by design: it logs and carries on when it cannot read a file,
+  which is right at runtime, where serving an asset uncompressed beats not serving it. At
+  BUILD time that is exactly wrong. A build step that quietly produced nothing still exits 0,
+  ships an image, and is discovered in production — which is how three separate steps in
+  hive's Dockerfile became no-ops nobody noticed.
+
+  So this checks afterwards that every declared file got both siblings, `error`s naming the
+  one that did not, and reports the sizes it achieved so the build log carries the evidence.
+  Returns the spec's file list.
+
+      ; src/precompress-assets.blsp
+      (defn main () (assets/precompress-verified (get web/endpoint/*assets* :precompress)))
+
+      # Dockerfile, in the stage that has the assets
+      RUN nest run --main precompress-assets
+
+  Boot still calls `prepare`, finds the siblings present and newer than their sources, and
+  does nothing (`fresh-sibling?`) — so this is an optimisation the image applies, never a step
+  the app depends on. Pair the two: an app that skips this still serves, just uncompressed
+  and slowly the first time.
+
+  A nil `spec` is not an error — an app with nothing name-pinned simply has nothing to do."
+  (if (nil? spec)
+    (do
+      (log/info "[assets] precompress-verified: no spec, nothing to do")
+      (list))
+    (let (dir (get spec :dir "static")
+          files (or (get spec :files) (list)))
+      (precompress-spec spec)
+      (dolist (file files)
+        (let (path (str dir "/" file))
+          (dolist (coding [".br" ".gz"])
+            (when (not (file/exists? (str path coding)))
+              (error "web/assets/precompress-verified: no " coding " was written for " path))
+            (log/info (str "[assets] "
+                        path
+                        coding
+                        ": "
+                        (count (file/slurp-bytes (str path coding)))
+                        " bytes, from "
+                        (count (file/slurp-bytes path)))))))
+      files)))
+
 ; ---- content fingerprinting (prod cache-busting) ---------------------------
 ; A release rewrites built assets to content-addressed names (`app.<sha>.css`) and records a
 ; `logical → fingerprinted` manifest under the static dir. `web/static/asset-path` reads that
