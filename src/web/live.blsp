@@ -1258,6 +1258,17 @@
       (handle-params (params model) updated-model) ; optional: live-patch (same view, new params)
       ...)
 
+  Markup binds to `on` handlers with `:data-event` (plus `:data-params` for a JSON payload).
+  A control may also carry `:data-disable-with`, which is Phoenix's `phx-disable-with`: from
+  the click until the server's next patch lands, the control is disabled and shows that text.
+
+      [:button {:data-event \"save\" :data-disable-with \"Saving…\"} \"Save\"]
+
+  It costs nothing to skip, and skipping it means a round trip whose only feedback is
+  nothing at all — where the usual result is a second click and a duplicate event. The client
+  restores the control BEFORE morphing the patch in, so the server's HTML is diffed against
+  what the app rendered rather than against the placeholder.
+
   An optional `(handle-params (params model) …)` clause runs on a live-patch —
   `web/live/send-update`'s sibling for the *view itself*: `brood_live.js`'s
   `session.patch(href)` updates the URL/history without a full reload or remount, the

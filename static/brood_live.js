@@ -215,6 +215,9 @@ const BroodLive = (() => {
     // carries one — so a reorder/insert above an interactive element keeps its
     // identity and transient state — and falls back to index matching otherwise.
     _patch(html) {
+      // Before the morph — see beginLoading. Every server update reaches the DOM through
+      // here, so this is the one place a loading control needs restoring.
+      endLoading();
       const next = document.createElement("div");
       next.innerHTML = html;
       morphChildren(this.container, next);
@@ -397,6 +400,40 @@ const BroodLive = (() => {
 
   // The nearest ancestor live-component id (web/component), if `el` sits inside one —
   // routes the event server-side to that component's own handle-event.
+  // ---- data-disable-with: a button that says it is working -------------------------
+  //
+  // Phoenix's phx-disable-with. A control carrying `data-disable-with="Saving…"` is disabled
+  // and shows that text from the moment it is clicked until the server's next patch lands.
+  // Without it the only feedback for a round trip is nothing at all, and the usual result is
+  // a second click and a duplicate event.
+  //
+  // Restoring happens BEFORE the patch is morphed in, never after: the server's new HTML is
+  // diffed against the element as the app rendered it, not against the placeholder we put
+  // there. Restoring afterwards would fight the morph and could leave the placeholder on
+  // screen when the re-render happened not to touch that node.
+  const loading = new Map();
+
+  function beginLoading(el) {
+    if (!el) return;
+    const label = el.dataset.disableWith;
+    if (label == null || loading.has(el)) return;
+    loading.set(el, { html: el.innerHTML, disabled: el.disabled });
+    el.disabled = true;
+    el.setAttribute("aria-busy", "true");
+    // textContent, not innerHTML: the label is author-supplied but flows through an
+    // attribute, and a control's loading text has no reason to carry markup.
+    el.textContent = label;
+  }
+
+  function endLoading() {
+    for (const [el, prev] of loading) {
+      el.innerHTML = prev.html;
+      el.disabled = prev.disabled;
+      el.removeAttribute("aria-busy");
+    }
+    loading.clear();
+  }
+
   function nearestCid(el) {
     const cidEl = el.closest("[data-cid]");
     return cidEl ? cidEl.dataset.cid : null;
@@ -410,6 +447,7 @@ const BroodLive = (() => {
       e.preventDefault();
       const name = el.dataset.event;
       const params = el.dataset.params ? JSON.parse(el.dataset.params) : {};
+      beginLoading(el);
       session.pushEvent(name, params, nearestCid(el));
     });
 
@@ -439,6 +477,8 @@ const BroodLive = (() => {
       e.preventDefault();
       const name = form.dataset.event;
       const data = Object.fromEntries(new FormData(form));
+      // the submitter if it asked, else any submit control in the form that did
+      beginLoading(e.submitter || form.querySelector("[data-disable-with]"));
       session.pushEvent(name, data, nearestCid(form));
     });
   }
