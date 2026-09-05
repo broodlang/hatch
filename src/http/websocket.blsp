@@ -40,15 +40,24 @@
   "A `bytes` value → the Latin-1 byte-string carrier (one codepoint 0–255 per byte).
   A binary-mode socket/subprocess now delivers inbound data as a first-class `bytes`
   value; convert it here at the receive boundary so the existing string-based readers
-  (frame parser, request reader) keep working unchanged. Built with `join` rather than
-  `apply` — a chunk can be up to 64 KB and `apply` may hit an arg cap."
-  (string/join (map (seq b) byte->char) ""))
+  (frame parser, request reader) keep working unchanged.
+
+  `string/codepoints->` IS this mapping — byte 0-255 is Latin-1 codepoint 0-255 — in one
+  native call. It used to map every byte through `byte->char` and join the results, which the
+  comment above `*byte-strs*` describes going to some length to keep merely linear. One call
+  beats a linear one: 1453us to 107us on a 4 KiB chunk, 13.6x, and this runs on every inbound
+  chunk, which can be 64 KB. Verified identical."
+  (string/codepoints-> (seq b)))
 
 (defn carrier-byte-at (s i)
   "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
-  frame/request parser's form) or a first-class `bytes` value (an outbound frame)."
+  frame/request parser's form) or a first-class `bytes` value (an outbound frame).
+
+  `bytes/at`, not `get`: both are O(1), but `get` is the generic collection accessor and
+  dispatches on the collection kind every call — 1.40us against `bytes/at`'s 0.31us, and this
+  is called per byte by the frame readers."
   (if (bytes? s)
-    (get s i)
+    (bytes/at s i)
     (string/char->int (string/char-at s i))))
 
 ; ---- handshake ----
@@ -341,12 +350,28 @@
 
 (defn unmask (buf key-offset plen)
   "XOR `plen` bytes of the `bytes` `buf` starting after `key-offset` using the 4-byte masking
-  key — returning a `bytes` value. `buf` is a first-class `bytes`, so `get` indexes it in O(1)
-  and the payload is built in one pass (a masked frame is the WS receive hot path; the old
-  carrier-string form indexed with O(i) `char-at`, making this O(n²) — a cheap CPU DoS)."
-  (let (key [(get buf key-offset)
-              (get buf (+ key-offset 1))
-              (get buf (+ key-offset 2))
-              (get buf (+ key-offset 3))]
+  key — returning a `bytes` value. `buf` is a first-class `bytes` and the payload is built in
+  one pass (a masked frame is the WS receive hot path; the old carrier-string form indexed with
+  O(i) `char-at`, making this O(n²) — a cheap CPU DoS).
+
+  Three things in this loop run once per PAYLOAD BYTE, so each is worth its own thought:
+
+  - `bytes/at`, not `get`. Both index a `bytes` in O(1), but `get` is the generic collection
+    accessor and dispatches on the collection kind every call — measured 1.40us against
+    `bytes/at`'s 0.31us.
+  - the key in four LOCALS, not a vector indexed per byte, which is another generic `get`.
+  - `bit/and i 3`, not `math/mod i 4` — the same value for a non-negative `i`, without division.
+
+  Together: 2818us to 509us on a 1 KiB frame, 5.5x, byte-identical output. Every message a
+  browser sends is masked (RFC 6455 requires it of clients), so this is on the path of every
+  live-view event, and the old cost scaled at ~2.8us per byte against a machine with one
+  shared vCPU."
+  (let (k0 (bytes/at buf key-offset)
+        k1 (bytes/at buf (+ key-offset 1))
+        k2 (bytes/at buf (+ key-offset 2))
+        k3 (bytes/at buf (+ key-offset 3))
         data-start (+ key-offset 4))
-    (bytes (map (range plen) (fn (i) (bit/xor (get buf (+ data-start i)) (get key (math/mod i 4))))))))
+    (bytes (map (range plen)
+             (fn (i)
+               (bit/xor (bytes/at buf (+ data-start i))
+                 (case (bit/and i 3) 0 k0 1 k1 2 k2 k3)))))))
