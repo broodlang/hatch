@@ -32,6 +32,7 @@
           ([:not-modified r] r)
           ([:send r] (compress-response conn r))))"
   (:use web/conn)
+  (:alias web/session)
   (:alias table))
 
 ;; ---- validators -------------------------------------------------------------
@@ -90,6 +91,95 @@
   "A `Cache-Control` for a response nothing may keep — a health probe, anything
   per-request by nature. Distinct from `no-cache`, which means store it but revalidate."
   "no-store")
+
+(defn public-swr (max-age stale-for)
+  "A `Cache-Control` for content that is the same for everyone: reusable without asking for
+  `max-age` seconds, and for a further `stale-for` seconds reusable INSTANTLY while the
+  browser revalidates in the background (`stale-while-revalidate`, RFC 5861).
+
+  The second half is what makes this usable on a page that is only mostly static. Under plain
+  `max-age` the choice is between a stale page and a round trip; with `stale-while-revalidate`
+  the visitor gets the cached page immediately and the next navigation has the fresh one. A
+  page that changes when someone signs in is wrong for at most one navigation instead of for
+  the whole `max-age`."
+  (str "public, max-age=" max-age ", stale-while-revalidate=" stale-for))
+
+;; ---- anonymous HTML ---------------------------------------------------------
+
+(defn html-freshness (conn resp &optional (opts {}))
+  "Choose `Cache-Control` for a dynamic HTML response, by whether this particular request
+  could possibly be personalised.
+
+  An app whose nav shows the signed-in user's email has to send `private, no-cache` — one
+  visitor's page must never be reused for another. But that header is charged to EVERYONE,
+  and most visitors to most sites are signed out, looking at a page that is byte-identical
+  for all of them. `no-cache` means *revalidate before reuse*, so each of them pays a network
+  round trip per navigation to be told nothing changed. On an origin one continent away that
+  is the entire perceived load time — the server's own work is a rounding error next to it.
+
+  So: a request carrying no session cookie is served `public, max-age=… ,
+  stale-while-revalidate=…` and its browser reuses the page with no request at all. A request
+  that carries one keeps `private, no-cache`.
+
+  Deliberately conservative — every one of these must hold, or it falls back to
+  `private, no-cache`:
+
+  - the method is GET or HEAD (a POST response is not a cache entry)
+  - the status is 200 (a redirect or an error is not the page)
+  - the response sets no cookie (a login response must never be shared, and it is a 200 with
+    a `Set-Cookie` that would otherwise slip through)
+  - the request carries no session cookie (`:cookie`, default `_hatch_session`)
+  - no `Cache-Control` was set already, and the body is HTML
+
+  A signed-out visitor whose expired cookie is still on disk simply gets the old behaviour,
+  which is the direction to be wrong in.
+
+  `opts`: `:max-age` (default 60), `:stale-for` (default 600), `:cookie` (session cookie name),
+  `:vary` (an extra Vary token, default `Cookie`)."
+  (let (headers (get resp :headers {})
+        content-type (get headers :content-type)
+        method (string/upper (or (get conn :method) ""))
+        cookie-name (get opts :cookie web/session/*default-cookie*))
+    (if (get headers :cache-control)
+      resp
+      (if (not (or (nil? content-type) (includes? content-type "text/html")))
+        resp
+        (let (public? (and (or (= method "GET") (= method "HEAD"))
+                        (= (get resp :status 200) 200)
+                        (nil? (get headers :set-cookie))
+                        (not (session-cookie? conn cookie-name))))
+          (assoc resp
+            :headers
+              (assoc headers
+                :cache-control
+                  (if public?
+                    (public-swr (get opts :max-age 60) (get opts :stale-for 600))
+                    "private, no-cache")
+                ;; MERGED, not assigned: a bare assignment discards whatever another layer
+                ;; already put in Vary.
+                :vary (merge-vary (get headers :vary) (get opts :vary "Cookie")))))))))
+
+(defn session-cookie? (conn name)
+  "Whether this request carries a session cookie called `name`.
+
+  Checks the parsed `:cookies` and, failing that, the raw `Cookie` header. The second look is
+  the point: `web/conn/build` parses cookies, but a conn assembled some other way may not
+  have, and `get-cookie` cannot tell \"no cookie\" from \"never parsed\". For a cache-control
+  decision those two must not be the same answer — reading a signed-in request as anonymous
+  publishes that page to a shared cache. So an unparsed conn that mentions the name in its
+  raw header counts as carrying it: this fails closed."
+  (or (not (nil? (get-cookie conn name)))
+    (let (raw (get (get conn :headers {}) :cookie))
+      (and (string? raw) (includes? raw name)))))
+
+(defn merge-vary (existing token)
+  "`existing` with `token` added, case-insensitively, or just `token` when there is none."
+  (if (or (nil? existing) (= existing ""))
+    token
+    (if (any? (map (string/split existing ",") (fn (t) (string/lower (string/trim t))))
+          (fn (t) (= t (string/lower token))))
+      existing
+      (str existing ", " token))))
 
 (defn put-cache-control (resp value)
   "Set `Cache-Control` on a response map, without clobbering one a handler already chose."

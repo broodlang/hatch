@@ -187,3 +187,73 @@
     (for (i (range (+ *max-compressed* 5)))
       (compressed [(str "etag" i) "br"] (fn () (str "body" i))))
     (is (<= (count (keys (compressed-entries))) *max-compressed*))))
+
+;; The half of caching that is charged to everyone: a page marked `private, no-cache` costs a
+;; network round trip per navigation, and most visitors to most sites are signed out looking
+;; at a page that is identical for all of them.
+(describe "html-freshness"
+  ;; Built the way the server builds one, so the cookie parsing under test is the real one.
+  (defn- conn-with (method cookie)
+    (web/conn/build {:method method
+                     :path "/"
+                     :headers (if (nil? cookie) {} {:cookie (str "_hatch_session=" cookie)})}))
+
+  (defn- cc (resp) (get (get resp :headers {}) :cache-control))
+
+  (test "an anonymous GET may be reused without asking"
+    (let (out (html-freshness (conn-with "GET" nil) {:status 200 :headers {} :body "<h1>hi</h1>"}))
+      (is (includes? (cc out) "public"))
+      (is (includes? (cc out) "max-age=60"))
+      (is (includes? (cc out) "stale-while-revalidate=600"))
+      (is (includes? (get (get out :headers) :vary) "Cookie"))))
+
+  (test "a request carrying a session cookie does not"
+    (assert= "private, no-cache"
+      (cc (html-freshness (conn-with "GET" "abc") {:status 200 :headers {} :body "<h1>hi</h1>"}))))
+
+  ;; A login is a 200 with a Set-Cookie. Caching it publicly would hand one visitor another's
+  ;; session, so it is checked on the RESPONSE as well as the request.
+  (test "a response that sets a cookie is never public"
+    (assert= "private, no-cache"
+      (cc (html-freshness (conn-with "GET" nil)
+            {:status 200 :headers {:set-cookie "_hatch_session=x"} :body "<h1>hi</h1>"}))))
+
+  (test "only GET and HEAD, only 200"
+    (assert= "private, no-cache"
+      (cc (html-freshness (conn-with "POST" nil) {:status 200 :headers {} :body "ok"})))
+    (assert= "private, no-cache"
+      (cc (html-freshness (conn-with "GET" nil) {:status 404 :headers {} :body "no"})))
+    (assert= "private, no-cache"
+      (cc (html-freshness (conn-with "GET" nil) {:status 302 :headers {} :body ""}))))
+
+  (test "a handler's own choice and a non-HTML body are both left alone"
+    (assert= "no-store"
+      (cc (html-freshness (conn-with "GET" nil)
+            {:status 200 :headers {:cache-control "no-store"} :body "x"})))
+    (assert= nil
+      (cc (html-freshness (conn-with "GET" nil)
+            {:status 200 :headers {:content-type "application/json"} :body "{}"}))))
+
+  (test "vary merges rather than replacing"
+    (assert= "Accept-Encoding, Cookie"
+      (get (get (html-freshness (conn-with "GET" nil)
+                  {:status 200 :headers {:vary "Accept-Encoding"} :body "<p>x</p>"})
+             :headers)
+        :vary))
+    ;; already present, in any case — left as the other layer wrote it
+    (assert= "cookie"
+      (get (get (html-freshness (conn-with "GET" nil)
+                  {:status 200 :headers {:vary "cookie"} :body "<p>x</p>"})
+             :headers)
+        :vary)))
+
+  ;; `get-cookie` reads the PARSED `:cookies` that `web/conn/build` fills in. A conn that
+  ;; never went through it has no `:cookies` at all, and reading that as "no session" would
+  ;; publish a signed-in page to a shared cache — so the raw header is the backstop.
+  (test "an unparsed conn is read from its raw Cookie header, not treated as anonymous"
+    (assert= "private, no-cache"
+      (cc (html-freshness {:method "GET" :headers {:cookie "_hatch_session=abc"}}
+            {:status 200 :headers {} :body "<h1>hi</h1>"})))
+    (assert= true (session-cookie? {:headers {:cookie "a=1; _hatch_session=abc"}} "_hatch_session"))
+    (assert= false (session-cookie? {:headers {:cookie "a=1; b=2"}} "_hatch_session"))
+    (assert= false (session-cookie? {:headers {}} "_hatch_session"))))
