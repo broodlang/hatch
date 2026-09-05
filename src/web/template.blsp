@@ -56,17 +56,18 @@
   Most strings contain none of them — a class list, a URL path, ordinary prose — and the
   five `string/replace` passes cost the same whether or not they find anything, because the
   cost is per CALL and not per byte: escaping a ONE-character value measured 5µs, which was
-  a fifth of the total cost of rendering an element. So the clean case is answered by five
-  searches that allocate nothing, and the replaces run only when there is something to
-  replace.
+  a fifth of the total cost of rendering an element. So the clean case is answered first, and
+  the replaces run only when there is something to replace.
+
+  That clean case is ONE pass. It was five `includes?`, which allocate nothing but still scan
+  the string five times — 3.2µs on a value with nothing to escape, and this is the most-called
+  function in the renderer (every attribute value and every text node). `string/span-until`
+  finds the first character from a SET in a single native scan: if that lands at the end, the
+  string is clean.
 
   (hatch/web/template/escape-html \"a<b&c\") ;=> \"a&lt;b&amp;c\""
   (let (text (str s))
-    (if (or (includes? text "&")
-          (includes? text "<")
-          (includes? text ">")
-          (includes? text "\"")
-          (includes? text "'"))
+    (if (not (= (string/span-until text 0 "&<>\"'") (string/length text)))
       (string/replace (string/replace (string/replace (string/replace (string/replace text
                                                                         "&" "&amp;")
                                                         "<" "&lt;")
@@ -136,6 +137,19 @@
 ;; distinct attribute names any real template uses.
 (def- *max-safe-names* 512)
 
+(def- *tag-names* (table/new))
+
+(defn- tag-name-of (tag)
+  "`(->string tag)` for an element's tag, memoised on the keyword — once per element rendered,
+  and a page is a few hundred elements over a handful of distinct tags. Bounded like the
+  attribute-name memo."
+  (if (table/has? *tag-names* tag)
+    (table/get *tag-names* tag)
+    (let (n (->string tag))
+      (when (< (table/count *tag-names*) *max-safe-names*)
+        (table/put *tag-names* tag n))
+      n)))
+
 (defn- safe-attr-name? (n)
   (cond
     (table/has? *safe-names* n) (table/get *safe-names* n)
@@ -144,6 +158,28 @@
       (let (safe (safe-attr-name-scan? n))
         (table/put *safe-names* n safe)
         safe)))
+
+(def- *attr-names* (table/new))
+
+(defn- attr-name (k)
+  "The attribute name string for keyword `k` when it is safe to emit, else nil. Memoised on
+  the KEYWORD, so the common path is one table lookup.
+
+  `render-attr` used to do `(->string k)` and then `safe-attr-name?` on the result — a
+  conversion that allocates plus a second memo lookup, about 1.3us per attribute, on a page
+  that has hundreds of them. Both answers are functions of the same keyword and neither can
+  change, so they are cached together.
+
+  Bounded like `*safe-names*`, and for the same reason: an app that derives a key from
+  untrusted input (`(keyword (str \"data-\" user))`) must not be able to grow this without
+  limit. Past the bound it still answers, just without remembering."
+  (if (table/has? *attr-names* k)
+    (table/get *attr-names* k)
+    (let (n (->string k)
+          safe (if (safe-attr-name? n) n nil))
+      (when (< (table/count *attr-names*) *max-safe-names*)
+        (table/put *attr-names* k safe))
+      safe)))
 
 (defn- safe-attr-name-scan? (n)
   "True when `n` is a non-empty attribute name with no character that could escape the
@@ -160,9 +196,9 @@
   attribute whose NAME contains an unsafe character is dropped entirely (an unsafe name can't
   be escaped the way a value can)."
   (let ([k v] kv
-        n (->string k))
+        n (attr-name k))
     (cond
-      (not (safe-attr-name? n)) ""
+      (nil? n) ""
       (= v true) (str " " n)
       (= v false) ""
       (nil? v) ""
@@ -218,7 +254,7 @@
         has-map (and (not (nil? tail)) (map? (first tail)))
         attrs (if has-map (first tail) {})
         children (if has-map (rest tail) tail)
-        tag-name (->string tag)
+        tag-name (tag-name-of tag)
         attr-str (render-attrs attrs))
     (if (contains? *void-tags* tag)
       (str "<" tag-name attr-str ">")
