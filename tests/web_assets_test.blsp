@@ -114,3 +114,33 @@
             (count (file/slurp-bytes (str dir "/mod_bg.wasm")))))
       (dolist (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
         (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f)))))))
+
+;; Re-running the step must be a no-op, not the work again. `serve` calls `prepare` on every
+;; prod boot, so if this regresses, an app whose image precompressed a large asset pays the
+;; full compression cost on the boot path of whatever machine it lands on.
+(describe "precompress is idempotent"
+  (test "an up-to-date sibling is left alone, a stale one is rebuilt"
+    (let (dir "/tmp/hatch-precompress-idem-test"
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
+          path (str dir "/asset.css"))
+      ;; Big enough that compressing it takes well over the millisecond `file/mtime` resolves
+      ;; to — otherwise the sibling can share a timestamp with its source and read as stale.
+      (file/spit path
+        (string/join (map (range 0 20000) (fn (i) (str "body { --n" i ": red; }\n"))) ""))
+      (precompress path)
+      (assert= (fresh-sibling? (str path ".br") path) true)
+      (let (first-bytes (file/slurp-bytes (str path ".br")))
+        ;; second call: sibling is current, so nothing is rewritten
+        (precompress path)
+        (assert= (count (file/slurp-bytes (str path ".br"))) (count first-bytes))
+        ;; a rewritten source makes the sibling stale again
+        (file/spit path
+          (string/join (map (range 0 40000) (fn (i) (str "body { --b" i ": blue; }\n"))) ""))
+        (assert= (fresh-sibling? (str path ".br") path) false)
+        (precompress path)
+        (is (not (= (count (file/slurp-bytes (str path ".br"))) (count first-bytes)))))
+      (dolist (f ["asset.css" "asset.css.br" "asset.css.gz"])
+        (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f))))))
+
+  (test "a missing sibling is not fresh"
+    (assert= (fresh-sibling? "/tmp/hatch-no-such-file.br" "/tmp/hatch-no-such-file") false)))

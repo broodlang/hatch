@@ -208,15 +208,42 @@
   `zlib/brotli` quality 11 (the `brotli` builtin, RFC 7932 `Content-Encoding: br`) and
   `zlib/gzip` level 9 (the `flate2` builtin) — a one-time build cost paid to shrink a file served
   many times, so the best ratio is the right trade. No external binary is required, so a
-  build/boot host without one no longer degrades to uncompressed serving. Overwrites stale
-  siblings from a previous build. A read/compress/write failure is logged and skipped, so serving
-  still works uncompressed."
-  (let (raw (check-allow :discarded-catch (try (file/slurp-bytes path) (catch e :error))))
-    (if (= raw :error)
-      (log/warn (str "[assets] precompress could not read " path "; serving uncompressed"))
-      (do
-        (precompress-variant (str path ".br") (fn () (zlib/brotli raw 11)) path)
-        (precompress-variant (str path ".gz") (fn () (zlib/gzip raw 9)) path)))))
+  build/boot host without one no longer degrades to uncompressed serving. A stale sibling is
+  rewritten; an up-to-date one is left alone (see `fresh-sibling?`). A read/compress/write
+  failure is logged and skipped, so serving still works uncompressed."
+  (let (wanted (filter [(str path ".br") (str path ".gz")]
+                 (fn (out) (not (fresh-sibling? out path)))))
+    (if (empty? wanted)
+      (log/info (str "[assets] precompress: " path " is already current, skipped"))
+      (let (raw (check-allow :discarded-catch (try (file/slurp-bytes path) (catch e :error))))
+        (if (= raw :error)
+          (log/warn (str "[assets] precompress could not read " path "; serving uncompressed"))
+          (do
+            (when (includes? wanted (str path ".br"))
+              (precompress-variant (str path ".br") (fn () (zlib/brotli raw 11)) path))
+            (when (includes? wanted (str path ".gz"))
+              (precompress-variant (str path ".gz") (fn () (zlib/gzip raw 9)) path))))))))
+
+(defn fresh-sibling? (out path)
+  "Whether the precompressed sibling `out` is already current for `path` — it exists and is
+  STRICTLY newer than the source.
+
+  Strictly, because `file/mtime` is milliseconds and two writes can land in the same one: a
+  tie cannot distinguish \"compressed just after\" from \"source rewritten just after\", and the
+  two failure modes are not symmetrical. Calling a tie stale costs one recompression; calling
+  it fresh serves bytes that do not match the asset, indefinitely.
+
+  This is what makes it safe for an app's `serve` to call `prepare` on every boot: a release
+  that precompressed its assets into the image gets a no-op instead of the work again.
+
+  Quality-11 brotli on a large asset is not a rounding error. Measured on a 7.0 MB
+  wasm-bindgen binary: 10.8 SECONDS of solid CPU. Paid on the boot path of a single-vCPU
+  machine, that is not a slow boot — it is a health check that times out and a deploy that
+  never comes up, which is a failure this project has had twice for the same shape of reason."
+  (and (file/exists? out)
+    (let (a (check-allow :discarded-catch (try (file/mtime out) (catch _ nil)))
+          b (check-allow :discarded-catch (try (file/mtime path) (catch _ nil))))
+      (and a b (> a b)))))
 
 (defn precompress-variant (out encode path)
   "Write one precompressed sibling `out` from `(encode)`, logging + skipping on failure so one
