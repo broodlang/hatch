@@ -203,6 +203,10 @@
         [n url?] (attr-info k))
     (cond
       (nil? n) ""
+      ;; The overwhelmingly common attribute: a plain string on a non-URL name. Taken here it
+      ;; skips four `=`/`nil?`/`vector?` tests that cannot match a string, and the `(str v)`
+      ;; call that re-stringifies something already a string.
+      (and (string? v) (not url?)) (str " " n "=\"" (escape-html v) "\"")
       (= v true) (str " " n)
       (= v false) ""
       (nil? v) ""
@@ -285,7 +289,20 @@
         ">"))))
 
 (defn- render-children (children)
-  (string/join (map (seq/flatten children) render) ""))
+  "Render an element's children, concatenated.
+
+  A single child that is not itself a list — `[:h2 {} \"Packages\"]`, `[:a {…} \"docs\"]`, every
+  leaf that wraps one piece of text — renders directly. `seq/flatten` allocates a fresh list
+  whether or not there is anything to flatten (1.05us), and `map` + `string/join` then build
+  two more to arrive at what `render` already returned. The guards are `empty?`, `rest` and
+  `pair?`, about 0.3us together.
+
+  `pair?` on the child is what keeps this honest: a lone child that IS a list still needs the
+  flatten path, because `(map … )` in a template produces exactly that."
+  (cond
+    (empty? children) ""
+    (and (empty? (rest children)) (not (pair? (first children)))) (render (first children))
+    else (string/join (map (seq/flatten children) render) "")))
 
 (defn html (node)
   "Render a Hiccup node and prepend the HTML5 doctype declaration.
