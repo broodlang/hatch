@@ -156,3 +156,27 @@
     (fetch :k (fn () :first))
     (clear)
     (assert= :second (fetch :k (fn () :second)))))
+
+;; ---- compressed representations ---------------------------------------------
+(describe "compressed"
+  :serial (test "compresses once per key"
+    (clear-compressed)
+    (let (to (self)
+          build (fn () (send to :built) "COMPRESSED"))
+      (assert= "COMPRESSED" (compressed ["\"abc\"" "br"] build))
+      (assert= "COMPRESSED" (compressed ["\"abc\"" "br"] build))
+      (assert= 1 (receive (:built (receive (:built 2) (after 20 1))) (after 20 0)))))
+
+  ;; The same bytes under a different coding are a different representation.
+  (test "coding is part of the key"
+    (clear-compressed)
+    (assert= "br" (compressed ["\"abc\"" "br"] (fn () "br")))
+    (assert= "gzip" (compressed ["\"abc\"" "gzip"] (fn () "gzip"))))
+
+  ;; A key derives from the response BODY, and a body can vary with request input — so an
+  ;; unbounded store here is a leak a stranger drives.
+  (test "it is bounded"
+    (clear-compressed)
+    (for (i (range (+ *max-compressed* 5)))
+      (compressed [(str "etag" i) "br"] (fn () (str "body" i))))
+    (is (<= (count (keys (compressed-entries))) *max-compressed*))))
