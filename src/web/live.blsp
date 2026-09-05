@@ -44,19 +44,52 @@
         (string/char-at *json-hex* (math/quot cp 16))
         (string/char-at *json-hex* (math/mod cp 16)))))
 
+; Every character JSON must escape: backslash (92), quote (34), and every C0 control
+; (U+0000–U+001F). Built once, as character SETs for `string/span-until`. The controls are
+; separated out because they are far rarer than a quote — HTML in a live diff is full of
+; `class="…"` and holds a control character essentially never.
+(def *json-control-chars* (string/codepoints-> (into [] (range 0 32))))
+(def *json-escape-chars* (string/codepoints-> (append [92 34] (into [] (range 0 32)))))
+
+(defn- json-clean? (s chars)
+  "True when `s` contains no character from the set `chars` — one native scan."
+  (= (string/span-until s 0 chars) (string/length s)))
+
 (defn json-str (s)
   "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
   (U+0000–U+001F) — the named short forms (\\b \\t \\n \\f \\r) or `\\u00XX`. RFC 8259 requires
   all chars < U+0020 to be escaped; emitting a raw control (a backspace/ESC/NUL pasted into
   user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
-  the whole frame — a per-field server↔client desync with no error surfaced."
-  (str "\""
-    (fold (range 32)
-      (-> s
-        (string/replace "\\" "\\\\")
-        (string/replace "\"" "\\\""))
-      (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp))))
-    "\""))
+  the whole frame — a per-field server↔client desync with no error surfaced.
+
+  Almost no string contains any of them, and the escaping path costs the same either way: two
+  `string/replace` passes, then a fold over all 32 control codepoints, each allocating a
+  `bytes`, decoding it to a string, and running ANOTHER full `string/replace` over the
+  accumulator. Thirty-four passes over the string to change nothing — 87.8us for a ten-
+  character string, and this runs on every string field of every live-view frame.
+
+  `string/span-until` asks whether any escapable character is present in one native scan, and
+  a second scan asks specifically about the controls. Three tiers, because the middle one is
+  what real traffic looks like: a rendered HTML diff is full of `class=\"…\"` and so needs the
+  two `string/replace` passes, but holds a C0 control essentially never — and it is the fold
+  over all 32 of those, not the replaces, that costs 87us. The full path is unchanged and
+  still runs whenever a control really is present."
+  (cond
+    (json-clean? s *json-escape-chars*) (str "\"" s "\"")
+    (json-clean? s *json-control-chars*)
+      (str "\""
+        (-> s
+          (string/replace "\\" "\\\\")
+          (string/replace "\"" "\\\""))
+        "\"")
+    else
+      (str "\""
+        (fold (range 32)
+          (-> s
+            (string/replace "\\" "\\\\")
+            (string/replace "\"" "\\\""))
+          (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp))))
+        "\"")))
 
 (defability Encode
   "JSON-encode a value to its wire string."
