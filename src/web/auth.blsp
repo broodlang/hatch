@@ -101,13 +101,63 @@
         colons (count (filter (string/->list unbracketed) (fn (c) (= c ":")))))
     (if (= colons 1) (first (string/split unbracketed ":")) unbracketed)))
 
+(defn- ipv6-groups (address)
+  "An IPv6 address as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
+  run. nil for anything that is not IPv6."
+  (if (< (count (filter (string/->list address) (fn (c) (= c ":")))) 2)
+    nil
+    (let (halves (string/split address "::")
+          head (filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
+          tail (if (< (count halves) 2)
+                 []
+                 (filter (string/split (second halves) ":") (fn (g) (not (= g "")))))
+          gap (- 8 (+ (count head) (count tail)))
+          filled (append (into [] head)
+                   (map (range (%max 0 gap)) (fn (_) "0"))
+                   (into [] tail)))
+      (if (= (count filled) 8)
+        (apply vector (map filled (fn (g) (string/pad-left (string/lower g) 4 "0"))))
+        nil))))
+
+(defn- prefix-match? (address entry)
+  "Whether `address` falls inside `entry` when `entry` is written as `prefix/bits`.
+
+  Only IPv6, and only prefix lengths that are a multiple of 16 — which covers the ones
+  anyone writes by hand (/32, /48, /64) and needs no bit arithmetic. Anything else is not a
+  match rather than a guess.
+
+  This exists because an IPv6 privacy address ROTATES its host half: the same machine on the
+  same network appears as `2c0f:ef18:1b2e:0:231b:…` one day and `2c0f:ef18:1b2e:0:5d71:…`
+  the next. An allow-list of exact addresses locks its owner out on the next rotation, which
+  is not a hypothetical — it happened within an hour of the first one being set."
+  (let (parts (string/split entry "/"))
+    (and (= (count parts) 2)
+      (let (bits (string/->number (second parts))
+            groups (ipv6-groups (first parts))
+            theirs (ipv6-groups address))
+        (and (not (failure? bits))
+          groups
+          theirs
+          (= 0 (math/rem bits 16))
+          (> bits 0)
+          (<= bits 128)
+          (let (n (/ bits 16))
+            (= (apply vector (take groups n)) (apply vector (take theirs n)))))))))
+
 (defn allowed-ip? (conn allowed)
-  "Whether this request's client address is one of `allowed` (a list of address strings).
+  "Whether this request's client address is admitted by `allowed` — a list of exact
+  addresses and/or IPv6 `prefix/bits` ranges (`2c0f:ef18:1b2e:0::/64`).
+
   An empty list allows nothing, and an unknown address is not allowed — a gate that cannot
   identify the caller must not admit them."
   (let (address (client-ip conn))
     (and address
-      (includes? (map allowed normalise-ip) (normalise-ip address)))))
+      (let (normalised (normalise-ip address))
+        (any? allowed
+          (fn (entry)
+            (if (includes? entry "/")
+              (prefix-match? normalised (string/trim entry))
+              (= (normalise-ip entry) normalised))))))))
 
 (defn allow-ips (allowed &optional (opts {}))
   "A plug admitting only requests from `allowed` addresses.
@@ -122,6 +172,9 @@
   Give it the addresses at runtime — from an environment variable or a secret — rather than
   baking them in: a residential address changes, and an allow-list in the image needs a
   deploy to fix while locking you out in the meantime.
+
+  For IPv6, prefer a `/64` prefix over an exact address. A privacy address rotates its host
+  half, so the same machine on the same network stops matching within a day.
 
   An address gate is a coarse outer defence. It stops the internet; it does not stop anyone
   who shares your network, and it rests on a proxy header (see `client-ip`). Put real

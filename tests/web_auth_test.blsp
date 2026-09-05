@@ -107,3 +107,34 @@
   (test "an allowed address passes through unhalted"
     (let (resp ((allow-ips ["1.2.3.4"]) (ip-conn {:fly-client-ip "1.2.3.4"})))
       (is (not (halted? resp))))))
+
+;; An IPv6 privacy address rotates its HOST half — the same machine on the same network
+;; appears as a different address within a day. An allow-list of exact addresses locks its
+;; owner out, which is not hypothetical: it happened within an hour of the first one being
+;; set on hive.
+(describe "allowed-ip? matches an IPv6 prefix"
+  (defn- from (address) (ip-conn {:fly-client-ip address}))
+
+  (test "a rotated host half still matches its /64"
+    (let (allowed ["2c0f:ef18:1b2e:0::/64"])
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:231b:2728:665b:78a9") allowed))
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:5d71:db2c:e7f6:f054") allowed))))
+
+  (test "a different network does not match"
+    (is (not (allowed-ip? (from "2c0f:ef18:9999:0:231b:2728:665b:78a9") ["2c0f:ef18:1b2e:0::/64"]))))
+
+  (test "a shorter prefix matches more"
+    (is (allowed-ip? (from "2c0f:ef18:9999:0:1:2:3:4") ["2c0f:ef18::/32"])))
+
+  (test "exact addresses still work alongside prefixes"
+    (let (allowed ["1.2.3.4" "2c0f:ef18:1b2e:0::/64"])
+      (is (allowed-ip? (from "1.2.3.4") allowed))
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:aaaa:bbbb:cccc:dddd") allowed))
+      (is (not (allowed-ip? (from "1.2.3.5") allowed)))))
+
+  ;; Not a guess: a prefix length this cannot evaluate is not a match.
+  (test "a non-multiple-of-16 prefix is refused rather than approximated"
+    (is (not (allowed-ip? (from "2c0f:ef18:1b2e:0:1:2:3:4") ["2c0f:ef18:1b2e:0::/60"]))))
+
+  (test "a v4 address never matches a v6 prefix"
+    (is (not (allowed-ip? (from "1.2.3.4") ["2c0f:ef18::/32"])))))
