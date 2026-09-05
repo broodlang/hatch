@@ -178,3 +178,42 @@
   "Drop every cached fragment — for tests, and for a dev reload that changed a template."
   (dolist (key (keys (table/snapshot *fragments*)))
     (table/delete *fragments* key)))
+
+;; ---- compressed representations ---------------------------------------------
+
+(def- *compressed* (table/new))
+
+;; Bounded, and this one is not a formality. A key here is derived from the RESPONSE BODY,
+;; and a body can vary with request input — a "no such version" page naming the version
+;; someone asked for produces a distinct body per distinct query string. An unbounded store
+;; keyed by that is a leak a stranger drives. At the cap the whole store is dropped rather
+;; than evicted one by one: entries are large and equally valuable, the pages that matter are
+;; re-cached on their next request, and the alternative is tracking recency for no benefit.
+(def *max-compressed* 64)
+
+(defn compressed (key build)
+  "The compressed body for `key`, computing it with `build` on the first ask.
+
+  Key it by something that identifies the exact bytes AND the coding — an ETag plus `\"br\"`
+  is exactly that, which is why `conditional` runs first. Compressing a 437 KB page measured
+  8.8ms against 0.45ms to hash it, and for a page whose content cannot change between
+  requests that work is repeated verbatim every time.
+
+  Do not use this for a response that varies per user: one entry serves everyone."
+  (cond
+    (table/has? *compressed* key) (table/get *compressed* key)
+    else
+      (let (value (build))
+        (when (>= (table/count *compressed*) *max-compressed*)
+          (clear-compressed))
+        (table/put *compressed* key value)
+        value)))
+
+(defn compressed-entries ()
+  "The compressed store as a map — for tests asserting the bound holds."
+  (table/snapshot *compressed*))
+
+(defn clear-compressed ()
+  "Drop every cached compressed body."
+  (dolist (key (keys (table/snapshot *compressed*))) (table/delete *compressed* key))
+  nil)
