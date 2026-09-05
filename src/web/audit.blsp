@@ -82,7 +82,7 @@
 
 (defn- within? (position rs)
   "Whether `position` falls inside any `[start end]` range in `rs`."
-  (> (count (filter rs (fn (r) (and (> position (first r)) (< position (second r)))))) 0))
+  (any? rs (fn (r) (and (> position (first r)) (< position (second r))))))
 
 (defn- inline-script-text (document)
   "Every inline `<script>` body in `document`, concatenated. External scripts contribute

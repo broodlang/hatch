@@ -125,17 +125,12 @@
   `>` backtick)."
   (or (<= cp 32) (= cp 34) (= cp 38) (= cp 39) (= cp 47) (= cp 60) (= cp 61) (= cp 62) (= cp 96)))
 
-;; Attribute names are keywords written in source — `:class`, `:href`, the same handful on
-;; every element of every page — so the character scan below answers the same question about
-;; the same strings for the life of the process. It measured 4.2µs per attribute, a sixth of
-;; the cost of rendering an element. Memoised, it is a table lookup.
-(def- *safe-names* (table/new))
-
-;; Bounded, because a name is not guaranteed to come from source: a template can build one
-;; from data, and an unbounded memo keyed by that is a leak an app's INPUT controls. Past the
-;; cap the scan simply runs — slower, still correct. The cap is far above the number of
-;; distinct attribute names any real template uses.
-(def- *max-safe-names* 512)
+;; The tag and attribute memos below are both bounded, because a name is not guaranteed to
+;; come from source: a template can build one from data (`(keyword (str "data-" user))`), and
+;; an unbounded memo keyed by that is a leak an app's INPUT controls. Past the cap the work
+;; simply runs — slower, still correct. The cap is far above the number of distinct tag or
+;; attribute names any real template uses.
+(def- *max-memo-entries* 512)
 
 (def- *tag-names* (table/new))
 
@@ -150,18 +145,9 @@
   (if (table/has? *tag-names* tag)
     (table/get *tag-names* tag)
     (let (info [(->string tag) (contains? *void-tags* tag)])
-      (when (< (table/count *tag-names*) *max-safe-names*)
+      (when (< (table/count *tag-names*) *max-memo-entries*)
         (table/put *tag-names* tag info))
       info)))
-
-(defn- safe-attr-name? (n)
-  (cond
-    (table/has? *safe-names* n) (table/get *safe-names* n)
-    (>= (table/count *safe-names*) *max-safe-names*) (safe-attr-name-scan? n)
-    else
-      (let (safe (safe-attr-name-scan? n))
-        (table/put *safe-names* n safe)
-        safe)))
 
 (def- *attr-names* (table/new))
 
@@ -174,14 +160,15 @@
   1.9us per attribute, on a page that has hundreds of them. All three are functions of the
   same keyword and none can change, so they are cached together.
 
-  Bounded like `*safe-names*`, and for the same reason: an app that derives a key from
-  untrusted input (`(keyword (str \"data-\" user))`) must not be able to grow this without
-  limit. Past the bound it still answers, just without remembering."
+  `safe-attr-name-scan?` is called directly rather than through a memo of its own. It used to
+  have one, keyed by the name STRING — but this is now its only caller and reaches it only on
+  a miss here, so that inner table cached an answer already computed at most once per keyword.
+  Two tables and two bounds where one of each does the work."
   (if (table/has? *attr-names* k)
     (table/get *attr-names* k)
-    (let (info [(if (safe-attr-name? (->string k)) (->string k) nil)
-                 (contains? *url-attrs* k)])
-      (when (< (table/count *attr-names*) *max-safe-names*)
+    (let (name (->string k)
+          info [(if (safe-attr-name-scan? name) name nil) (contains? *url-attrs* k)])
+      (when (< (table/count *attr-names*) *max-memo-entries*)
         (table/put *attr-names* k info))
       info)))
 

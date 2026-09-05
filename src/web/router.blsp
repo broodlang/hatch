@@ -127,7 +127,7 @@
 
 (defn mem? (x xs)
   "True if `x` is `=` to some element of list `xs`."
-  (not (empty? (filter xs (fn (y) (= y x))))))
+  (any? xs (fn (y) (= y x))))
 
 (defn uniq (xs)
   "`xs` with later duplicates removed, order preserved."

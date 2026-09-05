@@ -135,7 +135,7 @@
 
 (defn- pubsub-subscribed? (subs pid)
   "True if `pid` is still subscribed to any topic (O(log n) per topic set)."
-  (not (empty? (filter (%map-pairs subs) (fn (kv) (contains? (first (rest kv)) pid))))))
+  (any? (%map-pairs subs) (fn (kv) (contains? (first (rest kv)) pid))))
 
 (defn- pubsub-drop-ref (refs pid)
   "Demonitor `pid` (its last subscription is gone) and drop its ref."
