@@ -19,7 +19,9 @@
   (:use web/conn)
   ; url-decode — percent-decode each path segment (so a `%20` filename resolves), on the
   ; DECODED value of which the traversal checks run
-  (:alias http/util))
+  (:alias http/util)
+  ; not-modified? — the one implementation of RFC 9110 §13.1.2 If-None-Match matching
+  (:alias web/cache))
 
 ; ---- MIME types ----
 
@@ -208,25 +210,16 @@
   trusting (and re-using) its stored copy: the ETag and the Cache-Control."
   (send-resp (with-resp-headers conn {:etag tag :cache-control cc}) 304 ""))
 
-(defn strip-weak (t)
-  "Drop a leading weak-validator `W/` from an ETag token, so a weak `If-None-Match` still
-  matches our strong tag (the RFC 7232 comparison for `If-None-Match` is weak)."
-  (if (string/starts-with? t "W/") (string/substring t 2 (string/length t)) t))
-
 (defn if-none-match? (conn tag)
   "True if the request's `If-None-Match` lists `tag` (or is the `*` wildcard) — i.e. the
   client already holds this exact version, so we can answer 304 instead of resending it.
-  The header is a comma-separated list of (possibly weak) ETags; we compare each token
-  exactly (after trimming and stripping a `W/`), not by substring — a substring test both
-  misses legitimate multi-tag lists and false-positives when `tag` is a substring of an
-  unrelated token."
-  (let (inm (get (get conn :headers) :if-none-match))
-    (if (nil? inm)
-      false
-      (let (want (http/util/trim-if-needed inm))
-        (or (= want "*")
-          (any? (string/split want ",")
-            (fn (t) (= (strip-weak (http/util/trim-if-needed t)) tag))))))))
+
+  `web/cache/not-modified?` is the one implementation of the rule, for files and for dynamic
+  responses alike. This module had its own, and the two had already drifted: on `\"a\", *` and
+  on a malformed `W/ \"abc\"` they disagreed about whether to send a 304. Two readings of one
+  RFC paragraph is exactly the shape that drifts, and a wrongly-issued 304 leaves a client on
+  a stale copy."
+  (web/cache/not-modified? conn tag))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
