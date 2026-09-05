@@ -139,16 +139,20 @@
 
 (def- *tag-names* (table/new))
 
-(defn- tag-name-of (tag)
-  "`(->string tag)` for an element's tag, memoised on the keyword — once per element rendered,
-  and a page is a few hundred elements over a handful of distinct tags. Bounded like the
-  attribute-name memo."
+(defn- tag-info (tag)
+  "`[name void?]` for an element's tag, memoised on the keyword.
+
+  Both facts are asked once per element and neither can change for a given tag, so they share
+  ONE table lookup. Separately they were `(->string tag)` plus a `contains?` on the void-tag
+  set — 0.35us and 0.62us — against 0.55us for a lookup and a two-element destructure.
+
+  Bounded like the attribute memo; past the bound it still answers, without remembering."
   (if (table/has? *tag-names* tag)
     (table/get *tag-names* tag)
-    (let (n (->string tag))
+    (let (info [(->string tag) (contains? *void-tags* tag)])
       (when (< (table/count *tag-names*) *max-safe-names*)
-        (table/put *tag-names* tag n))
-      n)))
+        (table/put *tag-names* tag info))
+      info)))
 
 (defn- safe-attr-name? (n)
   (cond
@@ -161,25 +165,25 @@
 
 (def- *attr-names* (table/new))
 
-(defn- attr-name (k)
-  "The attribute name string for keyword `k` when it is safe to emit, else nil. Memoised on
-  the KEYWORD, so the common path is one table lookup.
+(defn- attr-info (k)
+  "`[name url?]` for attribute keyword `k` — `name` is nil when the name is not safe to emit.
+  Memoised on the KEYWORD, so the common path is one table lookup.
 
-  `render-attr` used to do `(->string k)` and then `safe-attr-name?` on the result — a
-  conversion that allocates plus a second memo lookup, about 1.3us per attribute, on a page
-  that has hundreds of them. Both answers are functions of the same keyword and neither can
-  change, so they are cached together.
+  `render-attr` used to do `(->string k)`, then `safe-attr-name?` on the result, then a
+  `contains?` on the URL-attribute set: an allocating conversion plus two more lookups, about
+  1.9us per attribute, on a page that has hundreds of them. All three are functions of the
+  same keyword and none can change, so they are cached together.
 
   Bounded like `*safe-names*`, and for the same reason: an app that derives a key from
   untrusted input (`(keyword (str \"data-\" user))`) must not be able to grow this without
   limit. Past the bound it still answers, just without remembering."
   (if (table/has? *attr-names* k)
     (table/get *attr-names* k)
-    (let (n (->string k)
-          safe (if (safe-attr-name? n) n nil))
+    (let (info [(if (safe-attr-name? (->string k)) (->string k) nil)
+                 (contains? *url-attrs* k)])
       (when (< (table/count *attr-names*) *max-safe-names*)
-        (table/put *attr-names* k safe))
-      safe)))
+        (table/put *attr-names* k info))
+      info)))
 
 (defn- safe-attr-name-scan? (n)
   "True when `n` is a non-empty attribute name with no character that could escape the
@@ -196,19 +200,32 @@
   attribute whose NAME contains an unsafe character is dropped entirely (an unsafe name can't
   be escaped the way a value can)."
   (let ([k v] kv
-        n (attr-name k))
+        [n url?] (attr-info k))
     (cond
       (nil? n) ""
       (= v true) (str " " n)
       (= v false) ""
       (nil? v) ""
       (vector? v) (str " " n "=\"" (escape-html (string/join (map v str) " ")) "\"")
-      (contains? *url-attrs* k) (str " " n "=\"" (escape-html (str (safe-url v))) "\"")
+      url? (str " " n "=\"" (escape-html (str (safe-url v))) "\"")
       else (str " " n "=\"" (escape-html (str v)) "\""))))
 
 (defn render-attrs (attrs)
-  "Serialize an attribute map to an HTML attribute string."
-  (string/join (map (%map-pairs attrs) render-attr) ""))
+  "Serialize an attribute map to an HTML attribute string.
+
+  Most elements carry no attributes or exactly one, and for those `map` + `string/join` is
+  pure ceremony: building a one-element list and joining it measured 2.77us, against 3.05us
+  for the `render-attr` call it wraps. The guards are `empty?` and `rest`, 0.05us each.
+
+  That cheapness is the point, and worth stating because the obvious spelling is a trap: an
+  earlier attempt guarded with `(= (count attrs) 0)`, and `count` on a map costs 0.5us —
+  charged to every element that DOES have attributes, which is most of them. It made a real
+  page measurably slower. `empty?` is ten times cheaper and answers the same question."
+  (let (pairs (%map-pairs attrs))
+    (cond
+      (empty? pairs) ""
+      (empty? (rest pairs)) (render-attr (first pairs))
+      else (string/join (map pairs render-attr) ""))))
 
 ;; The seam for an app's OWN type in a template. `render`'s `else` used to escape
 ;; `(str node)`, which for a record is its internal map — `{:__id__ :app/money, :cents 250}`
@@ -254,9 +271,9 @@
         has-map (and (not (nil? tail)) (map? (first tail)))
         attrs (if has-map (first tail) {})
         children (if has-map (rest tail) tail)
-        tag-name (tag-name-of tag)
+        [tag-name void?] (tag-info tag)
         attr-str (render-attrs attrs))
-    (if (contains? *void-tags* tag)
+    (if void?
       (str "<" tag-name attr-str ">")
       (str "<"
         tag-name
