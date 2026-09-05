@@ -57,10 +57,21 @@
   A `%`-escape can decode to an invalid UTF-8 byte sequence (`%ff`, `%c0`, `%e0%80`, …),
   on which `utf8-bytes->string` throws — and `parse-query` runs this on every request's
   query outside any try, so an unguarded throw crashes the worker with no response (a
-  trivially scriptable DoS). Catch it and fall back to the raw input rather than crash."
-  (try
-    (string/bytes-> (vec (reverse (url-decode-acc (string/->list s) nil))))
-    (catch _e s)))
+  trivially scriptable DoS). Catch it and fall back to the raw input rather than crash.
+
+  A string with no `%` and no `+` decodes to ITSELF, and almost every one is: a path segment
+  like `hatch` or `packages`, an ordinary query value. The decoder walks character by
+  character over a list of one-character strings, then reverses, vectorises and re-encodes —
+  13.6us for a five-character segment, paid per path param, per query param and per segment of
+  a splat route, on every request. One `string/span-until` says whether any of that is needed.
+
+  Provably the same answer: with no `%` and no `+`, every branch of `url-decode-acc` copies the
+  character's own bytes through unchanged, so the reassembled string is the input."
+  (if (= (string/span-until s 0 "%+") (string/length s))
+    s
+    (try
+      (string/bytes-> (vec (reverse (url-decode-acc (string/->list s) nil))))
+      (catch _e s))))
 
 (defn- url-decode-acc (chars acc)
   (match chars
