@@ -33,7 +33,10 @@
   #{"application/json"
     "application/javascript" "application/xml" "application/xhtml+xml" "application/rss+xml"
     "application/atom+xml" "application/manifest+json" "application/ld+json"
-    "application/vnd.api+json" "image/svg+xml"})
+    "application/vnd.api+json" "image/svg+xml"
+    ;; A .wasm is not a compressed format — it is bytecode and section names in a plain
+    ;; container, and compresses ~3x. Its size makes it the asset that most wants this.
+    "application/wasm"})
 
 (defn- refused? (accept-encoding coding)
   "True when `accept-encoding` lists `coding` with an explicit `q=0` weight — an RFC 7231

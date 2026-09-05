@@ -111,10 +111,42 @@
   `:fingerprint` is set, content-fingerprint the built files (see `fingerprint`) so prod
   serves them under immutable, cache-forever URLs."
   (run-each (or (get config :build) (list)) "build")
+  (prepare config)
+  nil)
+
+(defn prepare (config)
+  "The prod asset step, minus the bundler: content-fingerprint `:fingerprint`'s files, then
+  write `.br`/`.gz` siblings for `:precompress`'s. Both are pure file work — no external
+  command — so a slim runtime image with no bundler in it can run this at boot, which is
+  exactly what an app's `serve` should do in prod.
+
+  This exists as its own function because an app that pre-builds its assets in the image calls
+  it INSTEAD of `build`, and a release step that also runs the bundler gets it via `build`. It
+  used to be an inline `(when (get config :fingerprint) …)` in `build`, and an app taking the
+  first path silently got only the half it had copied — `:precompress` did nothing, with no
+  error to say so."
   (when (get config :fingerprint)
     (log/info "[assets] fingerprinting built assets")
     (fingerprint (get config :fingerprint)))
+  (when (get config :precompress)
+    (log/info "[assets] precompressing name-pinned assets")
+    (precompress-spec (get config :precompress)))
   nil)
+
+(defn precompress-spec (spec)
+  "Write `.br`/`.gz` siblings for `{:dir <static-dir> :files [<name> …]}` WITHOUT renaming
+  them — the escape hatch for an asset whose name another asset has baked in and so cannot be
+  fingerprinted.
+
+  The case this exists for is a wasm-bindgen bundle: the JS glue locates its binary with
+  `new URL(\'mod_bg.wasm\', import.meta.url)`, so fingerprinting the .wasm renames it out from
+  under the glue and the module 404s. The glue itself fingerprints fine; the binary it names
+  has to keep its name. It still wants its sidecars — a wasm binary is several megabytes and
+  compresses ~3x — and `web/static/serve-encoded` finds a sidecar by path alone, with no
+  manifest involved."
+  (let (dir (get spec :dir "static"))
+    (dolist (file (or (get spec :files) (list)))
+      (precompress (str dir "/" file)))))
 
 ; ---- content fingerprinting (prod cache-busting) ---------------------------
 ; A release rewrites built assets to content-addressed names (`app.<sha>.css`) and records a
@@ -158,9 +190,16 @@
     fp))
 
 (defn compressible? (file)
-  "True for text assets worth precompressing (CSS/JS/SVG/JSON/…), by MIME. Already-compressed
-  binaries (png/woff2/wasm/gz) barely shrink and are skipped."
-  (static/text-mime? (static/mime-type file)))
+  "True for assets worth precompressing (CSS/JS/SVG/JSON/… and wasm), by MIME.
+  Already-compressed binaries (png/jpeg/woff2/gz/zip) barely shrink and are skipped.
+
+  WebAssembly is on the compress side of that line, which is easy to get backwards: `.wasm`
+  looks like an opaque binary, but it is a plain uncompressed container of bytecode and
+  section names, and it compresses about as well as the source it came from. Measured on a
+  7.0 MB wasm-bindgen build: 2.5 MB gzipped, less again with brotli. Skipping it ships three
+  times the bytes for nothing."
+  (or (static/text-mime? (static/mime-type file))
+    (= (static/mime-type file) "application/wasm")))
 
 (defn precompress (path)
   "Best-effort: write brotli (`path.br`) and gzip (`path.gz`) copies of `path` so
