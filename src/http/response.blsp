@@ -117,10 +117,19 @@
 (defn header-safe (v)
   "Strip CR/LF from a header value so an attacker-influenced value (a redirect
   `Location`, a reflected header) can't inject extra headers or split the response
-  — HTTP response splitting. Values are always strings here; coerce for safety."
-  (-> (str v)
-    (string/replace "\r" "")
-    (string/replace "\n" "")))
+  — HTTP response splitting. Values are always strings here; coerce for safety.
+
+  Almost no header value contains either character, and the two `string/replace` passes cost
+  the same whether or not they find anything. `string/span-until` finds the first CR or LF in
+  ONE native scan; if that lands at the end there is nothing to strip and the value is
+  returned as it came. The replaces still run when there IS something, so the guarantee is
+  unchanged — this only stops paying for it on every header of every response."
+  (let (text (str v))
+    (if (= (string/span-until text 0 "\r\n") (string/length text))
+      text
+      (-> text
+        (string/replace "\r" "")
+        (string/replace "\n" "")))))
 
 (defn format-header (kv)
   "Format a `[keyword value]` pair as one or more HTTP header lines. A scalar value emits
@@ -136,9 +145,27 @@
   "One `Header-Name: value` line (CRLF-terminated), with CR/LF stripped from the value."
   (str (header-name k) ": " (header-safe v) "\r\n"))
 
+(def- *header-names* (table/new))
+(def- *max-header-names* 512)
+
 (defn header-name (k)
-  "Convert a keyword like `:content-type` to the canonical header string `Content-Type`."
-  (string/join (map (string/split (->string k) "-") capitalize-first) "-"))
+  "Convert a keyword like `:content-type` to the canonical header string `Content-Type`.
+
+  Memoised on the keyword. The conversion is a `->string`, a split, a `capitalize-first` per
+  segment (each of those a `blank?`, an `upper` and two `substring`s) and a join — and it ran
+  for every header of every response, to produce a string that is a pure function of the
+  keyword and can never change. A response carries seven or so headers drawn from a handful
+  of distinct names.
+
+  Bounded, like the template's name memos and for the same reason: a handler that derives a
+  header name from request data must not be able to grow this without limit. Past the bound
+  it still converts, just without remembering."
+  (if (table/has? *header-names* k)
+    (table/get *header-names* k)
+    (let (n (string/join (map (string/split (->string k) "-") capitalize-first) "-"))
+      (when (< (table/count *header-names*) *max-header-names*)
+        (table/put *header-names* k n))
+      n)))
 
 (defn capitalize-first (s)
   "Uppercase the first character of `s`, leaving the rest unchanged (unlike the prelude's
