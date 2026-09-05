@@ -530,14 +530,22 @@
 
 (defn load-manifest (&optional (dir "static"))
   "The fingerprint manifest under `dir` as a `logical → fingerprinted` map, or `{}` when
-  there's none (dev, or a build that didn't fingerprint). Memoized per `dir` (including the
-  empty/miss result), so a hot path reads the file at most once."
+  there's none (dev, or a build that didn't fingerprint).
+
+  A manifest that was READ is memoized per `dir`, so a hot path touches the disk once. A
+  MISS is deliberately not memoized: the absent manifest is a transient state — `serve`
+  writes it during boot, and anything that asked before then (a module-level `def` in a
+  view, loaded when the router builds its route table) would otherwise pin `{}` for the
+  life of the process and ship plain, `no-cache` URLs with a correct manifest sitting on
+  disk beside them. A miss costs one failed `file/slurp`; only dev pays it repeatedly."
   (if (table/has? *manifest-cache* dir)
     (table/get *manifest-cache* dir)
-    (let (text (check-allow :discarded-catch (try (file/slurp (manifest-path dir)) (catch _ nil)))
-          m (if (nil? text) {} (parse-manifest text)))
-      (table/put *manifest-cache* dir m)
-      m)))
+    (let (text (check-allow :discarded-catch (try (file/slurp (manifest-path dir)) (catch _ nil))))
+      (if (nil? text)
+        {}
+        (let (m (parse-manifest text))
+          (table/put *manifest-cache* dir m)
+          m)))))
 
 (defn clear-manifest-cache ()
   "Drop every memoized manifest, so the next `load-manifest` re-reads from disk. For tests

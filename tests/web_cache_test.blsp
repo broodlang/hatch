@@ -122,40 +122,47 @@
 ;; The half of caching no `Cache-Control` covers: work the SERVER repeats. A validator makes
 ;; a repeat visit cheap for the client, but the response must still be built to know its
 ;; ETag — so a page whose content cannot change is rebuilt in full for every request.
+; :serial, and a key of its own per test. The cache is one process-wide table, so `clear`
+; reaches into every other test in this group: run in parallel on a shared key `:k`, a
+; neighbour's `clear` lands between this test's `fetch` and its assertion and the rebuild it
+; asserts never happens. That failed roughly one run in four before both halves of this were
+; fixed — rare enough to read as a fluke, which is how a flaky test earns its keep.
 (describe "fetch"
-  (test "computes once and reuses"
-    (clear)
+  :serial (test "computes once and reuses"
+    (invalidate :reuse)
     (let (to (self)
           build (fn () (send to :built) :value))
-      (assert= :value (fetch :k build))
-      (assert= :value (fetch :k build))
-      (assert= :value (fetch :k build))
+      (assert= :value (fetch :reuse build))
+      (assert= :value (fetch :reuse build))
+      (assert= :value (fetch :reuse build))
       ;; exactly one build, however many asks
       (assert= 1 (receive (:built (receive (:built 2) (after 20 1))) (after 20 0)))))
 
   (test "keys are independent"
-    (clear)
+    (invalidate :ka)
+    (invalidate :kb)
     (assert= :a (fetch :ka (fn () :a)))
     (assert= :b (fetch :kb (fn () :b)))
     (assert= :a (fetch :ka (fn () :never))))
 
   (test "a cached nil is still a hit, not a miss"
-    (clear)
+    (invalidate :n)
     (let (to (self))
       (fetch :n (fn () (send to :built) nil))
       (assert= nil (fetch :n (fn () (send to :built) :recomputed)))))
 
   (test "invalidate forces one rebuild"
-    (clear)
-    (fetch :k (fn () :first))
-    (invalidate :k)
-    (assert= :second (fetch :k (fn () :second))))
+    (invalidate :inv)
+    (fetch :inv (fn () :first))
+    (invalidate :inv)
+    (assert= :second (fetch :inv (fn () :second))))
 
+  ;; The one test `clear` is the subject of, rather than the setup — so it is also the only
+  ;; one that may call it.
   (test "clear drops everything"
+    (fetch :cleared (fn () :first))
     (clear)
-    (fetch :k (fn () :first))
-    (clear)
-    (assert= :second (fetch :k (fn () :second)))))
+    (assert= :second (fetch :cleared (fn () :second)))))
 
 ;; ---- compressed representations ---------------------------------------------
 (describe "compressed"

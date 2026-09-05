@@ -65,10 +65,15 @@
     (assert= (compressible? "app.css") true)
     (assert= (compressible? "app.js") true)
     (assert= (compressible? "icon.svg") true))
+  ;; wasm READS as a binary and so is easy to file with the already-compressed ones, but it is
+  ;; a plain container of bytecode and section names: a 7.0 MB wasm-bindgen build gzips to
+  ;; 2.5 MB. This test used to assert the opposite, which is why it is spelled out here.
+  (test "wasm is compressible, despite being binary"
+    (assert= (compressible? "app.wasm") true))
   (test "already-compressed binaries are not"
     (assert= (compressible? "logo.png") false)
     (assert= (compressible? "font.woff2") false)
-    (assert= (compressible? "app.wasm") false)))
+    (assert= (compressible? "bundle.gz") false)))
 
 (describe "fingerprint precompression"
   ; precompress compresses in-process (no external CLI), writing both a brotli .br and a gzip .gz
@@ -92,3 +97,20 @@
       (file/rm (str dir "/" fp))
       (when (file/exists? gz) (file/rm gz))
       (when (file/exists? br) (file/rm br)))))
+
+;; A name-pinned asset (one whose name another asset has baked in) gets sidecars WITHOUT being
+;; renamed — the case `:precompress` exists for.
+(describe "precompress-spec"
+  (test "writes .br/.gz siblings and leaves the file's own name alone"
+    (let (dir "/tmp/hatch-precompress-spec-test"
+          _ (check-allow :discarded-catch (try (file/mkdir dir) (catch _ nil)))
+          body (string/join (map (range 0 200) (fn (_) "some repeated payload bytes\n")) "")
+          _ (file/spit (str dir "/mod_bg.wasm") body))
+      (precompress-spec {:dir dir :files ["mod_bg.wasm"]})
+      (assert= (file/exists? (str dir "/mod_bg.wasm")) true)
+      (assert= (file/exists? (str dir "/mod_bg.wasm.br")) true)
+      (assert= (file/exists? (str dir "/mod_bg.wasm.gz")) true)
+      (is (< (count (file/slurp-bytes (str dir "/mod_bg.wasm.br")))
+            (count (file/slurp-bytes (str dir "/mod_bg.wasm")))))
+      (dolist (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
+        (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f)))))))
