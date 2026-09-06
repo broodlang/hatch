@@ -285,10 +285,42 @@
   keys, each computed once — and makes it the wrong tool for anything keyed by user input,
   which would grow without limit."
   (if (table/has? *fragments* key)
-    (table/get *fragments* key)
+    (do (bump :hits) (table/get *fragments* key))
     (let (value (build))
+      (bump :misses)
       (table/put *fragments* key value)
       value)))
+
+;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
+;; unknowable: a cache that never hits and a cache that is never asked look identical from
+;; the outside, and both look like a cache that is working.
+(def- *counters* (table/new))
+
+(defn- bump (k)
+  (table/put *counters* k (+ 1 (table/get *counters* k 0))))
+
+(defn counter (k)
+  "One cache counter (`:hits`, `:misses`), or 0."
+  (table/get *counters* k 0))
+
+(defn stats ()
+  "A snapshot of what the cache is holding and doing, for a dashboard or a probe.
+
+  `:hit-rate` is nil rather than 0 when nothing has been asked yet — a cache with no traffic
+  is not a cache performing badly, and showing 0% for it invites the wrong fix."
+  (let (hits (counter :hits)
+        misses (counter :misses)
+        asked (+ hits misses))
+    {:fragments (count (keys (table/snapshot *fragments*)))
+     :compressed (count (compressed-entries))
+     :max-compressed *max-compressed*
+     :hits hits
+     :misses misses
+     :hit-rate (if (= asked 0) nil (math/round-to (/ (* 100.0 hits) asked) 1))
+     :node (check-allow :discarded-catch (try (node/name) (catch _e :nonode)))
+     :peers (into [] (remote-nodes))
+     :listening? (not (nil? (check-allow :discarded-catch
+                              (try (proc/whereis :hatch-cache) (catch _e nil)))))}))
 
 (defn- local-invalidate (key)
   "Drop one cached fragment on THIS node only — the half a peer's message applies."

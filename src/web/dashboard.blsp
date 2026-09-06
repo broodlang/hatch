@@ -18,13 +18,21 @@
   authenticates."
   (:use web/conn)
   (:alias web/metrics)
+  (:alias web/cache)
+  (:alias node)
   (:alias web/template))
+
+; Captured when this module loads, which is boot — the counters below are all "since this
+; process started", and without this the numbers have no denominator.
+(def- *booted-at* (os/now))
 
 (def- *styles*
   (str "body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;"
     "background:#0f1115;color:#d7dae0}" ".wrap{max-width:64rem;margin:0 auto;padding:2rem 1.25rem}"
     "h1{font-size:1.1rem;letter-spacing:.08em;text-transform:uppercase;color:#8b93a1;margin:0 0 1.25rem}"
     ".cards{display:flex;flex-wrap:wrap;gap:.75rem;margin-bottom:1.5rem}"
+    "h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#8b93a1;"
+    "margin:1.5rem 0 .6rem;font-weight:600}"
     ".card{background:#161a21;border:1px solid #232833;border-radius:8px;padding:.75rem 1rem;min-width:7rem}"
     ".card b{display:block;font-size:1.5rem;font-weight:600}"
     ".card span{color:#8b93a1;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em}"
@@ -40,6 +48,54 @@
   [:div {:class "card"} [:b {:class class} (str value)] [:span {} label]])
 
 (defn- ms (value) (if (= value :over) "5000+" (str value)))
+
+(defn- duration (millis)
+  "A human-scaled uptime — the number alone is unreadable past a minute."
+  (let (s (math/quot millis 1000))
+    (cond
+      (< s 60) (str s "s")
+      (< s 3600) (str (math/quot s 60) "m " (math/rem s 60) "s")
+      (< s 86400) (str (math/quot s 3600) "h " (math/rem (math/quot s 60) 60) "m")
+      else (str (math/quot s 86400) "d " (math/rem (math/quot s 3600) 24) "h"))))
+
+(defn- section (title cards)
+  [:div {} [:h2 {} title] [:div {:class "cards"} cards]])
+
+(defn- cache-cards ()
+  "What the cache is holding and doing. A cache that never hits and a cache nobody asks look
+  identical from outside — both look like one that works — so the counters matter more than
+  the sizes."
+  (let (c (web/cache/stats)
+        rate (get c :hit-rate))
+    [(card "fragments" (get c :fragments))
+      (card "compressed" (str (get c :compressed) "/" (get c :max-compressed)))
+      (card "cache hits" (get c :hits))
+      (card "misses" (get c :misses))
+      ;; nil, not 0%, when nothing has been asked — no traffic is not bad performance, and
+      ;; showing 0% for it invites the wrong fix
+      (card "hit rate" (if (nil? rate) "—" (str rate "%")) (if (nil? rate) "dim" ""))]))
+
+(defn- cluster-cards ()
+  "Whether this node is part of a cluster, and whether it is listening for the invalidations
+  a peer sends. A node that is not listening still serves — it just serves stale, which is
+  precisely the failure that leaves no other trace."
+  (let (c (web/cache/stats)
+        peers (get c :peers)
+        node-name (get c :node))
+    [(card "node"
+       (if (= node-name :nonode) "standalone" (str node-name))
+       (if (= node-name :nonode) "dim" ""))
+      (card "peers" (count peers) (if (empty? peers) "dim" ""))
+      (card "invalidations"
+        (if (get c :listening?) "listening" "NOT LISTENING")
+        (if (get c :listening?) "" "err"))]))
+
+(defn- runtime-cards ()
+  (let (procs (or (check-allow :discarded-catch (try (count (proc/list)) (catch _e nil))) 0)
+        host (or (check-allow :discarded-catch (try (os/hostname) (catch _e nil))) "?"))
+    [(card "processes" procs)
+      (card "uptime" (duration (- (os/now) *booted-at*)))
+      (card "host" host)]))
 
 (defn- row (r)
   [:tr
@@ -84,6 +140,10 @@
                                  (card "5xx"
                                    (get t :server-error)
                                    (if (> (get t :server-error) 0) "err" ""))]
+                               (section "cache" (cache-cards))
+                               (section "cluster" (cluster-cards))
+                               (section "runtime" (runtime-cards))
+                               [:h2 {} "routes"]
                                (if (empty? rows)
                                  [:p {:class "dim"} "No requests recorded yet."]
                                  [:table
