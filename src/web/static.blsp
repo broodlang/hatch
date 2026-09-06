@@ -319,7 +319,13 @@
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
       else
-        (or (serve-range conn content-type body tag cc (count (string/->bytes body)))
+      ;; The byte length is computed ONLY for a request that actually sent `Range`.
+      ;; `(count (string/->bytes body))` UTF-8-encodes the whole body — a full copy of the
+      ;; asset — and `serve-range` needs it only to decide whether a byte slice is safe and
+      ;; to parse the header. Almost no request carries `Range`, so almost every one was
+      ;; paying to encode a 150 KB stylesheet in order to conclude it was not ranging.
+        (or (and (get (get conn :headers) :range)
+              (serve-range conn content-type body tag cc (count (string/->bytes body))))
           (send-resp (with-resp-headers conn
                        {:content-type content-type
                         :etag tag
@@ -407,7 +413,11 @@
       (not-found-resp conn)
       (let (path (str root "/" (string/join segs "/")))
         (or (serve-encoded conn path root)
-          (let (fresh (fresh-cached-etag path))
+          ;; The stat is for ONE purpose: answering a revalidation without reading the file.
+          ;; A request with no `If-None-Match` is not revalidating, so it was a syscall spent
+          ;; to learn something nobody asked — and the read path stats again anyway, through
+          ;; `cached-etag`.
+          (let (fresh (and (get (get conn :headers) :if-none-match) (fresh-cached-etag path)))
             (if (and fresh (if-none-match? conn fresh))
               (not-modified conn fresh (cache-control path root))
               ; text types are read as a string (file/slurp); everything else (images, fonts,

@@ -16,6 +16,14 @@
   `conditional` closes that: it hangs a strong ETag on the finished response and turns a
   matching `If-None-Match` into a bodyless 304.
 
+  **Across a cluster.** The stored copies (`fetch`, and the compressed bodies below) are
+  per-node, deliberately — a cache lookup must never become a network call. What crosses the
+  network is the INVALIDATION, which is small, rare and carries no data: `invalidate` and
+  `clear` reach every connected peer, so a second machine cannot go on serving what the first
+  has already replaced. Call `start-cluster` once at boot on every node; without it a node
+  invalidates its own copy and hears nobody else\'s. Single-node apps are unaffected —
+  `(node/list)` is empty and every cluster path is a no-op.
+
   **The ETag identifies a REPRESENTATION, not a resource** (RFC 9110 §8.8.3). A gzipped
   body and a brotli body of the same page are different representations, so `etag-for`
   takes the content-coding and suffixes the tag with it. Getting this wrong is how a client
@@ -34,6 +42,11 @@
   (:use web/conn)
   ; trim-if-needed — `string/trim` costs 3.14us per call whether or not it finds anything
   (:use http/util)
+  ; ensure-supervised — the registered listener that applies peers' invalidations
+  (:use web/registry)
+  ; node/list — peers to replicate an invalidation to; empty when not distributed
+  (:alias node)
+  (:use set)
   (:alias web/session)
   (:alias table))
 
@@ -277,14 +290,91 @@
       (table/put *fragments* key value)
       value)))
 
-(defn invalidate (key)
-  "Drop one cached fragment, so the next `fetch` rebuilds it."
+(defn- local-invalidate (key)
+  "Drop one cached fragment on THIS node only — the half a peer's message applies."
   (table/delete *fragments* key))
 
-(defn clear ()
-  "Drop every cached fragment — for tests, and for a dev reload that changed a template."
+(defn- local-clear ()
+  "Drop every cached fragment on THIS node only."
   (dolist (key (keys (table/snapshot *fragments*)))
     (table/delete *fragments* key)))
+
+(defn invalidate (key)
+  "Drop one cached fragment, so the next `fetch` rebuilds it — on every node in the cluster.
+
+  A cache is per-node, so on a second machine the same key is still cached and still being
+  served. Invalidating locally and stopping there is how one machine starts answering with
+  content the other has already replaced, indefinitely and silently."
+  (local-invalidate key)
+  (replicate [:invalidate key]))
+
+(defn clear ()
+  "Drop every cached fragment — for tests, for a dev reload that changed a template, and
+  cluster-wide for the same reason as `invalidate`."
+  (local-clear)
+  (replicate [:clear]))
+
+;; ---- cluster ----------------------------------------------------------------
+;;
+;; The cache is node-local by nature and that is the point: a lookup must not become a network
+;; call. What has to cross the network is the INVALIDATION, which is small, rare, and carries
+;; no data — so each node keeps its own copy and hears when a copy has gone stale.
+;;
+;; This is the shape `web/pubsub` already uses for its cross-node fan-out, deliberately: one
+;; mechanism in the framework rather than two, addressed by registered name on each peer and
+;; best-effort per peer, so a link that just dropped is skipped instead of failing the write.
+
+(defn remote-nodes ()
+  "The connected peer node names, or an empty list when this runtime is not a distributed node
+  (so every cluster path below is a no-op and a single-node app is unaffected)."
+  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
+
+(defn- replicate (msg)
+  "Send `msg` to every peer's cache listener — once each, and never re-sent by the receiver,
+  so there are no loops and a write costs O(peers) messages. Best-effort: a peer not running
+  the listener, or a link that just dropped, is skipped rather than failing the invalidation."
+  (dolist (n (remote-nodes))
+    (check-allow :discarded-catch
+      (try (send {:name :hatch-cache :node n} msg) (catch _e nil)))))
+
+; How often the listener re-reads `(node/list)`. The kernel has no `[:nodeup]` —
+; `monitor-node` fires only `[:nodedown]` — so a peer's RETURN can only be noticed by looking,
+; which is what std/telemetry does for the same reason.
+(def *cluster-poll-ms* 5000)
+
+(defn- cache-listener (peers)
+  "Apply invalidations arriving from peers, and watch for a peer coming back.
+
+  A peer we could not see is a peer whose invalidations we did not receive, so when one
+  reappears this node's cache may be stale in ways it cannot enumerate. Dropping the whole
+  cache is the only honest response: it is cheap (everything rebuilds on demand) and the
+  alternative is serving content we have positive reason to doubt."
+  (receive
+    ([:invalidate key] (do (local-invalidate key) (cache-listener peers)))
+    ([:clear] (do (local-clear) (cache-listener peers)))
+    (_ (cache-listener peers))
+    (after *cluster-poll-ms*
+      (let (now (into #{} (remote-nodes))
+            returned (difference now peers))
+        (when (not (empty? returned)) (local-clear))
+        (cache-listener now)))))
+
+(defn start-cluster ()
+  "Make this node apply cache invalidations broadcast by its peers. Call it once at boot, from
+  the app's entry point, on every node.
+
+  Explicit rather than lazy, and that is the whole design: a node that only READS never
+  invalidates anything, so a listener started on first invalidation would never start on
+  exactly the node that most needs to hear about one. Idempotent, and harmless on a
+  single-node app — the listener simply never receives.
+
+  Returns the listener pid."
+  (ensure-supervised :hatch-cache-sup
+    [{:id :hatch-cache
+      :name :hatch-cache
+      :restart :permanent
+      :start (fn () (spawn (cache-listener (into #{} (remote-nodes)))))}]
+    :hatch-cache))
 
 ;; ---- compressed representations ---------------------------------------------
 

@@ -285,3 +285,59 @@
     (assert= false (not-modified? (inm "\"other\"") "\"abc\""))
     (assert= false (not-modified? (inm "\"abcd\"") "\"abc\""))
     (assert= false (not-modified? {:headers {}} "\"abc\""))))
+
+;; A cache is per-node by nature, and that is the point — a lookup must not become a network
+;; call. What has to cross the network is the INVALIDATION: small, rare, carrying no data.
+;; Invalidating locally and stopping there is how one machine serves content another has
+;; already replaced, indefinitely and silently.
+(describe "cluster-aware invalidation"
+  :serial (test "the listener starts, is idempotent, and survives being asked twice"
+    (let (a (start-cluster)
+          b (start-cluster))
+      (is (not (nil? a)))
+      (assert= a b)))
+
+  ;; Everything here must be a no-op on a single node — most apps are one node, and a cache
+  ;; that needed a cluster to work would be a cache nobody could use.
+  (test "a runtime that is not a distributed node has no peers"
+    (assert= [] (into [] (remote-nodes))))
+
+  (test "invalidate and clear still work locally with no cluster"
+    (fetch :cluster-a (fn () :first))
+    (assert= :first (fetch :cluster-a (fn () :second)))
+    (invalidate :cluster-a)
+    (assert= :second (fetch :cluster-a (fn () :second)))
+    (fetch :cluster-b (fn () :x))
+    (clear)
+    (assert= :rebuilt (fetch :cluster-b (fn () :rebuilt))))
+
+  ;; The listener applies what a peer sends. Sending to it directly is exactly what a peer's
+  ;; `replicate` does, so this exercises the receiving half without needing a second runtime.
+  (test "a peer's invalidate message drops the entry here"
+    (let (listener (start-cluster))
+      (fetch :from-peer (fn () :original))
+      (assert= :original (fetch :from-peer (fn () :changed)))
+      (send listener [:invalidate :from-peer])
+      ;; the listener is a separate process; give it a moment to apply
+      (receive (after 50 nil))
+      (assert= :changed (fetch :from-peer (fn () :changed)))))
+
+  (test "a peer's clear drops everything here"
+    (let (listener (start-cluster))
+      (fetch :wiped-1 (fn () :a))
+      (fetch :wiped-2 (fn () :b))
+      (send listener [:clear])
+      (receive (after 50 nil))
+      (assert= :rebuilt-1 (fetch :wiped-1 (fn () :rebuilt-1)))
+      (assert= :rebuilt-2 (fetch :wiped-2 (fn () :rebuilt-2)))))
+
+  ;; An unknown message must not kill the listener — it is permanent, and a peer running a
+  ;; newer hatch may send something this node does not know yet.
+  (test "an unrecognised message leaves the listener alive"
+    (let (listener (start-cluster))
+      (send listener [:something-from-the-future 1 2 3])
+      (receive (after 50 nil))
+      (fetch :still-alive (fn () :v))
+      (send listener [:invalidate :still-alive])
+      (receive (after 50 nil))
+      (assert= :rebuilt (fetch :still-alive (fn () :rebuilt))))))
