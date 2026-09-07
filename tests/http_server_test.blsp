@@ -267,7 +267,10 @@
                 {:tls {:cert cert :key key}}))
       (sleep 100)
       (server/stop port)
-      (assert= (nil? sup) false))))
+      ;; `(nil? sup)` asserted nothing: `server/start` answers a pid, and a pid is never
+      ;; nil, so the old `(assert= (nil? sup) false)` was true by construction. Ask what
+      ;; the test actually means — that the TLS listener came up as a real process.
+      (is (pid? sup)))))
 
 ; Phase 11 — per-connection workers run under a dynamic supervisor (observable via
 ; `nest observe` / whereis), as :temporary children (a dead socket can't resume, so never
