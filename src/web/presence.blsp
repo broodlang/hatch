@@ -160,6 +160,9 @@
   so ephemeral topics don't accumulate in the registry (and its vault)."
   (let (remaining (presence-without (presence-entries state topic) pid))
     (if (empty? remaining) (dissoc state topic) (assoc state topic remaining))))
+;; `state` declared `map`: untyped, `assoc`/`dissoc` answer `vector | map` and that width
+;; reaches `presence-tracked?` at the call site.
+(sig presence-remove (map any any -> map))
 
 (defn- presence-remove-pid (state pid)
   "Untrack `pid` from every topic. Topics it emptied are dropped (not left as dead keys)."
@@ -256,6 +259,7 @@
       (if (empty? node-map) (dissoc remotes from) (assoc remotes from node-map)))
     (assoc-in remotes [from topic] roster)))
 
+(sig presence-record-remote (map any any any -> map))
 (defn- presence-remote-topics-of (remotes node)
   "The topics a departed `node` had presences on (so a node-down only refreshes those)."
   (let (rr (get remotes node {}))

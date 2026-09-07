@@ -108,6 +108,7 @@
     (ident-run s (+ i 1))
     i))
 
+(sig ident-run (string int -> int))
 (defn string-lit-end (s i)
   "Index of the closing `\"` of a string literal whose opening quote is just before `i`."
   (cond
@@ -116,6 +117,7 @@
     (= (string/char-at s i) "\"") i
     else (string-lit-end s (+ i 1))))
 
+(sig string-lit-end (string int -> int))
 (defn expand-assigns (s)
   "Rewrite `@name` to `(get model :name)` in embedded Brood text `s`, leaving string
   literals (and `~@` splices) untouched."
@@ -147,6 +149,7 @@
                 ")")))
         else (expand-assigns-at s (+ i 1) (str acc c))))))
 
+(sig expand-assigns-at (string int string -> string))
 (defn read-expr (s)
   "Read embedded Brood text into a form, expanding the `@name` assign shorthand first."
   (reflect/read-string (expand-assigns s)))
@@ -169,6 +172,7 @@
         (= c "}") (if (= depth 0) i (interp-end s next (- depth 1) false false))
         else (interp-end s next depth false false)))))
 
+(sig interp-end (string int int bool bool -> int))
 (defn brace-inner (s)
   "`s` begins with `{`; return `[inner-text rest]`, the raw text between the braces
   (balanced, strings respected)."
@@ -202,6 +206,7 @@
         (quote-end s (+ i end 2)))
     else (quote-end s (+ i 1))))
 
+(sig quote-end (string int -> int))
 (defn read-quoted (s)
   "`s` begins with `\"`; returns `[text rest]` (text excludes the quotes)."
   (let (body (string/substring s 1 (string/length s))
@@ -484,7 +489,8 @@
   "Resolve `filename` against the directory of the file currently being compiled (the
   module that invoked a template macro). Call only at macro-expansion time, where
   `(current-file)` is that module's source."
-  (let (parts (string/split (reflect/current-file) "/")
+  ;; `current-file` answers nil outside a compile; splitting nil is the confusing failure.
+  (let (parts (string/split (or (reflect/current-file) "") "/")
         dir (string/join (take parts (- (count parts) 1)) "/"))
     (str dir "/" filename)))
 

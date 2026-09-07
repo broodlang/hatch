@@ -273,6 +273,7 @@
   "True if the two bytes at index `i` of `buf` are CR LF. Assumes `i+1` is in bounds."
   (and (= (bytes/at buf i) 13) (= (bytes/at buf (+ i 1)) 10)))
 
+(sig crlf-at? (bytes int -> bool))
 (defn dechunk-trailers-bytes (buf pos buflen)
   "Bytes-native `dechunk-trailers`: skip trailer headers after the 0-size chunk; return the index
   past the terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."

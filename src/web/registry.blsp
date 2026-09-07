@@ -31,7 +31,15 @@
     (do
       (supervisor/start children {:name sup-name :strategy :one-for-one})
       (await wait-name 60)
-      (proc/whereis wait-name))))
+      ;; Raise rather than answer nil. The docstring promises "the pid", and every caller
+      ;; takes it at its word — `(send (pubsub) …)`, `(send (presence) …)` and the rest
+      ;; passed the nil straight to `send`, which fails far from the cause with a message
+      ;; about the wrong thing. If the child never registered inside the window, that is
+      ;; what went wrong and this is where it is known.
+      (or (proc/whereis wait-name)
+        (error "ensure-supervised: "
+          wait-name " did not register within the start window")))))
+(sig ensure-supervised (any any any -> pid))
 
 (defn vault-loop (snapshot)
   "A durable mirror: holds the latest snapshot pushed via `[:set s]` and serves it on

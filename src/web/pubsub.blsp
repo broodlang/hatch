@@ -152,6 +152,9 @@
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
   (let (remaining (disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
+;; `subs` declared `map`: untyped, `assoc`/`dissoc` answer `vector | map` and the width
+;; reaches `pubsub-subscribed?` at the call site.
+(sig pubsub-remove (map any any -> map))
 
 (defn- pubsub-remove-pid (subs pid)
   "Remove `pid` from every topic — the dead-subscriber cleanup. Topics it emptied are

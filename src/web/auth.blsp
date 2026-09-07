@@ -108,9 +108,12 @@
     nil
     (let (halves (string/split address "::")
           head (filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
-          tail (if (< (count halves) 2)
+          ;; bound and nil-checked, not counted then indexed — the count never reaches
+          ;; `(second halves)`
+          after (second halves)
+          tail (if (nil? after)
                  []
-                 (filter (string/split (second halves) ":") (fn (g) (not (= g "")))))
+                 (filter (string/split after ":") (fn (g) (not (= g "")))))
           gap (- 8 (+ (count head) (count tail)))
           filled (append (into [] head)
                    (map (range (%max 0 gap)) (fn (_) "0"))
@@ -130,19 +133,22 @@
   same network appears as `2c0f:ef18:1b2e:0:231b:…` one day and `2c0f:ef18:1b2e:0:5d71:…`
   the next. An allow-list of exact addresses locks its owner out on the next rotation, which
   is not a hypothetical — it happened within an hour of the first one being set."
-  (let (parts (string/split entry "/"))
-    (and (= (count parts) 2)
-      (let (bits (string/->number (second parts))
-            groups (ipv6-groups (first parts))
+  (match (string/split entry "/")
+    ((prefix bits-text)
+      (let (bits (string/->number bits-text)
+            groups (ipv6-groups prefix)
             theirs (ipv6-groups address))
-        (and (not (failure? bits))
+        ;; `int?`, not `(not (failure? …))`: `math/rem` below wants an int, and a
+        ;; non-failure could still be a float — "2c0f::/64.5" parses.
+        (and (int? bits)
           groups
           theirs
           (= 0 (math/rem bits 16))
           (> bits 0)
           (<= bits 128)
           (let (n (/ bits 16))
-            (= (apply vector (take groups n)) (apply vector (take theirs n)))))))))
+            (= (apply vector (take groups n)) (apply vector (take theirs n)))))))
+    (_ false)))
 
 (defn allowed-ip? (conn allowed)
   "Whether this request's client address is admitted by `allowed` — a list of exact

@@ -407,7 +407,15 @@
   via its `:name` — and wait through the brief async-start / restart window. In normal
   operation the first `whereis` hits, so nothing competes with the supervisor's child."
   (or (proc/whereis nm)
-    (do (start-live-registries) (live-await nm 60) (proc/whereis nm))))
+    (do
+      (start-live-registries)
+      (live-await nm 60)
+      ;; Raise rather than answer nil — same reason as `web/registry/ensure-supervised`:
+      ;; `live-register`/`live-route-put` hand the result straight to `send`, which then
+      ;; fails describing the wrong thing.
+      (or (proc/whereis nm)
+        (error "live-ensure: " nm " did not register within the start window")))))
+(sig live-ensure (any -> pid))
 
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
 ; Hot reload already rebinds the view's globals (docs/shared-code.md); we just need
@@ -1517,7 +1525,7 @@
 (def *hatch-root*
   ; This file is <hatch>/src/web/live.blsp; strip the known suffix to find <hatch>,
   ; so we can serve the bundled brood_live.js without the app vendoring a copy.
-  (string/replace (reflect/current-file) "/src/web/live.blsp" ""))
+  (string/replace (or (reflect/current-file) "") "/src/web/live.blsp" ""))
 
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_live.js`."

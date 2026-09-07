@@ -375,3 +375,4 @@
              (fn (i)
                (bit/xor (bytes/at buf (+ data-start i))
                  (case (bit/and i 3) 0 k0 1 k1 2 k2 k3)))))))
+(sig unmask (bytes int int -> bytes))

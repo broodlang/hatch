@@ -56,6 +56,7 @@
     (= (bytes/at b i) 13)
     (= (bytes/at b (+ i 1)) 10)))
 
+(sig crlf-at? (bytes int -> bool))
 (defn part-trim (seg)
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
   body). The CRLF that precedes the next delimiter is already excluded from `seg` — it belongs

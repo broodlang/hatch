@@ -158,8 +158,11 @@
   (let (seg (string/lower (last (string/split path "/")))
         parts (string/split seg "."))
     (and (>= (count parts) 3)
+      ;; `h` is nil-checked as well as counted: `(>= (count parts) 3)` guarantees it, but
+      ;; nothing carries that to the `first`/`rest` chain that produces it.
       (let (h (first (rest (reverse parts))))
-        (and (>= (string/length h) 8)
+        (and h
+          (>= (string/length h) 8)
           (= (string/span h 0 "0123456789abcdef") (string/length h)))))))
 
 (defn relative-to (path dir)
@@ -255,24 +258,25 @@
                 ; suffix: bytes=-n → final n bytes
                 (string/blank? lo)
                   (let (n (range-int hi))
-                    (if (or (nil? n) (<= n 0))
-                      nil
-                      [(math/max 0 (- len n)) (- len 1)]))
+                    (if (and n (> n 0))
+                      [(math/max 0 (- len n)) (- len 1)]
+                      nil))
                 ; bytes=a- → a..end
                 (string/blank? hi)
                   (let (a (range-int lo))
-                    (cond
-                      (nil? a) nil
-                      (>= a len) :unsatisfiable
-                      else [a (- len 1)]))
+                    (if a
+                      (if (>= a len) :unsatisfiable [a (- len 1)])
+                      nil))
                 ; bytes=a-b
                 else
                   (let (a (range-int lo)
                         b (range-int hi))
-                    (cond
-                      (or (nil? a) (nil? b) (> a b)) nil
-                      (>= a len) :unsatisfiable
-                      else [a (math/min b (- len 1))]))))))))))
+                    (if (and a b)
+                      (cond
+                        (> a b) nil
+                        (>= a len) :unsatisfiable
+                        else [a (math/min b (- len 1))])
+                      nil))))))))))
 
 (defn serve-range (conn content-type body tag cc len)
   "Honour a `Range` request when we safely can. Byte ranges are byte offsets, but the body

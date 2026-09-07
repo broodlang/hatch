@@ -92,6 +92,7 @@
     0
     (math/min 100 (math/max 0 (math/quot (* got 100) total)))))
 
+(sig percent (int int -> int))
 (defn progress-message (measurements metadata)
   "The `handle-info` payload for one progress event: `{:upload {:token :got :total :percent
   :done?}}`. `:done?` marks the final event (the body is fully read), which is the one a view
