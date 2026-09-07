@@ -62,7 +62,7 @@ def  fn  quote  quasiquote  if  do  let  letrec
 Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (lowers to `(def name (%make-macro (fn …)))`), `defn`, `defn-` / `def-`, `defdyn`, `binding`,
 `cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `as->`,
-`some->` / `cond->` / `doto`, `if-let` / `when-let`,
+`ok->` / `cond->` / `doto`, `if-let` / `when-let`,
 `fmt` (string interpolation), `receive`, `spawn`.
 
 ## Defining things
@@ -499,8 +499,8 @@ Prefer the higher-order combinators:
 `[:a 1]`. `conj`/`into` insert at each kind's natural point and *preserve the kind*;
 `(conj #{1} 2)` and `(disj s x)` are prelude, no `(:use set)` needed. Two ops stay
 deliberately strict: `contains?` is map/set only (a vector would have to answer by
-*index*), and a **string** is not seqable — bridge with `string->list` or
-`string->graphemes`.
+*index*), and a **string** is not seqable — bridge with `string/->list` (codepoints) or
+`string/->graphemes` (what a human calls a character).
 
 **`case` for constant dispatch, `match` for shapes.** `case` is flat `test result`
 pairs with a lone trailing default, and its tests must be *literals* — a bare symbol
@@ -1006,15 +1006,32 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **Text → number: `(string/->number s)`, and it picks the type from the digits.**
-  `"42"` → an `int`, `"3.14"` → a `float`, anything it cannot parse in full → **`nil`**
-  (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` — `string/trim` first, and
-  `(or (string/->number s) 0)` is the default idiom). So `"3"` gives you an int even when
-  you wanted a float: `(->float (string/->number "3"))`. Going the other way,
-  `math/floor`/`math/round` return an `int` (there is no `trunc`). An optional **radix**
-  reads hex/octal/binary — `(string/->number "1F" 16)` → `31` — integer-only, digits
-  alone (no `0x` prefix), 2–36 or it raises; this is the *only* way, since Brood has no
-  radix literals. For money use `(decimal/of "1.50")`, which **throws** on malformed
-  input rather than answering nil: a parse failing is data, a constructor failing is a bug.
+  `"42"` → an `int`, `"3.14"` → a `float`, anything it cannot parse in full → a
+  **`failure`** (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` —
+  `string/trim` first). So `"3"` gives you an int even when you wanted a float:
+  `(->float (string/->number "3"))`. Going the other way, `math/floor`/`math/round`
+  return an `int` (there is no `trunc`). An optional **radix** reads hex/octal/binary —
+  `(string/->number "1F" 16)` → `31` — integer-only, digits alone (no `0x` prefix), 2–36
+  or it raises; this is the *only* way, since Brood has no radix literals. For money use
+  `(decimal/of "1.50")`, which **throws**: a parse failing is data, a constructor failing
+  is a bug.
+- **A `failure` is a returned value, not a raise (ADR-310).** Brood splits two channels:
+  a **bug or the unexpected raises** (wrong type, wrong arity, unbound — catch with
+  `try`/`catch`, or let the supervisor have it), while a **known failure comes back as a
+  value** — `(string/->number "abc")`, the `encoding` decoders, `datetime/parse-*`,
+  `url/percent-decode`. Test with `failure?`, read with `error-message`, build one with
+  `(failure "…")`. It is **truthy** — like every non-`nil`, non-`false` value — so it
+  never vanishes into a default: `(or (string/->number s) 0)` yields the *failure*, not
+  `0`. To default, say so: `(let (n (string/->number s)) (if (failure? n) 0 n))`. It is
+  also *not* `nil`, which still means absence (`get`, `nth`, `os/env`, `first` of empty).
+  There are **no call-site wrappers** (`attempt`, `result`) and no primitive absorbs a
+  failure — `(+ 1 <failure>)` raises and `(conj acc <failure>)` stores. To stop on one you
+  say so, with the three ADR-315 mechanisms: **`ok->`** (the failure pipe — the first
+  failing step short-circuits and falls out), **`with`** (the failure `let` — bindings like
+  `let`'s, the first failing value short-circuits; this is the one that reaches a chain of
+  YOUR OWN functions, because it binds rather than threads), and a **fold that stops once
+  its accumulator is a failure** (the case neither of the others can reach, since the
+  accumulator is threaded by the combinator).
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`
@@ -1023,10 +1040,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **bitwise**: `bit/and` `bit/or` `bit/xor` `bit/not` `bit/shift-left`
   `bit/shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
-  every step takes a seed and returns `[value next-seed]`. `rng` (→ a 32-bit
-  int), `rand-int` `(seed n)` → `[i next]` in `[0,n)`, `rand-float` `(seed)` →
-  `[f next]` in `[0,1)`, `shuffle` `(seed coll)`, `sample` `(seed coll)`; seed a
-  stream from any int (e.g. `(now)`) with `rand-seed`. Carry `next-seed` in your
+  every step takes a seed and returns `[value next-seed]`, and every name is
+  qualified; the unqualified spellings do not exist. `rand/rng` (→ a 32-bit
+  int), `rand/int` `(seed n)` → `[i next]` in `[0,n)`, `rand/float` `(seed)` →
+  `[f next]` in `[0,1)`, `rand/token` `(n)`; for collections, `seq/shuffle`
+  `(seed coll)` and `seq/sample` `(seed coll)`; seed a stream from any int
+  (e.g. `(now)`) with `rand/seed`. Carry `next-seed` in your
   loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
   splat) `reflect/eval` `reflect/read-string` `reflect/eval-string` `gensym` (fresh symbol, for macros)
@@ -1159,7 +1178,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**
   `(sort coll)` is `<` for numbers, lexicographic for vectors/lists, text order
   for strings/symbols/keywords (so `(sort [[1 0] [2 1]])` works, no comparator
-  needed). For custom orderings use `(sort less? coll)` or `(sort-by key-fn coll)`.
+  needed). For custom orderings use `(sort coll less?)` or `(sort-by coll key-fn)`.
 - **`index-of` works on strings *and* on lists/vectors.** Strings → substring
   search; lists/vectors → linear element search (structural `=`). Returns `-1`
   if absent. The general "is `x` in `coll`?" predicate is `(includes? coll x)`
@@ -1218,7 +1237,7 @@ generator (over the PRNG) and asserts `pred` on each — deterministic, and on a
 counterexample it fails with the value + seed:
 
 ```clojure
-(check-property 100 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
+(check-property 100 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
 ```
 
 `nest test` runs each test in its own green process. `nest run` invokes the
