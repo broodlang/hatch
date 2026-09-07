@@ -228,9 +228,25 @@
     ((c & rest) (if (jp-num-char? c) (jp-num-acc rest (cons c acc)) (jp-num-finish acc cs)))))
 
 (defn jp-num-finish (acc cs)
-  "Convert the gathered number chars to a value. Empty (a stray non-number at value
-  position in malformed input) yields nil rather than erroring on `(string/->number \"\")`."
-  (if (nil? acc) [nil cs] [(string/->number (jp-join acc)) cs]))
+  "Convert the gathered number chars to a value, or nil when they are not a number.
+
+  Two ways that happens, and both must answer nil because this parser reports malformed
+  input in-band — `jp-value` on exhausted input answers nil too, and every caller reads a
+  nil value as \"absent\", never as a parse error.
+
+  Empty `acc` is a stray non-number at value position. NON-empty `acc` that still will not
+  parse is the one that bites: `jp-num-char?` admits `+ - . e E`, so `-`, `1.2.3` and `1e`
+  are all gathered happily and only fail at conversion — and `string/->number` answers a
+  `failure`, which is TRUTHY. Returned as-is it does not raise here; it is stored as the
+  decoded value and surfaces much later, as a render of `#failure{…}` or a type error deep
+  inside arithmetic on a model field, with nothing pointing back at the payload.
+
+  That payload is the browser's: this decodes LiveView client messages, so the malformed
+  input is untrusted and reaching it takes only a crafted frame."
+  (if (nil? acc)
+    [nil cs]
+    (let (n (string/->number (jp-join acc)))
+      [(if (failure? n) nil n) cs])))
 
 (defn jp-object (cs)
   "Parse a JSON object; `{` heads `cs`. `[map rest]`."

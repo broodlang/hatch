@@ -301,3 +301,26 @@
   (test "a navigate frame carries its path"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
       {:event "navigate" :params {} :name "" :cid nil :path "/next" :sfp nil})))
+
+;; `jp-num-char?` admits `+ - . e E`, so a token like `-` or `1.2.3` is gathered as a number
+;; and only fails at conversion — where `string/->number` answers a TRUTHY `failure`. Returned
+;; as the decoded value it raises nothing here; it lands in a component's model and surfaces
+;; later as a rendered `#failure{…}` or a type error inside arithmetic, pointing nowhere near
+;; the frame that caused it. The input is the browser's, so reaching this takes only a crafted
+;; message. Malformed input must read as absent, the way the rest of this parser reports it.
+(describe "json-decode never yields a failure value"
+  (test "a number token that cannot parse decodes as nil, not a failure"
+    (dolist (bad (list "-" "+" "." "1.2.3" "1e" "--5" "1e+"))
+      (let (decoded (json-decode (str "{\"n\": " bad "}")))
+        (assert= {"n" nil} decoded))))
+
+  (test "a bare malformed number at top level decodes as nil"
+    (assert= nil (json-decode "1.2.3")))
+
+  (test "a malformed number inside an array decodes as nil"
+    (assert= [1 nil 3] (into [] (json-decode "[1, 1.2.3, 3]"))))
+
+  (test "valid numbers are untouched"
+    (assert= {"n" 42} (json-decode "{\"n\": 42}"))
+    (assert= {"n" -1.5} (json-decode "{\"n\": -1.5}"))
+    (assert= {"n" 1000.0} (json-decode "{\"n\": 1e3}"))))
