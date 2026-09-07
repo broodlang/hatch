@@ -51,7 +51,10 @@
 
 (defn- duration (millis)
   "A human-scaled uptime — the number alone is unreadable past a minute."
-  (let (s (math/quot millis 1000))
+  ;; `math/floor` first: the caller's `(- (os/now) *booted-at*)` is a whole number of
+  ;; milliseconds but types as `number`, and `math/quot` wants an int. Floor of an int is
+  ;; itself, so this only says what the value already is.
+  (let (s (math/quot (math/floor millis) 1000))
     (cond
       (< s 60) (str s "s")
       (< s 3600) (str (math/quot s 60) "m " (math/rem s 60) "s")

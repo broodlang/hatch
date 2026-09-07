@@ -210,6 +210,7 @@ port) still returns and lets the caller fail on its own terms."
           ([:tcp-accept _ client] (do (tcp/close client) (listener-drain workers deadline from)))
           (after remaining (do (listener-kill-all workers) (send from :drained))))))))
 
+(sig listener-drain (any int any -> any))
 (defn- listener-loop (lsock handler ws-handler config workers sup)
   (receive
     ([:tcp-accept ^lsock client]
@@ -238,10 +239,15 @@ port) still returns and lets the caller fail on its own terms."
                        config
                        (listener-without workers pid)
                        sup))
-    ([:drain from] (do
-                     (tcp/close lsock)
-                     (listener-drain workers (+ (os/now) (get config :shutdown-grace-ms)) from)
-                     (gen/stop sup)))
+    ([:drain from]
+      (do
+        (tcp/close lsock)
+        (listener-drain workers
+          ;; floored: a deadline is a whole millisecond stamp, but
+          ;; `(get config …)` types as `any` and widens the sum
+          (math/floor (+ (os/now) (get config :shutdown-grace-ms)))
+          from)
+        (gen/stop sup)))
     (:stop (do (tcp/close lsock) (gen/stop sup) (io/puts "http/server: stopped")))))
 
 (defn head-complete? (buf)

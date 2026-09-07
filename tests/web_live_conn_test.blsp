@@ -107,7 +107,7 @@
   "Open a real live session, send one join frame (claiming `sfp` if given), and return the
   server's join frame as text."
   (let (ls (tcp/listen "127.0.0.1" 0)
-        port (tcp/local-port ls))
+        port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
     (let (client (tcp/connect "127.0.0.1" port)
           server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
       (tcp/set-binary server true)
@@ -154,7 +154,7 @@
 (describe "a real live session exposes its Conn to render"
   :isolated (test "render reads the CSRF token off the connection the client actually opened"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
       (let (client (tcp/connect "127.0.0.1" port)
             server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/set-binary server true)

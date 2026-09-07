@@ -448,7 +448,9 @@ the failure would reach the body read as a length."
   (if (nil? cl)
     0
     (let (n (string/->number (string/trim cl)))
-      (if (failure? n) 0 n))))
+      ;; `int?`, not `(not (failure? …))`: a Content-Length is a count of bytes, and
+      ;; "12.5" parses to a float that would reach `substring` as a length.
+      (if (int? n) n 0))))
 
 (defn http-version (token)
   "Extract the numeric HTTP version ('1.1', '1.0') from a request-line version token like

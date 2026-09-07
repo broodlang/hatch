@@ -155,6 +155,7 @@
       (cons {:pid pid :key key :meta meta}
         (presence-without (presence-entries state topic) pid))))
 
+(sig presence-put (map any any any any -> map))
 (defn- presence-remove (state topic pid)
   "Untrack `pid` from `topic`, dropping the topic key entirely once it has no members left
   so ephemeral topics don't accumulate in the registry (and its vault)."

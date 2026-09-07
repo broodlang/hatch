@@ -88,11 +88,14 @@
 
   (hatch/web/upload/percent 512 1024) ;=> 50
   (hatch/web/upload/percent 0 0) ;=> 0"
-  (if (or (nil? total) (<= total 0))
-    0
-    (math/min 100 (math/max 0 (math/quot (* got 100) total)))))
+  ;; Positive form: `total` is deliberately open (callers pass nil for "unknown"), so ask
+  ;; what it must BE rather than what it must not.
+  (if (and (int? total) (> total 0))
+    (math/min 100 (math/max 0 (math/quot (* got 100) total)))
+    0))
 
-(sig percent (int int -> int))
+;; `total` stays open: the docstring promises 0 when it is unknown, and callers do pass nil.
+(sig percent (int any -> int))
 (defn progress-message (measurements metadata)
   "The `handle-info` payload for one progress event: `{:upload {:token :got :total :percent
   :done?}}`. `:done?` marks the final event (the body is fully read), which is the one a view

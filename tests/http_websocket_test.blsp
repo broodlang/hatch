@@ -215,7 +215,8 @@
 (defn masked-frame (opcode payload key)
   (let (pb (string/->bytes payload)
         n (count pb)
-        masked (bytes (map (range n) (fn (i) (bit/xor (get pb i) (get key (math/mod i 4)))))))
+        masked (bytes (map (range n)
+                        (fn (i) (bit/xor (or (get pb i) 0) (or (get key (math/mod i 4)) 0))))))
     (bytes/concat (bytes [(+ 128 opcode) (+ 128 n)]) (bytes key) masked)))
 
 (describe "parse-frame: unmask (non-zero key)"

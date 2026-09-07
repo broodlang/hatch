@@ -294,7 +294,9 @@
   :serial (test "the listener starts, is idempotent, and survives being asked twice"
     (let (a (start-cluster)
           b (start-cluster))
-      (is (not (nil? a)))
+      ;; `pid?`, not `(not (nil? a))`: `start-cluster` cannot answer nil now, so the old
+      ;; form was true by construction and asserted nothing.
+      (is (pid? a))
       (assert= a b)))
 
   ;; Everything here must be a no-op on a single node — most apps are one node, and a cache

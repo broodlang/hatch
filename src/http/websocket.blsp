@@ -328,6 +328,7 @@
             [:error "websocket: malformed close frame"]
             [:ok fin opcode payload remainder]))))))
 
+(sig one-frame-payload (bytes int any any any int int int -> any))
 (defn frame-size (buf)
   "Total byte length (header + payload) of the first WebSocket frame in `buf` once its length
   header is fully present, else nil — the header hasn't fully arrived (`buf` < 2, or < 4 for a

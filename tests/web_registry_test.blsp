@@ -29,7 +29,9 @@
 (describe "ensure-supervised"
   (test "starts a supervised named child and returns its pid"
     (let (pid (ensure-supervised :rtest-sup-a [(child-spec :rtest-child-a)] :rtest-child-a))
-      (assert= (nil? pid) false)
+      ;; `pid?`, not `(nil? pid)`: `ensure-supervised` raises rather than answering nil,
+      ;; so the old form could not fail.
+      (is (pid? pid))
       (assert= (= pid (proc/whereis :rtest-child-a)) true)))
   (test "is idempotent — a second call returns the same pid"
     (let (p1 (ensure-supervised :rtest-sup-b [(child-spec :rtest-child-b)] :rtest-child-b)

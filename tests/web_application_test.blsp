@@ -67,7 +67,11 @@
                                                        :msg "slow"
                                                        :ts 1000
                                                        :meta {:request_id "r1" :duration_ms 4.2}})
-          parsed (json/decode line))
+          decoded (json/decode line)
+          ;; narrowed to a map before the `get`s: `json/decode` answers any shape, and a
+          ;; non-map would reach `get` as a non-countable. A regression that made this
+          ;; something else now fails the assertions rather than the checker.
+          parsed (if (map? decoded) decoded {}))
       (assert= (get parsed :timestamp) 1000)
       (assert= (get parsed :level) "warn")
       (assert= (get parsed :message) "slow")
@@ -75,12 +79,11 @@
       (assert= (get parsed :duration_ms) 4.2)
       (assert= (includes? line "\n") true)))
   (test "an unrecognized level falls back to \"info\""
-    (assert= (get (json/decode (web/application/application-json-line {:level :bogus
+    (let (decoded (json/decode (web/application/application-json-line {:level :bogus
                                                                        :msg "x"
                                                                        :ts 0
-                                                                       :meta {}}))
-               :level)
-      "info")))
+                                                                       :meta {}})))
+      (assert= (get (if (map? decoded) decoded {}) :level) "info"))))
 
 (describe "default-logger-opts"
   (test "picks :level from $LOG_LEVEL, defaulting to :debug"

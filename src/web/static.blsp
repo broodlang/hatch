@@ -301,7 +301,11 @@
                         :content-range (str "bytes */" len)})
             416 "")
         else
-          (let ([start end] r)
+        ;; floored: byte offsets are integral by construction, but they arrive by
+        ;; destructuring a vector, which widens them to `number`
+          (let ([start-raw end-raw] r
+                start (math/floor start-raw)
+                end (math/floor end-raw))
             (send-resp (with-resp-headers conn
                          {:content-type content-type
                           :etag tag

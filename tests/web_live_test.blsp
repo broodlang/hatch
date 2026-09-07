@@ -100,7 +100,7 @@
   "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
   as the socket layer would deliver them."
   (let (flen (bytes/length frame))
-    (fold (range (math/quot (+ flen (- chunk 1)) chunk))
+    (fold (range (math/quot (math/floor (+ flen (- chunk 1))) chunk))
       nil
       (fn (_ k)
         (send (self)
@@ -161,7 +161,9 @@
       (register-live "/crash-test" (fn () {:ok true}) :customer)
       (assert= (get (lookup-live "/crash-test") :session) :customer)
       ; hard-kill the route registry; the supervisor restarts it and it re-seeds from the vault
-      (exit (proc/whereis :hatch-live-routes) :kill)
+      (exit (or (proc/whereis :hatch-live-routes)
+              (error "test: :hatch-live-routes is not registered"))
+        :kill)
       ; Poll for the supervised restart + re-seed rather than sleeping a guessed 80ms: the
       ; restart is async w.r.t. the kill, so a fixed wait is a race on a loaded machine.
       (let (e (wait-live-route "/crash-test" 200))
