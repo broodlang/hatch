@@ -93,21 +93,34 @@
         (if (get c :listening?) "listening" "NOT LISTENING")
         (if (get c :listening?) "" "err"))]))
 
+(defn- decimal (numerator denominator scale)
+  "`numerator/denominator` as a decimal STRING — `scale` 10 for one place, 100 for two.
+
+  Integer arithmetic on purpose. Brood's `/` on two ints is an EXACT RATIONAL and
+  `math/round-to` keeps it one, so the obvious `(str (math/round-to (/ bytes 1048576) 1))`
+  renders `337/10 MB` on the page where it means `33.7 MB`. `math/round` of a rational is
+  an int, so scaling first and splitting with `quot`/`rem` never leaves the integers."
+  (let (units (math/round (/ (* numerator scale) denominator))
+        whole (math/quot units scale)
+        frac (math/rem units scale))
+    (str whole "." (if (and (= scale 100) (< frac 10)) (str "0" frac) (str frac)))))
+
+(defn bytes-human (n)
+  "A byte count at human scale — `33.7 MB`, not `35389440`.
+
+  (hatch/web/dashboard/bytes-human 35389440) ;=> \"33.7 MB\""
+  (cond
+    (< n 1024) (str n " B")
+    (< n 1048576) (str (decimal n 1024 10) " KB")
+    (< n 1073741824) (str (decimal n 1048576 10) " MB")
+    else (str (decimal n 1073741824 100) " GB")))
+
 (defn- per-second (count)
   "Requests per second averaged over the whole uptime — a rate, not a rolling one. It says
   what this process has sustained, which is the question a counter alone cannot answer; a
   spike inside a long uptime is invisible here by construction."
   (let (seconds (math/quot (math/floor (- (os/now) *booted-at*)) 1000))
-    (if (< seconds 1) "—" (str (math/round-to (/ count seconds) 2)))))
-
-(defn- bytes-human (n)
-  "A byte count at human scale. Past a megabyte the raw figure is unreadable, and memory is
-  the number on this page most likely to be read in a hurry."
-  (cond
-    (< n 1024) (str n " B")
-    (< n 1048576) (str (math/round-to (/ n 1024) 1) " KB")
-    (< n 1073741824) (str (math/round-to (/ n 1048576) 1) " MB")
-    else (str (math/round-to (/ n 1073741824) 2) " GB")))
+    (if (< seconds 1) "—" (decimal count seconds 100))))
 
 (defn- probe (thunk fallback)
   "Call `thunk`, answering `fallback` if it throws. The runtime introspection below is

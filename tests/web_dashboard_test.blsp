@@ -55,6 +55,24 @@
       (is (includes? html "preempts"))
       (is (includes? html "uptime"))))
 
+  ;; Brood's `/` on two ints is an EXACT RATIONAL, and `math/round-to` keeps it one — so the
+  ;; first cut of the memory card put `337/10 MB` on the page. Same trap in the request rate.
+  (test "byte counts read as decimals, never as ratios"
+    (assert= (bytes-human 512) "512 B")
+    (assert= (bytes-human 35389440) "33.8 MB")
+    (assert= (bytes-human 2048) "2.0 KB")
+    (assert= (bytes-human 3221225472) "3.00 GB")
+    (is (not (includes? (bytes-human 35389440) "/"))))
+
+  (test "the rendered page carries no ratio in a figure"
+    (web/metrics/reset)
+    (for (i (range 3)) (web/metrics/record "GET" "/x" "/x" 200 5))
+    (let (html (page "T"))
+      ;; `0/64` (compressed/max) is the one legitimate slash in a card body
+      (is (not (includes? html "/10 MB")))
+      (is (not (includes? html "/5 MB")))
+      (is (includes? html "memory"))))
+
   (test "the title is the caller's"
     (web/metrics/reset)
     (is (includes? (body (call (handler {:title "hive metrics"}) (conn-for "GET" "/dashboard")))
