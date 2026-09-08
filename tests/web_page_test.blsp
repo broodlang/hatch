@@ -13,3 +13,43 @@
     (let (resp (page (conn-for) [:p {} "<script>"]))
       (assert= (includes? (get resp :resp-body) "&lt;script&gt;") true)
       (assert= (includes? (get resp :resp-body) "<script>") false))))
+
+;; `defhtml` compiles a Hiccup body to statics + dynamic holes at EXPANSION time, so a
+;; request joins prebaked fragments instead of walking a tree. The contract that matters is
+;; that it produces exactly what `render` would have.
+(defhtml dh-greeting
+  (name)
+  [:div
+    {:class "greet"}
+    [:h1 {} "Hello"]
+    [:span {:class "who"} (str name)]
+    [:p {} "static prose"]])
+
+(defhtml dh-nested
+  (items)
+  [:ul {:class "list"} (map items (fn (i) [:li {} (str i)]))])
+
+(describe "defhtml"
+  (test "produces exactly what render would have"
+    (assert= (web/template/render [:div
+                                    {:class "greet"}
+                                    [:h1 {} "Hello"]
+                                    [:span {:class "who"} "ada"]
+                                    [:p {} "static prose"]])
+      (web/template/render (dh-greeting "ada"))))
+
+  (test "the dynamic hole is evaluated per call, the statics are not"
+    (is (includes? (web/template/render (dh-greeting "ada")) "ada"))
+    (is (includes? (web/template/render (dh-greeting "grace")) "grace")))
+
+  (test "a value in a hole is HTML-escaped, as render escapes it"
+    (is (includes? (web/template/render (dh-greeting "<script>")) "&lt;script&gt;"))
+    (is (not (includes? (web/template/render (dh-greeting "<script>")) "<script>"))))
+
+  (test "it answers raw HTML, so it composes inside another Hiccup form"
+    (assert= (web/template/render [:section {} (dh-greeting "ada")])
+      (str "<section>" (web/template/render (dh-greeting "ada")) "</section>")))
+
+  (test "a comprehension still renders every item"
+    (assert= (web/template/render [:ul {:class "list"} [:li {} "1"] [:li {} "2"]])
+      (web/template/render (dh-nested [1 2])))))
