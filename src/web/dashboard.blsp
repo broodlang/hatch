@@ -93,11 +93,49 @@
         (if (get c :listening?) "listening" "NOT LISTENING")
         (if (get c :listening?) "" "err"))]))
 
+(defn- per-second (count)
+  "Requests per second averaged over the whole uptime — a rate, not a rolling one. It says
+  what this process has sustained, which is the question a counter alone cannot answer; a
+  spike inside a long uptime is invisible here by construction."
+  (let (seconds (math/quot (math/floor (- (os/now) *booted-at*)) 1000))
+    (if (< seconds 1) "—" (str (math/round-to (/ count seconds) 2)))))
+
+(defn- bytes-human (n)
+  "A byte count at human scale. Past a megabyte the raw figure is unreadable, and memory is
+  the number on this page most likely to be read in a hurry."
+  (cond
+    (< n 1024) (str n " B")
+    (< n 1048576) (str (math/round-to (/ n 1024) 1) " KB")
+    (< n 1073741824) (str (math/round-to (/ n 1048576) 1) " MB")
+    else (str (math/round-to (/ n 1073741824) 2) " GB")))
+
+(defn- probe (thunk fallback)
+  "Call `thunk`, answering `fallback` if it throws. The runtime introspection below is
+  optional surface — a build without it should cost the dashboard one card, not the page."
+  (or (check-allow :discarded-catch (try (thunk) (catch _e nil))) fallback))
+
 (defn- runtime-cards ()
-  (let (procs (or (check-allow :discarded-catch (try (count (proc/list)) (catch _e nil))) 0)
-        host (or (check-allow :discarded-catch (try (os/hostname) (catch _e nil))) "?"))
+  "Process-wide runtime figures.
+
+  Deliberately NOT `dev/gc-stats`: those describe the CALLING process's own local heap —
+  here, the short-lived process serving this request — so on a dashboard they would report
+  the dashboard rather than the application. `dev/mem-bytes`/`mem-peak` are process-wide and
+  mean what a reader expects. `:preempts` is quantum exhaustions, which is the figure that
+  moves when something long-running stops yielding; `:steals` is the work-stealer keeping
+  the pool even."
+  (let (procs (probe (fn () (count (proc/list))) 0)
+        host (probe (fn () (os/hostname)) "?")
+        sched (probe (fn () (dev/sched-stats)) {})
+        spawned (get sched :spawned)
+        preempts (get sched :preempts))
     [(card "processes" procs)
       (card "uptime" (duration (- (os/now) *booted-at*)))
+      (card "memory" (bytes-human (probe (fn () (dev/mem-bytes)) 0)))
+      (card "peak memory" (bytes-human (probe (fn () (dev/mem-peak)) 0)))
+      (card "workers" (or (get sched :workers) "—"))
+      (card "spawned" (or spawned "—"))
+      (card "preempts" (or preempts "—") (if (nil? preempts) "dim" ""))
+      (card "steals" (or (get sched :steals) "—") "dim")
       (card "host" host)]))
 
 (defn- row (r)
@@ -142,7 +180,8 @@
                                    (if (> (get t :client-error) 0) "warn" ""))
                                  (card "5xx"
                                    (get t :server-error)
-                                   (if (> (get t :server-error) 0) "err" ""))]
+                                   (if (> (get t :server-error) 0) "err" ""))
+                                 (card "req/s" (per-second (get t :count)) "dim")]
                                (section "cache" (cache-cards))
                                (section "cluster" (cluster-cards))
                                (section "runtime" (runtime-cards))

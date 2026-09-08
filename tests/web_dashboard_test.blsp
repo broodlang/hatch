@@ -46,6 +46,15 @@
       (is (includes? html "fragments")) ; cache
       (is (includes? html "node")) ; cluster
       (is (includes? html "processes")))) ; runtime
+  (test "reports process-wide runtime figures, not the request process's heap"
+    (web/metrics/reset)
+    (let (html (page "T"))
+      (is (includes? html "memory"))
+      (is (includes? html "peak memory"))
+      (is (includes? html "workers"))
+      (is (includes? html "preempts"))
+      (is (includes? html "uptime"))))
+
   (test "the title is the caller's"
     (web/metrics/reset)
     (is (includes? (body (call (handler {:title "hive metrics"}) (conn-for "GET" "/dashboard")))
