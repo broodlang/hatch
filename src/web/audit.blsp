@@ -35,9 +35,16 @@
 ;; fails, it is just a slower first paint than it needs to be.
 (def *first-flight-budget* 14336)
 
+(def- *dev?* (= (or (os/env "HATCH_ENV") "dev") "dev"))
+
 (defn dev? ()
-  "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`)."
-  (= (or (os/env "HATCH_ENV") "dev") "dev"))
+  "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`).
+
+  Read ONCE at load, not per call. `warn-page!` runs three audits per response and each
+  asked the environment again — measured 0.7us a call, 2.1us a response, paid forever in
+  prod for a value that cannot change while the process runs. An env var read on the
+  response path is a small thing that never stops costing."
+  *dev?*)
 
 (defn- tag-text (document start)
   "The source text of the tag opening at `start`, `<input …>` inclusive. Stops at the first

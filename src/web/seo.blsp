@@ -168,7 +168,10 @@
   form that defines `<router-name>--routes`, so at the moment the handler is built the
   table is not bound yet. `(fn () app-router--routes)` closes over the name and reads it
   when the request arrives, by which point it exists."
-  (if (fn? routes) (routes) routes))
+  (let (table (if (fn? routes) (routes) routes))
+    ;; Since the router indexes its table by first segment, the `def` holds an index map
+    ;; rather than a bare list. `:all` is the untouched table; a hand-built list still works.
+    (if (and (map? table) (contains? table :all)) (get table :all) table)))
 
 (defn fixed-get-paths (routes)
   "Every fixed URL path the route table serves on `GET`, in declaration order.

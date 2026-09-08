@@ -198,3 +198,33 @@
     (assert= (get (wrap-router (conn-for "GET" "/blocked")) :status) 403))
   (test "a route outside every group is unaffected"
     (assert= (get (wrap-router (conn-for "GET" "/plain")) :resp-body) "plain")))
+
+;; The route table is indexed by first path segment (web/router's index-routes), which turns
+;; dispatch from a linear scan into a lookup. The property that must survive it is
+;; FIRST-MATCH-WINS: an earlier route beats a later one even when the later is more specific.
+;; Bucketing by kind would quietly invert this, which is why each bucket is built by
+;; filtering the original list.
+(describe "route order survives the first-segment index"
+  (defrouter order-router
+    (get "/:anything" (fn (conn) "dynamic"))
+    (get "/packages" (fn (conn) "literal")))
+
+  (test "a dynamic route declared FIRST still wins over a later literal"
+    (assert= "dynamic" (get (order-router (conn-for "GET" "/packages")) :resp-body)))
+
+  (defrouter order-router-2
+    (get "/packages" (fn (conn) "literal"))
+    (get "/:anything" (fn (conn) "dynamic")))
+
+  (test "and a literal declared first wins over a later dynamic"
+    (assert= "literal" (get (order-router-2 (conn-for "GET" "/packages")) :resp-body))
+    (assert= "dynamic" (get (order-router-2 (conn-for "GET" "/other")) :resp-body)))
+
+  (defrouter splat-router
+    (get "/*rest" (fn (conn) "splat"))
+    (get "/named" (fn (conn) "named")))
+
+  (test "a splat first segment is a candidate for every path, including the root"
+    (assert= "splat" (get (splat-router (conn-for "GET" "/named")) :resp-body))
+    (assert= "splat" (get (splat-router (conn-for "GET" "/a/b/c")) :resp-body))
+    (assert= "splat" (get (splat-router (conn-for "GET" "/")) :resp-body))))
