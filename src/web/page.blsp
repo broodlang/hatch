@@ -48,13 +48,15 @@
   attribute position, a `for`, a nested component — so a body it cannot fully bake is
   correct, just less baked.
 
-  **Define it BEFORE anything that refers to it.** A module registers its `defn`s up front,
-  so an ordinary function may be referenced by one defined earlier in the file. A macro that
-  EXPANDS to a `defn` does not take part in that pass, so a bare reference above the
-  `defhtml` is unbound — at runtime, as a 500. Neither `nest check` nor `--strict` sees it:
-  hive's `package-list` referred to a `package-card` defined eight lines below it, 190 tests
-  passed, and `/packages` answered 500 on the first request. Moving the definition above its
-  use is the whole fix.
+  **On brood before `4895b00a`, define it BEFORE anything that refers to it.** A module
+  registers its `defn`s in a pre-pass over unexpanded forms, so an ordinary function may be
+  referenced from one defined earlier in the file. That pass used to match only literal `def`
+  heads, so a name a MACRO bound was invisible and a bare reference above the `defhtml` was
+  unbound — at runtime, as a 500, past a clean `nest check`, a clean `--strict` and a green
+  suite. hive's `package-list` referred to a `package-card` defined eight lines below it and
+  `/packages` answered 500 on the first request. That was brood KI-118, fixed by having the
+  pre-pass also collect the second element of any `def…`-headed form; order is free on a
+  toolchain past that commit, and moving the definition up is the workaround before it.
 
   Use it for markup whose SHAPE is fixed. A function whose body is assembled conditionally
   (`(if signed-in? [:a …] [:span …])`) has nothing static at the top level and gains
