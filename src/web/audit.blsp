@@ -265,7 +265,52 @@
                     "and TLS handshake to that origin. Self-host it, or preconnect.")))))
   document)
 
+(defn- stylesheet-links (head)
+  "Every `rel=\"stylesheet\"` link in `head`, absolute or not. Unlike [[blocking-links]],
+  a same-origin sheet counts here: it blocks the first paint just the same, and it is the
+  usual case."
+  (scan-tags head
+    "<link"
+    (fn (acc tag)
+      (if (= (attr-value tag "rel") "stylesheet") (cons tag acc) acc))
+    0
+    nil))
+
+(defn declares-color-scheme? (head)
+  "Whether `head` tells the browser its colour scheme WITHOUT waiting for a stylesheet —
+  a `<meta name=\"color-scheme\">` or an inline `<style>` mentioning it."
+  (or (>= (index-of head "name=\"color-scheme\"") 0)
+    (let (at (index-of head "<style"))
+      (and (>= at 0) (>= (index-of head "color-scheme") 0)))))
+
+(defn warn-canvas-flash! (document)
+  "Log a dev warning when `document` leaves the browser to guess its background.
+
+  A stylesheet link is render-blocking, but the browser paints its OWN canvas before the
+  sheet arrives — white, unless something in the document has already said otherwise. On
+  a plain page that is a flash on EVERY navigation: click a tab, the canvas goes light,
+  the page paints dark. It is subtle, it is per-click, and it looks like a bug in the app
+  rather than in the document head.
+
+  The cure is one line that cannot be render-blocked, ahead of the sheet: a
+  `<meta name=\"color-scheme\" content=\"light dark\">`, or a `color-scheme` (and the
+  matching `background`) in an inline `<style>`. Both are free — no request, no bytes worth
+  counting — and they are what the `color-scheme` in your stylesheet was already trying to
+  say, only in time to be useful.
+
+  Silent when the document has no stylesheet at all (nothing to be early to), and returns
+  `document` unchanged."
+  (when (dev?)
+    (let (head (head-of document))
+      (when (and (not (empty? (stylesheet-links head))) (not (declares-color-scheme? head)))
+        (log/warn (str "[audit] unstyled canvas: <head> links a render-blocking stylesheet "
+                    "but declares no color-scheme before it, so the browser paints its own "
+                    "background on every navigation until the sheet arrives — a flash per "
+                    "click. Add <meta name=\"color-scheme\" content=\"light dark\"> (or a "
+                    "color-scheme in an inline <style>) ahead of the link.")))))
+  document)
+
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
-  Currently [[warn-inert!]] and [[warn-first-flight!]]."
-  (warn-first-flight! (warn-inert! document)))
+  Currently [[warn-inert!]], [[warn-first-flight!]] and [[warn-canvas-flash!]]."
+  (warn-canvas-flash! (warn-first-flight! (warn-inert! document))))

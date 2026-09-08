@@ -136,3 +136,23 @@
     (let (document "<html><head><link rel=\"stylesheet\" href=\"https://fonts.example/x.css\"></head><body></body></html>")
       (assert= (warn-first-flight! document) document)
       (assert= (warn-page! document) document))))
+
+;; A stylesheet link is render-blocking, but the browser paints its own canvas before the
+;; sheet arrives. Without an early `color-scheme` that is a flash on every navigation —
+;; the bug this audit exists to name, reported on hive's /reference tabs.
+(describe "canvas-flash audit"
+  (test "a head that links a stylesheet and says nothing about colour scheme is flagged"
+    (let (head "<head><link rel=\"stylesheet\" href=\"/app.css\"></head>")
+      (is (not (web/audit/declares-color-scheme? (web/audit/head-of head))))))
+
+  (test "a meta color-scheme ahead of the link settles it"
+    (let (head "<head><meta name=\"color-scheme\" content=\"light dark\"><link rel=\"stylesheet\" href=\"/a.css\"></head>")
+      (is (web/audit/declares-color-scheme? (web/audit/head-of head)))))
+
+  (test "an inline style carrying color-scheme settles it too"
+    (let (head "<head><style>:root{color-scheme:light dark;background:#262130}</style><link rel=\"stylesheet\" href=\"/a.css\"></head>")
+      (is (web/audit/declares-color-scheme? (web/audit/head-of head)))))
+
+  (test "the audit returns its document unchanged"
+    (let (doc "<head><link rel=\"stylesheet\" href=\"/a.css\"></head><body></body>")
+      (assert= doc (web/audit/warn-canvas-flash! doc)))))
