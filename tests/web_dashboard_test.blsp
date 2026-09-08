@@ -30,6 +30,22 @@
       (assert= "no-store" (resp-header resp :cache-control))
       (is (includes? (resp-header resp :content-type) "text/html"))))
 
+  ;; Every card group — cache, cluster, runtime — is a helper returning a VECTOR of card
+  ;; forms, dropped into a child slot. `render` used to take such a vector as an element and
+  ;; use its printed first card as the TAG NAME, so the page carried a literal
+  ;; `<[:div {:class card} [:b {:class } 27] …]>` as text and the first card of each group
+  ;; was lost. Every assertion above still passed: they all ask `includes?` for a substring,
+  ;; and the substring was there — inside the garbage.
+  (test "renders no raw Hiccup, and keeps the first card of every group"
+    (web/metrics/reset)
+    (let (html (page "T"))
+      (is (not (includes? html "[:div")))
+      (is (not (includes? html "[:b ")))
+      (is (not (includes? html "[:span")))
+      ;; the first card of each group is the one the old bug ate
+      (is (includes? html "fragments")) ; cache
+      (is (includes? html "node")) ; cluster
+      (is (includes? html "processes")))) ; runtime
   (test "the title is the caller's"
     (web/metrics/reset)
     (is (includes? (body (call (handler {:title "hive metrics"}) (conn-for "GET" "/dashboard")))

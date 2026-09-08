@@ -140,6 +140,30 @@
     (assert= (render [:div {} (list [:span {} "1"] [:span {} "2"])])
       "<div><span>1</span><span>2</span></div>")))
 
+; A Hiccup element is `[:tag …]` — a KEYWORD head. A vector headed by anything else is
+; several nodes in one slot, and used to be rendered as an element whose tag name was the
+; printed first node: `<[:div {:class card} …]>`, text in the page, no error anywhere.
+(describe "render: a vector of nodes is a fragment"
+  (test "a vector of elements concatenates, like the list of the same"
+    (assert= (render [[:b {} "one"] [:i {} "two"]]) "<b>one</b><i>two</i>")
+    (assert= (render [[:b {} "one"] [:i {} "two"]])
+      (render (list [:b {} "one"] [:i {} "two"]))))
+
+  (test "one returned by a helper, dropped in a child slot, renders as its cards"
+    (let (cards (fn () [[:div {} "a"] [:div {} "b"]]))
+      (assert= (render [:section {:class "cards"} (cards)])
+        "<section class=\"cards\"><div>a</div><div>b</div></section>")))
+
+  (test "an empty vector renders to nothing"
+    (assert= (render []) "")
+    (assert= (render [:div {} []]) "<div></div>"))
+
+  (test "a vector of strings is text, escaped"
+    (assert= (render ["a" "<b>"]) "a&lt;b&gt;"))
+
+  (test "a keyword head is still an element"
+    (assert= (render [:div {:class "card"} "x"]) "<div class=\"card\">x</div>")))
+
 (describe "render: no attrs shorthand"
   (test "attrs map optional"
     (assert= (render [:p {} "hi"]) "<p>hi</p>")))

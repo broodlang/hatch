@@ -243,6 +243,7 @@
   - `(raw s)`                 → `s` verbatim (no escaping)
   - `[:tag attrs & children]` → HTML element
   - list of any of the above  → concatenated
+  - `[node node …]`           → FRAGMENT: a vector whose head is not a keyword, concatenated
   - anything else             → its `Renderable` impl, else HTML-escaped `str`
 
   (hatch/web/template/render [:p {:class \"x\"} \"hi\"]) ;=> \"<p class=\\\"x\\\">hi</p>\""
@@ -252,9 +253,24 @@
     (int? node) (str node)
     (float? node) (str node)
     (bool? node) ""
-    (vector? node) (render-element node)
+    (vector? node) (if (keyword? (first node)) (render-element node) (render-fragment node))
     (pair? node) (string/join (map node render) "")
     else (render-html node)))
+
+(defn- render-fragment (nodes)
+  "Render a vector of nodes and concatenate them — a FRAGMENT.
+
+  A Hiccup element is `[:tag …]`: the head is a keyword. A vector whose head is anything else
+  cannot be one, and the natural reading of `[card-a card-b]` is the same as `(list card-a
+  card-b)` — several nodes in one slot. It used to reach `render-element`, which took the head
+  as the tag: a function returning a vector of elements rendered as `<[:div {:class card} …]>`,
+  printed into the page as text, with the rest of the vector as its children. Silent, and
+  wrong in a way that looks like a template bug rather than a renderer one — hatch's own
+  dashboard shipped with three of them.
+
+  This is also what `web/parts` has always meant by `elem?` (a vector with a keyword head), so
+  the compiled and the interpreted renderer now agree on what an element is."
+  (string/join (map nodes render) ""))
 
 (defn- render-element (node)
   (let (tag (first node)
