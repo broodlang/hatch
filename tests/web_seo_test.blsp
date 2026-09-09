@@ -165,3 +165,50 @@
                                   (conn-for "GET" "/robots.txt"))
                      :cache-control)
           "max-age=60"))))
+
+;; llms.txt (llmstxt.org) is a curated map of a site for a language model — the few pages
+;; worth starting from, each with a line saying what it is. The spec fixes the ORDER: H1,
+;; then an optional blockquote, then free-form markdown with no headings in it, then
+;; H2-delimited sections of markdown links. A file that gets the order wrong is not one a
+;; reader can rely on, so the shape is what these assert.
+(describe "llms.txt"
+  (def *llms-site* {:url "https://example.com"})
+
+  (test "the title is the H1, and it is the only required part"
+    (assert= "# Acme\n" (llms-text *llms-site* {:title "Acme"})))
+
+  (test "summary, details and sections come in the specified order"
+    (assert= (str "# Acme\n"
+               "\n> A widget registry.\n" "\nBuilt in a shed.\n" "\n## Docs\n\n"
+               "- [Guide](https://example.com/guide): start here\n"
+               "- [API](https://example.com/api)\n")
+      (llms-text *llms-site*
+        {:title "Acme"
+         :summary "A widget registry."
+         :details "Built in a shed."
+         :sections [{:name "Docs"
+                     :links [{:title "Guide" :url "/guide" :notes "start here"}
+                              {:title "API" :url "/api"}]}]})))
+
+  (test "relative link urls are made absolute — the file is read away from the site"
+    (is (includes? (llms-text *llms-site*
+                     {:title "A" :sections [{:name "S" :links [{:title "T" :url "/x"}]}]})
+          "(https://example.com/x)")))
+
+  (test "an absolute url is left alone"
+    (is (includes? (llms-text *llms-site*
+                     {:title "A"
+                      :sections [{:name "S"
+                                  :links [{:title "T" :url "https://other.example/x"}]}]})
+          "(https://other.example/x)")))
+
+  (test "the handler serves it as plain text, cacheable"
+    (let (resp (call (llms-handler *llms-site* {:title "Acme"} {}) (conn-for "GET" "/llms.txt")))
+      (assert= 200 (status resp))
+      (is (includes? (resp-header resp :content-type) "text/plain"))
+      (is (includes? (resp-header resp :cache-control) "max-age"))
+      (is (includes? (body resp) "# Acme"))))
+
+  (test "content may be a thunk, so a listing is read per request and not frozen at boot"
+    (let (handler (llms-handler *llms-site* (fn () {:title "Live"}) {}))
+      (is (includes? (body (call handler (conn-for "GET" "/llms.txt"))) "# Live")))))

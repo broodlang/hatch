@@ -211,6 +211,75 @@
     (text-resp (put-resp-header conn :cache-control (web/cache/public-for (get opts :max-age 3600)))
       (robots-text site opts))))
 
+;; ---- llms.txt ---------------------------------------------------------------
+
+(defn llms-text (site content)
+  "The `llms.txt` body for `content`, in the order the specification fixes.
+
+  `llms.txt` (llmstxt.org) is a curated map of a site for a language model: not a crawl
+  frontier like `sitemap.xml`, which lists every URL there is, but the handful a reader
+  should start from, each with a line saying what it is. A model given a whole site spends
+  its context finding the documentation; given this, it starts at it.
+
+  `content`:
+
+    :title    (required) the H1 — the project or site name
+    :summary  a one-line blockquote under it
+    :details  free-form markdown between the summary and the sections. Headings are NOT
+              allowed here by the spec, since an H2 would open a section.
+    :sections a list of `{:name :links}`, each rendered as an H2 and a markdown list.
+              A link is `{:title :url :notes}`; `:notes` is appended after a colon.
+              A section named \"Optional\" has a defined meaning — a reader short on
+              context may skip everything in it — so put secondary material there rather
+              than inventing a name for it.
+
+  Relative link URLs are made absolute against `site`, because the file is read away from
+  the page it came from and a bare `/docs` has nothing to resolve against.
+
+      (llms-text *site*
+        {:title \"Acme\"
+         :summary \"A widget registry.\"
+         :sections [{:name \"Docs\"
+                     :links [{:title \"Guide\" :url \"/guide\" :notes \"start here\"}]}]})"
+  (let (sections (get content :sections []))
+    (str "# "
+      (get content :title "")
+      "\n"
+      (let (summary (get content :summary)) (if (present? summary) (str "\n> " summary "\n") ""))
+      (let (details (get content :details)) (if (present? details) (str "\n" details "\n") ""))
+      (apply str (map sections (fn (section) (llms-section site section)))))))
+
+(defn- llms-section (site section)
+  "One H2 section and its link list."
+  (str "\n## "
+    (get section :name "")
+    "\n\n"
+    (apply str
+      (map (get section :links [])
+        (fn (link)
+          (str "- ["
+            (get link :title "")
+            "]("
+            (absolute-url site (get link :url ""))
+            ")"
+            (let (notes (get link :notes)) (if (present? notes) (str ": " notes) ""))
+            "\n"))))))
+
+(defn llms-handler (site content opts)
+  "A conn handler serving `llms-text` at `/llms.txt`.
+
+  `content` is the map `llms-text` takes, OR a zero-argument function returning one — pass
+  the function when any of it is read from the database, so the file reflects the site as it
+  is now rather than as it was at boot.
+
+  Served as `text/plain`: it is markdown, but it is meant to be read raw, and a browser
+  shows plain text rather than offering to download it."
+  (fn (conn)
+    (let (data (if (fn? content) (content) content))
+      (text-resp (put-resp-header conn
+                   :cache-control (web/cache/public-for (get opts :max-age 3600)))
+        (llms-text site data)))))
+
 ;; ---- sitemap.xml ------------------------------------------------------------
 
 (defn- url-entry (site entry)
