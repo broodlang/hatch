@@ -1,0 +1,135 @@
+(defmodule web/mcp
+  "WebMCP — declare this page's capabilities as tools an in-browser agent can call.
+
+  A page that only renders HTML leaves an agent to scrape it: read the markup, guess which
+  input is the search box, submit it, parse the result page. WebMCP lets the page say what
+  it can do instead — a name, a description, a JSON Schema for the arguments, and the
+  endpoint that answers. The agent calls the same API a client would.
+
+  Tools are declared as DATA and rendered into a JSON block; hatch's bundled
+  `brood_webmcp.js` reads that block and registers each one. Nothing here emits JavaScript
+  built from application strings, which is both an injection surface and, in this tree, a
+  thing the CI gate refuses.
+
+  The API is young and has moved — the getter has been specified on both `navigator` and
+  `document`, and the earlier `provideContext`/`clearContext` pair was replaced by
+  `registerTool`. The client probes both and does nothing where neither exists, so a page
+  carrying tools is unchanged in a browser that has never heard of them, and for a crawler.
+
+      (mcp/tools-script
+        [{:name \"searchPackages\"
+          :description \"Search the registry by name or description.\"
+          :input-schema {:type \"object\"
+                         :properties {:q {:type \"string\" :description \"search text\"}}
+                         :required [\"q\"]}
+          :endpoint {:method \"GET\" :url \"/api/v1/packages\" :query [\"q\"]}}])"
+  (:alias web/template)
+  ; serve-body — the static cache pipeline (content ETag, 304, nosniff)
+  (:alias web/static :as static))
+
+(def *block-id* "hatch-mcp-tools")
+
+(defn- present? (s) (and (string? s) (not (= s ""))))
+
+(defn tools-script (tools)
+  "The Hiccup for `tools`: a JSON block of definitions plus the client that registers them.
+
+  Put it in the body of any page whose tools apply. Answers \"\" for no tools, so a page
+  with nothing to offer carries no markup and no request."
+  (if (empty? tools)
+    ""
+    [:div
+      {}
+      [:script
+        {:type "application/json" :id *block-id*}
+        (web/template/raw (script-safe (json/encode (map tools validated-tool))))]
+      [:script {:type "module" :src (client-path)}]]))
+
+(defn client-path ()
+  "The URL the bundled client is served from. Override by serving it elsewhere and passing
+  your own `<script src>`; this is the path `client-js-handler` is meant to sit on."
+  "/static/brood_webmcp.js")
+
+(defn validated-tool (tool)
+  "`tool` as the wire shape the client expects, or a raised error naming what is wrong.
+
+  Validated at RENDER time and not left to the browser, because a malformed tool is silent
+  where it lands: the page looks right, the agent surface simply never offers it. The
+  requirements are the specification's — a name, a description an agent can choose on, and
+  an object schema for the arguments."
+  (let (name (get tool :name)
+        description (get tool :description)
+        schema (get tool :input-schema))
+    (when (not (present? name))
+      (error "web/mcp: a tool needs a :name — an agent selects on it: " tool))
+    (when (not (valid-name? name))
+      (error "web/mcp: tool :name must be letters, digits, _ or - (got): " name))
+    (when (not (present? description))
+      (error "web/mcp: tool " name " needs a :description — it is what an agent chooses on"))
+    (when (not (object-schema? schema))
+      (error "web/mcp: tool " name " needs an :input-schema of {:type \"object\" :properties {…}}"))
+    (when (not (present? (get (get tool :endpoint {}) :url)))
+      (error "web/mcp: tool " name " needs an :endpoint with a :url"))
+    {:name name
+     :description description
+     :inputSchema schema
+     :endpoint (get tool :endpoint)}))
+
+(defn valid-name? (name)
+  "A tool name an agent can address: letters, digits, `_` or `-`, nothing else."
+  (and (string? name)
+    (> (string/length name) 0)
+    (all-chars? name
+      (fn (c)
+        (or (and (>= (string/char->int c) 48) (<= (string/char->int c) 57))
+          (and (>= (string/char->int c) 65) (<= (string/char->int c) 90))
+          (and (>= (string/char->int c) 97) (<= (string/char->int c) 122))
+          (= c "_")
+          (= c "-"))))))
+
+(defn- all-chars? (s pred)
+  (letrec (go (fn (i)
+                (cond
+                  (>= i (string/length s)) true
+                  (not (pred (string/char-at s i))) false
+                  else (go (+ i 1)))))
+    (go 0)))
+
+(defn object-schema? (schema)
+  "Whether `schema` is the object JSON Schema the tool contract requires. A tool takes named
+  arguments, so anything else — a bare string, an array, a missing `:properties` — would be
+  registered and then never callable."
+  (and (map? schema)
+    (= (get schema :type) "object")
+    (map? (get schema :properties))))
+
+(defn- script-safe (s)
+  "JSON made safe to sit inside a `<script>` element."
+  (string/replace (string/replace s "</" "<\\/") "<!--" "<\\!--"))
+
+;; ---- serving the bundled client ---------------------------------------------
+
+(def *hatch-root*
+  ; This file is <hatch>/src/web/mcp.blsp; strip the known suffix to find <hatch>, so the
+  ; client is served from the package rather than vendored into every app — the same trick
+  ; web/live uses for brood_live.js.
+  (string/replace (or (reflect/current-file) "") "/src/web/mcp.blsp" ""))
+
+(defn asset-path ()
+  "Absolute path to hatch's bundled `static/brood_webmcp.js`."
+  (str *hatch-root* "/static/brood_webmcp.js"))
+
+(defn client-js ()
+  "The bundled client's source, or nil if it can't be located."
+  (check-allow :discarded-catch (try (file/slurp (asset-path)) (catch _ nil))))
+
+(defn client-js-handler ()
+  "A conn handler serving the bundled client, so an app can wire it straight from the
+  package:
+
+      (get \"/static/brood_webmcp.js\" (mcp/client-js-handler))"
+  (fn (conn)
+    (static/serve-body conn
+      "text/javascript; charset=utf-8"
+      (or (client-js) "")
+      "brood_webmcp.js")))

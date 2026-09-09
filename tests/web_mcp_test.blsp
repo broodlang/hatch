@@ -1,0 +1,92 @@
+;; web/mcp — WebMCP tool declarations. A malformed tool is SILENT where it lands: the page
+;; renders, and the agent surface simply never offers it. So the shape is checked here, at
+;; render time, and these tests are mostly about what is refused.
+(defmodule web-mcp-test
+  (:use test)
+  (:use web/mcp)
+  (:use web/test)
+  (:use web/template :only [render]))
+
+(def *tool*
+  {:name "searchPackages"
+   :description "Search the registry by name or description."
+   :input-schema {:type "object" :properties {:q {:type "string"}} :required ["q"]}
+   :endpoint {:method "GET" :url "/api/v1/packages" :query ["q"]}})
+
+(defn- threw (thunk)
+  (check-allow :discarded-catch (try (do (thunk) nil) (catch e (str e)))))
+
+(describe "tools-script"
+  (test "renders the definitions as JSON and pulls in the client"
+    (let (html (render (tools-script [*tool*])))
+      (is (includes? html "application/json"))
+      (is (includes? html "hatch-mcp-tools"))
+      (is (includes? html "\"name\":\"searchPackages\""))
+      (is (includes? html "\"inputSchema\""))
+      (is (includes? html "/static/brood_webmcp.js"))))
+
+  (test "a page with no tools carries no markup and no request"
+    (assert= "" (render (tools-script []))))
+
+  ;; The JSON sits inside a <script>, so a `</script>` in any string value would end the
+  ;; element early and spill the rest into the document as markup.
+  (test "a closing tag inside a value cannot break out of the script element"
+    (let (html (render (tools-script [(assoc *tool*
+                                        :description "ends the block </script><img src=x>")])))
+      (is (not (includes? html "</script><img")))
+      (is (includes? html "<\\/script>")))))
+
+(describe "a malformed tool is refused at render time, not shipped"
+  (test "no name"
+    (is (includes? (or (threw (fn () (tools-script [(dissoc *tool* :name)]))) "") ":name")))
+
+  (test "a name an agent could not address"
+    (is (includes? (or (threw (fn () (tools-script [(assoc *tool* :name "search packages")]))) "")
+          ":name")))
+
+  (test "no description — it is what an agent chooses on"
+    (is (includes? (or (threw (fn () (tools-script [(dissoc *tool* :description)]))) "")
+          ":description")))
+
+  (test "a schema that is not an object schema"
+    (is (includes? (or (threw (fn () (tools-script [(assoc *tool* :input-schema {:type "string"})])))
+                     "")
+          ":input-schema"))
+    (is (includes? (or (threw (fn () (tools-script [(assoc *tool* :input-schema {:type "object"})])))
+                     "")
+          ":input-schema")))
+
+  (test "no endpoint to answer the call"
+    (is (includes? (or (threw (fn () (tools-script [(dissoc *tool* :endpoint)]))) "") ":endpoint"))))
+
+(describe "schema and name predicates"
+  (test "object-schema? wants type object AND properties"
+    (is (object-schema? {:type "object" :properties {}}))
+    (is (not (object-schema? {:type "object"})))
+    (is (not (object-schema? {:type "array" :properties {}})))
+    (is (not (object-schema? "nope")))
+    (is (not (object-schema? nil))))
+
+  (test "valid-name? allows letters, digits, underscore and dash only"
+    (is (valid-name? "searchPackages"))
+    (is (valid-name? "get_package-v2"))
+    (is (not (valid-name? "search packages")))
+    (is (not (valid-name? "search.packages")))
+    (is (not (valid-name? "")))
+    (is (not (valid-name? nil)))))
+
+(describe "the bundled client"
+  (test "is found in the package, so an app need not vendor it"
+    (is (not (nil? (client-js))))
+    (is (includes? (or (client-js) "") "registerTool")))
+
+  ;; The API has moved between `navigator` and `document`, and shipped first on navigator.
+  (test "probes both spellings, and is inert where neither exists"
+    (let (source (or (client-js) ""))
+      (is (includes? source "document.modelContext"))
+      (is (includes? source "navigator.modelContext"))))
+
+  (test "the handler serves it as JavaScript"
+    (let (resp (call (client-js-handler) (conn-for "GET" "/static/brood_webmcp.js")))
+      (assert= 200 (status resp))
+      (is (includes? (resp-header resp :content-type) "javascript")))))
