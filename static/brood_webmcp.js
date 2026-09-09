@@ -26,8 +26,17 @@
   }
   if (!Array.isArray(tools)) return;
 
+  // `/api/v1/packages/{name}` with args {name: "hatch"} -> `/api/v1/packages/hatch`.
+  // Each segment is encoded, so an argument cannot introduce a path of its own.
+  function fillPath(template, args) {
+    return template.replace(/\{(\w+)\}/g, function (whole, key) {
+      if (!args || args[key] === undefined || args[key] === null) return whole;
+      return encodeURIComponent(String(args[key]));
+    });
+  }
+
   function buildUrl(endpoint, args) {
-    var url = new URL(endpoint.url, window.location.origin);
+    var url = new URL(fillPath(endpoint.url, args), window.location.origin);
     (endpoint.query || []).forEach(function (name) {
       if (args && args[name] !== undefined && args[name] !== null) {
         url.searchParams.set(name, String(args[name]));
@@ -46,7 +55,7 @@
       if (method === "GET") {
         url = buildUrl(endpoint, args);
       } else {
-        url = new URL(endpoint.url, window.location.origin).toString();
+        url = new URL(fillPath(endpoint.url, args), window.location.origin).toString();
         init.headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(args || {});
       }

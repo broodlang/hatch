@@ -86,6 +86,13 @@
       (is (includes? source "document.modelContext"))
       (is (includes? source "navigator.modelContext"))))
 
+  ;; A path argument is substituted into the URL, so it must be encoded — otherwise an
+  ;; argument could introduce path segments of its own.
+  (test "path templates are filled and each argument is encoded"
+    (let (source (or (client-js) ""))
+      (is (includes? source "fillPath"))
+      (is (includes? source "encodeURIComponent"))))
+
   (test "the handler serves it as JavaScript"
     (let (resp (call (client-js-handler) (conn-for "GET" "/static/brood_webmcp.js")))
       (assert= 200 (status resp))
