@@ -23,8 +23,11 @@
   (:use encoding)
   ; hmac-sha256 — the cookie signature
   (:use hash)
-  ; constant-time-equal? — constant-time signature comparison (no timing oracle)
-  (:use crypto))
+  ; constant-time-equal? — constant-time signature comparison (no timing oracle);
+  ; encrypt/decrypt/random-nonce/pbkdf2 — the sealed cookie format
+  (:use crypto)
+  ; table/new — memoising the derived AEAD key, which costs a 600k pbkdf2 to make
+  (:alias table))
 
 (def *default-cookie* "_hatch_session")
 (def *flash-key* "__flash__")
@@ -67,18 +70,96 @@
 
 ; ---- signing / verification ----
 
-(defn encode-session (secret data)
-  "Serialize session `data` (a map) into a signed cookie string: `payload.signature`,
-  where payload is base64url(JSON) and signature is HMAC-SHA256(secret, payload)."
-  (let (payload (base64-url-encode (json/encode data))
-        sig (hmac-sha256 secret payload))
-    (str payload "." sig)))
+(defn encode-session (secret data &optional (opts {}))
+  "Serialize session `data` (a map) into a cookie string.
+
+  Signed by default: `payload.signature`, where payload is base64url(JSON) and signature is
+  HMAC-SHA256(secret, payload). A signature is AUTHENTICATION — it proves the value came
+  from this app and was not altered — but the payload is plain base64 that anyone holding
+  the cookie can read.
+
+  With `:encrypt true` the whole session is sealed instead (`ENCRYPTED-PREFIX`), so its
+  contents are confidential as well. Use it when a session carries anything the holder of
+  the cookie should not be able to READ — a one-shot token in a flash, an email address, a
+  role. It costs one AEAD seal per write, and reads are unchanged for cookies that were
+  never encrypted, so it can be turned on for a running app."
+  (if (get opts :encrypt false)
+    (encrypt-session secret data)
+    (let (payload (base64-url-encode (json/encode data))
+          sig (hmac-sha256 secret payload))
+      (str payload "." sig))))
+
+;; Marks a sealed cookie, and the format that produced it. A prefix rather than a flag
+;; passed to the reader: a cookie has to say what it is, because both formats are in flight
+;; the moment encryption is switched on for an app whose users hold signed cookies already.
+(def *encrypted-prefix* "E1.")
+
+(defn encrypt-session (secret data)
+  "Seal `data` into `E1.<nonce>.<ciphertext>`, both base64url.
+
+  ChaCha20-Poly1305, which authenticates as well as encrypts — so a sealed cookie needs no
+  separate HMAC; a tampered one fails to open. The nonce is fresh per write, which is what
+  the construction requires: reusing one under the same key would leak the relationship
+  between two sessions."
+  (let (nonce (random-nonce)
+        sealed (encrypt (session-key secret) nonce (string/->bytes (json/encode data))))
+    (str *encrypted-prefix*
+      (base64-url-encode-bytes nonce)
+      "."
+      (base64-url-encode-bytes sealed))))
+
+(defn decrypt-session (secret cookie)
+  "Open a sealed cookie, or `{}` if it does not open — a bad cookie reads as an empty
+  session, exactly as a bad signature does."
+  (let (rest-of (string/substring cookie
+                  (string/length *encrypted-prefix*)
+                  (string/length cookie))
+        dot (index-of rest-of "."))
+    (if (< dot 0)
+      {}
+      ;; `bytes?` at each step, not truthiness. Neither of these reports failure by
+      ;; raising or by answering nil: `base64-url-decode-bytes` answers a FAILURE value,
+      ;; which is truthy, and `decrypt` answers the keyword `:error` when the tag does not
+      ;; verify — which is exactly what a tampered cookie produces. Checking the type is
+      ;; what makes a bad cookie read as an empty session instead of raising out of a plug.
+      (let (nonce (base64-url-decode-bytes (string/substring rest-of 0 dot))
+            sealed (base64-url-decode-bytes (string/substring rest-of
+                                              (+ dot 1)
+                                              (string/length rest-of)))
+            opened (when (and (bytes? nonce) (bytes? sealed))
+                     (decrypt (session-key secret) nonce sealed)))
+        (if (not (bytes? opened))
+          {}
+          (check-expiry (decode-json (string/bytes-> opened))))))))
+
+;; The 32-byte key a session is sealed with, derived from the signing secret so an app needs
+;; no second secret to turn encryption on. MEMOISED: the derivation is a 600k-iteration
+;; pbkdf2, which is the right cost to pay once at first use and absurd to pay per request.
+;; Keyed by the secret, so a test using several secrets gets a key for each.
+(def- *session-keys* (table/new))
+
+(defn session-key (secret)
+  "The AEAD key for `secret`, derived once and remembered."
+  (if (table/has? *session-keys* secret)
+    (table/get *session-keys* secret)
+    (let (key (pbkdf2 secret "hatch/web/session/encrypt" 600000 32))
+      (table/put *session-keys* secret key)
+      key)))
 
 (defn decode-session (secret cookie)
-  "Verify and decode a signed session `cookie` back into a string-keyed map. Returns `{}`
-  for an absent, malformed, or tampered cookie (signature mismatch) — a bad cookie reads as
-  an empty session, never an error. base64url has no `.`, so the final `.` cleanly splits
-  payload from signature."
+  "Verify and decode a session `cookie` back into a string-keyed map. Returns `{}` for an
+  absent, malformed, or tampered cookie — a bad cookie reads as an empty session, never an
+  error. base64url has no `.`, so the final `.` cleanly splits payload from signature.
+
+  Both formats are read, whichever the app currently WRITES. Turning encryption on therefore
+  does not sign everyone out: the signed cookies already in browsers keep opening, and each
+  is replaced with a sealed one the next time its session changes."
+  (cond
+    (or (nil? cookie) (string/blank? cookie)) {}
+    (string/starts-with? cookie *encrypted-prefix*) (decrypt-session secret cookie)
+    else (decode-signed secret cookie)))
+
+(defn- decode-signed (secret cookie)
   (if (or (nil? cookie) (string/blank? cookie))
     {}
     (let (dot (index-of cookie "."))
@@ -117,9 +198,13 @@
 (defn decode-payload (payload)
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
   parse failure, or if the payload isn't a JSON object."
+  (try (decode-json (base64-url-decode payload)) (catch _e {})))
+
+(defn decode-json (json)
+  "A JSON object as a string-keyed map; `{}` for anything else. Shared by the signed and the
+  sealed formats, so both agree on what a session that does not parse reads as."
   (try
-    (let (json (base64-url-decode payload)
-          parsed (if json (json/decode json) nil))
+    (let (parsed (if json (json/decode json) nil))
       (if (map? parsed) (stringify-keys parsed) {}))
     (catch _e {})))
 
@@ -166,7 +251,7 @@
         (delete-cookie conn (get cfg :cookie) (session-cookie-opts opts))
         (put-cookie conn
           (get cfg :cookie)
-          (encode-session secret (with-expiry sess opts))
+          (encode-session secret (with-expiry sess opts) opts)
           (session-cookie-opts opts))))
     conn))
 

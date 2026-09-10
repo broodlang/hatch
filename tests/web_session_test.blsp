@@ -161,3 +161,67 @@
   ; cookies) — but every newly WRITTEN session now carries one via with-expiry above
   (test "a cookie with no __exp__ still decodes (legacy compatibility)"
     (assert= (decode-session *secret* (encode-session *secret* {"user" "y"})) {"user" "y"})))
+
+;; A SIGNED cookie proves the value came from this app; it does not hide it. The payload is
+;; base64 anyone holding the cookie can read, which matters as soon as a session carries
+;; something the holder should not see — a one-shot token in a flash, an email, a role.
+;; `:encrypt true` seals it instead. ChaCha20-Poly1305 authenticates as well as encrypts, so
+;; a sealed cookie needs no separate signature.
+(describe "encrypted sessions"
+  (def *sec* "a-strong-enough-secret-for-tests-0123456789")
+
+  (test "a sealed cookie round-trips"
+    (let (cookie (encode-session *sec* {"user_id" 7 "role" "admin"} {:encrypt true}))
+      (assert= {"user_id" 7 "role" "admin"} (decode-session *sec* cookie))))
+
+  ;; The property the whole thing exists for.
+  (test "the contents are not readable from the cookie"
+    (let (cookie (encode-session *sec* {"token" "super-secret-value"} {:encrypt true})
+          last-dot (string/last-index-of cookie ".")
+          ciphertext (encoding/base64-url-decode-bytes (string/substring cookie
+                                                         (+ last-dot 1)
+                                                         (string/length cookie)))
+          plaintext (string/->bytes (json/encode {"token" "super-secret-value"})))
+      (is (not (includes? cookie "super-secret-value")))
+      ;; compared as BYTES: the ciphertext is not text, which is the point — decoding it as
+      ;; UTF-8 raises, so the check is that it is not the plaintext rather than what it reads as
+      (is (bytes? ciphertext))
+      (is (not (= (vec (if (bytes? ciphertext) ciphertext (bytes))) (vec plaintext))))))
+
+  (test "a signed cookie, by contrast, is readable — which is why this option exists"
+    (let (cookie (encode-session *sec* {"token" "super-secret-value"} {})
+          payload (string/substring cookie 0 (index-of cookie ".")))
+      (let (decoded (encoding/base64-url-decode payload))
+        (is (string? decoded))
+        (is (includes? (if (string? decoded) decoded "") "super-secret-value")))))
+
+  (test "a tampered ciphertext does not open"
+    (let (cookie (encode-session *sec* {"user_id" 7} {:encrypt true})
+          flipped (str (string/substring cookie 0 (- (string/length cookie) 2)) "AA"))
+      (assert= {} (decode-session *sec* flipped))))
+
+  (test "another secret does not open it"
+    (let (cookie (encode-session *sec* {"user_id" 7} {:encrypt true}))
+      (assert= {} (decode-session "a-different-secret-entirely-9876543210" cookie))))
+
+  (test "a truncated or malformed sealed cookie reads as an empty session, not an error"
+    (assert= {} (decode-session *sec* "E1."))
+    (assert= {} (decode-session *sec* "E1.notbase64!!.alsonot"))
+    (assert= {} (decode-session *sec* "E1.onlyonepart")))
+
+  ;; Turning encryption on must not sign everyone out: the cookies already in browsers are
+  ;; signed, and each is replaced with a sealed one the next time its session changes.
+  (test "a signed cookie still opens when the app has switched to sealing"
+    (let (signed (encode-session *sec* {"user_id" 7} {}))
+      (assert= {"user_id" 7} (decode-session *sec* signed))))
+
+  (test "expiry is enforced for a sealed cookie too"
+    (let (expired (encode-session *sec* {"user_id" 7 "__exp__" (- (os/now) 1000)} {:encrypt true}))
+      (assert= {} (decode-session *sec* expired))))
+
+  ;; The key derivation is a 600k-iteration pbkdf2 — right to pay once, absurd per request.
+  (test "the derived key is memoised, so sealing is not a KDF per write"
+    (let (t0 (os/now)
+          _ (for (i (range 20)) (encode-session *sec* {"n" i} {:encrypt true}))
+          elapsed (- (os/now) t0))
+      (is (< elapsed 500)))))
