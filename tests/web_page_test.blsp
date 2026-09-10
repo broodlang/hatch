@@ -12,7 +12,18 @@
   (test "escapes text content"
     (let (resp (page (conn-for) [:p {} "<script>"]))
       (assert= (includes? (get resp :resp-body) "&lt;script&gt;") true)
-      (assert= (includes? (get resp :resp-body) "<script>") false))))
+      (assert= (includes? (get resp :resp-body) "<script>") false)))
+
+  ;; A rendered page must be able to carry a status. It went through `html-resp`, which
+  ;; passes a literal 200 to `send-resp`, so `put-status` was overwritten and a themed 404
+  ;; could not exist — the app had to pick the page or the status code.
+  (test "honours a status set with put-status, so a rendered page can be a 404"
+    (let (resp (page (put-status (conn-for) 404) [:h1 {} "Not found"]))
+      (assert= (get resp :status) 404)
+      (assert= (get resp :resp-body) "<!DOCTYPE html><h1>Not found</h1>")))
+
+  (test "still defaults to 200 when no status was set"
+    (assert= (get (page (conn-for) [:p {} "hi"]) :status) 200)))
 
 ;; `defhtml` compiles a Hiccup body to statics + dynamic holes at EXPANSION time, so a
 ;; request joins prebaked fragments instead of walking a tree. The contract that matters is

@@ -19,8 +19,14 @@
   paint in one TCP round trip, and about a render-blocking third-party resource in the
   `<head>`. All of that costs nothing in prod and never changes the response; it exists
   because such a page is correct in every way a test usually checks and is still worse to
-  use than it needs to be."
-  (html-resp conn (audit/warn-page! (html node))))
+  use than it needs to be.
+
+  Honours a status already set with `put-status`, so a rendered page can be a 404. It went
+  through `html-resp`, which names 200 in its own docstring and passes it to `send-resp`
+  as a literal — overwriting the conn's status. There was therefore NO way to render a
+  Hiccup page under any other status, and an app that wanted a themed 404 had to choose
+  between the page and the status code. Unset (the default) is still 200."
+  (send-resp conn (or (get conn :status) 200) (audit/warn-page! (html node))))
 
 (defmacro defhtml (name args & body)
   "Define `name` as a function of `args` whose Hiccup body is compiled to HTML **at
