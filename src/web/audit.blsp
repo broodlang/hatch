@@ -102,6 +102,22 @@
           acc
           (str acc " " (string/substring document (inc body-start) (second r))))))))
 
+(defn- has-external-script? (document)
+  "Whether `document` carries a `<script>` with a `src`, in ANY attribute order.
+
+  Matching the literal `<script src=\"` instead — which is what this did — sees only the
+  case where `src` happens to come first, and misses `<script type=\"module\" src=…>`. That
+  put [[inert-controls]] to work on exactly the page it promises to decline: a filter box
+  whose behaviour lives in a companion module script was reported inert on every render,
+  which is the false positive this module says it would rather not catch at all."
+  (let (scan (fn (from)
+               (let (at (index-of document "<script" from))
+                 (cond
+                   (< at 0) false
+                   (attr-value (tag-text document at) "src") true
+                   else (scan (+ at 7))))))
+    (scan 0)))
+
 (defn inert-controls (document)
   "Every interactive control in `document` that provably cannot do anything, as a list of
   maps carrying `:tag`, `:id` and `:snippet`.
@@ -123,7 +139,7 @@
       (hatch/web/audit/inert-controls \"<html><body><input id=\\\"q\\\"></body></html>\")   → ({:tag \"input\" :id \"q\" :snippet \"<input id=\\\"q\\\">\"})"
   (if (< (index-of document "<html") 0)
     nil
-    (let (external? (>= (index-of document "<script src=\"") 0)
+    (let (external? (has-external-script? document)
           script-text (inline-script-text document)
           form-ranges (ranges document "<form" "</form>" 7 0 nil))
       (if external?

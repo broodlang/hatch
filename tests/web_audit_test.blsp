@@ -46,6 +46,14 @@
     (assert= (inert-controls (page-with "<input id=\"q\"><script src=\"/static/app.js\"></script>"))
       nil))
 
+  ;; The same refusal, with an attribute BEFORE the `src`. Matching the literal
+  ;; `<script src="` saw only the shape above, so a page whose control is driven by a
+  ;; `type="module"` script was judged — and reported inert on every render.
+  (test "an external script is still external when an attribute precedes its src"
+    (assert= (inert-controls (page-with (str "<input id=\"module-filter\">"
+                                          "<script type=\"module\" src=\"/static/reference-index.js\"></script>")))
+      nil))
+
   (test "a control with no id may be reached by a tag or class selector"
     (assert= (inert-controls (page-with "<input type=\"search\"><script>document.querySelector('input')</script>"))
       nil))
