@@ -141,6 +141,21 @@ a CDN is infrastructure, analytics is render-blocking third-party JavaScript tra
 checkbox, `ads.txt` declares who may sell advertising on a site that sells none, and
 "include your keywords" is advice to write well, not a change to make.
 
+**0.15.0 adds the half of WebMCP that does not need JavaScript.** `mcp/form-tool` emits the
+declarative annotations — `toolname`, `tooldescription`, optional `toolautosubmit`, and
+`toolparamdescription` on the controls — that a browser reads off a `<form>` to derive a tool
+and its input schema.
+
+It matters more than a second spelling of the same idea. The imperative block is only real
+once a browser implementing WebMCP has run the script and registered the tools, so a crawler,
+an audit tool, or an agent that never executes the page sees nothing at all. An annotated form
+is static HTML and is visible to every one of them. Prefer it wherever a form already does the
+thing: there is no endpoint to duplicate and no second code path to keep in step.
+
+`web/audit`'s coverage rule learned both halves — an annotated form is covered by itself, and
+an annotated form is *itself* a declaration, so a page using only the declarative API is
+audited rather than opting out of the check entirely.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.

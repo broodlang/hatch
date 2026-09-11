@@ -125,8 +125,9 @@ src/
                       control nothing can reach, a document too big for one round trip, a
                       head with no color-scheme before its stylesheet, and a page that
                       declares WebMCP tools yet leaves a GET form uncovered
-    mcp.blsp        — WebMCP: declare a page's capabilities as tools an in-browser agent
-                      can call (tools-script validates every shape at render time)
+    mcp.blsp        — WebMCP, both halves: tools-script (imperative, JS-registered, shapes
+                      validated at render time) and form-tool (declarative annotations the
+                      browser reads off a <form> — static HTML, so visible to a crawler)
     seo.blsp        — head-tags, robots.txt, llms.txt, and a sitemap derived from the
                       router's own route table
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers

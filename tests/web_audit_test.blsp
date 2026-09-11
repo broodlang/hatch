@@ -356,3 +356,63 @@
           without "<html><head><title>t</title></head><body></body></html>")
       (assert= (warn-favicon! with-icon) with-icon)
       (assert= (warn-favicon! without) without))))
+
+;; ---- the declarative half ----------------------------------------------------
+;;
+;; A form annotated with `toolname` IS the tool — the browser derives the schema from the
+;; fields, and no JSON block or JavaScript is involved. It is also static HTML, so unlike the
+;; imperative API a crawler or a scanner that never runs the page can still see it.
+
+(def- *annotated-form*
+  "<form action=\"/packages\" method=\"get\" toolname=\"searchPackages\" tooldescription=\"Search.\"><input name=\"q\"></form>")
+
+(describe "an annotated form is covered by itself"
+  (test "it needs no JSON tool to cover it"
+    (assert= (uncovered-forms (str "<!DOCTYPE html><html><body>" *annotated-form* "</body></html>"))
+      []))
+
+  (test "and an annotated form is itself a declaration, so the page IS audited"
+    ;; Without this, a page using only the declarative API would opt out of the audit
+    ;; entirely and its UNannotated forms would go unreported.
+    (let (document (str "<!DOCTYPE html><html><body>"
+                     *annotated-form*
+                     "<form action=\"/other\" method=\"get\"><input name=\"zzz\"></form>"
+                     "</body></html>")
+          findings (uncovered-forms document))
+      (assert= (count findings) 1)
+      (assert= (get (first findings) :action) "/other")))
+
+  (test "the two halves coexist: a JSON tool covers one form, an annotation the other"
+    (let (document (str "<!DOCTYPE html><html><body>"
+                     *search-form*
+                     "<form action=\"/x\" method=\"get\" toolname=\"other\" tooldescription=\"d\"><input name=\"zzz\"></form>"
+                     (web/template/render (web/mcp/tools-script [(search-tool)]))
+                     "</body></html>"))
+      (assert= (uncovered-forms document) []))))
+
+(describe "form-tool builds the annotations"
+  (test "name and description"
+    (assert= (web/mcp/form-tool {:name "searchPackages" :description "Search."})
+      {:toolname "searchPackages" :tooldescription "Search."}))
+  (test "autosubmit is opt-in — right for a search, wrong for anything that spends money"
+    (assert= (get (web/mcp/form-tool {:name "s" :description "d" :autosubmit true}) :toolautosubmit)
+      true)
+    (assert= (get (web/mcp/form-tool {:name "s" :description "d"}) :toolautosubmit) nil))
+  (test "a tool with no name or no description is refused, as in the imperative API"
+    (assert= (try (do (web/mcp/form-tool {:description "d"}) :no-error) (catch _e :error)) :error)
+    (assert= (try (do (web/mcp/form-tool {:name "s"}) :no-error) (catch _e :error)) :error))
+  (test "a name an agent cannot select on is refused"
+    (assert= (try
+               (do (web/mcp/form-tool {:name "bad name!" :description "d"}) :no-error)
+               (catch _e :error))
+      :error))
+  (test "it renders as real attributes, boolean and all"
+    (let (html (web/template/render [:form
+                                      (web/mcp/form-tool {:name "s"
+                                                          :description "d"
+                                                          :autosubmit true})
+                                      "x"]))
+      (is (includes? html "toolname=\"s\""))
+      (is (includes? html "tooldescription=\"d\""))
+      ;; a bare boolean attribute, not toolautosubmit="true"
+      (is (includes? html "toolautosubmit>")))))

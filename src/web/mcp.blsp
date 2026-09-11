@@ -45,6 +45,49 @@
         (web/template/raw (script-safe (json/encode (map tools validated-tool))))]
       [:script {:type "module" :src (client-path)}]]))
 
+(def *form-tool-attr* "toolname")
+
+(defn form-tool (spec)
+  "The declarative WebMCP attributes for a `<form>`, as a map to merge into its own.
+
+  The JSON block above is the *imperative* API: a tool the page registers through
+  JavaScript, backed by whatever endpoint you name. This is the other half of the
+  specification, and it needs no JavaScript at all — the browser reads the annotations off
+  the form, generates the input schema from the fields, and the tool IS the form.
+
+      [:form
+        (merge {:action \"/packages\" :method \"get\"}
+          (mcp/form-tool {:name \"searchPackages\"
+                          :description \"Search the package registry by name.\"
+                          :autosubmit true}))
+        [:label {:for \"q\"} \"Search\"]
+        [:input {:id \"q\" :name \"q\" :toolparamdescription \"Search text.\"}]]
+
+  Which to use is not a style question. A form that already does the thing wants the
+  declarative form: there is no endpoint to duplicate, no second code path to keep in step,
+  and — the part that matters in practice — an annotated form is STATIC HTML, so a crawler,
+  a scanner or an agent that never runs the page can still see the capability. The
+  imperative API is for a capability that is not a form: a lookup with no UI, an action the
+  page performs itself.
+
+  `:autosubmit` lets an agent submit the form once it has filled it, rather than filling it
+  and waiting for a person. Right for a search; wrong for anything that spends money or
+  cannot be undone, which is why it is off unless asked for.
+
+  Per-field descriptions are a `:toolparamdescription` on the control itself — an ordinary
+  attribute, so no helper is needed. Without one the browser uses the field's `<label>`,
+  which is usually what you would have written anyway."
+  (let (nm (get spec :name)
+        description (get spec :description))
+    (when (not (present? nm))
+      (error "web/mcp/form-tool: a form tool needs a :name — an agent selects on it: " spec))
+    (when (not (valid-name? nm))
+      (error "web/mcp/form-tool: :name must be letters, digits, _ or - (got): " nm))
+    (when (not (present? description))
+      (error "web/mcp/form-tool: tool " nm " needs a :description — it is what an agent chooses on"))
+    (let (base {:toolname nm :tooldescription description})
+      (if (get spec :autosubmit) (assoc base :toolautosubmit true) base))))
+
 (defn client-path ()
   "The URL the bundled client is served from. Override by serving it elsewhere and passing
   your own `<script src>`; this is the path `client-js-handler` is meant to sit on."

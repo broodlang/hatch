@@ -89,7 +89,42 @@ reading.
 - **Favicon** — no `<link rel="icon">` at all. Serve `/favicon.ico` as well: browsers and
   scanners ask for it without reading your markup.
 - **WebMCP tool coverage** — a page that declares tools and still leaves a GET form no tool
-  can stand in for.
+  can stand in for. A form annotated with `toolname` counts as covered by itself.
+
+## Making a form agent-callable
+
+WebMCP has two halves, and the choice between them is not a style question.
+
+The **imperative** API (`mcp/tools-script`) registers tools through JavaScript, backed by
+whatever endpoint you name. Use it for a capability that is not a form — a lookup with no
+UI, an action the page performs itself.
+
+The **declarative** API annotates the form directly, and the browser derives the tool's input
+schema from the fields:
+
+```brood
+[:form
+  (merge {:action "/packages" :method "get"}
+    (mcp/form-tool {:name "searchPackages"
+                    :description "Search the package registry by name."
+                    :autosubmit true}))
+  [:label {:for "q"} "Search"]
+  [:input {:id "q" :name "q" :toolparamdescription "Search text."}]]
+```
+
+Prefer it whenever a form already does the thing. There is no endpoint to duplicate and no
+second code path to keep in step — and, the part that matters in practice, **an annotated
+form is static HTML**. A crawler, an audit tool, or an agent that never executes the page can
+still see the capability; the imperative block is invisible to all of them, because it is
+only real once a browser that implements WebMCP has run the script and registered the tools.
+
+That distinction is worth knowing before reading an audit report. A tool that lists "WebMCP
+tools registered" is reporting what a browser registered *at analysis time*, so a page using
+only the imperative API shows nothing there — not because the page is wrong, but because the
+scanner's browser does not implement the API. Annotated forms show up regardless.
+
+`:autosubmit` lets an agent submit the form once it has filled it. Right for a search; wrong
+for anything that spends money or cannot be undone, which is why it is off by default.
 
 ## What hatch will not do
 

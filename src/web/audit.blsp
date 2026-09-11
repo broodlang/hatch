@@ -404,10 +404,14 @@
   it is a product decision (a login, a password change, a delete); nagging about those
   would be the rule crying wolf on the one case where the absence is correct.
 
-  A form counts as covered when a SINGLE tool accepts every one of its fields — one form is
-  one action, so a coverage claim spread across two tools is not the same offer."
+  A form counts as covered when it is ANNOTATED (`web/mcp/form-tool` puts a `toolname` on
+  it, and the browser then derives the tool from the form itself), or when a single declared
+  JSON tool accepts every one of its fields. One form is one action, so a coverage claim
+  spread across two tools is not the same offer."
   (let (tools (tool-declarations document))
-    (if (nil? tools)
+    ;; The opt-in gate: a page that declares nothing — no JSON block and no annotated form —
+    ;; has made no claim to be inconsistent with, so it is not audited at all.
+    (if (and (nil? tools) (not (includes? document (str web/mcp/*form-tool-attr* "="))))
       []
       (fold (ranges document "<form" "</form>" 7 0 nil)
         []
@@ -421,7 +425,10 @@
                 fields (field-names form))
             (if (or (not (= method "get"))
                   (empty? fields)
-                  (any? tools
+                  ;; Annotated in place — the browser builds the tool from this very form, so
+                  ;; there is nothing for a JSON tool to duplicate.
+                  (not (nil? (attr-value open-tag web/mcp/*form-tool-attr*)))
+                  (any? (or tools [])
                     (fn (tool)
                       (let (accepted (covered-names tool))
                         (every? fields (fn (field) (includes? accepted field)))))))
