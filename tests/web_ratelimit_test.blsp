@@ -87,3 +87,63 @@
 
   (test "no identifying header means one shared bucket"
     (assert= "global" (client-key {:headers {}}))))
+
+;; ---- keying by network, not by address --------------------------------------
+;;
+;; An address is not a client. IPv6 privacy extensions rotate the host half, and a caller
+;; can cycle through a /64 far faster than the rotation does — so a per-address bucket is
+;; escaped by picking a new address, which is the one thing an abuse control must not allow.
+
+(defn- conn-from (headers)
+  (conn/build {:method "GET" :path "/api" :query "" :params {} :headers headers :body ""}))
+
+(describe "ipv6-network"
+  (test "a full address collapses to its first four groups"
+    (assert= (ipv6-network "2c0f:ef18:1b2e:0:231b:1:2:3") "2c0f:ef18:1b2e:0000::/64"))
+  (test "a compressed run is expanded before the prefix is taken"
+    (assert= (ipv6-network "2c0f:ef18::1") "2c0f:ef18:0000:0000::/64")
+    (assert= (ipv6-network "::1") "0000:0000:0000:0000::/64"))
+  (test "groups are zero-padded, so two spellings of one network agree"
+    (assert= (ipv6-network "2c0f:ef18:1b2e:0::1") (ipv6-network "2c0f:ef18:1b2e:0000::2")))
+  (test "casing does not matter"
+    (assert= (ipv6-network "2C0F:EF18:1B2E:0::1") (ipv6-network "2c0f:ef18:1b2e:0::1")))
+  (test "a bracketed address is read the same way"
+    (assert= (ipv6-network "[2c0f:ef18:1b2e:0::1]") (ipv6-network "2c0f:ef18:1b2e:0::1")))
+  (test "IPv4 has no host/network split to take"
+    (assert= (ipv6-network "10.0.0.1") nil))
+  (test "nonsense is nil rather than a raised error"
+    (assert= (ipv6-network "not-an-address") nil)))
+
+(describe "network-key"
+  (test "two addresses in one /64 share a bucket"
+    ;; The rotation case: same machine, same network, different address tomorrow.
+    (assert= (network-key (conn-from {:fly-client-ip "2c0f:ef18:1b2e:0:231b:1:2:3"}))
+      (network-key (conn-from {:fly-client-ip "2c0f:ef18:1b2e:0:5d71:9:9:9"}))))
+
+  (test "a different /64 is a different bucket"
+    (is (not (= (network-key (conn-from {:fly-client-ip "2c0f:ef18:1b2e:0::1"}))
+               (network-key (conn-from {:fly-client-ip "2c0f:ef18:1b2f:0::1"}))))))
+
+  (test "an IPv4 client is keyed by its address, unchanged"
+    (assert= (network-key (conn-from {:fly-client-ip "203.0.113.7"})) "203.0.113.7"))
+
+  (test "no client header falls back to the shared global bucket, as client-key does"
+    (assert= (network-key (conn-from {})) "global"))
+
+  (test "it reads the same headers the auth gate does"
+    ;; Whichever header identifies a caller for the gate must identify them for the limiter.
+    (assert= (network-key (conn-from {:x-real-ip "203.0.113.7"})) "203.0.113.7")))
+
+; :isolated — the plug hits the shared :hatch-ratelimit singleton. The networks below are
+; unique to this test, so no reset is needed and nothing else can spend their tokens.
+(describe "rate-limit with :key-fn network-key"
+  :isolated (test "a rotating address inside one /64 cannot escape the bucket"
+    (let (plug (rate-limit {:rate 2 :per 100000 :burst 2 :key-fn network-key})
+          hit (fn (address) (conn/halted? (plug (conn-from {:fly-client-ip address})))))
+      ;; two tokens, spent from two DIFFERENT addresses in the same network
+      (is (not (hit "2c0f:aaaa:1b2e:0:1:1:1:1")))
+      (is (not (hit "2c0f:aaaa:1b2e:0:2:2:2:2")))
+      ;; a third address in the same /64 finds the bucket empty — the rotation bought nothing
+      (is (hit "2c0f:aaaa:1b2e:0:3:3:3:3"))
+      ;; while a different network still has its own tokens
+      (is (not (hit "2c0f:bbbb:1b2e:0:1:1:1:1"))))))

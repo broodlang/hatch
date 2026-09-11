@@ -343,3 +343,61 @@
       (send listener [:invalidate :still-alive])
       (receive (after 50 nil))
       (assert= :rebuilt (fetch :still-alive (fn () :rebuilt))))))
+
+;; ---- fetch-ttl ---------------------------------------------------------------
+;;
+;; `fetch` has no expiry, which makes it wrong for a document built from the database:
+;; memoised, the first version of it is served for the life of the process unless something
+;; remembers to invalidate. A TTL is wrong for at most its window, always — no matter what
+;; changed or who forgot to add a hook.
+
+(defn- counting-build (calls value)
+  (fn ()
+    (table/put calls :n (+ 1 (table/get calls :n 0)))
+    value))
+
+(describe "fetch-ttl"
+  (test "computes once within the window"
+    (let (calls (table/new)
+          build (counting-build calls "v1"))
+      (assert= (fetch-ttl [:ttl-test :within] 60000 build) "v1")
+      (assert= (fetch-ttl [:ttl-test :within] 60000 build) "v1")
+      (assert= (table/get calls :n) 1)))
+
+  (test "recomputes once the window has passed"
+    ;; A zero window expires immediately, which is the boundary worth pinning: the check is
+    ;; `now < stored-deadline`, so a deadline of now is already past.
+    (let (calls (table/new)
+          build (counting-build calls "v1"))
+      (fetch-ttl [:ttl-test :expired] 0 build)
+      (fetch-ttl [:ttl-test :expired] 0 build)
+      (assert= (table/get calls :n) 2)))
+
+  (test "a fresh key always computes"
+    (let (calls (table/new))
+      (assert= (fetch-ttl [:ttl-test :fresh] 60000 (counting-build calls "v")) "v")
+      (assert= (table/get calls :n) 1)))
+
+  (test "invalidate reaches a ttl entry, so an explicit hook still works"
+    (let (calls (table/new)
+          build (counting-build calls "v"))
+      (fetch-ttl [:ttl-test :invalidated] 60000 build)
+      (invalidate [:ttl-test :invalidated])
+      (fetch-ttl [:ttl-test :invalidated] 60000 build)
+      (assert= (table/get calls :n) 2)))
+
+  (test "it stores the value, not the wrapper — a caller never sees the bookkeeping"
+    (assert= (fetch-ttl [:ttl-test :shape] 60000 (fn () {:rows [1 2 3]})) {:rows [1 2 3]}))
+
+  (test "nil is a value and is cached like any other"
+    (let (calls (table/new)
+          build (counting-build calls nil))
+      (assert= (fetch-ttl [:ttl-test :nil] 60000 build) nil)
+      (assert= (fetch-ttl [:ttl-test :nil] 60000 build) nil)
+      (assert= (table/get calls :n) 1)))
+
+  (test "two keys do not share an entry"
+    (let (calls (table/new))
+      (assert= (fetch-ttl [:ttl-test :a] 60000 (counting-build calls "a")) "a")
+      (assert= (fetch-ttl [:ttl-test :b] 60000 (counting-build calls "b")) "b")
+      (assert= (table/get calls :n) 2))))

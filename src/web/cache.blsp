@@ -291,6 +291,35 @@
       (table/put *fragments* key value)
       value)))
 
+(defn fetch-ttl (key ttl-ms build)
+  "The cached value for `key`, recomputed once `ttl-ms` has passed since it was stored.
+
+  The bounded-staleness sibling of [[fetch]], and the right tool for the case `fetch` is
+  explicitly wrong for: output that is identical for every requester but DOES change —
+  a listing of rows, a document built from the database. `fetch` has no expiry, so
+  memoising such a document serves the first version of it for the life of the process
+  unless something remembers to invalidate; the entry here simply ages out.
+
+  Prefer this over `invalidate` when staleness is cheap and correctness-by-construction is
+  not. An invalidation hook has to be added to every path that can change the value, and
+  the failure mode of forgetting one is a document that is wrong indefinitely with nothing
+  to notice it. A TTL is wrong for at most `ttl-ms`, always, no matter what changed or who
+  forgot.
+
+  Costs one `os/now` per hit. The stored entry is `{:value :at}`, so a key written by
+  `fetch` and read by `fetch-ttl` (or the reverse) is not confused for a value — they do
+  not share a namespace by accident, but do not point both at one key either.
+
+  `invalidate` and `clear` still reach these entries, and still replicate to peers."
+  (let (entry (if (table/has? *fragments* key) (table/get *fragments* key) nil)
+        now (os/now))
+    (if (and (map? entry) (contains? entry :ttl-at) (< now (get entry :ttl-at)))
+      (do (bump :hits) (get entry :value))
+      (let (value (build))
+        (bump :misses)
+        (table/put *fragments* key {:value value :ttl-at (+ now ttl-ms)})
+        value))))
+
 ;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
 ;; unknowable: a cache that never hits and a cache that is never asked look identical from
 ;; the outside, and both look like a cache that is working.

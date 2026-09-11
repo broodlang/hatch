@@ -88,6 +88,21 @@ docstring had forbidden since it shipped. An `##` there does not render as empha
 opens a section ahead of `:sections`, and everything after it silently becomes that phantom
 section's content while the document still looks correct, headings and all.
 
+**0.12.0 gives rate limiting and caching the two shapes a public read surface needs.**
+`web/cache/fetch-ttl` is the bounded-staleness sibling of `fetch`, for the case `fetch` is
+documented as wrong for: output identical for every requester that nonetheless changes — a
+listing, a document built from the database. `fetch` has no expiry, so memoising one serves
+its first version for the life of the process unless something remembers to invalidate, and
+the failure mode of forgetting a hook is a document that is wrong indefinitely with nothing
+to notice. A TTL is wrong for at most its window, whatever changed and whoever forgot.
+
+`web/ratelimit/network-key` keys an IPv6 caller by its /64 rather than its exact address.
+An address is not a client: privacy extensions rotate the host half, and a caller can cycle
+through a /64 far faster than the rotation does, so a per-address bucket is escaped by
+picking a new address — the one thing an abuse control must not allow. `web/auth/allow-ips`
+already treats a /64 as the unit of identity. It is opt-in, because the bluntness cuts both
+ways and `client-key` remains right wherever a neighbour's traffic must not affect yours.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.

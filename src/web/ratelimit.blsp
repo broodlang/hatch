@@ -97,6 +97,68 @@
   identify them for the rate limiter."
   (or (web/auth/client-ip conn) "global"))
 
+(def *ipv6-prefix-groups* 4)
+
+(defn network-key (conn)
+  "Like [[client-key]], but an IPv6 client is keyed by its **/64 network** rather than its
+  exact address.
+
+  An address is not a client. IPv6 privacy extensions rotate the host half of an address —
+  the same machine on the same network appears as `2c0f:ef18:1b2e:0:231b:…` one day and
+  `2c0f:ef18:1b2e:0:5d71:…` the next, and a determined caller can cycle through them far
+  faster than that. Keyed per address, a bucket is trivially escaped by picking a new one;
+  keyed per /64, the whole interface shares one. `web/auth/allow-ips` already treats a /64
+  as the unit of identity for the same reason.
+
+  The cost is bluntness in the other direction: everyone behind one /64 shares a bucket.
+  That is the right trade for an abuse control on a public read endpoint, and the wrong one
+  for anything where a neighbour's traffic must not affect yours — so [[client-key]] stays
+  the default and this is opt-in:
+
+      (ratelimit/rate-limit {:rate 300 :per 60000 :key-fn ratelimit/network-key})
+
+  IPv4 is returned unchanged: there is no equivalent host/network split to take, and a v4
+  address is already one customer far more often than not."
+  (let (address (web/auth/client-ip conn))
+    (cond
+      (nil? address) "global"
+      (not (includes? address ":")) address
+      else (or (ipv6-network address) address))))
+
+(defn ipv6-network (address)
+  "The `/64` network of IPv6 `address` — its first four groups, expanded and zero-padded,
+  as a key. nil when `address` is not IPv6 or cannot be read as eight groups.
+
+      (hatch/web/ratelimit/ipv6-network \"2c0f:ef18:1b2e:0:231b:1:2:3\") ;=> \"2c0f:ef18:1b2e:0000::/64\"
+      (hatch/web/ratelimit/ipv6-network \"::1\") ;=> \"0000:0000:0000:0000::/64\"
+      (hatch/web/ratelimit/ipv6-network \"10.0.0.1\") ;=> nil"
+  (let (groups (ipv6-groups (unbracket address)))
+    (if (nil? groups)
+      nil
+      (str (string/join (into [] (take groups *ipv6-prefix-groups*)) ":") "::/64"))))
+
+(defn- unbracket (address)
+  "`address` without a `[…]` wrapper and without a trailing `:port` on a bracketed form."
+  (let (lower (string/lower (string/trim address)))
+    (if (string/starts-with? lower "[")
+      (let (close (index-of lower "]")) (if (< close 0) lower (string/substring lower 1 close)))
+      lower)))
+
+(defn- ipv6-groups (address)
+  "IPv6 `address` as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
+  run. nil for anything that is not IPv6."
+  (if (< (count (filter (string/->list address) (fn (c) (= c ":")))) 2)
+    nil
+    (let (halves (string/split address "::")
+          head (filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
+          after (second halves)
+          tail (if (nil? after) [] (filter (string/split after ":") (fn (g) (not (= g "")))))
+          gap (- 8 (+ (count head) (count tail)))
+          filled (append (into [] head) (map (range (math/max 0 gap)) (fn (_g) "0")) (into [] tail)))
+      (if (= (count filled) 8)
+        (apply vector (map filled (fn (g) (string/pad-left (string/lower g) 4 "0"))))
+        nil))))
+
 ; ---- the plug ----
 
 (defn limited (conn retry-after)
