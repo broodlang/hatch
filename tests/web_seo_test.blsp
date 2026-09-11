@@ -227,3 +227,79 @@
     (let (xml (sitemap-xml {:url "https://example.com"}
                 [{:path "/a" :lastmod (sitemap-date 1757548800000)}]))
       (assert= (includes? xml "<lastmod>2025-09-11</lastmod>") true))))
+
+;; ---- the one llms.txt rule that was documented and unenforced ----------------
+;;
+;; `:details` sits between the summary and the sections, and the spec forbids a heading
+;; there — an `##` line does not render as emphasis, it OPENS A SECTION at a position where
+;; the reader is still being told what the site is. Everything after it, up to the first
+;; real section, silently becomes that phantom section's content, and the document still
+;; looks fine: the headings are all present, in an order nobody intended.
+
+(describe "heading-line? is exact about what is and is not a heading"
+  (test "an ATX heading at the start of a line"
+    (is (heading-line? "# Title"))
+    (is (heading-line? "## Section"))
+    (is (heading-line? "###### deepest")))
+  (test "up to three leading spaces still reads as a heading"
+    (is (heading-line? " # one"))
+    (is (heading-line? "   ### three")))
+  (test "four leading spaces is a code block, not a heading"
+    (is (not (heading-line? "    # four"))))
+  (test "seven hashes is not an ATX heading"
+    (is (not (heading-line? "####### too many"))))
+  (test "a hash with no space after it is a tag, not a heading"
+    (is (not (heading-line? "#tag")))
+    (is (not (heading-line? "#"))))
+  (test "a hash mid-sentence is not a heading"
+    (is (not (heading-line? "written in C# mostly")))
+    (is (not (heading-line? "issue #42 is open"))))
+  (test "a heading on a later line still counts"
+    (is (heading-line? "an opening line\n\n## Later")))
+  (test "ordinary prose is not a heading"
+    (is (not (heading-line? "")))
+    (is (not (heading-line? "plain prose over\nseveral lines")))))
+
+(describe "llms-text rejects a heading in :details"
+  (test "a heading raises, naming the problem"
+    (match (try
+             (do (llms-text *site* {:title "Acme" :details "## Oops"}) :no-error)
+             (catch e [:error (error-message e)]))
+      ([:error message] (is (includes? message ":details")))
+      (:no-error (is false))))
+
+  (test "prose in :details is fine"
+    (let (text (llms-text *site* {:title "Acme" :details "A registry of widgets."}))
+      (is (includes? text "# Acme"))
+      (is (includes? text "A registry of widgets."))))
+
+  (test "a hash that is not a heading is fine"
+    (is (includes? (llms-text *site* {:title "Acme" :details "Written in C# mostly."}) "C# mostly")))
+
+  (test "absent :details is fine"
+    (is (includes? (llms-text *site* {:title "Acme"}) "# Acme")))
+
+  (test "a heading is still allowed where it belongs — in :sections"
+    (let (text (llms-text *site*
+                 {:title "Acme"
+                  :details "Plain prose."
+                  :sections [{:name "Docs"
+                              :links [{:title "Guide" :url "/guide" :notes "start here"}]}]}))
+      (is (includes? text "## Docs"))
+      (is (includes? text "[Guide](https://example.com/guide): start here")))))
+
+(describe "llms-text keeps the order the spec fixes"
+  (test "title, then summary, then details, then sections"
+    (let (text (llms-text *site*
+                 {:title "Acme"
+                  :summary "A widget registry."
+                  :details "More about it."
+                  :sections [{:name "Docs" :links [{:title "Guide" :url "/guide"}]}
+                              {:name "Optional" :links [{:title "Blog" :url "/blog"}]}]})
+          at (fn (needle) (index-of text needle)))
+      (is (< (at "# Acme") (at "> A widget registry.")))
+      (is (< (at "> A widget registry.") (at "More about it.")))
+      (is (< (at "More about it.") (at "## Docs")))
+      ;; "Optional" has a defined meaning — a reader short on context may skip it — so it
+      ;; belongs last.
+      (is (< (at "## Docs") (at "## Optional"))))))

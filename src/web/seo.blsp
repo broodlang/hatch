@@ -241,13 +241,67 @@
          :summary \"A widget registry.\"
          :sections [{:name \"Docs\"
                      :links [{:title \"Guide\" :url \"/guide\" :notes \"start here\"}]}]})"
-  (let (sections (get content :sections []))
+  (let (sections (get content :sections [])
+        details (get content :details))
+    (check-details details)
     (str "# "
       (get content :title "")
       "\n"
       (let (summary (get content :summary)) (if (present? summary) (str "\n> " summary "\n") ""))
-      (let (details (get content :details)) (if (present? details) (str "\n" details "\n") ""))
+      (if (present? details) (str "\n" details "\n") "")
       (apply str (map sections (fn (section) (llms-section site section)))))))
+
+(defn check-details (details)
+  "Raise when `details` contains a markdown heading, which the specification forbids there.
+
+  The rule reads like pedantry and is not. `details` sits between the summary and the
+  sections, and an `##` line in it does not render as emphasis — it OPENS A SECTION, at a
+  position where the reader is still being told what the site is. Everything after it, up
+  to the first real section, silently becomes that phantom section's content, and the
+  document still looks fine: the headings are all there, in an order nobody intended.
+
+  Raised rather than warned, because `llms-text` is called to build a file and the caller
+  is a `def` or a handler in the app's own source — a value it can fix, at a moment it can
+  see. A `#` at the start of a line is the whole test; a `#` mid-sentence (`C#`) is not a
+  heading and is left alone."
+  (when (and (string? details) (heading-line? details))
+    (error "web/seo/llms-text: :details must not contain a markdown heading — an ATX "
+      "heading there opens a section ahead of :sections, and everything after it is read "
+      "as that section's content. Move it into :sections, or write it as plain prose.")))
+
+(defn- run-length (line character from limit)
+  "How many consecutive `character`s `line` has from index `from`, capped at `limit`."
+  (let (n (count line)
+        step (fn (i seen)
+               (if (or (>= i n)
+                     (>= seen limit)
+                     (not (= (string/substring line i (inc i)) character)))
+                 seen
+                 (step (inc i) (inc seen)))))
+    (step from 0)))
+
+(defn heading-line? (text)
+  "Whether any line of `text` begins an ATX markdown heading (`#` through `######`).
+
+  Deliberately exact about the three edge cases, because a heading check that guesses is
+  worse than none: `#tag` is not a heading (no space after the hashes), `C#` mid-sentence
+  is not one (not at the start of a line), and FOUR leading spaces is not one either — at
+  that indent markdown reads the line as a code block, so capping the indent scan at three
+  makes the fourth space fail the `#` test on its own.
+
+      (hatch/web/seo/heading-line? \"plain prose\") ;=> false
+      (hatch/web/seo/heading-line? \"written in C# mostly\") ;=> false
+      (hatch/web/seo/heading-line? \"#tag\") ;=> false
+      (hatch/web/seo/heading-line? \"## Heading\") ;=> true
+      (hatch/web/seo/heading-line? \"   ### deep\") ;=> true"
+  (any? (string/split text "\n")
+    (fn (line)
+      (let (n (count line)
+            indent (run-length line " " 0 3)
+            hashes (run-length line "#" indent 6))
+        (and (> hashes 0)
+          (< (+ indent hashes) n)
+          (= (string/substring line (+ indent hashes) (+ indent hashes 1)) " "))))))
 
 (defn- llms-section (site section)
   "One H2 section and its link list."
@@ -298,6 +352,22 @@
         "")
       (if (nil? priority) "" (str "<priority>" priority "</priority>"))
       "</url>\n")))
+
+(defn sitemap-date (ms)
+  "Epoch-milliseconds as the date a sitemap `<lastmod>` takes, or nil when `ms` is not a
+  number — a malformed date is worse than an absent one, which is simply omitted.
+
+  `<lastmod>` accepts a full W3C datetime or a bare date, and a bare date is usually the
+  honest precision: the timestamp behind it moves when a row is written, and no crawler
+  schedules on the hour.
+
+  It is worth carrying. A site that publishes continuously has most of itself unchanged on
+  any given day, and without a date a crawler has no way to tell the one page that moved
+  from the hundred that did not — so it re-fetches on its own schedule instead of yours.
+
+      (hatch/web/seo/sitemap-date 1757548800000) ;=> \"2025-09-11\"
+      (hatch/web/seo/sitemap-date nil) ;=> nil"
+  (if (number? ms) (string/substring (datetime/->iso (datetime/epoch-ms-> ms)) 0 10) nil))
 
 (defn sitemap-date (ms)
   "Epoch-milliseconds as the date a sitemap `<lastmod>` takes, or nil when `ms` is not a

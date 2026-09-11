@@ -121,6 +121,14 @@ src/
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
     upload.blsp     — live upload progress: ?upload_token= → [:hatch :upload :progress]
                       telemetry → pubsub → the view's handle-info as {:upload {…}}
+    audit.blsp      — dev-only page audits, logged and never altering the response: a
+                      control nothing can reach, a document too big for one round trip, a
+                      head with no color-scheme before its stylesheet, and a page that
+                      declares WebMCP tools yet leaves a GET form uncovered
+    mcp.blsp        — WebMCP: declare a page's capabilities as tools an in-browser agent
+                      can call (tools-script validates every shape at render time)
+    seo.blsp        — head-tags, robots.txt, llms.txt, and a sitemap derived from the
+                      router's own route table
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
 static/
   brood_live.js     — vanilla JS client for live views; apps can serve it straight
@@ -143,6 +151,9 @@ tests/
   web_errors_test.blsp
   web_env_test.blsp
   web_cluster_test.blsp
+  web_audit_test.blsp
+  web_mcp_test.blsp
+  web_seo_test.blsp
   web_router_test.blsp
   web_session_test.blsp
   web_static_test.blsp

@@ -21,7 +21,9 @@
   to judge whatever it cannot prove."
   (:use web/conn)
   ; dev? — the one place $HATCH_ENV is read
-  (:alias web/env))
+  (:alias web/env)
+  ; *block-id* — the JSON block a page's tool declarations are rendered into
+  (:alias web/mcp))
 
 (def- *controls* ["<input" "<select" "<textarea" "<button"])
 
@@ -335,7 +337,122 @@
                     "color-scheme in an inline <style>) ahead of the link.")))))
   document)
 
+;; ---- tool coverage ----------------------------------------------------------
+
+(defn- tool-declarations (document)
+  "The decoded WebMCP tool declarations in `document`, or nil when it declares none.
+
+  nil is the OPT-OUT, and it is the whole reason this audit can exist without crying wolf.
+  A page that declares no tools is making no claim about being agent-usable, so there is
+  nothing to be inconsistent with; only a page that already opted in gets judged."
+  (let (marker (str "id=\"" web/mcp/*block-id* "\"")
+        at (index-of document marker))
+    (if (< at 0)
+      nil
+      (let (open (index-of document ">" at)
+            close (index-of document "</script>" at))
+        (if (or (< open 0) (< close 0) (> open close))
+          nil
+          ;; A malformed block is not this audit's business to report — `web/mcp` raises on
+          ;; anything it cannot render, so a block that will not decode here means someone
+          ;; hand-wrote one, and guessing at their intent is how a lint earns distrust.
+          (let (decoded (check-allow :discarded-catch
+                          (try
+                            (json/decode (string/substring document (inc open) close))
+                            (catch _e nil))))
+            (if (vector? decoded) decoded (if (list? decoded) decoded nil))))))))
+
+(defn- covered-names (tool)
+  "Every argument name `tool` accepts — its input-schema properties plus its endpoint's
+  query parameters, as strings."
+  (let (properties (get (get tool :inputSchema {}) :properties {})
+        query (get (get tool :endpoint {}) :query []))
+    (append (map (keys properties) ->string) (map query ->string))))
+
+(def- *field-tags* ["<input" "<select" "<textarea"])
+(def- *inert-types* ["hidden" "submit" "button" "reset" "image"])
+
+(defn- field-names (form)
+  "The `name` attributes of `form`'s user-facing fields.
+
+  Hidden, submit, button, reset and image inputs are skipped: a CSRF token and a submit
+  button are not arguments anyone would put in a tool schema, and counting them would make
+  every form permanently uncoverable."
+  (let (scan (fn (tag from acc)
+               (let (at (index-of form tag from))
+                 (if (< at 0)
+                   acc
+                   (let (text (tag-text form at)
+                         field (attr-value text "name")
+                         kind (string/lower (or (attr-value text "type") "text")))
+                     (scan tag
+                       (+ at (count tag))
+                       (if (and field (not (includes? *inert-types* kind))) (cons field acc) acc)))))))
+    ;; A vector, not whatever `fold` and `append` happen to produce: `:fields` is part of a
+    ;; public finding shape, so its type should be a decision rather than an implementation
+    ;; detail a caller has to discover.
+    (into [] (fold *field-tags* [] (fn (acc tag) (append acc (reverse (scan tag 0 nil))))))))
+
+(defn uncovered-forms (document)
+  "Every GET form in `document` that no declared WebMCP tool can stand in for, as a list of
+  `{:action :fields}` maps. Empty when the page declares no tools, has no such form, or
+  every one of them is covered.
+
+  **GET only, deliberately.** A GET form is a read, which is exactly what a read-only tool
+  replaces — so a page offering tools alongside an uncovered search box is an oversight
+  worth naming. A POST form is a mutation, and whether an agent should be able to perform
+  it is a product decision (a login, a password change, a delete); nagging about those
+  would be the rule crying wolf on the one case where the absence is correct.
+
+  A form counts as covered when a SINGLE tool accepts every one of its fields — one form is
+  one action, so a coverage claim spread across two tools is not the same offer."
+  (let (tools (tool-declarations document))
+    (if (nil? tools)
+      []
+      (fold (ranges document "<form" "</form>" 7 0 nil)
+        []
+        (fn (acc region)
+          (let (start (first region)
+                form (string/substring document
+                       start
+                       (math/min (count document) (+ (second region) 7)))
+                open-tag (tag-text document start)
+                method (string/lower (or (attr-value open-tag "method") "get"))
+                fields (field-names form))
+            (if (or (not (= method "get"))
+                  (empty? fields)
+                  (any? tools
+                    (fn (tool)
+                      (let (accepted (covered-names tool))
+                        (every? fields (fn (field) (includes? accepted field)))))))
+              acc
+              (append acc
+                [{:action (or (attr-value open-tag "action") "") :fields fields}]))))))))
+
+(defn warn-tool-coverage! (document)
+  "Log a dev warning for every GET form [[uncovered-forms]] finds in `document`.
+
+  The failure this catches has no symptom: the page declares tools, an agent registers
+  them, and the one thing a visitor actually came to do is still only reachable by driving
+  the markup. Both halves work; they just do not meet.
+
+  A no-op outside dev, a no-op on a page that declares no tools, and returns `document`
+  unchanged."
+  (when (dev?)
+    (doseq (finding (uncovered-forms document))
+      (log/warn (str "[audit] uncovered form: this page declares WebMCP tools, but its GET "
+                  "form"
+                  (let (action (get finding :action))
+                    (if (= action "") "" (str " to " action)))
+                  " takes "
+                  (string/join (get finding :fields) ", ")
+                  " and no single tool accepts those arguments — an agent has to drive the "
+                  "markup for the one thing the page is for. Add a tool whose :input-schema "
+                  "(or :endpoint :query) covers them, or drop the ones that no longer apply."))))
+  document)
+
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
-  Currently [[warn-inert!]], [[warn-first-flight!]] and [[warn-canvas-flash!]]."
-  (warn-canvas-flash! (warn-first-flight! (warn-inert! document))))
+  Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]] and
+  [[warn-tool-coverage!]]."
+  (warn-tool-coverage! (warn-canvas-flash! (warn-first-flight! (warn-inert! document)))))

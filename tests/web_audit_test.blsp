@@ -1,4 +1,8 @@
-(defmodule web-audit-test (:use web/audit) (:use test))
+(defmodule web-audit-test
+  (:use web/audit)
+  (:alias web/mcp)
+  (:alias web/template)
+  (:use test))
 
 ;; The bug this exists for: a page that is complete, correct, 200-OK HTML and still does
 ;; nothing when a person uses it. brood.fly.dev served its language reference with a
@@ -164,3 +168,120 @@
   (test "the audit returns its document unchanged"
     (let (doc "<head><link rel=\"stylesheet\" href=\"/a.css\"></head><body></body>")
       (assert= doc (web/audit/warn-canvas-flash! doc)))))
+
+;; ---- tool coverage ----------------------------------------------------------
+;;
+;; The documents here embed a REAL tool block (`web/mcp/tools-script` rendered), not a
+;; hand-written one, so the audit is read against the shape the framework actually emits —
+;; including the key renaming `validated-tool` does on the way out.
+
+(defn- search-tool ()
+  {:name "searchPackages"
+   :description "Search the registry by name or description."
+   :input-schema {:type "object"
+                  :properties {:q {:type "string" :description "search text"}}
+                  :required ["q"]}
+   :endpoint {:method "GET" :url "/api/v1/packages" :query ["q"]}})
+
+(defn- lookup-tool ()
+  {:name "getPackage"
+   :description "Look up one package by its exact name."
+   :input-schema {:type "object" :properties {:name {:type "string" :description "exact name"}}}
+   :endpoint {:method "GET" :url "/api/v1/packages/{name}"}})
+
+(defn- with-tools (tools body)
+  "A document carrying `body` and a rendered tool block for `tools`."
+  (str "<!DOCTYPE html><html><body>"
+    body
+    (web/template/render (web/mcp/tools-script tools))
+    "</body></html>"))
+
+(def- *search-form*
+  "<form action=\"/packages\" method=\"get\"><input name=\"q\" type=\"search\"><button type=\"submit\">Go</button></form>")
+
+(describe "uncovered-forms declines to judge a page that made no claim"
+  (test "a page with no tool block is not audited, however many forms it has"
+    (assert= (uncovered-forms (str "<!DOCTYPE html><html><body>" *search-form* "</body></html>"))
+      []))
+  (test "a page with tools and no form at all is clean"
+    (assert= (uncovered-forms (with-tools [(search-tool)] "<p>nothing to submit</p>")) []))
+  (test "a hand-written block that will not decode is not reported as a coverage problem"
+    ;; web/mcp raises on anything it cannot render, so an undecodable block means someone
+    ;; wrote one by hand — guessing at their intent is how a lint earns distrust.
+    (assert= (uncovered-forms (str "<!DOCTYPE html><html><body>"
+                                *search-form*
+                                "<script type=\"application/json\" id=\"hatch-mcp-tools\">{not json</script>"
+                                "</body></html>"))
+      [])))
+
+(describe "uncovered-forms on a page that did opt in"
+  (test "a covered search form is clean"
+    (assert= (uncovered-forms (with-tools [(search-tool)] *search-form*)) []))
+
+  (test "an uncovered field is reported, with the action and the fields"
+    (let (form "<form action=\"/find\" method=\"get\"><input name=\"term\" type=\"search\"></form>"
+          findings (uncovered-forms (with-tools [(search-tool)] form)))
+      (assert= (count findings) 1)
+      (assert= (get (first findings) :action) "/find")
+      (assert= (get (first findings) :fields) ["term"])))
+
+  (test "coverage counts the endpoint's query parameters, not only the schema"
+    ;; `limit` is a query parameter with no schema property of its own.
+    (let (tool (assoc (search-tool)
+                 :input-schema
+                   {:type "object" :properties {:q {:type "string" :description "text"}}}
+                 :endpoint {:method "GET" :url "/api/v1/packages" :query ["q" "limit"]})
+          form "<form method=\"get\"><input name=\"q\"><input name=\"limit\"></form>")
+      (assert= (uncovered-forms (with-tools [tool] form)) [])))
+
+  (test "one form is one action — two tools covering half the fields each is not coverage"
+    (let (form "<form method=\"get\"><input name=\"q\"><input name=\"name\"></form>"
+          findings (uncovered-forms (with-tools [(search-tool) (lookup-tool)] form)))
+      (assert= (count findings) 1)))
+
+  (test "several uncovered forms are each reported"
+    (let (form-a "<form action=\"/a\" method=\"get\"><input name=\"alpha\"></form>"
+          form-b "<form action=\"/b\" method=\"get\"><input name=\"beta\"></form>"
+          findings (uncovered-forms (with-tools [(search-tool)] (str form-a *search-form* form-b))))
+      (assert= (count findings) 2)
+      (assert= (map findings (fn (f) (get f :action))) (list "/a" "/b"))))
+
+  (test "select and textarea count as fields too"
+    (let (form "<form method=\"get\"><select name=\"kind\"><option>a</option></select></form>")
+      (assert= (count (uncovered-forms (with-tools [(search-tool)] form))) 1))
+    (let (form "<form method=\"get\"><textarea name=\"body\"></textarea></form>")
+      (assert= (count (uncovered-forms (with-tools [(search-tool)] form))) 1))))
+
+(describe "uncovered-forms judges only the forms where absence is a mistake"
+  (test "a POST form is a mutation, and whether an agent may do it is not a lint's call"
+    (let (form "<form action=\"/login\" method=\"post\"><input name=\"email\"><input name=\"password\" type=\"password\"></form>")
+      (assert= (uncovered-forms (with-tools [(search-tool)] form)) [])))
+
+  (test "a method in any casing is read the same way"
+    (let (form "<form action=\"/login\" method=\"POST\"><input name=\"email\"></form>")
+      (assert= (uncovered-forms (with-tools [(search-tool)] form)) [])))
+
+  (test "an absent method is GET, per HTML, so it IS judged"
+    (let (form "<form action=\"/find\"><input name=\"term\"></form>")
+      (assert= (count (uncovered-forms (with-tools [(search-tool)] form))) 1)))
+
+  (test "a form with nothing but a hidden token and a submit button has no arguments"
+    ;; Counting a CSRF token as an argument would make every form permanently uncoverable.
+    (let (form "<form method=\"get\"><input type=\"hidden\" name=\"_csrf_token\" value=\"x\"><button type=\"submit\">Go</button></form>")
+      (assert= (uncovered-forms (with-tools [(search-tool)] form)) [])))
+
+  (test "a hidden field alongside a covered one does not break coverage"
+    (let (form "<form method=\"get\"><input type=\"hidden\" name=\"_csrf_token\" value=\"x\"><input name=\"q\"></form>")
+      (assert= (uncovered-forms (with-tools [(search-tool)] form)) [])))
+
+  (test "an unnamed input cannot be submitted, so it is not an argument"
+    (let (form "<form method=\"get\"><input type=\"search\" placeholder=\"unused\"></form>")
+      (assert= (uncovered-forms (with-tools [(search-tool)] form)) []))))
+
+(describe "warn-tool-coverage!"
+  (test "returns the document unchanged, so it drops into a render pipeline"
+    (let (document (with-tools [(search-tool)] "<form method=\"get\"><input name=\"nope\"></form>"))
+      (assert= (warn-tool-coverage! document) document)))
+  (test "and on a clean page too"
+    (let (document (with-tools [(search-tool)] *search-form*))
+      (assert= (warn-tool-coverage! document) document))))

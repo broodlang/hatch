@@ -75,6 +75,19 @@ vary per session rather than per compile. And `web/auth` grew `bearer-auth`, who
 match is case-insensitive as RFC 9110 §11.1 requires; the obvious
 `(string/starts-with? raw "Bearer ")` rejects the `bearer` several clients send.
 
+**0.11.0 adds two checks that were already documented and unenforced.** `web/audit` grew a
+fourth rule: a page that declares WebMCP tools and still has a GET form no single tool can
+stand in for. Both halves work — the agent registers the tools, the form renders — and the
+one thing the page is for is reachable only by driving the markup. It judges GET forms
+only, and only on a page that already declared tools: a POST form deliberately without a
+tool (a login, a password change) is the common correct case, and warning about it is how a
+lint stops being read.
+
+`web/seo/llms-text` now raises when `:details` contains a markdown heading, which its own
+docstring had forbidden since it shipped. An `##` there does not render as emphasis — it
+opens a section ahead of `:sections`, and everything after it silently becomes that phantom
+section's content while the document still looks correct, headings and all.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
