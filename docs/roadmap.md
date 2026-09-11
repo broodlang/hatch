@@ -103,6 +103,22 @@ picking a new address — the one thing an abuse control must not allow. `web/au
 already treats a /64 as the unit of identity. It is opt-in, because the bluntness cuts both
 ways and `client-key` remains right wherever a neighbour's traffic must not affect yours.
 
+**0.13.0 makes rate limiting adaptable instead of extractable.** The question that
+prompted it was whether to split it into a package; the answer is that the package boundary
+was never what people would want from it. What they want is to change parts of the decision,
+so all four are now seams: `:key-fn` (who), `:skip?` (whether at all, per request rather than
+per route), `:cost` as a function of the conn (what the request is worth), and `:store` —
+`{:take (fn (key cost cfg now))}` — for where the buckets live. `refill` and `spend` are
+public so an alternative store reuses the token-bucket arithmetic rather than reimplementing
+it; a Postgres-backed store is those two functions around a row.
+
+`stats` and `[:hatch :ratelimit :denied]` telemetry close the other half: a limiter that
+never denies and one nobody reaches look identical from outside, and both look like one that
+works. `web/dashboard` renders the counters, and `:buckets` is the number to watch — keys
+are never evicted, so one derived from user input grows the table without bound.
+`docs/rate-limiting.md` documents all of it, including the three things it deliberately does
+not do.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.

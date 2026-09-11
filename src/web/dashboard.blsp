@@ -18,6 +18,8 @@
   authenticates."
   (:use web/conn)
   (:alias web/metrics)
+  ; stats — what the limiter has decided, and how many buckets it holds
+  (:alias web/ratelimit)
   (:alias web/cache)
   (:alias node)
   (:alias web/template))
@@ -127,6 +129,26 @@
   optional surface — a build without it should cost the dashboard one card, not the page."
   (or (check-allow :discarded-catch (try (thunk) (catch _e nil))) fallback))
 
+(defn- ratelimit-cards ()
+  "What the limiter has actually decided, and how much it is holding to decide it.
+
+  A limiter that never denies and one nobody reaches look identical from outside, and both
+  look like one that is working — so the counters are the point, not the configuration.
+
+  `buckets` is the number to watch rather than admire. Keys are whatever `:key-fn` returns
+  and are never evicted, so a key taken from user input grows the table without bound; a
+  steadily climbing count is that bug, visible here before it is a memory problem."
+  (let (r (web/ratelimit/stats)
+        rate (get r :deny-rate)
+        buckets (get r :buckets))
+    [(card "allowed" (get r :allowed))
+      (card "denied" (get r :denied) (if (> (get r :denied) 0) "warn" ""))
+      ;; nil, not 0%, when nothing has been decided — no traffic is not a healthy zero.
+      (card "deny rate" (if (nil? rate) "—" (str rate "%")) (if (nil? rate) "dim" ""))
+      ;; nil when the limiter did not answer in time: it fails open, so a dashboard that
+      ;; cannot reach it should say so rather than print a confident zero.
+      (card "buckets" (if (nil? buckets) "—" buckets) (if (nil? buckets) "dim" ""))]))
+
 (defn- runtime-cards ()
   "Process-wide runtime figures.
 
@@ -197,6 +219,7 @@
                                  (card "req/s" (per-second (get t :count)) "dim")]
                                (section "cache" (cache-cards))
                                (section "cluster" (cluster-cards))
+                               (section "rate limiting" (ratelimit-cards))
                                (section "runtime" (runtime-cards))
                                [:h2 {} "routes"]
                                (if (empty? rows)

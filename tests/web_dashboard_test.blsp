@@ -77,3 +77,21 @@
     (web/metrics/reset)
     (is (includes? (body (call (handler {:title "hive metrics"}) (conn-for "GET" "/dashboard")))
           "hive metrics"))))
+
+;; A limiter that never denies and one nobody reaches look identical from outside, and both
+;; look like one that is working — so the dashboard carries the counters, not the config.
+(describe "the dashboard reports rate limiting"
+  (test "the section and its cards are on the page"
+    (let (html (page "test dashboard"))
+      (is (includes? html "rate limiting"))
+      (is (includes? html "allowed"))
+      (is (includes? html "denied"))
+      (is (includes? html "deny rate"))
+      ;; The number to watch: buckets are never evicted, so a key derived from user input
+      ;; grows the table without bound and this is where that becomes visible.
+      (is (includes? html "buckets"))))
+
+  (test "a deny rate of nothing shows an em dash, not a confident 0%"
+    ;; No traffic is not a healthy zero, and printing one invites the wrong fix.
+    (web/ratelimit/reset-stats)
+    (is (includes? (page "test dashboard") "—"))))

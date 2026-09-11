@@ -2,6 +2,7 @@
   (:use web/ratelimit)
   (:use-internals web/ratelimit)
   (:alias web/conn)
+  (:alias table)
   (:use test))
 
 (def cfg {:rate 1 :per 1000 :burst 2})
@@ -147,3 +148,109 @@
       (is (hit "2c0f:aaaa:1b2e:0:3:3:3:3"))
       ;; while a different network still has its own tokens
       (is (not (hit "2c0f:bbbb:1b2e:0:1:1:1:1"))))))
+
+;; ---- the extension seams ----------------------------------------------------
+;;
+;; Rate limiting stays in hatch because a framework that cannot throttle a login form is
+;; incomplete. What makes that defensible rather than limiting is that every part of the
+;; decision is replaceable: where buckets live, who is exempt, what a request costs, how a
+;; caller is identified, and what a rejection looks like.
+
+(defn- recording-store (calls decision)
+  "A `:store` that records how it was called and answers `decision`."
+  {:take (fn (key cost cfg now)
+           (table/put calls :key key)
+           (table/put calls :cost cost)
+           (table/put calls :cfg cfg)
+           (table/put calls :now now)
+           decision)})
+
+(describe ":store replaces where the buckets live"
+  (test "the plug asks the store, not the built-in limiter"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "k")}))
+      (assert= (conn/halted? (plug (conn-from {}))) false)
+      (assert= (table/get calls :key) "k")))
+
+  (test "a store that denies halts the conn with a 429, exactly as the default does"
+    (let (plug (rate-limit {:store (recording-store (table/new) [:deny 5000])}))
+      (let (out (plug (conn-from {:fly-client-ip "203.0.113.1"})))
+        (assert= (conn/halted? out) true)
+        (assert= (get out :status) 429)
+        ;; 5000ms of deficit, reported to the client in whole seconds
+        (assert= (get-in out [:resp-headers :retry-after]) "5"))))
+
+  (test "the store is handed the resolved config, so it need not restate the defaults"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok) :rate 30 :burst 10}))
+      (plug (conn-from {}))
+      (assert= (table/get calls :cfg) {:rate 30 :per 60000 :burst 10})))
+
+  (test "and the caller's clock, so an alternative store is testable at a chosen time"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok)}))
+      (plug (conn-from {}))
+      (is (int? (table/get calls :now)))))
+
+  (test "bucket-config is that resolution, on its own"
+    (assert= (bucket-config {}) {:rate 60 :per 60000 :burst 60})
+    (assert= (bucket-config {:rate 10}) {:rate 10 :per 60000 :burst 10})
+    (assert= (bucket-config {:rate 10 :burst 3 :per 1000}) {:rate 10 :per 1000 :burst 3})))
+
+(describe ":skip? exempts a request without unwiring the plug"
+  (test "a skipped request never reaches the store"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls [:deny 1000]) :skip? (fn (_c) true)}))
+      ;; the store would have denied; the conn passes because it was never asked
+      (assert= (conn/halted? (plug (conn-from {}))) false)
+      (assert= (table/get calls :key) nil)))
+
+  (test "and a request the predicate declines to skip is limited normally"
+    (let (plug (rate-limit {:store (recording-store (table/new) [:deny 1000])
+                            :skip? (fn (c) (= (get c :path) "/health"))}))
+      (assert= (conn/halted? (plug (conn-from {}))) true)))
+
+  (test "no :skip? is the same as one that never skips"
+    (let (plug (rate-limit {:store (recording-store (table/new) [:deny 1000])}))
+      (assert= (conn/halted? (plug (conn-from {}))) true))))
+
+(describe ":cost may be a function of the request"
+  (test "a fixed number is spent as given"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok) :cost 5}))
+      (plug (conn-from {}))
+      (assert= (table/get calls :cost) 5)))
+
+  (test "a function lets an endpoint charge for the work it was asked to do"
+    ;; The point: a request for 100 rows and one for 1 should not cost the same.
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok)
+                            :cost (fn (c) (if (= (get c :path) "/bulk") 10 1))}))
+      (plug (conn-from {}))
+      (assert= (table/get calls :cost) 1)))
+
+  (test "the default is one token"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok)}))
+      (plug (conn-from {}))
+      (assert= (table/get calls :cost) 1))))
+
+(describe "stats, for a dashboard"
+  :isolated (test "counts decisions, and reports a rate only once there have been some"
+    (reset-stats)
+    (assert= (get (stats) :deny-rate) nil)
+    (let (allow (rate-limit {:store (recording-store (table/new) :ok)})
+          deny (rate-limit {:store (recording-store (table/new) [:deny 1000])}))
+      (allow (conn-from {}))
+      (allow (conn-from {}))
+      (allow (conn-from {}))
+      (deny (conn-from {}))
+      (let (s (stats))
+        (assert= (get s :allowed) 3)
+        (assert= (get s :denied) 1)
+        ;; A number, not necessarily a float: `round-to` demotes a whole value, so this is
+        ;; 25 rather than 25.0. The dashboard formats it; nothing compares it.
+        (assert= (get s :deny-rate) 25))))
+
+  (test "bucket-count answers a number from the live limiter"
+    (is (int? (bucket-count)))))

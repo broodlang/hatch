@@ -1,34 +1,99 @@
 (defmodule web/ratelimit
-  "Token-bucket rate limiting — a plug that caps how fast a client may hit an endpoint. Each
-  key (by default the client IP from `X-Forwarded-For`/`X-Real-IP`, else one global bucket) owns
-  a bucket that holds up to `:burst` tokens and refills at `:rate` tokens per `:per` ms; a
-  request spends one token (`:cost`). An empty bucket answers `429 Too Many Requests` with a
-  `Retry-After` telling the client when a token frees up. State lives in one supervised counter
-  process (per-key buckets), so the read-refill-spend is serialized and race-free.
+  "Token-bucket rate limiting — a plug that caps how fast a client may hit an endpoint.
 
-  Wire it into a pipeline like any plug; put it early so a throttled request is rejected before
-  expensive work:
+  Each key owns a bucket holding up to `:burst` tokens, refilled at `:rate` tokens per
+  `:per` ms; a request spends `:cost`. An empty bucket answers `429 Too Many Requests` with
+  a `Retry-After` saying when a token frees up. Put it early in a pipeline, so a throttled
+  request is rejected before the expensive work:
 
-    (through [(ratelimit/rate-limit {:rate 100 :per 60000 :burst 20})]
-      (post \"/login\" auth/login))
+      (through [(ratelimit/rate-limit {:rate 100 :per 60000 :burst 20})]
+        (post \"/login\" auth/login))
 
-  Options:
-    :rate    — tokens replenished per window (default 60)
-    :per     — the window in ms (default 60000, i.e. 60 req/min)
-    :burst   — bucket capacity / max instantaneous burst (default = :rate)
-    :cost    — tokens one request spends (default 1)
-    :key-fn  — `(fn (conn) -> key)` choosing the bucket; default `client-key`
-    :on-limit — `(fn (conn retry-after-seconds) -> conn)` for a custom 429 (default `limited`)"
+  ## Options
+
+    :rate     — tokens replenished per window (default 60)
+    :per      — the window in ms (default 60000, i.e. 60/min)
+    :burst    — capacity, and so the largest instantaneous burst (default `:rate`)
+    :cost     — tokens a request spends: a number, or `(fn (conn) -> number)` (default 1)
+    :key-fn   — `(fn (conn) -> key)` choosing the bucket (default `client-key`)
+    :skip?    — `(fn (conn) -> bool)`; true exempts the request entirely (default none)
+    :store    — where buckets live (default `in-memory-store`)
+    :on-limit — `(fn (conn retry-after-seconds) -> conn)` for a custom 429 (default `limited`)
+
+  ## The four seams
+
+  Rate limiting lives in the framework because an app that cannot throttle its own login
+  form is incomplete. What keeps that from being a straitjacket is that every part of the
+  decision is replaceable.
+
+  **Who is being limited** — `:key-fn`. `client-key` keys by the client address a proxy
+  named; `network-key` keys an IPv6 caller by its /64, because an address is not a client
+  and a caller can rotate the host half faster than a bucket refills. Your own is a
+  function of the conn: an account id, an API token, a tenant, or a constant for one shared
+  ceiling.
+
+  **Whether to limit at all** — `:skip?`. Route-level wiring is coarse; this is per request.
+  Exempt a health probe, an internal caller, an address allow-list. Never limit the
+  platform's health check: throttling it does not protect the machine, it causes the outage
+  the check exists to detect.
+
+  **What a request costs** — `:cost` as a function. A request for a hundred rows and one for
+  a single row should not spend the same token, and an endpoint whose work scales with a
+  parameter can charge for it.
+
+  **Where the buckets live** — `:store`, a map of one function:
+
+      {:take (fn (key cost cfg now) -> :ok | [:deny retry-ms])}
+
+  `cfg` is `{:rate :per :burst}` as `bucket-config` resolves it, and `now` is epoch ms from
+  the caller — passed in rather than read inside, so an alternative store is testable at a
+  time of the test's choosing. `refill` and `spend` are public so a store can reuse the
+  token-bucket arithmetic rather than reimplement it; a Postgres- or Redis-backed store is
+  roughly those two functions around a row.
+
+  ## What this does not do, and will not pretend to
+
+  **Buckets are per node.** The default store is one process per machine, so a client
+  round-robined across N machines gets N times the configured allowance — measured on a
+  two-machine deployment as a burst of 20 admitting 40. This is a deliberate trade: the
+  decision sits on the request path, and a shared store spends a network round trip on every
+  limited request to avoid over-admitting by the machine count. `web/cache` refuses the same
+  trade for the same reason. Divide your ceiling by the machine count, or supply a `:store`
+  when you need a ceiling you can prove.
+
+  **Buckets are never evicted.** The table is keyed by whatever `:key-fn` returns, so a key
+  taken from user input grows it without bound. `stats` reports `:buckets` for exactly this
+  reason — a steadily climbing count is that bug before it is a memory problem.
+
+  **It fails open.** If the limiter does not answer within a second the request is allowed.
+  The worst case of admitting a window of traffic is a busy server; the worst case of the
+  alternative is an outage caused by the thing meant to prevent one.
+
+  **An address is a weak identity.** `client-key` trusts a proxy header (see
+  `web/auth/client-ip`), which is only meaningful because the proxy overwrites it. Read it
+  from a request that did not come through one and it is whatever the caller typed. This is
+  an outer defence, never the only one.
+
+  ## Seeing it work
+
+  `stats` gives `{:allowed :denied :deny-rate :buckets}`, which `web/dashboard` renders, and
+  every rejection emits `[:hatch :ratelimit :denied]` telemetry carrying the key, the cost,
+  the method and the path — so a 429 storm is visible to a metrics pipeline rather than only
+  in the access log."
   ; halt / send-resp / put-resp-header / header — reject a throttled request
   (:use web/conn)
   ; ensure-supervised — the buckets live in a supervised singleton
   (:use web/registry)
   ; client-ip — the one implementation of "which header names the real client"
-  (:alias web/auth))
+  (:alias web/auth)
+  ; emit — a rejection is worth seeing; web/metrics and a dashboard read this
+  (:alias telemetry)
+  ; the counters behind `stats`
+  (:alias table))
 
 ; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
 
-(defn- refill (bucket cfg dnow)
+(defn refill (bucket cfg dnow)
   "Refill `bucket` to time `dnow`: add the tokens accrued since its timestamp, capped at the
   bucket's capacity (`:burst`). A fresh key starts full."
   (let (burst (get cfg :burst)
@@ -38,7 +103,7 @@
         refilled (+ tokens (* (- dnow ts) per-ms)))
     {:tokens (math/min (* 1.0 burst) refilled) :ts dnow}))
 
-(defn- spend (bucket cfg cost dnow)
+(defn spend (bucket cfg cost dnow)
   "Try to spend `cost` tokens from a refilled `bucket`. Returns `[new-bucket :ok]` when it had
   enough, else `[unchanged-bucket [:deny retry-ms]]` with the ms until `cost` tokens accrue."
   (let (b (refill bucket cfg dnow)
@@ -59,7 +124,11 @@
                                             decision (nth result 1))
                                         (send from [:take r decision])
                                         (ratelimit-loop (assoc buckets key bucket))))
-    ([:reset from r] (do (send from [:reset r]) (ratelimit-loop {})))))
+    ([:reset from r] (do (send from [:reset r]) (ratelimit-loop {})))
+    ;; How many keys are held. Worth being able to ask: the bucket table is keyed by
+    ;; whatever `:key-fn` returns, so a key derived from user input grows without bound and
+    ;; there is otherwise no way to see it happening.
+    ([:count from r] (do (send from [:count r (count (keys buckets))]) (ratelimit-loop buckets)))))
 
 (defn limiter ()
   "The rate-limit counter pid — a supervised singleton, started on first use. A crash resets the
@@ -71,16 +140,86 @@
       :start (fn () (spawn (ratelimit-loop {})))}]
     :hatch-ratelimit))
 
-(defn take-token (key cost cfg)
-  "Ask the limiter to spend `cost` tokens from `key`'s bucket. Returns `:ok` or `[:deny
-  retry-ms]`. Fails OPEN (`:ok`) if the limiter doesn't answer within 1s — a limiter hiccup
-  must not take the endpoint down. `now` is read here (not in the process) so the caller's clock
-  drives refill."
+(defn take-token (key cost cfg &optional (now (os/now)))
+  "Ask the in-memory limiter to spend `cost` tokens from `key`'s bucket. Returns `:ok` or
+  `[:deny retry-ms]`. The store contract's `:take`, and usable directly.
+
+  Fails OPEN (`:ok`) if the limiter does not answer within a second. A limiter hiccup must
+  not take the endpoint down: the worst case of admitting a window of traffic is a busy
+  server, and the worst case of the alternative is an outage caused by the thing meant to
+  prevent one.
+
+  `now` is taken as an argument rather than read inside the process, so the CALLER's clock
+  drives refill — which is what lets `spend` be tested without a running limiter, and what
+  lets an alternative store be exercised at a time of the test's choosing."
   (let (r (ref))
-    (send (limiter) [:take key cost cfg (os/now) (self) r])
+    (send (limiter) [:take key cost cfg now (self) r])
     (receive
       ([:take ^r decision] decision)
       (after 1000 :ok))))
+
+; ---- counters ----
+;;
+;; A limiter that never denies and a limiter nobody reaches look identical from outside, and
+;; both look like one that is working. Kept here rather than derived from telemetry so the
+;; numbers exist whether or not an app attached a listener.
+
+(def- *counters* (table/new))
+
+(defn- bump (k)
+  (table/put *counters* k (+ 1 (table/get *counters* k 0))))
+
+(defn bucket-count ()
+  "How many keys the in-memory store currently holds, or nil if it does not answer promptly.
+
+  The number to watch. Buckets are keyed by whatever `:key-fn` returns and are never
+  evicted, so a key taken from user input — a header, a path, an account id — grows the
+  table without bound. A steadily climbing count is that bug, visible before it is a memory
+  problem."
+  (let (r (ref))
+    (send (limiter) [:count (self) r])
+    (receive
+      ([:count ^r n] n)
+      (after 1000 nil))))
+
+(defn stats ()
+  "Counters for a dashboard: `{:allowed :denied :deny-rate :buckets}`.
+
+  `:deny-rate` is a percentage of decisions made, or nil when none have been — no traffic is
+  not a healthy zero, and showing 0% for it invites the wrong conclusion. It is a NUMBER and
+  not always a float: `round-to` demotes a whole value, so 25.0 comes back as 25. Format it,
+  do not compare it to a float literal.
+
+  `:buckets` is nil when the limiter does not answer promptly — it fails open, so a reader
+  that cannot reach it should say so rather than print a confident zero."
+  (let (allowed (table/get *counters* :allowed 0)
+        denied (table/get *counters* :denied 0)
+        total (+ allowed denied))
+    {:allowed allowed
+     :denied denied
+     :deny-rate (if (= total 0) nil (math/round-to (* 100.0 (/ denied (* 1.0 total))) 1))
+     :buckets (bucket-count)}))
+
+(defn reset-stats ()
+  "Zero the counters (tests, and a dashboard that wants a fresh window)."
+  (table/put *counters* :allowed 0)
+  (table/put *counters* :denied 0)
+  nil)
+
+; ---- the store seam ----
+
+;; The default bucket store: one supervised process per node, holding every key's bucket.
+;;
+;; **Per NODE.** Each machine runs its own, so a client round-robined across N machines gets
+;; N times the configured allowance — measured on a two-machine deployment as a burst of 20
+;; admitting 40. That is a deliberate trade, not an oversight: a rate-limit decision sits on
+;; the request path, and making it a network call spends a round trip on every limited
+;; request to avoid over-admitting by a factor of the machine count. `web/cache` refuses the
+;; same trade for the same reason.
+;;
+;; So: divide your intended ceiling by the machine count, or swap in a shared `:store` when
+;; you need a ceiling you can prove. See the module docstring for the contract.
+(def in-memory-store {:take take-token})
 
 ; ---- key selection ----
 
@@ -168,16 +307,41 @@
                      :content-type "text/plain; charset=utf-8")
           429 "429 Too Many Requests\n")))
 
+(defn bucket-config (opts)
+  "The `{:rate :per :burst}` a store needs, from a plug's `opts`. Exposed so an adaptor can
+  read the same configuration the built-in store does rather than reinvent the defaults."
+  (let (rate (get opts :rate 60))
+    {:rate rate :per (get opts :per 60000) :burst (get opts :burst rate)}))
+
 (defn rate-limit (&optional (opts {}))
-  "Plug factory: returns a plug that token-bucket rate-limits by `:key-fn` (default the client
-  IP). Under the limit the conn passes through; over it, the conn is halted with a 429 +
-  `Retry-After`. See the module docstring for `opts`."
-  (let (rate (get opts :rate 60)
-        cfg {:rate rate :per (get opts :per 60000) :burst (get opts :burst rate)}
+  "Plug factory: returns a plug that token-bucket rate-limits a request. Under the limit the
+  conn passes through; over it, the conn is halted with a 429 and a `Retry-After`.
+
+  Every part of the decision is replaceable — see the module docstring for the four seams
+  and their contracts. Emits `[:hatch :ratelimit :denied]` telemetry on a rejection, so a
+  429 storm is visible to `web/metrics` and a dashboard rather than only to the access log."
+  (let (cfg (bucket-config opts)
         cost (get opts :cost 1)
         key-fn (get opts :key-fn client-key)
-        on-limit (get opts :on-limit limited))
+        on-limit (get opts :on-limit limited)
+        skip? (get opts :skip? nil)
+        store (get opts :store in-memory-store))
     (fn (conn)
-      (match (take-token (key-fn conn) cost cfg)
-        (:ok conn)
-        ([:deny retry-ms] (on-limit conn (math/max 1 (math/ceil (/ retry-ms 1000.0)))))))))
+      (if (and skip? (skip? conn))
+        conn
+        (let (key (key-fn conn)
+              ;; A number or a function of the conn — an endpoint whose work scales with a
+              ;; parameter can charge for it (a page size, a batch length) instead of
+              ;; pretending every request costs the same.
+              spent (if (fn? cost) (cost conn) cost))
+          (match ((get store :take) key spent cfg (os/now))
+            (:ok (do (bump :allowed) conn))
+            ([:deny retry-ms] (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
+                                (bump :denied)
+                                (telemetry/emit [:hatch :ratelimit :denied]
+                                  {:retry_after retry-after}
+                                  {:key key
+                                   :cost spent
+                                   :method (get conn :method)
+                                   :path (get conn :path)})
+                                (on-limit conn retry-after)))))))))

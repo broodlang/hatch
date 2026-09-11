@@ -186,6 +186,9 @@ docs/
   robustness.md           — http/server hardening tiers (DoS limits, timeouts)
   tcp-http-audit.md       — socket-stack audit (kernel + framework), findings & fix plan
   live-view-ergonomics.md — router-wired live views design note
+  rate-limiting.md        — the token-bucket plug, its four extension seams (key/skip/cost/
+                            store), and what it deliberately does not do (per-node buckets,
+                            no eviction, fails open)
 ```
 
 ## Key conventions
