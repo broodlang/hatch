@@ -353,6 +353,71 @@
       (if (nil? priority) "" (str "<priority>" priority "</priority>"))
       "</url>\n")))
 
+(defn canonical-host (site &optional (opts {}))
+  "A plug that redirects any request for another host to `site`'s own, with a permanent 301.
+
+  One page reachable at several addresses is one page's worth of ranking split across them,
+  and the addresses accumulate without anyone adding them: an apex and a `www`, a platform
+  hostname alongside a custom domain, an old domain still pointed at the app. A search engine
+  has to guess which is canonical; a redirect tells it.
+
+      (through [(seo/canonical-host *site*)]
+        (get \"/\" home/index))
+
+  A `<link rel=canonical>` (which `head-tags` emits from `:canonical`) states a preference.
+  This *enforces* one — the wrong address stops answering 200 at all, which is the only
+  version of this that also fixes the duplicate a crawler already has in its index.
+
+  301 and not 302: a permanent redirect is what transfers the ranking signal, and a
+  temporary one asks the crawler to keep the old address. `:status` overrides it for a
+  migration you are not yet sure of.
+
+  The request's own scheme is preserved unless `site`'s URL names one, so an app behind a
+  TLS-terminating proxy does not accidentally send visitors to plaintext. `:except` is a
+  list of hostnames to leave alone — a health check that dials the machine by its internal
+  name, say, which must not be redirected into a loop it cannot follow."
+  (let (canonical (host-of (get site :url ""))
+        status (get opts :status 301)
+        except (get opts :except []))
+    (fn (conn)
+      (let (requested (request-host conn))
+        (if (or (nil? requested)
+              (= requested canonical)
+              (= canonical "")
+              (includes? except requested))
+          conn
+          (halt (send-resp (put-resp-header conn
+                             :location (str (get site :url) (request-target conn)))
+                  status "")))))))
+
+(defn host-of (url)
+  "The hostname in `url`, lowercased and without a port — `\"\"` when there is none.
+
+      (hatch/web/seo/host-of \"https://example.com/a\") ;=> \"example.com\"
+      (hatch/web/seo/host-of \"https://example.com:8443\") ;=> \"example.com\"
+      (hatch/web/seo/host-of \"\") ;=> \"\""
+  (let (after (let (at (index-of url "://"))
+                (if (< at 0) url (string/substring url (+ at 3) (count url))))
+        host (first (string/split (first (string/split after "/")) ":")))
+    (string/lower (string/trim host))))
+
+(defn request-host (conn)
+  "The hostname this request asked for, lowercased and without a port, or nil.
+
+  `X-Forwarded-Host` first: behind a proxy the `Host` the app sees may be the proxy's own,
+  and the one the visitor typed is the one that matters for canonicalisation."
+  (let (headers (get conn :headers {})
+        raw (or (get headers :x-forwarded-host) (get headers :host)))
+    (if (or (nil? raw) (= raw "")) nil (host-of (first (string/split raw ","))))))
+
+(defn- request-target (conn)
+  "The path and query of `conn`, so a redirect preserves what was asked for. A canonical
+  redirect that drops the path sends every deep link to the home page, which loses exactly
+  the ranking the redirect was meant to consolidate."
+  (let (path (or (get conn :path) "/")
+        query (get conn :query))
+    (if (and (string? query) (not (= query ""))) (str path "?" query) path)))
+
 (defn sitemap-date (ms)
   "Epoch-milliseconds as the date a sitemap `<lastmod>` takes, or nil when `ms` is not a
   number — a malformed date is worse than an absent one, which is simply omitted.

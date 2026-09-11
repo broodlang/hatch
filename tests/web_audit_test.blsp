@@ -285,3 +285,74 @@
   (test "and on a clean page too"
     (let (document (with-tools [(search-tool)] *search-form*))
       (assert= (warn-tool-coverage! document) document))))
+
+;; ---- document outline -------------------------------------------------------
+;;
+;; A heading level is size in CSS and structure in HTML. Going h1 -> h3 tells a reader
+;; navigating by heading that they are inside an h2 section, and they are not — the classic
+;; defect that looks perfect: the page renders, the sizes are what the designer asked for,
+;; and the document says something nobody meant.
+
+(describe "heading-levels reads the outline, and only the outline"
+  (test "in source order"
+    (assert= (heading-levels "<h1>a</h1><h2>b</h2><h3>c</h3>") (list 1 2 3)))
+  (test "attributes do not hide a heading"
+    (assert= (heading-levels "<h1 class=\"x\">a</h1><h2 id=\"y\">b</h2>") (list 1 2)))
+  (test "<hr>, <html> and <header> are not headings"
+    (assert= (heading-levels "<html><header><hr><h2>only me</h2></header></html>") (list 2)))
+  (test "h7 does not exist"
+    (assert= (heading-levels "<h7>nope</h7>") (list)))
+  (test "a document with no headings has no outline"
+    (assert= (heading-levels "<p>text</p>") (list))))
+
+(describe "skipped-headings"
+  (test "a clean outline reports nothing"
+    (assert= (skipped-headings "<h1>a</h1><h2>b</h2><h3>c</h3><h2>d</h2>") []))
+  (test "h1 straight to h3 is a skip"
+    (let (findings (skipped-headings "<h1>a</h1><h3>b</h3>"))
+      (assert= (count findings) 1)
+      (assert= (first findings) {:from 1 :to 3})))
+  (test "the real case: an h1, a run of h3s, then an h2 much later"
+    ;; hive's home page, exactly — seven feature cards marked h3 for their size.
+    (let (findings (skipped-headings "<h1>Brood</h1><h3>a</h3><h3>b</h3><h3>c</h3><h2>A taste</h2>"))
+      (assert= (count findings) 1)
+      (assert= (first findings) {:from 1 :to 3})))
+  (test "coming back up any distance is ordinary, not a skip"
+    (assert= (skipped-headings "<h1>a</h1><h2>b</h2><h3>c</h3><h4>d</h4><h2>e</h2>") []))
+  (test "a page whose outline starts at h3 has skipped h2"
+    (assert= (skipped-headings "<h3>first thing</h3>") [{:from 1 :to 3}]))
+  (test "starting at h1 is not a skip"
+    (assert= (skipped-headings "<h1>fine</h1>") []))
+  (test "starting at h2 is not a skip either — that is an ordinary page, and a fragment"
+    ;; The rule declines to judge what it cannot prove: a section heading rendered on its
+    ;; own, or a page whose h1 is its title, both legitimately open at h2.
+    (assert= (skipped-headings "<h2>a section</h2><h3>within it</h3>") []))
+  (test "two separate skips are both reported"
+    (assert= (count (skipped-headings "<h1>a</h1><h3>b</h3><h2>c</h2><h5>d</h5>")) 2))
+  (test "a document with no headings reports nothing"
+    (assert= (skipped-headings "<p>no headings here</p>") [])))
+
+(describe "warn-headings!"
+  (test "returns the document unchanged"
+    (let (document "<h1>a</h1><h3>b</h3>")
+      (assert= (warn-headings! document) document))))
+
+;; ---- the icon ---------------------------------------------------------------
+
+(describe "declares-icon?"
+  (test "a plain icon link counts"
+    (is (declares-icon? "<head><link rel=\"icon\" href=\"/f.svg\"></head>")))
+  (test "so do the other spellings"
+    (is (declares-icon? "<head><link rel=\"shortcut icon\" href=\"/f.ico\"></head>"))
+    (is (declares-icon? "<head><link rel=\"apple-touch-icon\" href=\"/f.png\"></head>")))
+  (test "a stylesheet is not an icon"
+    (is (not (declares-icon? "<head><link rel=\"stylesheet\" href=\"/a.css\"></head>"))))
+  (test "an empty head declares nothing"
+    (is (not (declares-icon? "<head></head>")))))
+
+(describe "warn-favicon!"
+  (test "returns the document unchanged, with or without an icon"
+    (let (with-icon "<html><head><link rel=\"icon\" href=\"/f.svg\"></head><body></body></html>"
+          without "<html><head><title>t</title></head><body></body></html>")
+      (assert= (warn-favicon! with-icon) with-icon)
+      (assert= (warn-favicon! without) without))))

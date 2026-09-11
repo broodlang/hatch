@@ -250,6 +250,31 @@
   this with the SSE content-type and an event-formatting `emit`."
   (assoc conn :status status :stream stream-fn))
 
+(def *forwarded-proto-headers* [:x-forwarded-proto :fly-forwarded-proto :x-forwarded-scheme])
+
+(defn secure? (conn)
+  "Whether this request reached the app over HTTPS.
+
+  Behind a proxy the app's own socket is plaintext — TLS was terminated an edge away — so
+  the only evidence is a header the proxy sets: `X-Forwarded-Proto` and the two spellings
+  that appear in the wild. Trustworthy for exactly the reason `web/auth/client-ip` is: the
+  proxy OVERWRITES these on the way in. On a request that did not come through one they are
+  whatever the client typed, so this answers a question about transport, never about
+  authorisation.
+
+  Falls back to the connection's own scheme when the server is terminating TLS itself.
+
+      (hatch/web/conn/secure? {:headers {:x-forwarded-proto \"https\"}}) ;=> true
+      (hatch/web/conn/secure? {:headers {:x-forwarded-proto \"http\"}}) ;=> false
+      (hatch/web/conn/secure? {:headers {} :scheme \"https\"}) ;=> true
+      (hatch/web/conn/secure? {:headers {}}) ;=> false"
+  (let (headers (get conn :headers {})
+        forwarded (first (filter (map *forwarded-proto-headers* (fn (h) (get headers h)))
+                           (fn (v) (and (string? v) (not (= v ""))))))
+        ;; a proxy chain may forward a list; the first hop is the client's
+        proto (if forwarded (string/lower (string/trim (first (string/split forwarded ",")))) nil))
+    (if proto (= proto "https") (= (get conn :scheme) "https"))))
+
 (defn html-resp (conn body)
   "200 OK HTML response (conn)."
   (send-resp conn 200 body))

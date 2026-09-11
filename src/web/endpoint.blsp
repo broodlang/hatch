@@ -85,6 +85,39 @@
 
 ;; ---- the response pipeline --------------------------------------------------
 
+(def *default-hsts* "max-age=31536000")
+
+(defn hsts-header (conn resp value)
+  "Add `Strict-Transport-Security` to `resp`, but only when the request arrived over HTTPS.
+
+  Sending it over plaintext is not merely useless — the specification says a client MUST
+  ignore it there, and a header that is ignored is one nobody notices is misconfigured. So
+  the guard is the behaviour, not a nicety.
+
+  The default is `max-age=31536000` and deliberately nothing else. `includeSubDomains` is
+  the usual recommendation and it is a promise hatch cannot make on an app's behalf: it
+  commits every subdomain of the host to HTTPS, including ones this app has never heard of,
+  and a staging or internal subdomain still serving plaintext simply stops working — with a
+  year-long memory in every browser that saw the header. `preload` is the same commitment
+  made irreversible, since removal means waiting to be dropped from a list compiled into
+  browser builds.
+
+  Both are right for many sites and are one string away:
+
+      {:hsts \"max-age=31536000; includeSubDomains\"}
+
+  `:hsts false` sends none. A handler that set its own is left alone, as with every other
+  header here."
+  (let (headers (get resp :headers {}))
+    (if (and value (web/conn/secure? conn) (nil? (get headers :strict-transport-security)))
+      (assoc resp :headers (assoc headers :strict-transport-security value))
+      resp)))
+
+(defn- secured (conn resp config headers)
+  "The baseline headers, plus HSTS — which depends on the transport and so cannot live in
+  the flat default map."
+  (hsts-header conn (security-headers resp headers) (get config :hsts *default-hsts*)))
+
 (defn security-headers (resp headers)
   "Merge baseline security `headers` into `resp`, without clobbering any a handler already
   set. The handler wins, deliberately: a page that needs to be framed, or an endpoint that
@@ -144,10 +177,12 @@
         headers (get config :security-headers *default-security-headers*)
         coding (compress/chosen-encoding conn))
     (match (cache/conditional conn resp coding)
-      ([:not-modified not-modified] (security-headers not-modified headers))
-      ([:send validated] (security-headers (if compress-opts
-                                             (compress-response conn validated compress-opts)
-                                             validated)
+      ([:not-modified not-modified] (secured conn not-modified config headers))
+      ([:send validated] (secured conn
+                           (if compress-opts
+                             (compress-response conn validated compress-opts)
+                             validated)
+                           config
                            headers)))))
 
 (defn freshen (conn resp config)
@@ -251,6 +286,9 @@
                            (`{:max-age 60 :stale-for 600}`). Omitted: no policy applied.
     `:security-headers`  — merged under whatever a handler set (default
                            `*default-security-headers*`); `{}` for none.
+    `:hsts`              — `Strict-Transport-Security`, sent only on an HTTPS request
+                           (default `max-age=31536000`, `false` for none). See
+                           `hsts-header` for why `includeSubDomains` is not defaulted.
     `:compress`          — `{:min-bytes 256}`, or `false` to send bodies uncompressed.
     `:assets`            — a `web/assets` config; dev watches it, prod fingerprints it.
     `:live`              — the WebSocket handler (default `(web/live/live-dispatcher)`);

@@ -285,3 +285,51 @@
                   (send-resp (put-resp-header conn :set-cookie "_hatch_session=x") 200 "<p>in</p>"))
           headers (get (respond {:router login :freshness {:max-age 60 :stale-for 600}}) :headers))
       (assert= (get headers :cache-control) "private, no-cache"))))
+
+;; ---- HSTS -------------------------------------------------------------------
+;;
+;; Sending it over plaintext is not merely useless: the specification says a client MUST
+;; ignore it there, and a header that is ignored is one nobody notices is misconfigured.
+
+(defn- secure-request (&optional (headers {}))
+  (request (merge {:x-forwarded-proto "https"} headers)))
+
+(describe "Strict-Transport-Security"
+  (test "is sent on an HTTPS request, by default"
+    (assert= (get (get ((adapter {:router html-router}) (secure-request)) :headers)
+               :strict-transport-security)
+      "max-age=31536000"))
+
+  (test "is NOT sent on a plaintext request"
+    (assert= (get (get (respond {:router html-router}) :headers) :strict-transport-security) nil))
+
+  (test "a proxy chain's first hop decides — that is the client's transport"
+    (assert= (get (get ((adapter {:router html-router}) (request {:x-forwarded-proto "https, http"}))
+                    :headers)
+               :strict-transport-security)
+      "max-age=31536000"))
+
+  (test "an app can commit to subdomains, which hatch will not do on its behalf"
+    (assert= (get (get ((adapter {:router html-router :hsts "max-age=31536000; includeSubDomains"}) (secure-request))
+                    :headers)
+               :strict-transport-security)
+      "max-age=31536000; includeSubDomains"))
+
+  (test ":hsts false sends none at all"
+    (assert= (get (get ((adapter {:router html-router :hsts false}) (secure-request)) :headers)
+               :strict-transport-security)
+      nil))
+
+  (test "a handler's own value wins, like every other security header"
+    (let (own (fn (conn)
+                (send-resp (put-resp-header conn :strict-transport-security "max-age=60") 200 "ok")))
+      (assert= (get (get ((adapter {:router own}) (secure-request)) :headers)
+                 :strict-transport-security)
+        "max-age=60")))
+
+  (test "it rides on a 304 too — a revalidation is still an HTTPS response"
+    (let (config {:router html-router}
+          tag (get (get ((adapter config) (secure-request)) :headers) :etag)
+          resp ((adapter config) (secure-request {:if-none-match tag})))
+      (assert= (get resp :status) 304)
+      (assert= (get (get resp :headers) :strict-transport-security) "max-age=31536000"))))

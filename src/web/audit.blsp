@@ -451,8 +451,101 @@
                   "(or :endpoint :query) covers them, or drop the ones that no longer apply."))))
   document)
 
+;; ---- document outline -------------------------------------------------------
+
+(defn heading-levels (document)
+  "The heading levels in `document`, in source order, as a list of integers."
+  (let (scan (fn (from acc)
+               (let (at (index-of document "<h" from))
+                 (if (< at 0)
+                   (reverse acc)
+                   (let (digit (string/substring document (+ at 2) (+ at 3))
+                         level (string/->number digit)
+                         after (string/substring document
+                                 (+ at 3)
+                                 (math/min (count document) (+ at 4))))
+                     ;; `<h2 ` or `<h2>` is a heading; `<hr>`, `<html>` and `<header>` are not
+                     (if (and (int? level)
+                           (>= level 1)
+                           (<= level 6)
+                           (or (= after ">") (= after " ") (= after "\n")))
+                       (scan (+ at 3) (cons level acc))
+                       (scan (+ at 2) acc)))))))
+    (scan 0 nil)))
+
+(defn skipped-headings (document)
+  "Every place `document`'s outline skips a level, as `{:from :to}` maps.
+
+  A heading level is structure, not size. Going from an `h1` straight to an `h3` tells a
+  reader navigating by heading — and a search engine building an outline — that there is an
+  `h2` section they are inside, and there is not. It is the classic defect that looks
+  perfect: the page renders, the sizes are what the designer wanted, and the document says
+  something nobody meant.
+
+  Only DOWNWARD jumps of more than one level count. Coming back up any distance is ordinary
+  (an `h4` followed by the next `h2` closes two sections and opens one), and the first
+  heading is judged against `h1`, so a page whose outline starts at `h3` is reported."
+  (let (levels (heading-levels document))
+    (if (empty? levels)
+      []
+      (let (pairs (map (range (count levels))
+                    (fn (i)
+                      (let (current (nth levels i)
+                            ;; The first heading is measured against h1, so a document whose
+                            ;; outline opens at h3 is reported — it has skipped h2 as surely
+                            ;; as one that jumps mid-page. Opening at h2 is NOT reported: a
+                            ;; page whose title is its h1 and whose sections are h2 is
+                            ;; ordinary, and so is a fragment rendered on its own.
+                            base (if (= i 0) 1 (nth levels (- i 1))))
+                        (if (> current (+ base 1)) {:from base :to current} nil)))))
+        (seq/filterv pairs (fn (p) (not (nil? p))))))))
+
+(defn warn-headings! (document)
+  "Log a dev warning for every skipped heading level in `document`. Returns it unchanged."
+  (when (dev?)
+    (doseq (finding (skipped-headings document))
+      (log/warn (str "[audit] heading level skipped: h"
+                  (get finding :from)
+                  " is followed by h"
+                  (get finding :to)
+                  " with no h"
+                  (+ (get finding :from) 1)
+                  " between them — a level is size in CSS and structure in HTML, and the "
+                  "outline now claims a section that does not exist. Change the LEVEL to "
+                  "match the document and keep the size as a class."))))
+  document)
+
+;; ---- the icon ---------------------------------------------------------------
+
+(defn declares-icon? (head)
+  "Whether `head` points at a favicon — any `rel` containing `icon`, which covers `icon`,
+  `shortcut icon` and `apple-touch-icon`."
+  (let (scan (fn (from)
+               (let (at (index-of head "rel=\"" from))
+                 (cond
+                   (< at 0) false
+                   (includes? (string/lower (tag-text head at)) "icon") true
+                   else (scan (+ at 5))))))
+    (scan 0)))
+
+(defn warn-favicon! (document)
+  "Log a dev warning when `document` declares no icon at all.
+
+  Worth a warning and not more, because the failure is small and entirely cosmetic: a
+  browser asks for `/favicon.ico` on its own, and a site that serves neither gets a 404 per
+  visit and a blank tab. Declaring one is a single `<link>`, and serving `/favicon.ico`
+  alongside it satisfies the clients and scanners that never read the markup."
+  (when (dev?)
+    (let (head (head-of document))
+      (when (and (not (= head "")) (not (declares-icon? head)))
+        (log/warn (str "[audit] no favicon: <head> declares no <link rel=\"icon\">, so every "
+                    "visit asks for /favicon.ico and the tab shows a blank page icon. Add "
+                    "the link — and serve /favicon.ico too, for the clients that ask "
+                    "without reading the markup.")))))
+  document)
+
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
-  Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]] and
-  [[warn-tool-coverage!]]."
-  (warn-tool-coverage! (warn-canvas-flash! (warn-first-flight! (warn-inert! document)))))
+  Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]],
+  [[warn-tool-coverage!]], [[warn-headings!]] and [[warn-favicon!]]."
+  (warn-favicon! (warn-headings! (warn-tool-coverage! (warn-canvas-flash! (warn-first-flight! (warn-inert! document)))))))

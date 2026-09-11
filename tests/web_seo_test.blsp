@@ -2,6 +2,7 @@
 (defmodule web-seo-test
   (:use test)
   (:use web/seo)
+  (:alias web/conn)
   (:use web/test)
   (:use web/router)
   (:use web/template :only [render]))
@@ -303,3 +304,79 @@
       ;; "Optional" has a defined meaning — a reader short on context may skip it — so it
       ;; belongs last.
       (is (< (at "## Docs") (at "## Optional"))))))
+
+;; ---- canonicalisation --------------------------------------------------------
+;;
+;; One page reachable at several addresses is one page's worth of ranking split across them,
+;; and the addresses accumulate without anyone adding them: an apex and a www, a platform
+;; hostname beside a custom domain, an old domain still pointed at the app.
+
+(defn- conn-for-host (host &optional (path "/") (query ""))
+  (web/conn/build {:method "GET" :path path :query query :params {} :headers {:host host} :body ""}))
+
+(describe "host-of"
+  (test "the hostname, without scheme or path"
+    (assert= (host-of "https://example.com/a/b") "example.com"))
+  (test "without a port" (assert= (host-of "https://example.com:8443/a") "example.com"))
+  (test "lowercased" (assert= (host-of "https://EXAMPLE.com") "example.com"))
+  (test "a bare host is already one" (assert= (host-of "example.com") "example.com"))
+  (test "nothing is nothing" (assert= (host-of "") "")))
+
+(describe "request-host"
+  (test "reads the Host header"
+    (assert= (request-host (conn-for-host "example.com")) "example.com"))
+  (test "a port is not part of the identity"
+    (assert= (request-host (conn-for-host "example.com:8080")) "example.com"))
+  (test "X-Forwarded-Host wins — behind a proxy, Host may be the proxy's own"
+    (let (conn (web/conn/build {:method "GET"
+                                :path "/"
+                                :query ""
+                                :params {}
+                                :headers {:host "internal.fly" :x-forwarded-host "example.com"}
+                                :body ""}))
+      (assert= (request-host conn) "example.com")))
+  (test "no host header at all is nil"
+    (assert= (request-host (web/conn/build {:method "GET"
+                                            :path "/"
+                                            :query ""
+                                            :params {}
+                                            :headers {}
+                                            :body ""}))
+      nil)))
+
+(describe "canonical-host"
+  (test "the canonical host passes straight through"
+    (let (conn ((canonical-host *site*) (conn-for-host "example.com")))
+      (assert= (web/conn/halted? conn) false)))
+
+  (test "another host is redirected, permanently"
+    (let (conn ((canonical-host *site*) (conn-for-host "www.example.com")))
+      (assert= (web/conn/halted? conn) true)
+      ;; 301, not 302: a permanent redirect is what transfers the ranking signal
+      (assert= (get conn :status) 301)
+      (assert= (get-in conn [:resp-headers :location]) "https://example.com/")))
+
+  (test "the path and query survive — a redirect that drops them loses the deep links"
+    (let (conn ((canonical-host *site*) (conn-for-host "old.example.org" "/packages" "q=json")))
+      (assert= (get-in conn [:resp-headers :location]) "https://example.com/packages?q=json")))
+
+  (test ":except leaves a host alone — an internal probe must not be sent somewhere it cannot follow"
+    (let (conn ((canonical-host *site* {:except ["internal.fly"]}) (conn-for-host "internal.fly")))
+      (assert= (web/conn/halted? conn) false)))
+
+  (test ":status overrides, for a migration you are not yet sure of"
+    (assert= (get ((canonical-host *site* {:status 302}) (conn-for-host "www.example.com")) :status)
+      302))
+
+  (test "a request with no Host is left alone rather than guessed at"
+    (let (conn ((canonical-host *site*) (web/conn/build {:method "GET"
+                                                         :path "/"
+                                                         :query ""
+                                                         :params {}
+                                                         :headers {}
+                                                         :body ""})))
+      (assert= (web/conn/halted? conn) false)))
+
+  (test "a site with no :url configured redirects nobody"
+    (let (conn ((canonical-host {}) (conn-for-host "anything.example")))
+      (assert= (web/conn/halted? conn) false))))

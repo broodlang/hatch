@@ -189,6 +189,10 @@ docs/
   rate-limiting.md        — the token-bucket plug, its four extension seams (key/skip/cost/
                             store), and what it deliberately does not do (per-node buckets,
                             no eviction, fails open)
+  seo-and-headers.md      — what ships on by default (security headers, HSTS, ETag), what is
+                            one line to add (canonical-host, robots/sitemap/llms, ugc rel),
+                            what the dev audits warn about, and which audit-tool advice hatch
+                            deliberately refuses (CDN, analytics, ads.txt, keyword stuffing)
 ```
 
 ## Key conventions

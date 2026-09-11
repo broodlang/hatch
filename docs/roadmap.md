@@ -119,6 +119,28 @@ are never evicted, so one derived from user input grows the table without bound.
 `docs/rate-limiting.md` documents all of it, including the three things it deliberately does
 not do.
 
+**0.14.0 turns an SEO audit's findings into framework defaults.** Running a scan against a
+hatch app produced a list, and the useful reaction to such a list is not to hand-fix one
+site — it is to ask which items every app has and make those either automatic or one line.
+
+Automatic: `Strict-Transport-Security`, sent only on an HTTPS request (`web/conn/secure?`
+reads `X-Forwarded-Proto`, since behind a proxy the app's own socket is plaintext). The
+default is `max-age=31536000` and nothing more — `includeSubDomains` commits subdomains the
+framework has never heard of, with a year-long memory in every browser that saw it.
+
+One line: `seo/canonical-host`, a 301 to the site's own host that preserves path and query,
+for the duplicate-address problem that accumulates without anyone adding to it.
+
+Warned about: two new `web/audit` rules. **Heading hierarchy** catches `h1` followed by `h3`
+— a level is size in CSS and structure in HTML, and skipping one tells a reader navigating by
+heading that they are inside a section that does not exist. **Favicon** catches a `<head>`
+that declares no icon.
+
+And `docs/seo-and-headers.md` writes down the triage itself, including what hatch refuses:
+a CDN is infrastructure, analytics is render-blocking third-party JavaScript traded for a
+checkbox, `ads.txt` declares who may sell advertising on a site that sells none, and
+"include your keywords" is advice to write well, not a change to make.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
