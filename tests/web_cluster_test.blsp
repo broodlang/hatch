@@ -1,0 +1,50 @@
+(defmodule web-cluster-test (:use web/cluster) (:use test))
+
+(describe "address"
+  (test "an IPv6 host is bracketed — a bare v6 address and a port are ambiguous"
+    (assert= (address "fdaa:0:1::3" 4370) "[fdaa:0:1::3]:4370"))
+  (test "a compressed loopback too" (assert= (address "::1" 4370) "[::1]:4370"))
+  (test "an IPv4 host is not bracketed — brackets make it an invalid authority"
+    (assert= (address "10.0.0.2" 4370) "10.0.0.2:4370"))
+  (test "an already-bracketed host is left alone rather than double-wrapped"
+    (assert= (address "[::1]" 4370) "[::1]:4370"))
+  (test "a hostname is not bracketed" (assert= (address "peer.internal" 4370) "peer.internal:4370")))
+
+(describe "node-spec"
+  (test "the keyword name loses its sigil"
+    (assert= (node-spec :my-app "fdaa::3" 4370) "my-app@[fdaa::3]:4370"))
+  (test "v4 peers get the unbracketed form"
+    (assert= (node-spec :my-app "10.0.0.2" 4370) "my-app@10.0.0.2:4370"))
+  (test "a string name works as well as a keyword"
+    (assert= (node-spec "my-app" "::1" 4370) "my-app@[::1]:4370")))
+
+(describe "fly?"
+  (test "this machine is not a Fly machine, so clustering is off"
+    ;; The three variables it needs are unset in a test run, and the answer must be a
+    ;; boolean rather than the nil an `and` chain would produce — `start` branches on it.
+    (assert= (fly?) false)))
+
+(describe "fly-peers"
+  (test "no FLY_APP_NAME means no peers, rather than a DNS lookup of \".internal\""
+    (assert= (fly-peers) [])))
+
+(describe "start"
+  (test "a name is required — a node has to be called something"
+    (assert= (try (do (start {}) :no-error) (catch _e :error)) :error))
+
+  (test "an environment that is not a cluster is a no-op, not a failure"
+    ;; The whole point of the `:enabled?` gate: a laptop, a CI run and a one-machine deploy
+    ;; all take this path, so `main` can call it unconditionally.
+    (assert= (start {:name :test-app}) nil))
+
+  (test ":enabled? false wins even when :discover would answer peers"
+    (assert= (start {:name :test-app :enabled? (fn () false) :discover (fn () ["::1"])})
+      nil))
+
+  (test "enabled with no host and no FLY_PRIVATE_IP fails loudly rather than guessing one"
+    ;; A node needs an address, and inventing one would produce a cluster whose members
+    ;; cannot reach each other while reporting success.
+    (assert= (try
+               (do (start {:name :test-app :enabled? (fn () true) :discover (fn () [])}) :no-error)
+               (catch _e :error))
+      :error)))

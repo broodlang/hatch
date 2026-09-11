@@ -1,4 +1,8 @@
-(defmodule web-page-test (:use web/page) (:use web/conn) (:use test))
+(defmodule web-page-test
+  (:use web/page)
+  (:use web/conn)
+  (:use web/template :only [render])
+  (:use test))
 
 (defn conn-for ()
   (build {:method "GET" :path "/" :query "" :params {} :headers {} :body ""}))
@@ -64,3 +68,88 @@
   (test "a comprehension still renders every item"
     (assert= (web/template/render [:ul {:class "list"} [:li {} "1"] [:li {} "2"]])
       (web/template/render (dh-nested [1 2])))))
+
+;; ---- the shell, rendered once -----------------------------------------------
+
+;; Every test uses a key of its own, because the store is process-shared and lives for the
+;; life of the runtime — two tests sharing a key would be testing each other's entry.
+
+(defn- shell-for (label)
+  "A shell builder: `label` in the nav, the placeholder where the body goes, a fixed footer."
+  (fn (placeholder) [:html {} [:body {} [:nav {} label] placeholder [:footer {} "end"]]]))
+
+(describe "shell-halves"
+  (test "splits the chrome at the placeholder"
+    (let ([prefix suffix] (shell-halves [:shell-test :split] (shell-for "nav")))
+      (assert= (includes? prefix "<nav>nav</nav>") true)
+      (assert= (includes? suffix "<footer>end</footer>") true)
+      ;; the marker itself never reaches either half
+      (assert= (includes? prefix "hatch-body") false)
+      (assert= (includes? suffix "hatch-body") false)))
+
+  (test "a builder that drops the placeholder yields the whole render as the prefix"
+    ;; Degrades to a chrome-only page rather than to a page with a stray marker in it.
+    (let ([prefix suffix] (shell-halves [:shell-test :no-marker]
+                            (fn (_placeholder) [:html {} [:body {} "no body slot"]])))
+      (assert= (includes? prefix "no body slot") true)
+      (assert= suffix "")))
+
+  (test "the same key answers the same halves — that is the point of the cache"
+    (assert= (shell-halves [:shell-test :stable] (shell-for "a"))
+      (shell-halves [:shell-test :stable] (shell-for "b"))))
+
+  (test "a different key is a different shell, so two users never share a prefix"
+    (let ([prefix-a _sa] (shell-halves [:shell-test :user "a@example.com"]
+                           (shell-for "a@example.com"))
+          [prefix-b _sb] (shell-halves [:shell-test :user "b@example.com"]
+                           (shell-for "b@example.com")))
+      (assert= (includes? prefix-a "a@example.com") true)
+      (assert= (includes? prefix-b "b@example.com") true)
+      (assert= (= prefix-a prefix-b) false))))
+
+(describe "with-shell"
+  (test "the body is rendered into the cached chrome"
+    (let (html (render (with-shell [:shell-test :with] (shell-for "nav") [:main {} "content"])))
+      (assert= (includes? html "<nav>nav</nav><main>content</main><footer>end</footer>") true)))
+
+  (test "the chrome is reused across bodies while the body is not"
+    (let (one (render (with-shell [:shell-test :reuse] (shell-for "nav") [:main {} "first"]))
+          two (render (with-shell [:shell-test :reuse] (shell-for "nav") [:main {} "second"])))
+      (assert= (includes? one "first") true)
+      (assert= (includes? two "second") true)
+      (assert= (includes? two "first") false)))
+
+  (test "the result is usable as a node inside `page`"
+    (let (resp (page (conn-for)
+                 (with-shell [:shell-test :in-page] (shell-for "nav") [:main {} "x"])))
+      (assert= (get resp :status) 200)
+      (assert= (includes? (get resp :resp-body) "<main>x</main>") true))))
+
+(describe "cached"
+  (test "a cacheable page is stored, so a second call does not rebuild it"
+    (let (built (table/new)
+          build (fn ()
+                  (table/put built :n (+ 1 (or (table/get built :n) 0)))
+                  [:p {} "page"])
+          first (cached [:shell-test :cached] build true)
+          second (cached [:shell-test :cached] build true))
+      (assert= first second)
+      (assert= (table/get built :n) 1)))
+
+  (test "an uncacheable page is rebuilt every time — the caller says which it is"
+    ;; The predicate is an argument and never a guess: one entry serves everyone who asks
+    ;; for the key, so a page carrying anything about the viewer must not be stored.
+    (let (built (table/new)
+          build (fn ()
+                  (table/put built :n (+ 1 (or (table/get built :n) 0)))
+                  [:p {} "page"])
+          _first (cached [:shell-test :uncached] build false)
+          _second (cached [:shell-test :uncached] build false))
+      (assert= (table/get built :n) 2)))
+
+  (test "the default is cacheable"
+    (assert= (cached [:shell-test :default] (fn () [:p {} "x"]))
+      (cached [:shell-test :default] (fn () [:p {} "y"]))))
+
+  (test "the value is rendered HTML, ready to send"
+    (assert= (cached [:shell-test :rendered] (fn () [:p {} "hi"]) false) "<p>hi</p>")))

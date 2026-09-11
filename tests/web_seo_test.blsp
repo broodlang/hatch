@@ -212,3 +212,18 @@
   (test "content may be a thunk, so a listing is read per request and not frozen at boot"
     (let (handler (llms-handler *llms-site* (fn () {:title "Live"}) {}))
       (is (includes? (body (call handler (conn-for "GET" "/llms.txt"))) "# Live")))))
+
+(describe "sitemap-date"
+  (test "epoch-ms becomes the bare date <lastmod> takes"
+    (assert= (sitemap-date 1757548800000) "2025-09-11"))
+  (test "a non-number is omitted rather than rendered wrong"
+    ;; A malformed <lastmod> is worse than an absent one: the entry is still valid without
+    ;; it, and invalid with a date a crawler cannot parse.
+    (assert= (sitemap-date nil) nil)
+    (assert= (sitemap-date "yesterday") nil))
+  (test "the result is a date, not a full instant — the precision the timestamp deserves"
+    (assert= (string/length (sitemap-date 1757548800000)) 10))
+  (test "it drops into a sitemap entry map"
+    (let (xml (sitemap-xml {:url "https://example.com"}
+                [{:path "/a" :lastmod (sitemap-date 1757548800000)}]))
+      (assert= (includes? xml "<lastmod>2025-09-11</lastmod>") true))))

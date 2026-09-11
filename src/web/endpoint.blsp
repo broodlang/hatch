@@ -1,0 +1,267 @@
+(defmodule web/endpoint
+  "The standard endpoint: everything between a raw request and the bytes that answer it.
+
+  `conn/router->handler` is the three-line version — build, route, serialize — and it is
+  enough for a demo. A real endpoint wants six more things, and every app that writes them
+  itself writes the same six, in an order that matters:
+
+  1. **Process isolation with a deadline.** Each request runs as a `task`, so a handler that
+     raises cannot take the worker down and one that wedges cannot hold the connection open
+     forever.
+  2. **A log line for the crash.** A request inside a task comes back as `[:task-error h msg]`
+     rather than propagating, which means `http/server`'s own exception telemetry never fires
+     for it. An adapter that binds that message to `_msg` and drops it — the obvious way to
+     write this — leaves a 500 with no recorded cause anywhere, and the only way left to
+     learn anything is to reproduce it by hand.
+  3. **A validator on the response.** Marking a page `no-cache` is correct and says
+     *revalidate before reuse*; with no ETag on it every one of those revalidations is a
+     full 200 carrying the whole body, forever, and nothing about it looks wrong.
+  4. **Compression, after the validator.** The ETag is computed against the body a cache
+     would store, so asking first means a 304 skips the compression work entirely instead of
+     compressing a body that is never sent.
+  5. **Baseline security headers**, applied without clobbering what a handler set.
+  6. **Themed errors** (`web/errors`), which must skin the framework's bare 404 while leaving
+     a JSON body and a handler's own rendered page alone.
+
+  So:
+
+      (web/endpoint/serve
+        {:router     routes/app-router
+         :assets     *assets*
+         :freshness  {:max-age 60 :stale-for 600}
+         :errors     {:render my-error-page}})
+
+  Every key has a default and only `:router` is required. The pipeline order is fixed
+  because it is the part that is easy to get wrong and impossible to notice."
+  (:alias http/server)
+  (:alias web/conn)
+  (:alias web/live)
+  (:alias web/errors)
+  ;; chosen-encoding / encode-body — the coding choice and the encoder, one implementation
+  ;; for every app rather than an `accepts-gzip?` per app that matches the literal "gzip"
+  ;; and serves a br-only client uncompressed.
+  (:alias web/compress :as compress)
+  ;; conditional / etag-for — the validator that makes a mandated revalidation cheap
+  (:alias web/cache :as cache)
+  ;; ensure (dev: install + build + watch) / prepare (prod boot: fingerprint + precompress)
+  (:alias web/assets)
+  (:alias web/env)
+  (:alias task)
+  (:alias log))
+
+;; ---- defaults ---------------------------------------------------------------
+
+;; Hard deadline per request — kills a wedged handler and answers 504. Generous, because it
+;; is a backstop against a bug and not a latency budget: a handler that legitimately needs
+;; longer than this should be streaming or a background job.
+(def *default-timeout-ms* 30000)
+
+;; Below this, the ~20-byte framing overhead is not worth the CPU.
+(def *default-compress-min-bytes* 256)
+
+(def *default-security-headers*
+  ;; Applied to every response — HTML, JSON, a tarball, a static file.
+  ;;
+  ;; A Content-Security-Policy is deliberately absent. A meaningful one needs per-page
+  ;; nonces, which is an app-level decision about the app's own inline scripts; a default
+  ;; CSP here would either be so loose it means nothing or would break the first page with
+  ;; an inline `<style>`. Pass your own through `:security-headers`.
+  {:x-content-type-options "nosniff" ; never MIME-sniff a response into an executable type
+   :x-frame-options "DENY" ; clickjacking: most apps are not meant to be framed
+   :referrer-policy "strict-origin-when-cross-origin"}) ; don't leak full paths cross-origin
+;; Whether this runtime can compress at all. Probed once at load: the encoders are native, and
+;; a runtime built without them should serve plain bodies rather than raise per request.
+(def- *zlib?* (check-allow :discarded-catch (try (do zlib/gzip zlib/brotli true) (catch _e false))))
+
+;; ---- environment ------------------------------------------------------------
+
+(defn port (&optional (fallback 5000))
+  "The port to serve on: `$HATCH_PORT` when it is a positive integer, else `fallback`.
+
+  Non-numeric or non-positive falls back rather than raising — a platform that exports
+  `PORT` and not `HATCH_PORT` should still boot on the default, and a typo should not be a
+  crash loop."
+  (web/env/positive-integer "HATCH_PORT" fallback))
+
+;; ---- the response pipeline --------------------------------------------------
+
+(defn security-headers (resp headers)
+  "Merge baseline security `headers` into `resp`, without clobbering any a handler already
+  set. The handler wins, deliberately: a page that needs to be framed, or an endpoint that
+  sets its own `Referrer-Policy`, is making a decision this must not silently undo."
+  (if (empty? headers)
+    resp
+    (assoc resp :headers (merge headers (get resp :headers {})))))
+
+(defn compress-response (conn resp opts)
+  "Compress a text response body with the best coding the client accepts — brotli where it
+  is offered, else gzip — as a native `Content-Encoding`.
+
+  Runs last, so it merges `Accept-Encoding` into any `Vary` an earlier stage set (a
+  freshness policy that varies by `Cookie`, say). Fires only on a *string* body (HTML, JSON,
+  SVG — a binary response carries `bytes`) with no existing `Content-Encoding`, above the
+  size floor, and only when the runtime has the encoders. A static asset that already served
+  a precompressed sibling carries `Content-Encoding` and is skipped.
+
+  A response with an ETag is compressed THROUGH the compressed-body cache. For a page whose
+  bytes cannot change between requests, compressing is the largest remaining cost and
+  produces the same output every time; the ETag identifies those exact bytes and the coding
+  names the representation, so together they are the key. Without a tag (nothing worth
+  validating) it compresses per request."
+  (let (body (get resp :body)
+        headers (get resp :headers {})
+        min-bytes (get opts :min-bytes *default-compress-min-bytes*)
+        coding (compress/chosen-encoding conn))
+    (if (and *zlib?*
+          coding
+          (string? body)
+          (>= (string/length body) min-bytes)
+          (nil? (get headers :content-encoding)))
+      (assoc resp
+        :body
+          (let (tag (get headers :etag))
+            (if (or (nil? tag) (= tag ""))
+              (compress/encode-body coding body)
+              (cache/compressed [tag coding] (fn () (compress/encode-body coding body)))))
+        :headers
+          (assoc headers
+            :content-encoding coding
+            ;; `cache/merge-vary`, not a substring test — an existing `accept-encoding` in
+            ;; any casing but the one being added fails a naive match and the token goes out
+            ;; twice.
+            :vary (cache/merge-vary (get headers :vary) "Accept-Encoding")))
+      resp)))
+
+(defn finish (conn resp config)
+  "Validate, compress and secure a finished response, in that order.
+
+  The order is the point. The ETag is computed first, against the body a cache would store,
+  so a matching `If-None-Match` returns a bodyless 304 — which also skips the compression
+  work for a body that is never sent. The coding is passed to the validator because a br
+  entity and a gzip entity are different representations of the same page (RFC 9110 §8.8.3)
+  and must not share a tag."
+  (let (compress-opts (get config :compress {})
+        headers (get config :security-headers *default-security-headers*)
+        coding (compress/chosen-encoding conn))
+    (match (cache/conditional conn resp coding)
+      ([:not-modified not-modified] (security-headers not-modified headers))
+      ([:send validated] (security-headers (if compress-opts
+                                             (compress-response conn validated compress-opts)
+                                             validated)
+                           headers)))))
+
+(defn freshen (conn resp config)
+  "Apply the app's dynamic-HTML freshness policy, if it has one.
+
+  `:freshness` is passed straight to `web/cache/html-freshness`, which holds the conditions
+  (GET/HEAD, 200, no `Set-Cookie`, HTML only) and fails closed on anything it cannot read.
+  Omit it and a response keeps whatever `Cache-Control` its handler set."
+  (let (freshness (get config :freshness))
+    (if freshness (cache/html-freshness conn resp freshness) resp)))
+
+;; ---- failures ---------------------------------------------------------------
+
+(defn- error-opts (config)
+  (let (errors (get config :errors {}))
+    (if errors errors {})))
+
+(defn- failure-response (code config)
+  (or (web/errors/error-response code (error-opts config))
+    {:status code :headers {:content-type "text/plain; charset=utf-8"} :body "error"}))
+
+(defn- log-crash (conn message config)
+  "Log a crashed handler's message at `:error`, then answer the generic 500 page.
+
+  The message goes to the log and never to the response — the page still leaks nothing to
+  the caller — but it goes SOMEWHERE, which is the whole difference between a diagnosable
+  500 and a mystery one."
+  (log/error (str "handler raised: " message)
+    {:method (get conn :method) :path (get conn :path) :status 500 :error (str message)})
+  (failure-response 500 config))
+
+(defn- log-timeout (conn timeout-ms config)
+  "Log a handler that outran its deadline at `:error`, then answer 504.
+
+  Logged distinctly from a crash on purpose: a slow handler and a broken one look identical
+  in a log that records only the status, and they want opposite responses."
+  (log/error (str "handler timed out after " timeout-ms "ms")
+    {:method (get conn :method) :path (get conn :path) :status 504 :timeout_ms timeout-ms})
+  (failure-response 504 config))
+
+;; ---- the adapter ------------------------------------------------------------
+
+(defn- dispatch (conn config)
+  (let (timeout-ms (get config :timeout-ms *default-timeout-ms*)
+        router (get config :router)
+        errors (get config :errors {})
+        h (task/task (fn () (web/conn/conn->response (router conn))) {:timeout timeout-ms}))
+    (receive
+      ([:task-done ^h resp] (if errors (web/errors/themed resp errors) resp))
+      ([:task-error ^h message] (log-crash conn message config))
+      ([:task-timeout ^h] (log-timeout conn timeout-ms config)))))
+
+(defn adapter (config)
+  "The `http/server` request handler for `config` — build a conn, run the router inside a
+  task with a deadline, then theme, freshen, validate, compress and secure the result.
+
+  `:router` (a `defrouter` function, taking a conn and answering one) is required. See `serve` for the rest of
+  the config; pass the same map to both."
+  (when (nil? (get config :router))
+    (error "web/endpoint/adapter: :router is required (a defrouter function)"))
+  (fn (request)
+    (let (conn (web/conn/build request))
+      (finish conn (freshen conn (dispatch conn config) config) config))))
+
+;; ---- assets + boot ----------------------------------------------------------
+
+(defn prepare-assets (assets)
+  "Get the asset pipeline ready for this environment, if the app has one.
+
+  In dev: first-run install, a one-shot build, then the watcher, whose rebuilds hot-swap the
+  page CSS over the live socket. In prod: `prepare` only — fingerprint the already-built
+  files (and write any missing precompressed siblings), so the slim runtime image boots
+  without the bundler installed.
+
+  A prod failure is a warning, not a boot failure: a missing build degrades to plain asset
+  URLs, and refusing to serve at all would turn a cosmetic problem into an outage.
+
+  `prepare` and not `fingerprint`: the inner one skips the `:precompress` step, which is how
+  a 7 MB wasm module goes out uncompressed with its spec sitting right there in the config."
+  (when assets
+    (if (web/env/dev?)
+      (web/assets/ensure assets)
+      (try
+        (web/assets/prepare assets)
+        (catch e
+          (log/warn (str "[assets] preparation skipped ("
+                      (error-message e)
+                      "); serving plain asset URLs")))))))
+
+(defn serve (config)
+  "Prepare the assets and start the HTTP listener. The canonical body of an app's endpoint,
+  and one of `web/application`'s children.
+
+    `:router`            — a `defrouter` function (conn in, conn out). **Required.**
+    `:port`              — the listen port (default `(port)`, i.e. `$HATCH_PORT` or 5000).
+    `:timeout-ms`        — per-request deadline (default 30s) after which a handler is
+                           killed and the request answered 504.
+    `:errors`            — `web/errors` opts (`:render`, `:meta`) for themed error pages, or
+                           `false` to pass framework error bodies through untouched.
+    `:freshness`         — `web/cache/html-freshness` opts for dynamic HTML
+                           (`{:max-age 60 :stale-for 600}`). Omitted: no policy applied.
+    `:security-headers`  — merged under whatever a handler set (default
+                           `*default-security-headers*`); `{}` for none.
+    `:compress`          — `{:min-bytes 256}`, or `false` to send bodies uncompressed.
+    `:assets`            — a `web/assets` config; dev watches it, prod fingerprints it.
+    `:live`              — the WebSocket handler (default `(web/live/live-dispatcher)`);
+                           `false` for an app with no live views.
+    `:server`            — extra `http/server/start` config (`:spool-threshold`,
+                           `:max-request-bytes`, `:tls`, …).
+
+  Returns the listener supervisor pid."
+  (prepare-assets (get config :assets))
+  (let (live (get config :live :default))
+    (http/server/start (get config :port (port))
+      (adapter config)
+      (if (= live :default) (web/live/live-dispatcher) (if live live nil))
+      (get config :server {}))))

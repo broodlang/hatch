@@ -1,0 +1,149 @@
+(defmodule web/cluster
+  "Find and dial the other machines running this app, so the per-node caches can talk to
+  each other.
+
+  This is the half `web/cache/start-cluster` waits for. That listener applies invalidations
+  broadcast by peers, and broadcasting reaches `(node/list)` — which is empty until
+  something has become a node and dialled somebody. Started alone it runs correctly and
+  hears nothing: an invalidation on one machine leaves the other serving what the first has
+  already replaced, silently, until someone notices two tabs disagreeing.
+
+  Discovery is a **poll**, not an event, because that is what platforms offer. Fly publishes
+  one AAAA record per machine at `<app>.internal` and nothing announces a machine's arrival,
+  so the loop re-resolves and re-dials; dialling a peer that is already connected returns
+  the same identity and adds no second entry to `node/list`, which is what makes re-resolving
+  on a timer cheap rather than accumulating links.
+
+  It is **off** unless the environment supplies what it needs, so a laptop, a CI run and a
+  one-machine deploy all take the same no-op path they would without it:
+
+      (web/cluster/start {:name :my-app})   ; Fly discovery, or a no-op
+
+  `:discover` replaces the platform half — any thunk answering a list of `host` strings —
+  and `:enabled?` replaces the question of whether to run at all."
+  (:alias node)
+  (:alias dns)
+  (:alias web/env)
+  (:alias log))
+
+;; The distribution port. It must NOT be exposed publicly: a node port reachable from the
+;; internet is a remote-code-execution endpoint guarded by nothing but the cookie. On Fly
+;; that means leaving it out of `fly.toml` — 6PN is private to the org.
+(def *default-port* 4370)
+
+;; Re-resolve this often. A machine that has appeared is a machine whose invalidations we are
+;; not receiving, so the gap between its boot and our dial is a window of stale reads.
+(def *default-poll-ms* 10000)
+
+(def *cookie-var* "BROOD_COOKIE")
+
+;; ---- addresses --------------------------------------------------------------
+
+(defn address (host port)
+  "`host:port` as a node listen/dial address, bracketing an IPv6 host.
+
+  Both families, because the bracket is not optional and not universal: a bare v6 address
+  and a port are ambiguous without it, and a v4 address with brackets is not a valid
+  authority. An already-bracketed host is left alone.
+
+      (hatch/web/cluster/address \"fdaa:0:1::3\" 4370) ;=> \"[fdaa:0:1::3]:4370\"
+      (hatch/web/cluster/address \"10.0.0.2\" 4370) ;=> \"10.0.0.2:4370\"
+      (hatch/web/cluster/address \"[::1]\" 4370) ;=> \"[::1]:4370\""
+  (cond
+    (string/starts-with? host "[") (str host ":" port)
+    (includes? host ":") (str "[" host "]:" port)
+    else (str host ":" port)))
+
+(defn node-spec (nm host port)
+  "The `name@host:port` spec `node/connect` dials.
+
+      (hatch/web/cluster/node-spec :my-app \"fdaa::3\" 4370) ;=> \"my-app@[fdaa::3]:4370\""
+  (str (->string nm) "@" (address host port)))
+
+;; ---- Fly.io discovery -------------------------------------------------------
+
+(defn fly-private-ip ()
+  "This machine's private 6PN address, from `$FLY_PRIVATE_IP`."
+  (web/env/text "FLY_PRIVATE_IP"))
+
+(defn fly-app-name ()
+  "The Fly app this machine belongs to, from `$FLY_APP_NAME`."
+  (web/env/text "FLY_APP_NAME"))
+
+(defn fly-peers ()
+  "Every machine's private address, from Fly's internal DNS — the only peer list available
+  from inside a machine.
+
+  Our OWN address is in there and is deliberately not filtered out. `node/connect` refuses
+  to dial itself with a clear error, where comparing addresses as strings would need both
+  sides spelled the same way — `$FLY_PRIVATE_IP` is compressed and a DNS answer is not — so
+  letting the dial fail is exact where string equality would be a guess.
+
+  That difference in spelling is safe to ignore for the peers too: a node dialled as
+  `app@[0:0:0:0:0:0:0:1]` reports itself as `app@[::1]`, and `node/connect` identifies a
+  peer by the name it reports rather than the string we dialled."
+  (let (app (fly-app-name))
+    (if (nil? app) [] (dns/lookup (str app ".internal") dns/*aaaa*))))
+
+(defn fly? ()
+  "Whether this runtime has everything Fly clustering needs.
+
+  The cookie is the one that is easy to forget and impossible to notice. Without a SHARED
+  `$BROOD_COOKIE` every machine generates its own, every handshake fails authentication, and
+  the app runs perfectly as a set of strangers — so its absence disables clustering loudly
+  at boot rather than quietly at the first invalidation."
+  (not (or (nil? (fly-private-ip)) (nil? (fly-app-name)) (nil? (web/env/text *cookie-var*)))))
+
+;; ---- the loop ---------------------------------------------------------------
+
+(defn- dial (nm host port)
+  "Link to the node at `host:port`, if there is one and it is not us.
+
+  Best-effort by design: a machine mid-boot, one shutting down, and ourselves all fail
+  here, and all three are ordinary events in a cluster that is working."
+  (check-allow :discarded-catch (try (node/connect (node-spec nm host port)) (catch _e nil))))
+
+(defn- discovery-loop (nm port poll-ms discover)
+  (dolist (host (discover)) (dial nm host port))
+  (receive (after poll-ms nil))
+  (discovery-loop nm port poll-ms discover))
+
+(defn start (config)
+  "Become a node and keep dialling this app's other machines. Returns the qualified node
+  name, or nil when the environment is not a cluster — so it is safe to call
+  unconditionally from `main`, as one of `web/application`'s children.
+
+    `:name`     — the node's name (a keyword). Required.
+    `:port`     — the distribution port (default `*default-port*`, 4370).
+    `:poll-ms`  — how often to re-resolve peers (default `*default-poll-ms*`, 10s).
+    `:host`     — this node's own address; default `fly-private-ip`.
+    `:discover` — thunk answering a list of peer hosts; default `fly-peers`.
+    `:enabled?` — thunk deciding whether to cluster at all; default `fly?`.
+
+  The node's identity is `name@<this machine's address>`, and borrowing the address is
+  deliberate: brood identifies a node by `name@host`, so an address that is already unique
+  per machine makes each node's identity unique without inventing an id or coordinating one.
+
+  Start it BEFORE `web/cache/start-cluster`: that listener reads `(node/list)` to notice a
+  peer returning, and started first it would spend its first poll believing it is alone."
+  (let (nm (get config :name)
+        port (get config :port *default-port*)
+        poll-ms (get config :poll-ms *default-poll-ms*)
+        discover (get config :discover fly-peers)
+        enabled? (get config :enabled? fly?))
+    (when (nil? nm)
+      (error "web/cluster/start: :name is required (the node's name, a keyword)"))
+    (if (not (enabled?))
+      (do
+        (log/info (str "[cluster] not clustering: needs FLY_PRIVATE_IP, FLY_APP_NAME and "
+                    *cookie-var* " (or a :discover/:enabled? of your own)"))
+        nil)
+      (let (host (or (get config :host) (fly-private-ip)))
+        (when (nil? host)
+          (error "web/cluster/start: no :host and no $FLY_PRIVATE_IP — a node needs an address"))
+        (node/start nm (address host port))
+        ;; so a peer can run work here, and so the link is bidirectional
+        (node/serve-spawns)
+        (log/info (str "[cluster] node " (node/name) " listening on " (address host port)))
+        (spawn (discovery-loop nm port poll-ms discover))
+        (node/name)))))

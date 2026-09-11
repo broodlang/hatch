@@ -76,17 +76,32 @@ src/
     server.blsp     — TCP listener/worker; WS upgrade detection
     websocket.blsp  — RFC 6455 handshake + frame codec
   web/
+    endpoint.blsp   — THE standard endpoint: request → task with a deadline → router →
+                      themed errors → freshness → ETag → compression → security headers,
+                      in that order (web/endpoint/serve); assets prepared per environment
+    errors.blsp     — error pages as a pipeline stage: a status table, an app-supplied
+                      :render, and the two guards (never skin a JSON body, never skin a
+                      page a handler rendered under its own status)
+    env.blsp        — typed environment reads (as-text/as-integer/as-items/as-flag?) plus
+                      dev?/prod?; the one place $HATCH_ENV is read
+    cluster.blsp    — become a node and keep dialling the app's other machines (Fly's
+                      <app>.internal AAAA records by default); the discovery half
+                      web/cache/start-cluster waits for
     template.blsp   — Hiccup → HTML renderer
     bml.blsp        — .bml → Hiccup template compiler (HEEx-flavoured: {expr}, @field,
                       :if, :for, components); macro-time, invoked by deflive's template clause
     conn.blsp       — immutable Conn value + response pipeline (conn->response); cookies,
                       body params, before-send hook
-    page.blsp       — plain (non-live) page render helper: (page conn hiccup)
+    page.blsp       — plain (non-live) page render helper: (page conn hiccup); defhtml
+                      (statics baked at expansion time); shell-halves/with-shell/cached
+                      (the runtime counterpart — a shell rendered once and split at a
+                      marker, and a whole page cached when the caller says it may be)
     router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input);
                       live-token/live-csrf-input read the token off web/live/live-conn
-    auth.blsp       — HTTP Basic-auth plug for router through groups (basic-auth)
+    auth.blsp       — auth plugs for router through groups: basic-auth, bearer-auth
+                      (RFC-9110 case-insensitive scheme), allow-ips / allow-ips-from-env
     static.blsp     — MIME table + path-safe static file handler
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-conn (the connection's read-only Conn, bound per session),
@@ -124,6 +139,10 @@ tests/
   web_page_test.blsp
   web_csrf_test.blsp
   web_auth_test.blsp
+  web_endpoint_test.blsp
+  web_errors_test.blsp
+  web_env_test.blsp
+  web_cluster_test.blsp
   web_router_test.blsp
   web_session_test.blsp
   web_static_test.blsp
@@ -169,8 +188,12 @@ docs/
   not a silent misread). Destructuring a *vector* value works. For a list, use
   `first`/`rest`: `(let (a (first x) b (first (rest x))) ...)`.
 - **`map`/`filter`/`fold` return lists** — don't assert against `[...]` vectors.
-  When you need a vector, use **`mapv`/`filterv`** rather than wrapping in
-  `(into [] ...)`.
+  When you need a vector, use **`mapv`** or **`seq/filterv`** rather than
+  wrapping in `(into [] ...)`. The two are *not* in the same place: `mapv` is a
+  prelude global, `filterv` lives in `std/seq.blsp` — so it is `seq/filterv`
+  qualified (which auto-loads), or bare only after `(:use seq)`. A bare
+  `filterv` is an unbound symbol, which surfaces as a warning from `nest check`
+  and a runtime failure, not a compile error.
 - **Macro params shadow builtins** — avoid naming macro params `name`,
   `type`, `count`, etc.
 - **`tcp-listen` inside spawned process** — accept messages go to the

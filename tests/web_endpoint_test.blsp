@@ -1,0 +1,287 @@
+(defmodule web-endpoint-test
+  (:use web/endpoint)
+  ; send-resp / put-resp-header — the routers under test are ordinary handlers
+  (:use web/conn)
+  (:alias web/cache)
+  (:use test))
+
+(defn- request (&optional (headers {}) (path "/"))
+  {:method "GET" :path path :query "" :params {} :headers headers :body ""})
+
+(defn- html-router (conn) (send-resp conn 200 "<!DOCTYPE html><p>hello</p>"))
+
+(defn- long-html-router (conn)
+  ;; Comfortably over the 256-byte compression floor, and compressible.
+  (send-resp conn 200 (str "<!DOCTYPE html><p>" (string/repeat "hello world " 60) "</p>")))
+
+(defn- json-router (conn)
+  (send-resp (put-resp-header conn :content-type "application/json") 404 "{\"error\":\"nope\"}"))
+
+(defn- fragment-404-router (conn)
+  ;; What the router itself answers for an unmatched path: a bare fragment, no document.
+  (send-resp conn 404 "<h1>404 Not Found</h1>"))
+
+(defn- crashing-router (conn) (error "boom: " (get conn :path)))
+
+(defn- wedged-router (conn)
+  (receive (after 5000 nil))
+  (send-resp conn 200 "too late"))
+
+(defn- respond (config &optional (headers {}) (path "/"))
+  ((adapter config) (request headers path)))
+
+(describe "adapter"
+  (test ":router is required — the one key with nothing sensible to default to"
+    (assert= (try (do (adapter {}) :no-error) (catch _e :error)) :error))
+
+  (test "a handler's response comes through with its status and body"
+    (let (resp (respond {:router html-router}))
+      (assert= (get resp :status) 200)
+      (assert= (includes? (get resp :body) "hello") true))))
+
+(describe "security headers"
+  (test "the baseline set is on every response"
+    (let (headers (get (respond {:router html-router}) :headers))
+      (assert= (get headers :x-content-type-options) "nosniff")
+      (assert= (get headers :x-frame-options) "DENY")
+      (assert= (get headers :referrer-policy) "strict-origin-when-cross-origin")))
+
+  (test "a handler's own value wins — a page that needs framing is making a decision"
+    (let (framed (fn (conn)
+                   (send-resp (put-resp-header conn :x-frame-options "SAMEORIGIN") 200 "ok"))
+          headers (get (respond {:router framed}) :headers))
+      (assert= (get headers :x-frame-options) "SAMEORIGIN")
+      ;; the others are still applied
+      (assert= (get headers :x-content-type-options) "nosniff")))
+
+  (test "an empty map disables them"
+    (assert= (get (get (respond {:router html-router :security-headers {}}) :headers)
+               :x-frame-options)
+      nil))
+
+  (test "an app can add its own, e.g. a CSP the framework declines to guess at"
+    (assert= (get (get (respond {:router html-router
+                                 :security-headers {:content-security-policy "default-src 'self'"}})
+                    :headers)
+               :content-security-policy)
+      "default-src 'self'")))
+
+(describe "a handler that raises"
+  (test "answers 500 rather than propagating — the worker survives"
+    (let (resp (respond {:router crashing-router}))
+      (assert= (get resp :status) 500)))
+
+  (test "the body is the generic page and leaks nothing about the cause"
+    (let (body (get (respond {:router crashing-router}) :body))
+      (assert= (includes? body "An unexpected error occurred") true)
+      (assert= (includes? body "boom") false)))
+
+  (test ":render puts the 500 in the app's own layout"
+    (let (resp (respond {:router crashing-router
+                         :errors {:render (fn (code title _blurb) (str "APP " code " " title))}}))
+      (assert= (get resp :body) "APP 500 Something went wrong"))))
+
+(describe "a handler that outruns its deadline"
+  (test "answers 504, and does not wait for the handler"
+    ;; The wedged router sleeps 5s; a 50ms deadline must answer long before that.
+    (let (started (os/now)
+          resp (respond {:router wedged-router :timeout-ms 50}))
+      (assert= (get resp :status) 504)
+      (assert= (< (- (os/now) started) 4000) true)))
+
+  (test "the 504 page says the request timed out, not that something went wrong"
+    (assert= (includes? (get (respond {:router wedged-router :timeout-ms 50}) :body)
+               "Request timed out")
+      true)))
+
+(describe "themed errors"
+  (test "the router's bare 404 fragment is re-skinned into a page"
+    (let (resp (respond {:router fragment-404-router}))
+      (assert= (get resp :status) 404)
+      (assert= (includes? (get resp :body) "Page not found") true)))
+
+  (test "a JSON error body survives — an API client's decoder expects an object"
+    (let (resp (respond {:router json-router}))
+      (assert= (get resp :status) 404)
+      (assert= (get resp :body) "{\"error\":\"nope\"}")))
+
+  (test ":errors false passes the framework body through untouched"
+    (assert= (get (respond {:router fragment-404-router :errors false}) :body)
+      "<h1>404 Not Found</h1>")))
+
+(describe "validators"
+  (test "a 200 with a body gets an ETag"
+    (assert= (string? (get (get (respond {:router html-router}) :headers) :etag)) true))
+
+  (test "a matching If-None-Match answers a bodyless 304"
+    (let (tag (get (get (respond {:router html-router}) :headers) :etag)
+          resp (respond {:router html-router} {:if-none-match tag}))
+      (assert= (get resp :status) 304)
+      (assert= (get resp :body) "")))
+
+  (test "a 304 still carries the security headers"
+    (let (tag (get (get (respond {:router html-router}) :headers) :etag)
+          headers (get (respond {:router html-router} {:if-none-match tag}) :headers))
+      (assert= (get headers :x-content-type-options) "nosniff")))
+
+  (test "a stale If-None-Match gets the full body"
+    (let (resp (respond {:router html-router} {:if-none-match "\"nope\""}))
+      (assert= (get resp :status) 200)
+      (assert= (includes? (get resp :body) "hello") true))))
+
+(describe "compression"
+  (test "a large body is compressed when the client accepts a coding"
+    (let (resp (respond {:router long-html-router} {:accept-encoding "gzip"}))
+      (assert= (get (get resp :headers) :content-encoding) "gzip")
+      ;; the body is now bytes, and smaller than the string it came from
+      (assert= (< (bytes/length (get resp :body)) 700) true)))
+
+  (test "brotli is preferred when it is offered"
+    (assert= (get (get (respond {:router long-html-router} {:accept-encoding "gzip, br"}) :headers)
+               :content-encoding)
+      "br"))
+
+  (test "Vary carries Accept-Encoding, merged with whatever a freshness policy set"
+    (let (headers (get (respond {:router long-html-router :freshness {:max-age 60 :stale-for 600}}
+                         {:accept-encoding "gzip"})
+                    :headers)
+          vary (string/lower (get headers :vary)))
+      (assert= (includes? vary "accept-encoding") true)
+      (assert= (includes? vary "cookie") true)))
+
+  (test "a body under the floor is not compressed — the framing costs more than it saves"
+    (assert= (get (get (respond {:router html-router} {:accept-encoding "gzip"}) :headers)
+               :content-encoding)
+      nil))
+
+  (test ":compress false sends the body as it was rendered"
+    (assert= (get (get (respond {:router long-html-router :compress false}
+                         {:accept-encoding "gzip"})
+                    :headers)
+               :content-encoding)
+      nil))
+
+  (test "a client that offers nothing gets the plain body"
+    (assert= (get (get (respond {:router long-html-router}) :headers) :content-encoding) nil))
+
+  (test "a q=0 refusal is honoured"
+    (assert= (get (get (respond {:router long-html-router} {:accept-encoding "gzip;q=0"}) :headers)
+               :content-encoding)
+      nil)))
+
+(describe "freshness"
+  (test "a signed-out HTML GET may be reused without asking"
+    (let (cache-control (get (get (respond {:router html-router
+                                            :freshness {:max-age 60 :stale-for 600}})
+                               :headers)
+                          :cache-control))
+      (assert= (includes? cache-control "public") true)
+      (assert= (includes? cache-control "max-age=60") true)))
+
+  (test "a request carrying a session cookie keeps private, no-cache"
+    (let (cache-control (get (get (respond {:router html-router
+                                            :freshness {:max-age 60 :stale-for 600}}
+                                    {:cookie "_hatch_session=abc"})
+                               :headers)
+                          :cache-control))
+      (assert= cache-control "private, no-cache")))
+
+  (test "no :freshness leaves Cache-Control to the handler"
+    (assert= (get (get (respond {:router html-router}) :headers) :cache-control) nil)))
+
+(describe "port"
+  (test "an unset HATCH_PORT falls back"
+    ;; `nest test` sets no HATCH_PORT, so this reads the fallback path.
+    (assert= (port 5000) 5000)
+    (assert= (port 8080) 8080)))
+
+(describe "prepare-assets"
+  (test "no asset config is a no-op rather than a failure"
+    (assert= (prepare-assets nil) nil)
+    (assert= (prepare-assets false) nil)))
+
+;; Once rendering is cached, compressing is the largest cost left in a cacheable response —
+;; 8.8ms of brotli on a 437 KB page against 0.45ms to hash it, on bytes that cannot change
+;; between requests. The ETag names those exact bytes and the coding names the
+;; representation, so together they key the compressed result.
+(def- long-body (string/repeat "compress me please " 100))
+
+(defn- conn-accepting (coding)
+  (build {:method "GET" :path "/" :query "" :params {} :headers {:accept-encoding coding} :body ""}))
+
+(defn- entries-for (tag)
+  "The compressed-body cache keys belonging to `tag`.
+
+  Counted by tag rather than in total, and with a tag of its own per test: the store is
+  process-shared and every other test in this file that compresses a tagged body puts an
+  entry in it, so a total count would be asserting about its neighbours."
+  (seq/filterv (keys (web/cache/compressed-entries)) (fn (key) (= (first key) tag))))
+
+(describe "compress-response reuses a compressed body"
+  (test "the same etag and coding compress once"
+    (let (tag "\"reuse-one\""
+          resp {:status 200 :headers {:etag tag} :body long-body}
+          conn (conn-accepting "br")
+          first-out (compress-response conn resp {})
+          second-out (compress-response conn resp {}))
+      (assert= (get (get first-out :headers) :content-encoding) "br")
+      ;; identical bytes back, and one entry for this representation
+      (assert= (bytes/length (get first-out :body)) (bytes/length (get second-out :body)))
+      (assert= (count (entries-for tag)) 1)))
+
+  (test "a different coding is a separate representation — RFC 9110 8.8.3"
+    ;; A client holding a br entity, told 304 over a gzip connection, would decode the
+    ;; wrong bytes; the two must never share a cache slot.
+    (let (tag "\"reuse-two\""
+          resp {:status 200 :headers {:etag tag} :body long-body})
+      (compress-response (conn-accepting "br") resp {})
+      (compress-response (conn-accepting "gzip") resp {})
+      (assert= (count (entries-for tag)) 2)))
+
+  (test "no etag still compresses, and caches nothing"
+    ;; A response with no validator has nothing to key on, and must still go out compressed.
+    (let (before (count (keys (web/cache/compressed-entries)))
+          out (compress-response (conn-accepting "br")
+                {:status 200 :headers {} :body long-body}
+                {}))
+      (assert= (get (get out :headers) :content-encoding) "br")
+      (assert= (count (keys (web/cache/compressed-entries))) before))))
+
+;; A tag earned under one coding must not satisfy a request for another: a client holding a
+;; br entity, told 304 over a gzip connection, would decode the wrong bytes.
+(describe "a validator names a representation, not a resource"
+  (test "a br tag does not satisfy a gzip request"
+    (let (config {:router long-html-router}
+          br-tag (get (get (respond config {:accept-encoding "br"}) :headers) :etag)
+          resp (respond config {:accept-encoding "gzip" :if-none-match br-tag}))
+      (assert= (get resp :status) 200)))
+
+  (test "and the same coding does"
+    (let (config {:router long-html-router}
+          br-tag (get (get (respond config {:accept-encoding "br"}) :headers) :etag)
+          resp (respond config {:accept-encoding "br" :if-none-match br-tag}))
+      (assert= (get resp :status) 304))))
+
+;; A 304 must carry the caching metadata the client refreshes its copy with — the SAME
+;; metadata the 200 would have carried, since a client that revalidates gets its freshness
+;; reset from this response and nothing else.
+(describe "a 304 keeps the freshness the 200 would have had"
+  (test "cache-control and vary survive onto the 304"
+    (let (config {:router html-router :freshness {:max-age 60 :stale-for 600}}
+          tag (get (get (respond config) :headers) :etag)
+          headers (get (respond config {:if-none-match tag}) :headers))
+      (assert= (get headers :cache-control) "public, max-age=60, stale-while-revalidate=600")
+      (assert= (includes? (get headers :vary) "Cookie") true)))
+
+  (test "a signed-in client's 304 stays private"
+    (let (config {:router html-router :freshness {:max-age 60 :stale-for 600}}
+          tag (get (get (respond config {:cookie "_hatch_session=abc"}) :headers) :etag)
+          headers (get (respond config {:cookie "_hatch_session=abc" :if-none-match tag})
+                    :headers))
+      (assert= (get headers :cache-control) "private, no-cache")))
+
+  (test "a response that sets a cookie is never public — sign-in is a 200 with a Set-Cookie"
+    (let (login (fn (conn)
+                  (send-resp (put-resp-header conn :set-cookie "_hatch_session=x") 200 "<p>in</p>"))
+          headers (get (respond {:router login :freshness {:max-age 60 :stale-for 600}}) :headers))
+      (assert= (get headers :cache-control) "private, no-cache"))))

@@ -19,6 +19,8 @@
   changed, so plain GETs don't churn the cookie."
   ; get-cookie, put-cookie, register-before-send — the conn plumbing this builds on
   (:use web/conn)
+  ; dev? / prod? — the one place $HATCH_ENV is read
+  (:alias web/env)
   ; base64-url-encode / base64-url-decode — cookie-safe payload encoding
   (:use encoding)
   ; hmac-sha256 — the cookie signature
@@ -66,7 +68,7 @@
   secret in any environment, the labeled dev default when it's missing/weak in dev, or a loud
   boot failure when it's missing/weak outside dev. Prefer this over a hand-rolled
   `(or (os/env …) \"dev-secret\")` so a forgotten prod secret can't silently ship."
-  (check-secret (os/env var) (= (or (os/env "HATCH_ENV") "dev") "dev")))
+  (check-secret (os/env var) (web/env/dev?)))
 
 ; ---- signing / verification ----
 
@@ -260,7 +262,7 @@
   in prod the auth cookie is sent only over HTTPS (a network attacker can't read it off a
   plaintext request and replay it) while local HTTP dev still works. An explicit `:secure`
   opt overrides."
-  (not (= (or (os/env "HATCH_ENV") "dev") "dev")))
+  (web/env/prod?))
 
 (defn session-cookie-opts (opts)
   "The put-cookie options for the session cookie, defaulting to a secure-by-default shape

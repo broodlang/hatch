@@ -1,0 +1,144 @@
+(defmodule web/errors
+  "Error pages, as a pipeline stage rather than a page.
+
+  Two kinds of error response exist and they arrive from opposite directions. One the
+  framework produces — the router's bare 404, a handler that raised, a handler that outran
+  its deadline — and it carries a body nobody designed. The other a HANDLER produced, under
+  a status it chose deliberately, and it is usually the better page: 'no such package
+  `frobnicate`' says more than 'that page doesn't exist'.
+
+  So `themed` re-skins the first and leaves the second alone. What it must not touch:
+
+  - a **JSON** response, whose contract an HTML skin would clobber — an API client parsing
+    `{\"error\": …}` would get a document instead;
+  - a response that already carries a full **HTML document**, which means a handler
+    rendered its own page and `put-status`'d it.
+
+  Both guards are one-line predicates, and both are the kind of thing an app gets wrong
+  once — silently, in the direction of a broken API — which is why they live here.
+
+  Supply `:render` to put the page in your own layout; the built-in one is a minimal,
+  unstyled document so a framework-only app still returns something readable:
+
+      (errors/themed resp {:render (fn (code title blurb) (html (my-layout …)))})"
+  (:alias web/template))
+
+;; ---- the status table -------------------------------------------------------
+
+(def *default-meta*
+  ;; `[title blurb]` per status. Deliberately plain: an error page is read by someone who
+  ;; did not expect to be on it, so it says what happened and what to do, and never what
+  ;; went wrong internally — a stack trace, a query, or a path is a gift to whoever is
+  ;; probing.
+  {400 ["Bad request" "The request couldn't be understood."]
+   401 ["Sign-in required" "You need to sign in to view this page."]
+   403 ["Forbidden" "You don't have access to this page."]
+   404 ["Page not found" "That page doesn't exist or may have moved."]
+   405 ["Method not allowed" "That address doesn't accept this kind of request."]
+   413 ["Request too large" "The request body exceeded the size this server accepts."]
+   422 ["Couldn't process that" "The request was understood but couldn't be completed."]
+   429 ["Too many requests" "You've made too many requests — wait a moment and try again."]
+   500 ["Something went wrong" "An unexpected error occurred."]
+   502 ["Bad gateway" "An upstream service answered incorrectly."]
+   503 ["Service unavailable" "The service is temporarily unable to handle the request."]
+   504 ["Request timed out" "The request took too long and was stopped."]})
+
+(defn error-meta (code &optional (opts {}))
+  "`[title blurb]` for status `code`, or nil when `code` is not an error (2xx/3xx).
+
+  `:meta` in `opts` is merged OVER the defaults, so an app overrides the wording of one
+  status without restating the other eleven. An error status with no entry falls back to a
+  generic pair rather than to nil — a 451 must still render a page.
+
+      (hatch/web/errors/error-meta 404) ;=> [\"Page not found\" \"That page doesn't exist or may have moved.\"]
+      (hatch/web/errors/error-meta 200) ;=> nil
+      (hatch/web/errors/error-meta 404 {:meta {404 [\"Gone\" \"Not here.\"]}}) ;=> [\"Gone\" \"Not here.\"]"
+  (let (table (merge *default-meta* (get opts :meta {})))
+    (or (get table code) (if (>= code 400) ["Error" "Something went wrong."] nil))))
+
+;; ---- rendering --------------------------------------------------------------
+
+(def- *html-headers* {:content-type "text/html; charset=utf-8"})
+
+(defn default-render (code title blurb)
+  "A minimal error document — no stylesheet, no layout, nothing to configure. Enough that
+  an app which has not supplied a `:render` still answers something a person can read,
+  and small enough to fit any response."
+  (web/template/html [:html
+                       {:lang "en"}
+                       [:head
+                         {}
+                         [:meta {:charset "utf-8"}]
+                         [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+                         [:title {} (str code " — " title)]]
+                       [:body
+                         {}
+                         [:h1 {} (str code " — " title)]
+                         [:p {} blurb]
+                         [:p {} [:a {:href "/"} "Back home"]]]]))
+
+(defn error-body (code &optional (opts {}))
+  "Rendered HTML for status `code`, or nil when `code` is not an error.
+
+  `:render` is `(fn (code title blurb) -> html-string)` and defaults to `default-render`.
+  It is given the resolved title and blurb rather than the raw status so an app's layout
+  does not have to carry its own copy of the status table."
+  (let (m (error-meta code opts))
+    (when m ((get opts :render default-render) code (first m) (second m)))))
+
+(defn error-response (code &optional (opts {}))
+  "A standalone error response map for `code` — the one to return for an error the
+  endpoint itself raises (a crashed handler, a request that outran its deadline), where
+  there is no upstream response to re-skin. nil for a non-error status."
+  (let (body (error-body code opts))
+    (when body {:status code :headers *html-headers* :body body})))
+
+;; ---- the guards -------------------------------------------------------------
+
+(defn api-response? (resp)
+  "True when `resp` already declares a JSON content-type.
+
+  A handler that produced a JSON body owns it, and an HTML skin over
+  `{\"error\": \"no such package\"}` turns a parseable failure into an unparseable one —
+  the client sees a document where its decoder expected an object, and reports a JSON
+  syntax error instead of the message the server actually sent."
+  (let (content-type (get (get resp :headers {}) :content-type))
+    (and (string? content-type) (includes? (string/lower content-type) "application/json"))))
+
+(def- *doctype* "<!doctype html>")
+
+(defn rendered-page? (resp)
+  "True when `resp` already carries a full HTML document, which means a handler rendered
+  its own page and chose the status.
+
+  A themed 404 that names the missing thing is strictly more useful than a generic one, so
+  skinning it would trade the specific page for the vague one. The framework-generated
+  errors this module exists to skin carry no document — the router's 404 is a bare
+  `<h1>`, and a crash has no body at all.
+
+  Matched case-insensitively on the prefix only: `web/template/html` emits
+  `<!DOCTYPE html>`, a hand-written document may say `<!doctype html>`, and lowercasing a
+  400 KB page to find out would cost more than rendering it."
+  (let (body (get resp :body)
+        n (string/length *doctype*))
+    (and (string? body)
+      (>= (string/length body) n)
+      (= (string/lower (string/substring body 0 n)) *doctype*))))
+
+(defn themed (resp &optional (opts {}))
+  "Re-skin `resp`'s body with an error page when its status is an error, keeping its
+  headers; everything else passes through unchanged.
+
+  The headers survive on purpose. A 401 carries a `WWW-Authenticate` challenge and a 3xx
+  carries a `Location`, and a skin that rebuilt the response from the status alone would
+  drop both — turning a browser's native auth prompt into a dead-end page, and a redirect
+  into a blank one.
+
+  Pass the same `opts` as `error-body` (`:render`, `:meta`). Wire it as the endpoint's
+  `:on-response`, where it sees every handler result exactly once."
+  (if (or (api-response? resp) (rendered-page? resp))
+    resp
+    (let (body (error-body (get resp :status) opts))
+      (if body
+        (assoc resp :body body :headers (merge (get resp :headers {}) *html-headers*))
+        resp))))

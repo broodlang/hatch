@@ -206,3 +206,27 @@
           resp ((router->handler router) *req*))
       (assert= (get resp :status) 403)
       (assert= (get resp :body) "no"))))
+
+(describe "json-resp"
+  (test "a map body is encoded"
+    (let (resp (json-resp (build *req*) {:ok true}))
+      (assert= (get resp :resp-body) "{\"ok\":true}")
+      (assert= (get-in resp [:resp-headers :content-type]) "application/json")
+      (assert= (get resp :status) 200)))
+  (test "an already-encoded string is sent as-is, not double-encoded"
+    (assert= (get (json-resp (build *req*) "{\"ok\":true}") :resp-body) "{\"ok\":true}"))
+  (test "a status can be given, so an error body keeps its content-type"
+    ;; Without this, every JSON error path was hand-built — and one of them forgot the
+    ;; content-type, which turns a parseable {"error": …} into a decoder failure.
+    (let (resp (json-resp (build *req*) {:error "no such package"} 404))
+      (assert= (get resp :status) 404)
+      (assert= (get-in resp [:resp-headers :content-type]) "application/json")
+      (assert= (get resp :resp-body) "{\"error\":\"no such package\"}")))
+  (test ":cache sets Cache-Control"
+    (assert= (get-in (json-resp (build *req*) {} 200 {:cache "public, max-age=60"})
+               [:resp-headers :cache-control])
+      "public, max-age=60"))
+  (test "no :cache sets no Cache-Control — only the handler knows if a read is public"
+    (assert= (get-in (json-resp (build *req*) {}) [:resp-headers :cache-control]) nil))
+  (test "a list body is encoded as an array"
+    (assert= (get (json-resp (build *req*) [1 2 3]) :resp-body) "[1,2,3]")))

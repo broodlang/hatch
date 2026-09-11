@@ -9,7 +9,9 @@
   ; warn-page! — the dev-only page audits (inert controls, first-flight budget)
   (:alias web/audit)
   ; compile-parts / weave — the static/dynamic split `defhtml` compiles a page through
-  (:alias web/parts))
+  (:alias web/parts)
+  ; fetch — the shell and the assembled page are cached; see `shell-halves` / `cached`
+  (:alias web/cache))
 (defn page (conn node)
   "Render a Hiccup node to a full HTML-document response (doctype + markup) on `conn`.
   The non-live counterpart to a live view's render — `(page conn (layout title body))`.
@@ -76,3 +78,70 @@
         (list 'web/parts/weave
           (get parts :statics)
           (cons 'list (get parts :dynamics)))))))
+
+;; ---- the shell, rendered once -----------------------------------------------
+
+;; A marker no rendered page can contain, so splitting on it is unambiguous.
+(def *body-marker* "\x00hatch-body\x00")
+
+(defn shell-halves (key build)
+  "The rendered chrome around a page's body, as `[prefix suffix]`.
+
+  A site's head, nav and footer are usually most of a small page's bytes and most of its
+  render — and identical on every request. They cannot be cached as one string because they
+  WRAP the body, so this renders them once with a marker where the body goes and splits
+  there; a request then renders only its own content and joins three strings.
+
+  It is not a small difference. A 4.1 KB chrome around a 1.3 KB body measured 2.18ms of a
+  3.00ms render, rebuilt identically every time.
+
+  `build` is `(fn (placeholder) -> hiccup)` and must embed `placeholder` where the body
+  belongs. `key` is what the chrome VARIES BY, and getting it right is the whole contract:
+  a nav showing the signed-in person's email must carry that email in the key, not a
+  signed-in boolean, or two people share a prefix. When the marker is missing from the
+  result (a `build` that dropped it) the whole render becomes the prefix, so the page is
+  chrome-only rather than silently unescaped.
+
+  The counterpart to `defhtml`, which bakes the static parts of a form at expansion time.
+  This is the runtime version, for a shell whose statics depend on values known per
+  session rather than per compile."
+  (let (rendered (web/cache/fetch key
+                   (fn () (render (build (raw *body-marker*)))))
+        at (index-of rendered *body-marker*))
+    (if (< at 0)
+      [rendered ""]
+      [(string/substring rendered 0 at)
+        (string/substring rendered
+          (+ at (string/length *body-marker*))
+          (string/length rendered))])))
+
+(defn with-shell (key build main)
+  "The cached chrome for `key` with `main` rendered into it, as a `raw` node ready to hand
+  to `page`.
+
+      (page conn (with-shell [:shell (get user :email) title] shell-tree body))
+
+  Returns a `raw` node rather than a tree: the chrome is assembled as a string once per
+  `key`, and only the body is rendered per request."
+  (let ([prefix suffix] (shell-halves key build))
+    (raw (str prefix (render main) suffix))))
+
+(defn cached (key build &optional (cacheable? true))
+  "The fully rendered document for `key`, cached — but only when `cacheable?`.
+
+  `shell-halves` catches the chrome and `defhtml` catches a fragment's statics; what this
+  catches is the ASSEMBLY, which for a large page is most of the remaining cost. A 437 KB
+  reference page measured 16.5ms to render on one shared vCPU against 0.45ms to hash it,
+  and that 16.5ms was paid even on a 304 — the ETag is computed from the body, so the
+  server built the whole page, hashed it, and then answered 'not modified'.
+
+  `cacheable?` is an ARGUMENT and not a guess, deliberately. One entry serves everyone who
+  asks for `key`, so a page carrying anything about the person viewing it must never be
+  stored under a key that omits them — caching it would hand one visitor another's session.
+  A framework that inferred this from the request would be wrong exactly once and
+  catastrophically; pass `(nil? user)`, or whatever your app's version of that question is.
+
+  `build` is a thunk answering the Hiccup document."
+  (if cacheable?
+    (web/cache/fetch key (fn () (render (build))))
+    (render (build))))

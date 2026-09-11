@@ -36,11 +36,11 @@ trade-offs behind them — is archived in
 | Layer | Modules |
 |---|---|
 | HTTP/1.1 + WebSocket | `http/request` `http/response` `http/server` `http/websocket` `http/multipart` `http/util` `http/base64` |
-| Request pipeline | `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` |
+| Request pipeline | `web/endpoint` `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` `web/errors` |
 | Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) |
 | Live views | `web/live` `web/component` `web/pubsub` `web/presence` `web/registry` |
 | Forms & uploads | `web/form` `web/upload` |
-| Production | `web/compress` `web/ratelimit` `web/logger` `web/stream` `web/assets` `web/application` `web/repo` |
+| Production | `web/compress` `web/cache` `web/ratelimit` `web/logger` `web/metrics` `web/dashboard` `web/stream` `web/assets` `web/application` `web/cluster` `web/env` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
 `http/server`'s request-head read is `tcp/read-until` (brood ≥ 0.3.11), so the delimiter
@@ -53,6 +53,27 @@ reconnecting client that still holds the page skeleton is not sent it again. Sin
 (a dynamic binding set once per session, so no hook signature changed), and `web/csrf` grew
 `live-token`/`live-csrf-input` on top of it — closing the gap where a live view had no way to
 render a CSRF token for a POST to a protected route.
+
+**0.10.0 closes the endpoint gap.** Until it, `conn/router->handler` was the only thing
+between the server and a router, and every real app therefore hand-rolled the six stages
+around it: process isolation with a deadline, a log line for the crash, a validator on the
+response, compression after the validator, baseline security headers, and themed error pages.
+Six apps, six copies, and the order between stages three and four is the part that is easy to
+get wrong and impossible to notice. `web/endpoint/serve` is that pipeline, configured rather
+than rewritten; `web/errors` is the error-page half, with the two guards an app gets wrong
+once (never skin a JSON body; never skin a page a handler rendered under its own status).
+Extracted from hive, whose own comments record each of them as a bug it shipped.
+
+Four smaller modules landed with it, each closing the same shape of gap — something every app
+was writing itself, with a trap in it. `web/cluster` finds and dials an app's other machines,
+which is what `web/cache/start-cluster` had been waiting for since it shipped: without a peer
+list that listener runs correctly and hears nothing. `web/env` is typed environment reads,
+because `string/->number` answers a *truthy* failure for junk and every hand-written
+`(if (string/->number raw) …)` therefore admits `"abc"`. `web/page` grew `shell-halves` /
+`with-shell` / `cached` — the runtime counterpart to `defhtml`, for a page shell whose statics
+vary per session rather than per compile. And `web/auth` grew `bearer-auth`, whose scheme
+match is case-insensitive as RFC 9110 §11.1 requires; the obvious
+`(string/starts-with? raw "Bearer ")` rejects the `bearer` several clients send.
 
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,

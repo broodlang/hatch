@@ -138,3 +138,83 @@
 
   (test "a v4 address never matches a v6 prefix"
     (is (not (allowed-ip? (from "1.2.3.4") ["2c0f:ef18::/32"])))))
+
+;; ---- bearer tokens ----------------------------------------------------------
+
+(defn- tokens (token) (if (= token "good-token") {:id 7 :email "a@example.com"} nil))
+
+(describe "bearer-token"
+  (test "a well-formed header yields the raw token"
+    (assert= (bearer-token (conn-with-auth "Bearer abc123")) "abc123"))
+  (test "the scheme is case-insensitive, because RFC 9110 says it is"
+    ;; The obvious `(string/starts-with? raw "Bearer ")` rejects this, and `bearer` is what
+    ;; several clients and every hand-written curl eventually send.
+    (assert= (bearer-token (conn-with-auth "bearer abc123")) "abc123")
+    (assert= (bearer-token (conn-with-auth "BEARER abc123")) "abc123"))
+  (test "the token itself is returned verbatim, never lowercased"
+    (assert= (bearer-token (conn-with-auth "Bearer AbC123")) "AbC123"))
+  (test "surrounding whitespace is trimmed"
+    (assert= (bearer-token (conn-with-auth "Bearer   abc123  ")) "abc123"))
+  (test "another scheme is not a bearer token"
+    (assert= (bearer-token (conn-with-auth "Basic YWRtaW46YWRtaW4=")) nil))
+  (test "an empty token is nil, not the empty string"
+    (assert= (bearer-token (conn-with-auth "Bearer ")) nil)
+    (assert= (bearer-token (conn-with-auth "Bearer    ")) nil))
+  (test "no header at all is nil"
+    (assert= (bearer-token (conn-with-auth nil)) nil))
+  (test "the scheme word alone, with no space, is not a bearer token"
+    (assert= (bearer-token (conn-with-auth "Bearer")) nil)))
+
+(describe "bearer-auth"
+  (test "a token the lookup recognises passes through and assigns the user"
+    (let (conn ((bearer-auth tokens) (conn-with-auth "Bearer good-token")))
+      (assert= (halted? conn) false)
+      (assert= (get (get-assign conn :current-user) :id) 7)))
+
+  (test "an unknown token halts with a 401 and a Bearer challenge"
+    (let (conn ((bearer-auth tokens) (conn-with-auth "Bearer nope")))
+      (assert= (halted? conn) true)
+      (assert= (get conn :status) 401)
+      (assert= (includes? (get-in conn [:resp-headers :www-authenticate]) "Bearer") true)))
+
+  (test "a missing header halts too — the lookup is never called with nil"
+    (let (conn ((bearer-auth tokens) (conn-with-auth nil)))
+      (assert= (halted? conn) true)
+      (assert= (get conn :status) 401)))
+
+  (test ":realm labels the challenge"
+    (assert= (includes? (get-in ((bearer-auth tokens {:realm "hive"}) (conn-with-auth nil))
+                          [:resp-headers :www-authenticate])
+               "realm=\"hive\"")
+      true))
+
+  (test "a realm carrying a quote or a newline cannot inject a header"
+    (let (challenge (get-in ((bearer-auth tokens {:realm "a\"b\r\nX: y"}) (conn-with-auth nil))
+                      [:resp-headers :www-authenticate]))
+      (assert= (includes? challenge "\"") true) ; the syntactic quotes remain
+      (assert= (includes? challenge "\r") false)
+      (assert= (includes? challenge "\n") false)
+      (assert= (includes? challenge "X: y") true))) ; inert text, not a header
+  (test ":body and :content-type give an API a JSON rejection its client can parse"
+    (let (conn ((bearer-auth tokens
+                  {:body "{\"error\":\"authentication required\"}"
+                   :content-type "application/json"}) (conn-with-auth nil)))
+      (assert= (get conn :resp-body) "{\"error\":\"authentication required\"}")
+      (assert= (get-in conn [:resp-headers :content-type]) "application/json")))
+
+  (test "a lookup that answers false, not nil, is still a rejection"
+    (assert= (halted? ((bearer-auth (fn (_t) false)) (conn-with-auth "Bearer x"))) true)))
+
+;; ---- allow-ips-from-env -----------------------------------------------------
+
+(describe "allow-ips-from-env"
+  (test "an unset variable admits nobody — a gate with no list configured must close"
+    (let (conn ((allow-ips-from-env "HATCH_DEFINITELY_UNSET_9f3a") (build {:method "GET"
+                                                                           :path "/dashboard"
+                                                                           :query ""
+                                                                           :params {}
+                                                                           :headers {:fly-client-ip "1.2.3.4"}
+                                                                           :body ""})))
+      (assert= (halted? conn) true)
+      ;; 404 and not 403: a 403 confirms the endpoint is there and worth attacking.
+      (assert= (get conn :status) 404))))

@@ -19,7 +19,9 @@
   element. Every one of them is written to have no false positives rather than to catch
   everything: a lint that cries wolf is a lint people stop reading, so each rule declines
   to judge whatever it cannot prove."
-  (:use web/conn))
+  (:use web/conn)
+  ; dev? — the one place $HATCH_ENV is read
+  (:alias web/env))
 
 (def- *controls* ["<input" "<select" "<textarea" "<button"])
 
@@ -35,7 +37,7 @@
 ;; fails, it is just a slower first paint than it needs to be.
 (def *first-flight-budget* 14336)
 
-(def- *dev?* (= (or (os/env "HATCH_ENV") "dev") "dev"))
+(def- *dev?* (web/env/dev?))
 
 (defn dev? ()
   "Whether this process is running in the dev environment (`HATCH_ENV` unset or `dev`).

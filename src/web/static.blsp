@@ -20,6 +20,8 @@
   ; url-decode — percent-decode each path segment (so a `%20` filename resolves), on the
   ; DECODED value of which the traversal checks run
   (:alias http/util)
+  ; dev? / prod? — the one place $HATCH_ENV is read
+  (:alias web/env)
   ; not-modified? — the one implementation of RFC 9110 §13.1.2 If-None-Match matching
   (:alias web/cache))
 
@@ -106,10 +108,10 @@
 ; ---- environment ----
 
 (defn prod? ()
-  "True unless $HATCH_ENV names the dev environment (the zero-config default). Mirrors the
-  endpoint's `dev?`; it lives here too so the static layer can pick its cache policy without
-  the app threading an env flag through every call."
-  (not (= (or (os/env "HATCH_ENV") "dev") "dev")))
+  "True unless $HATCH_ENV names the dev environment (the zero-config default) — `web/env/prod?`,
+  re-exported here so the static layer can pick its cache policy without the app threading an
+  env flag through every call."
+  (web/env/prod?))
 
 ; ---- caching ----
 

@@ -10,7 +10,9 @@
   (:use web/conn)
   (:use encoding)
   ; constant-time-equal? — constant-time credential comparison (no timing oracle)
-  (:use crypto))
+  (:use crypto)
+  ; items — the comma-separated allow-list read from the environment
+  (:alias web/env))
 (defn basic-auth (username password &optional (realm "Restricted"))
   "A plug that requires HTTP Basic auth matching `username`:`password`. On a match it
   assigns `:current-user` (the username) and passes the conn through; otherwise it halts
@@ -61,6 +63,66 @@
     (put-resp-header :www-authenticate
       (str "Basic realm=\"" (realm-safe realm) "\", charset=\"UTF-8\""))
     (send-resp 401 "<h1>401 Unauthorized</h1>")))
+
+;; ---- bearer tokens ----------------------------------------------------------
+
+(defn bearer-token (conn)
+  "The raw token from an `Authorization: Bearer <token>` header, or nil when the header is
+  absent, uses another scheme, or carries an empty token.
+
+  The scheme is matched **case-insensitively**, because RFC 9110 §11.1 says it is one. A
+  `(string/starts-with? raw \"Bearer \")` test — the obvious way to write this, and the way
+  everyone writes it — rejects `bearer <token>`, which is what several HTTP clients and
+  every hand-written `curl` eventually sends. The token itself is returned verbatim and
+  never lowercased.
+
+  The value is opaque here: it may be an API token to hash and look up, or a JWT to verify.
+  This only pulls it out of the envelope."
+  (let (raw (header conn :authorization)
+        prefix "bearer ")
+    (if (and raw
+          (>= (string/length raw) (string/length prefix))
+          (= (string/lower (string/substring raw 0 (string/length prefix))) prefix))
+      (let (token (string/trim (string/substring raw (string/length prefix) (string/length raw))))
+        (if (= token "") nil token))
+      nil)))
+
+(defn bearer-auth (lookup &optional (opts {}))
+  "A plug that requires a bearer token `lookup` recognises.
+
+  `lookup` is `(fn (token) -> user-or-nil)` — your own token store, since what a token
+  identifies and how it is stored is not the framework's business. On a hit the result is
+  assigned as `:current-user` and the conn passes through; otherwise the conn is halted with
+  a 401 and a `WWW-Authenticate: Bearer` challenge.
+
+      (through [(auth/bearer-auth accounts/user-for-token)]
+        (post \"/api/v1/publish\" api/publish))
+
+  `:realm` labels the challenge. `:body` replaces the rejection body — pass a JSON one for
+  an API, so a client's decoder gets an object rather than a document:
+
+      (auth/bearer-auth lookup {:body \"{\\\"error\\\":\\\"authentication required\\\"}\"
+                                :content-type \"application/json\"})
+
+  Unlike `basic-auth` there is no constant-time compare here: the comparison happens inside
+  `lookup`, against a stored hash of the token rather than the token itself, which is where
+  it belongs."
+  (let (realm (get opts :realm "API")
+        body (get opts :body "<h1>401 Unauthorized</h1>")
+        content-type (get opts :content-type nil))
+    (fn (conn)
+      (let (token (bearer-token conn)
+            user (and token (lookup token)))
+        (if user
+          (assign conn :current-user user)
+          (halt (bearer-challenge conn realm body content-type)))))))
+
+(defn bearer-challenge (conn realm body content-type)
+  "A 401 conn carrying the `WWW-Authenticate: Bearer` challenge for `realm`."
+  (let (challenged (put-resp-header conn
+                     :www-authenticate (str "Bearer realm=\"" (realm-safe realm) "\"")))
+    (send-resp (if content-type (put-resp-header challenged :content-type content-type) challenged)
+      401 body)))
 
 ;; ---- address allow-lists ----------------------------------------------------
 
@@ -191,3 +253,16 @@
       (if (allowed-ip? conn allowed)
         conn
         (halt (send-resp conn status body))))))
+
+(defn allow-ips-from-env (var &optional (opts {}))
+  "`allow-ips` with the list read from environment variable `var` — comma-separated, at
+  boot.
+
+      (through [(auth/allow-ips-from-env \"DASHBOARD_IPS\")]
+        (get \"/dashboard\" (web/dashboard/handler {})))
+
+  This is the form `allow-ips`' own docstring tells you to use, so it may as well be one
+  call. An unset variable yields an empty list, which admits NOBODY (`web/env/items`
+  answers `[]`, and `allowed-ip?` refuses an empty list): a gate whose list was never
+  configured must close, not open."
+  (allow-ips (web/env/items var) opts))

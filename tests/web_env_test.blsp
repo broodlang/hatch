@@ -1,0 +1,77 @@
+(defmodule web-env-test (:use web/env) (:use test))
+
+;; The PARSERS are what these tests exercise. Brood's environment is read-only (there is no
+;; `os/setenv`), so a test that could only reach this logic through `os/env` could not set
+;; up its own input — which is why the parsing is a pure function per type and the env read
+;; is a one-liner on top. The readers are tested against what the suite's own environment
+;; actually holds, at the bottom.
+
+(describe "as-text"
+  (test "a value is trimmed" (assert= (as-text "  hello  ") "hello"))
+  (test "nil yields the fallback" (assert= (as-text nil "default") "default"))
+  (test "blank counts as unset — an empty secret is not a configured empty value"
+    (assert= (as-text "   " "default") "default"))
+  (test "no fallback given, nil is nil" (assert= (as-text nil) nil))
+  (test "a value with inner spaces keeps them" (assert= (as-text " a b ") "a b")))
+
+(describe "as-integer"
+  (test "a numeric value parses" (assert= (as-integer "8080" 5000) 8080))
+  (test "junk yields the fallback rather than a truthy failure"
+    ;; The trap this module exists for: `string/->number` answers a FAILURE for "abc", a
+    ;; failure is truthy, so a truthiness guard admits it and the next comparison raises.
+    (assert= (as-integer "abc" 5000) 5000))
+  (test "a float is not an integer" (assert= (as-integer "1.5" 5000) 5000))
+  (test "a negative integer is still an integer" (assert= (as-integer "-3" 5000) -3))
+  (test "zero is an integer" (assert= (as-integer "0" 5000) 0))
+  (test "surrounding space does not stop it" (assert= (as-integer "  42 " 0) 42))
+  (test "blank yields the fallback" (assert= (as-integer "" 5000) 5000)))
+
+(describe "as-positive-integer"
+  (test "a positive value parses" (assert= (as-positive-integer "30" 60) 30))
+  (test "zero falls back — a timeout of 0 fires immediately"
+    (assert= (as-positive-integer "0" 60) 60))
+  (test "negative falls back" (assert= (as-positive-integer "-1" 60) 60))
+  (test "junk falls back without raising" (assert= (as-positive-integer "soon" 60) 60))
+  (test "no fallback given, a rejected value is nil" (assert= (as-positive-integer "0") nil)))
+
+(describe "as-flag?"
+  (test "nil is false" (assert= (as-flag? nil) false))
+  (test "blank is false" (assert= (as-flag? "  ") false))
+  (test "any other value means yes" (assert= (as-flag? "1") true))
+  (test "a word means yes" (assert= (as-flag? "yes") true))
+  (test "0 means no — turning a flag off without deleting the line"
+    (assert= (as-flag? "0") false))
+  (test "false/no/off mean no, in any casing"
+    (assert= (as-flag? "FALSE") false)
+    (assert= (as-flag? "No") false)
+    (assert= (as-flag? "off") false)))
+
+(describe "as-items"
+  (test "comma-separated, trimmed" (assert= (as-items "a, b ,c") ["a" "b" "c"]))
+  (test "nil is the empty list, so an allow-list built on it admits nobody"
+    (assert= (as-items nil) []))
+  (test "blank is the empty list" (assert= (as-items "  ") []))
+  (test "a trailing separator makes no phantom entry" (assert= (as-items "a,b,") ["a" "b"]))
+  (test "an interior empty entry is dropped" (assert= (as-items "a,,b") ["a" "b"]))
+  (test "a single value needs no separator" (assert= (as-items "only") ["only"]))
+  (test "an IPv6 allow-list survives — the separator is the comma, not the colon"
+    (assert= (as-items "2c0f:ef18::/64, ::1") ["2c0f:ef18::/64" "::1"]))
+  (test "a custom separator" (assert= (as-items "a:b" ":") ["a" "b"]))
+  (test "the result is a vector, so a caller can index it"
+    (assert= (vector? (as-items "a,b")) true)))
+
+(describe "the readers, against this suite's own environment"
+  (test "an unset variable yields its fallback"
+    (assert= (text "HATCH_DEFINITELY_UNSET_9f3a" "fallback") "fallback")
+    (assert= (integer "HATCH_DEFINITELY_UNSET_9f3a" 7) 7)
+    (assert= (positive-integer "HATCH_DEFINITELY_UNSET_9f3a" 7) 7)
+    (assert= (flag? "HATCH_DEFINITELY_UNSET_9f3a") false)
+    (assert= (items "HATCH_DEFINITELY_UNSET_9f3a") []))
+  (test "PATH is set, so `text` reads it back"
+    ;; Not an assertion about PATH's contents — only that a reader reaches a real variable.
+    (assert= (string? (text "PATH" nil)) true))
+  (test "the test suite runs in dev, so dev?/prod? agree on that"
+    ;; `nest test` sets no HATCH_ENV, which is the zero-config default.
+    (assert= (dev?) true)
+    (assert= (prod?) false)
+    (assert= (name-of) "dev")))

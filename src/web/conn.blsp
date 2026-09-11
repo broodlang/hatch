@@ -258,9 +258,29 @@
   "200 OK plain-text response (conn)."
   (send-resp (put-resp-header conn :content-type "text/plain; charset=utf-8") 200 body))
 
-(defn json-resp (conn body)
-  "200 OK JSON response (conn)."
-  (send-resp (put-resp-header conn :content-type "application/json") 200 body))
+(defn json-resp (conn body &optional (status 200) (opts {}))
+  "JSON response (conn), `status` defaulting to 200.
+
+  `body` is encoded when it is not already a string, so a handler hands over the data it
+  has rather than remembering to encode at every call site:
+
+      (json-resp conn {:packages results})              ; encoded, 200
+      (json-resp conn {:error \"no such package\"} 404)   ; encoded, 404
+      (json-resp conn already-encoded-text)             ; sent as-is
+
+  The status matters more than it looks. Without it every JSON error had to be built by hand
+  (`put-resp-header` + `send-resp`), and an app that did that once per error path is an app
+  where one of them forgot the content-type — which turns a parseable `{\"error\": …}` into a
+  body the client's decoder rejects, reporting a syntax error instead of the message.
+
+  `:cache` in `opts` sets `Cache-Control`. There is no default, deliberately: a JSON response
+  is public and cacheable (`cache/public-for`) or it is per-user and must not be
+  (`cache/no-store`), and only the handler knows which. A read whose freshness nobody
+  declared is one every client and proxy has to guess about."
+  (let (typed (put-resp-header conn :content-type "application/json")
+        cache (get opts :cache)
+        headed (if cache (put-resp-header typed :cache-control cache) typed))
+    (send-resp headed status (if (string? body) body (json/encode body)))))
 
 (defn redirect-resp (conn url &optional (status 302))
   "Redirect response (conn)."
@@ -283,6 +303,8 @@
   minimal `build → route → conn->response` seam every app otherwise hand-rolls — wire it
   straight into the endpoint:
     (server/start port (web/conn/router->handler app-router) (live/live-dispatcher))
-  An app that wants per-request logging, process isolation, a handler timeout, or themed
-  error pages composes its own adapter instead (see hatch-demo's `web/endpoint`)."
+  An app that wants per-request logging, process isolation, a handler timeout, themed error
+  pages, response validators or compression uses `web/endpoint/serve` instead, which is that
+  pipeline in the order that makes it correct. This stays for the smallest case: a router and
+  nothing around it."
   (fn (request) (conn->response (router (build request)))))

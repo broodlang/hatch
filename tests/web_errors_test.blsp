@@ -1,0 +1,114 @@
+(defmodule web-errors-test (:use web/errors) (:use test))
+
+(defn- render-marked (code title blurb)
+  "A `:render` that is obviously an app's own — no doctype, so it also proves `themed`
+  does not need one to replace a body."
+  (str "APP " code " " title " / " blurb))
+
+(describe "error-meta"
+  (test "a known status carries a title and a blurb"
+    (assert= (error-meta 404) ["Page not found" "That page doesn't exist or may have moved."]))
+  (test "a 2xx is not an error, so there is no page for it"
+    (assert= (error-meta 200) nil)
+    (assert= (error-meta 204) nil))
+  (test "a redirect is not an error either — a 302 carries a Location, not a page"
+    (assert= (error-meta 302) nil))
+  (test "an error status with no entry still renders, generically"
+    (assert= (error-meta 451) ["Error" "Something went wrong."]))
+  (test ":meta overrides one status without restating the others"
+    (let (opts {:meta {404 ["Gone" "Not here."]}})
+      (assert= (error-meta 404 opts) ["Gone" "Not here."])
+      (assert= (error-meta 500 opts) ["Something went wrong" "An unexpected error occurred."]))))
+
+(describe "error-body"
+  (test "the default render produces a document with the status and title in it"
+    (let (body (error-body 404))
+      (assert= (includes? body "<!DOCTYPE html>") true)
+      (assert= (includes? body "404") true)
+      (assert= (includes? body "Page not found") true)))
+  (test ":render receives the resolved title and blurb, not the raw status"
+    (assert= (error-body 404 {:render render-marked})
+      "APP 404 Page not found / That page doesn't exist or may have moved."))
+  (test ":render and :meta compose"
+    (assert= (error-body 404 {:render render-marked :meta {404 ["Gone" "Bye."]}})
+      "APP 404 Gone / Bye."))
+  (test "a non-error status has no body"
+    (assert= (error-body 200) nil))
+  (test "the blurb never carries anything internal — no path, no message, no trace"
+    (let (body (error-body 500))
+      (assert= (includes? body "An unexpected error occurred.") true))))
+
+(describe "error-response"
+  (test "a standalone response carries the status, the HTML content-type and a body"
+    (let (resp (error-response 504))
+      (assert= (get resp :status) 504)
+      (assert= (get (get resp :headers) :content-type) "text/html; charset=utf-8")
+      (assert= (includes? (get resp :body) "Request timed out") true)))
+  (test "a non-error status has no response"
+    (assert= (error-response 200) nil)))
+
+(describe "api-response?"
+  (test "a JSON content-type is an API response"
+    (assert= (api-response? {:status 404 :headers {:content-type "application/json"}}) true))
+  (test "a charset parameter does not hide it"
+    (assert= (api-response? {:status 404 :headers {:content-type "application/json; charset=utf-8"}})
+      true))
+  (test "casing does not hide it either"
+    (assert= (api-response? {:status 404 :headers {:content-type "Application/JSON"}}) true))
+  (test "HTML is not an API response"
+    (assert= (api-response? {:status 404 :headers {:content-type "text/html"}}) false))
+  (test "no content-type at all is not an API response"
+    (assert= (api-response? {:status 404 :headers {}}) false)
+    (assert= (api-response? {:status 404}) false)))
+
+(describe "rendered-page?"
+  (test "a full document means a handler rendered its own page"
+    (assert= (rendered-page? {:status 404 :body "<!DOCTYPE html><h1>no such package</h1>"}) true))
+  (test "a lowercase doctype counts — a hand-written document is still a document"
+    (assert= (rendered-page? {:status 404 :body "<!doctype html><h1>hi</h1>"}) true))
+  (test "the router's bare 404 fragment is not a document"
+    (assert= (rendered-page? {:status 404 :body "<h1>404 Not Found</h1>"}) false))
+  (test "an empty or absent body is not a document"
+    (assert= (rendered-page? {:status 500 :body ""}) false)
+    (assert= (rendered-page? {:status 500}) false))
+  (test "a bytes body is not a document — and must not raise on the length check"
+    (assert= (rendered-page? {:status 200 :body (string/->bytes "<!DOCTYPE html>")}) false)))
+
+(describe "themed"
+  (test "the router's bare 404 is re-skinned"
+    (let (resp (themed {:status 404 :headers {} :body "<h1>404 Not Found</h1>"}))
+      (assert= (get resp :status) 404)
+      (assert= (includes? (get resp :body) "may have moved") true)
+      (assert= (get (get resp :headers) :content-type) "text/html; charset=utf-8")))
+  (test "a 200 passes through untouched"
+    (let (original {:status 200 :headers {} :body "hello"})
+      (assert= (themed original) original)))
+  (test "a redirect passes through, Location intact"
+    (let (resp (themed {:status 302 :headers {:location "/login"} :body ""}))
+      (assert= (get resp :status) 302)
+      (assert= (get (get resp :headers) :location) "/login")
+      (assert= (get resp :body) "")))
+  (test "a 401's WWW-Authenticate challenge survives the skin"
+    ;; Rebuilt from the status alone, this response would lose the header that makes a
+    ;; browser show its native auth prompt.
+    (let (resp (themed {:status 401
+                        :headers {:www-authenticate "Basic realm=\"Dev\""}
+                        :body "<h1>401 Unauthorized</h1>"}))
+      (assert= (get (get resp :headers) :www-authenticate) "Basic realm=\"Dev\"")
+      (assert= (includes? (get resp :body) "Sign-in required") true)))
+  (test "a JSON error body is left alone — the client's decoder expects an object"
+    (let (original {:status 404
+                    :headers {:content-type "application/json"}
+                    :body "{\"error\":\"no such package\"}"})
+      (assert= (themed original) original)))
+  (test "a handler's own rendered 404 is left alone, so it keeps naming what was missing"
+    (let (original {:status 404
+                    :headers {:content-type "text/html; charset=utf-8"}
+                    :body "<!DOCTYPE html><h1>no such package: frobnicate</h1>"})
+      (assert= (themed original) original)))
+  (test ":render puts the page in the app's own layout"
+    (assert= (get (themed {:status 404 :headers {} :body "x"} {:render render-marked}) :body)
+      "APP 404 Page not found / That page doesn't exist or may have moved."))
+  (test "a status with no meta and no error range passes through"
+    (let (original {:status 204 :headers {} :body ""})
+      (assert= (themed original) original))))

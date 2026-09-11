@@ -32,6 +32,20 @@ folds server messages into it, and `render` returns the markup:
       [:span (get model :count)]]))
 ```
 
+An app's endpoint is configuration, not code. `web/endpoint/serve` is the
+request pipeline every production app needs, in the order that makes it
+correct — each request in its own process with a deadline, the crash logged,
+an `ETag` computed before the body is compressed, baseline security headers,
+and error pages in your own layout:
+
+```brood
+(web/endpoint/serve
+  {:router    routes/app-router
+   :assets    *assets*
+   :freshness {:max-age 60 :stale-for 600}
+   :errors    {:render my-error-page}})
+```
+
 See `docs/web-framework-design.md` for the design rationale and `hatch-demo`
 for worked examples (presence, forms, uploads, pubsub).
 
