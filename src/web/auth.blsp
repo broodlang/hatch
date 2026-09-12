@@ -141,7 +141,7 @@
   they are whatever the client typed, so an allow-list built on this must be the outer of
   two defences and never the only one."
   (let (headers (get conn :headers {})
-        direct (first (filter (map *client-ip-headers* (fn (h) (get headers h)))
+        direct (first (seq/filter (map *client-ip-headers* (fn (h) (get headers h)))
                         (fn (v) (and (string? v) (not (= v ""))))))
         forwarded (get headers :x-forwarded-for))
     (cond
@@ -160,22 +160,22 @@
                       lower)
         ;; a single colon is a v4 host:port; several mean it is v6, where colons are the
         ;; address itself
-        colons (count (filter (string/->list unbracketed) (fn (c) (= c ":")))))
+        colons (count (seq/filter (string/->list unbracketed) (fn (c) (= c ":")))))
     (if (= colons 1) (first (string/split unbracketed ":")) unbracketed)))
 
 (defn- ipv6-groups (address)
   "An IPv6 address as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
   run. nil for anything that is not IPv6."
-  (if (< (count (filter (string/->list address) (fn (c) (= c ":")))) 2)
+  (if (< (count (seq/filter (string/->list address) (fn (c) (= c ":")))) 2)
     nil
     (let (halves (string/split address "::")
-          head (filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
+          head (seq/filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
           ;; bound and nil-checked, not counted then indexed — the count never reaches
           ;; `(second halves)`
           after (second halves)
           tail (if (nil? after)
                  []
-                 (filter (string/split after ":") (fn (g) (not (= g "")))))
+                 (seq/filter (string/split after ":") (fn (g) (not (= g "")))))
           gap (- 8 (+ (count head) (count tail)))
           filled (append (into [] head)
                    (map (range (%max 0 gap)) (fn (_) "0"))

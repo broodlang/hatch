@@ -257,7 +257,7 @@
   build/boot host without one no longer degrades to uncompressed serving. A stale sibling is
   rewritten; an up-to-date one is left alone (see `fresh-sibling?`). A read/compress/write
   failure is logged and skipped, so serving still works uncompressed."
-  (let (wanted (filter [(str path ".br") (str path ".gz")]
+  (let (wanted (seq/filter [(str path ".br") (str path ".gz")]
                  (fn (out) (not (fresh-sibling? out path)))))
     (if (empty? wanted)
       (log/info (str "[assets] precompress: " path " is already current, skipped"))

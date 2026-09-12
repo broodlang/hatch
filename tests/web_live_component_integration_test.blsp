@@ -14,9 +14,8 @@
 (defn live-component-spec ()
   {:mount widget-mount :render widget-render :handle-event widget-handle-event})
 
-(deflive
-  (mount (params)
-    {:authed (= (get params "authed") "1") :n (string/->number (get params "n" "5"))})
+(deflive (mount (params)
+           {:authed (= (get params "authed") "1") :n (string/->number (get params "n" "5"))})
   (render (model)
     [:div
       {}

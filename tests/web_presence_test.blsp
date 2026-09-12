@@ -38,7 +38,7 @@
 
 (defn meta-status (topic key)
   "The :status of `key`'s roster entry on `topic`, or nil if absent."
-  (let (e (first (filter (roster topic) (fn (x) (= (get x :key) key)))))
+  (let (e (first (seq/filter (roster topic) (fn (x) (= (get x :key) key)))))
     (if e (get (get e :meta) :status) nil)))
 
 (defn wait-meta (topic key val tries)
@@ -101,7 +101,7 @@
     (do
       (track "pres:m" "m1" {:color "blue"})
       (wait-key "pres:m" "m1" 60)
-      (let (e (first (filter (roster "pres:m") (fn (x) (= (get x :key) "m1")))))
+      (let (e (first (seq/filter (roster "pres:m") (fn (x) (= (get x :key) "m1")))))
         (untrack "pres:m")
         (assert= (get (get e :meta) :color) "blue"))))
   (test "re-tracking the same process replaces its entry (updated meta, no duplicate)"
@@ -112,7 +112,7 @@
       ; poll until the meta reflects the update
       (assert= (wait-meta "pres:r" "r1" "online" 60) true)
       ; exactly one entry for this pid (no duplicate from re-track)
-      (assert= (count (filter (roster "pres:r") (fn (e) (= (get e :key) "r1")))) 1)
+      (assert= (count (seq/filter (roster "pres:r") (fn (e) (= (get e :key) "r1")))) 1)
       (untrack "pres:r"))))
 
 (describe "auto-leave on death"

@@ -9,7 +9,7 @@
 
 (defn path-segments (path)
   "Split a path into segments, dropping empty strings from leading slash."
-  (filter (string/split path "/") (fn (s) (not (string/blank? s)))))
+  (seq/filter (string/split path "/") (fn (s) (not (string/blank? s)))))
 
 (defn match-path (pattern segments)
   "Match a pattern list against path segments.
@@ -143,9 +143,9 @@
   `:by-seg` maps a literal first segment to the routes that could match it (that literal,
   plus every dynamic-first route), `:other` is for a first segment no route names literally,
   `:empty` is for the root path, and `:all` is the untouched table the 404/405 paths need."
-  (let (literals (uniq (map (filter routes (fn (r) (string? (first-seg r)))) first-seg))
-        dyn (filter routes dynamic-first?)
-        empties (filter routes (fn (r) (or (empty? (get r :pattern)) (splat-first? r)))))
+  (let (literals (uniq (map (seq/filter routes (fn (r) (string? (first-seg r)))) first-seg))
+        dyn (seq/filter routes dynamic-first?)
+        empties (seq/filter routes (fn (r) (or (empty? (get r :pattern)) (splat-first? r)))))
     {:all routes
      :empty empties
      :other dyn
@@ -154,7 +154,7 @@
                (fn (acc seg)
                  (assoc acc
                    seg
-                     (filter routes
+                     (seq/filter routes
                        (fn (r) (or (dynamic-first? r) (= (first-seg r) seg)))))))}))
 
 (defn- candidates (routes segments)
@@ -183,7 +183,7 @@
 (defn path-methods (routes segments)
   "The distinct declared methods of every route whose *path* matches `segments`
   (regardless of HTTP method) — the raw material for a 405 `Allow` header."
-  (uniq (map (filter routes (fn (r) (match-path (get r :pattern) segments)))
+  (uniq (map (seq/filter routes (fn (r) (match-path (get r :pattern) segments)))
           (fn (r) (get r :method)))))
 
 (defn mem? (x xs)

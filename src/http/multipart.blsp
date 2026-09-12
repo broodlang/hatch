@@ -21,7 +21,7 @@
   (if (or (nil? boundary) (string/blank? boundary))
     {:fields {} :files {}}
     (let (delim (string/->bytes (str "--" boundary))
-          parts (filter (map (split-parts body delim) parse-part) (fn (p) (not (nil? p)))))
+          parts (seq/filter (map (split-parts body delim) parse-part) (fn (p) (not (nil? p)))))
       (fold parts {:fields {} :files {}} add-part))))
 
 ; ---- splitting on the boundary ----
@@ -83,7 +83,7 @@
 (defn parse-part-headers (s)
   "A part's header block → `lowercased-name → value` map. Parts don't repeat headers, so
   last-wins is fine."
-  (fold (filter (string/split s "\r\n") (fn (l) (not (string/blank? l))))
+  (fold (seq/filter (string/split s "\r\n") (fn (l) (not (string/blank? l))))
     {}
     (fn (m line)
       (let (ci (index-of line ":"))

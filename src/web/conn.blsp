@@ -269,7 +269,7 @@
       (hatch/web/conn/secure? {:headers {} :scheme \"https\"}) ;=> true
       (hatch/web/conn/secure? {:headers {}}) ;=> false"
   (let (headers (get conn :headers {})
-        forwarded (first (filter (map *forwarded-proto-headers* (fn (h) (get headers h)))
+        forwarded (first (seq/filter (map *forwarded-proto-headers* (fn (h) (get headers h)))
                            (fn (v) (and (string? v) (not (= v ""))))))
         ;; a proxy chain may forward a list; the first hop is the client's
         proto (if forwarded (string/lower (string/trim (first (string/split forwarded ",")))) nil))

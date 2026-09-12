@@ -106,7 +106,7 @@
   `data:image/svg+xml,…` are caught). Whitespace and control characters are removed first and
   case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
   `javascript:`)."
-  (let (s (string/lower (string/join (filter (string/->list (str v))
+  (let (s (string/lower (string/join (seq/filter (string/->list (str v))
                                        (fn (c) (not (url-scheme-noise? c))))
                           "")))
     (or (string/starts-with? s "javascript:")

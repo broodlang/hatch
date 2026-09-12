@@ -179,7 +179,7 @@
   `routes` is the table `defrouter` defines — the `<router-name>--routes` global — or a
   thunk returning it (see `route-table`). It is a plain list of `{:method :pattern
   :handler}` maps."
-  (map (filter (route-table routes)
+  (map (seq/filter (route-table routes)
          (fn (route)
            (and (= (get route :method) "GET") (fixed-path? (get route :pattern)))))
     (fn (route) (str "/" (string/join (get route :pattern) "/")))))
@@ -434,22 +434,6 @@
       (hatch/web/seo/sitemap-date nil) ;=> nil"
   (if (number? ms) (string/substring (datetime/->iso (datetime/epoch-ms-> ms)) 0 10) nil))
 
-(defn sitemap-date (ms)
-  "Epoch-milliseconds as the date a sitemap `<lastmod>` takes, or nil when `ms` is not a
-  number — a malformed date is worse than an absent one, which is simply omitted.
-
-  `<lastmod>` accepts a full W3C datetime or a bare date, and a bare date is usually the
-  honest precision: the timestamp behind it moves when a row is written, and no crawler
-  schedules on the hour.
-
-  It is worth carrying. A site that publishes continuously has most of itself unchanged on
-  any given day, and without a date a crawler has no way to tell the one page that moved
-  from the hundred that did not — so it re-fetches on its own schedule instead of yours.
-
-      (hatch/web/seo/sitemap-date 1757548800000) ;=> \"2025-09-11\"
-      (hatch/web/seo/sitemap-date nil) ;=> nil"
-  (if (number? ms) (string/substring (datetime/->iso (datetime/epoch-ms-> ms)) 0 10) nil))
-
 (defn sitemap-xml (site entries)
   "A `sitemap.xml` document for `entries` — each a path string or a
   `{:path :lastmod :changefreq :priority}` map."
@@ -475,7 +459,7 @@
         excluded? (fn (path)
                     (any? exclude
                       (fn (prefix) (or (= path prefix) (string/starts-with? path prefix))))))
-    (append (filter (fixed-get-paths routes) (fn (path) (not (excluded? path)))) extra)))
+    (append (seq/filter (fixed-get-paths routes) (fn (path) (not (excluded? path)))) extra)))
 
 (defn sitemap-handler (site routes opts)
   "A conn handler serving `sitemap.xml`, built from the router's own table.

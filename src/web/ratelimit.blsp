@@ -286,12 +286,12 @@
 (defn- ipv6-groups (address)
   "IPv6 `address` as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
   run. nil for anything that is not IPv6."
-  (if (< (count (filter (string/->list address) (fn (c) (= c ":")))) 2)
+  (if (< (count (seq/filter (string/->list address) (fn (c) (= c ":")))) 2)
     nil
     (let (halves (string/split address "::")
-          head (filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
+          head (seq/filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
           after (second halves)
-          tail (if (nil? after) [] (filter (string/split after ":") (fn (g) (not (= g "")))))
+          tail (if (nil? after) [] (seq/filter (string/split after ":") (fn (g) (not (= g "")))))
           gap (- 8 (+ (count head) (count tail)))
           filled (append (into [] head) (map (range (math/max 0 gap)) (fn (_g) "0")) (into [] tail)))
       (if (= (count filled) 8)

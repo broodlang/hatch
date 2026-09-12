@@ -101,9 +101,9 @@
   is unsafe — a path-traversal attempt like `../../etc/passwd`, `..%2f..`, or `%2e%2e`. Decode
   is per-segment so a `%2f` becomes a literal `/` *inside* a segment (rejected by
   `unsafe-segment?`) rather than a new separator."
-  (let (segs (map (filter (string/split rel "/") (fn (s) (not (string/blank? s))))
+  (let (segs (map (seq/filter (string/split rel "/") (fn (s) (not (string/blank? s))))
                http/util/url-decode))
-    (if (empty? (filter segs unsafe-segment?)) segs nil)))
+    (if (empty? (seq/filter segs unsafe-segment?)) segs nil)))
 
 ; ---- environment ----
 
@@ -526,7 +526,7 @@
 
 (defn parse-manifest (text)
   "Parse a manifest (one `logical<TAB>fingerprinted` line per asset) into a map."
-  (fold (filter (string/split text "\n") (fn (l) (not (string/blank? l))))
+  (fold (seq/filter (string/split text "\n") (fn (l) (not (string/blank? l))))
     {}
     (fn (m line)
       (let (tab (index-of line "\t"))

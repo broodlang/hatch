@@ -369,7 +369,7 @@
 (defn all-digits? (s)
   "True if `s` is non-empty and every character is an ASCII digit 0–9."
   (and (not (string/blank? s))
-    (empty? (filter (string/->list s)
+    (empty? (seq/filter (string/->list s)
               (fn (c) (let (n (string/char->int c)) (or (< n 48) (> n 57))))))))
 
 (defn header-value-for (line lower-key)
@@ -421,14 +421,14 @@
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
   (a proxy may honor a different occurrence than our last-wins map), a smuggling vector."
-  (> (count (filter header-lines
+  (> (count (seq/filter header-lines
               (fn (line) (not (nil? (header-value-for line "transfer-encoding"))))))
     1))
 
 (defn content-length-conflict? (header-lines)
   "True if `Content-Length` appears more than once with differing values — ambiguous
   framing (RFC 7230), a request-smuggling vector. Duplicate identical values are fine."
-  (let (vals (filter (map header-lines (fn (line) (header-value-for line "content-length")))
+  (let (vals (seq/filter (map header-lines (fn (line) (header-value-for line "content-length")))
                (fn (v) (not (nil? v)))))
     (and (> (count vals) 1)
       (any? (rest vals) (fn (v) (not (= v (first vals))))))))

@@ -414,5 +414,7 @@
                                       "x"]))
       (is (includes? html "toolname=\"s\""))
       (is (includes? html "tooldescription=\"d\""))
-      ;; a bare boolean attribute, not toolautosubmit="true"
-      (is (includes? html "toolautosubmit>")))))
+      ;; a bare boolean attribute, not toolautosubmit="true" — wherever it lands among the
+      ;; attributes (a map's order is not a contract)
+      (is (or (includes? html " toolautosubmit ") (includes? html " toolautosubmit>")))
+      (refute (includes? html "toolautosubmit=")))))

@@ -427,7 +427,7 @@
 (defn- live-registry-loop (pids)
   (receive
     ([:register p] (live-registry-loop (cons p pids)))
-    ([:unregister p] (live-registry-loop (filter pids (fn (q) (not (= q p))))))
+    ([:unregister p] (live-registry-loop (seq/filter pids (fn (q) (not (= q p))))))
     ([:reload] (dolist (p pids) (send p [:reload])) (live-registry-loop pids))
     ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live-registry-loop pids))))
 
@@ -1204,7 +1204,7 @@
   singular clauses (`mount`/`render`/`template`/`handle-info`/`unmount`/`on-mount-guard`/
   `handle-params`), of which a deflive/deflive-component form has at most one each. A duplicate
   is a mistake (a second one would be silently ignored), so it's an error at macro-expansion."
-  (let (matches (filter clauses (fn (c) (= (first c) tag))))
+  (let (matches (seq/filter clauses (fn (c) (= (first c) tag))))
     (if (> (count matches) 1)
       (error (str "deflive: duplicate `"
                (->string tag)
@@ -1214,7 +1214,7 @@
 (defn- deflive-clauses (tag clauses)
   "Every clause in `clauses` headed by symbol `tag` — the repeatable ones (`on`/`tick`),
   of which a deflive/deflive-component form can have several."
-  (filter clauses (fn (c) (= (first c) tag))))
+  (seq/filter clauses (fn (c) (= (first c) tag))))
 
 (defn- deflive-render-expr (render-clause template-clause)
   "The macro-time render expression: an inline `(render …)` clause's body (`do`-wrapped

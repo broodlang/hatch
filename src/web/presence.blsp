@@ -146,7 +146,7 @@
 
 (defn- presence-without (entries pid)
   "`entries` with any entry for `pid` removed."
-  (filter entries (fn (e) (not (= (get e :pid) pid)))))
+  (seq/filter entries (fn (e) (not (= (get e :pid) pid)))))
 
 (defn- presence-put (state topic pid key meta)
   "Track `pid` on `topic` under `key`/`meta`, replacing any prior entry for that pid."
@@ -182,7 +182,7 @@
 
 (defn- presence-topics-of (state pid)
   "The topics `pid` is tracked on (so a death only refreshes those)."
-  (map (filter (%map-pairs state) (fn (kv) (presence-has-pid? (first (rest kv)) pid)))
+  (map (seq/filter (%map-pairs state) (fn (kv) (presence-has-pid? (first (rest kv)) pid)))
     (fn (kv) (first kv))))
 
 (defn- presence-roster (state topic)
