@@ -39,6 +39,19 @@
 
 ;; ---- addresses --------------------------------------------------------------
 
+(defn remote-nodes ()
+  "The connected peer node names, or an empty list when this runtime is not a distributed
+  node — so every cross-node path a caller guards with it becomes a no-op and a single-node
+  app is unaffected.
+
+  `web/cache`, `web/pubsub` and `web/presence` each carried an identical copy of this,
+  `try`-guard and all. It belongs here: what a peer IS, and whether there are any, is this
+  module's subject — the other three only ask.
+
+  Guarded rather than assumed: `node/list` raises when the runtime was never started as a
+  node, which is the ordinary single-machine case, not an error."
+  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
+
 (defn address (host port)
   "`host:port` as a node listen/dial address, bracketing an IPv6 host.
 

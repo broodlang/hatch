@@ -9,16 +9,22 @@
 
 (describe "deflive-component"
   (test "mount builds state from id + assigns"
-    (assert= ((get (live-component-spec) :mount) "x" {"start" 5}) {:n 5}))
+    (assert= ((web/component/component-spec-mount (live-component-spec)) "x" {"start" 5}) {:n 5}))
   (test "mount defaults when assigns carries no start"
-    (assert= ((get (live-component-spec) :mount) "x" {}) {:n 0}))
+    (assert= ((web/component/component-spec-mount (live-component-spec)) "x" {}) {:n 0}))
   (test "render lowers state to HTML"
-    (assert= (web/template/render ((get (live-component-spec) :render) {:n 7})) "<span>7</span>"))
+    (assert= (web/template/render ((web/component/component-spec-render (live-component-spec)) {:n 7}))
+      "<span>7</span>"))
   (test "on dispatches by event name"
-    (assert= ((get (live-component-spec) :handle-event) "bump" {} {:n 5}) {:n 6})
-    (assert= ((get (live-component-spec) :handle-event) "set" {"value" 9} {:n 5}) {:n 9}))
+    (assert= ((web/component/component-spec-handle-event (live-component-spec)) "bump" {} {:n 5})
+      {:n 6})
+    (assert= ((web/component/component-spec-handle-event (live-component-spec)) "set"
+               {"value" 9}
+               {:n 5})
+      {:n 9}))
   (test "an unrecognized event name is a no-op"
-    (assert= ((get (live-component-spec) :handle-event) "nope" {} {:n 5}) {:n 5})))
+    (assert= ((web/component/component-spec-handle-event (live-component-spec)) "nope" {} {:n 5})
+      {:n 5})))
 
 (describe "render-slot"
   (test "mounts on first render, wrapping the component's HTML in [data-cid]"
@@ -67,3 +73,15 @@
       (assert= (send-update (self) "c1" {:n 1}) nil)
       (assert= (receive ([:update-component cid changes] [cid changes]) (after 1000 :timeout))
         ["c1" {:n 1}]))))
+
+;; The component's half of the same change — see web_test_test's "live-spec is a record".
+(describe "live-component-spec is a record"
+  (test "the thunk produces one"
+    (is (record? (live-component-spec)))
+    (assert= (->string (live-component-spec)) "#<live component-spec>"))
+  (test "a hand-built map spec is still a component spec"
+    (let (spec {:render (fn (state) [:i {} (str (get state :n))])})
+      (assert= (web/template/render ((web/component/component-spec-render spec) {:n 3}))
+        "<i>3</i>")
+      ;; the pre-split fallback branch render-slot depends on: no statics means "render whole"
+      (assert= (web/component/component-spec-render-static spec) nil))))

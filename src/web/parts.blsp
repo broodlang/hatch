@@ -77,6 +77,19 @@
     (list 'web/parts/comp-slot
       (list 'for spec (list 'web/template/render (rewrite-components body))))))
 
+;; The name of the extra parameter `deflive` binds on its generated `render`/`render-dynamic`
+;; and that a component slot references as a free variable: the session's live component
+;; table. It is a MACRO-TIME symbol, agreed on by three places that never see each other —
+;; the parameter `deflive` emits, the argument `component-slot-form` emits, and the
+;; change-tracking rule in `deps-of` that reads it as "always dirty".
+;;
+;; It was the bare symbol `live-components` written out at each of them. Renaming the
+;; parameter would have left `deps-of` matching a name nothing binds any more, and the failure
+;; is silent and severe: a component slot stops being `:all`, so a component's own state
+;; change — which touches no `model` key by definition — never marks its slot dirty and simply
+;; stops reaching the client. Nothing raises; the component freezes.
+(def *component-table-param* 'live-components)
+
 (defn component-form? (node)
   "True for a literal `(component module assigns)` form — a LiveComponent slot
   (web/component), compiled to its own dynamic hole instead of falling through to the
@@ -105,7 +118,7 @@
     (list 'quote (nth node 1))
     (symbol (str (->string (nth node 1)) "/live-component-spec"))
     (nth node 2)
-    'live-components))
+    *component-table-param*))
 
 ; ---- change tracking: which model keys each dynamic slot reads ----
 ; So the session can re-render only the slots a state change actually affects (Phoenix
@@ -144,7 +157,7 @@
       (deps-merge (list (first (rest (rest form))))
         (deps-seq (rest (rest (rest form))) model-sym))
     (= form model-sym) :all
-    (= form 'live-components) :all
+    (= form *component-table-param*) :all
     (pair? form) (deps-seq form model-sym)
     (vector? form) (deps-seq form model-sym)
     ; a map literal in the form (e.g. an attrs map inside a comprehension body) — its keys
@@ -218,15 +231,18 @@
     else (emit-dynamic st (list 'web/template/render (rewrite-components node)))))
 
 (defn walk-element (st node)
+  ;; `after-tag`, not `second` — that shadowed the prelude function of the same name for the
+  ;; whole body, which is exactly the trap this codebase warns about for macro parameters and
+  ;; is no better in a `let`.
   (let (tag (->string (first node))
         n (count node)
-        second (if (> n 1) (nth node 1) nil)
-        has-attrs (map? second)
-        ambiguous (and (> n 1) (not has-attrs) (not (child-or-literal? second))))
+        after-tag (if (> n 1) (nth node 1) nil)
+        has-attrs (map? after-tag)
+        ambiguous (and (> n 1) (not has-attrs) (not (child-or-literal? after-tag))))
     (if ambiguous
       ; can't tell a dynamic attrs map from a child — render the whole element at runtime
       (emit-dynamic st (list 'web/template/render node))
-      (let (attrs (if has-attrs second {})
+      (let (attrs (if has-attrs after-tag {})
             cstart (if has-attrs 2 1)
             st (emit-static st (str "<" tag))
             st (fold (%map-pairs attrs) st emit-attr)
@@ -256,6 +272,17 @@
   "Tag a comprehension's per-item HTML strings as one slot value so the runtime diffs the
   list per item instead of treating the whole thing as one opaque string."
   {:__comp__ (into [] items)})
+
+;; A shape test, and deliberately not the record identity `web/template/raw-node` uses.
+;;
+;; Two reasons. The forgery `raw?` had to defend against cannot happen here: a slot value is
+;; only ever what a compiled dynamic produced — a string from `render`, or one of these two
+;; tags — and never a value from the model, so no app data reaches `comp?` to be mistaken for
+;; a slot. And these maps ARE the wire format: `{"__comp__":[…]}` is what the client reads. A
+;; record encodes through `Encode`'s `:default`, not its `:map` impl, so making it one would
+;; silently ship the stringified record instead of the frame the client expects.
+;;
+;; If that ever changes, the fix is an `Encode` impl for the record, not a shape test.
 
 (defn comp? (v)
   "True if `v` is a comprehension slot value (from `comp`)."

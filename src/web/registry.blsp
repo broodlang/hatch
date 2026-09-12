@@ -84,11 +84,15 @@
   for the pids it just recovered from the vault. One that died during the crash window
   re-fires `[:down]` immediately and is cleaned up by the loop's ordinary dead-pid arm."
   (fold pids {} (fn (monitors pid) (assoc monitors pid (monitor pid)))))
+(sig monitor-each (any -> map))
 
 (defn hold-monitor (monitors pid)
   "`monitors` with `pid` monitored, if it isn't already. Idempotent: a pid subscribing to a
   second topic must not take a second ref on the same process."
   (if (contains? monitors pid) monitors (assoc monitors pid (monitor pid))))
+;; `monitors` declared `map`: untyped, `assoc` answers `vector | map` and that width reaches
+;; `release-monitor` at the call site (the same narrowing web/pubsub's own helpers carry).
+(sig hold-monitor (map any -> map))
 
 (defn release-monitor (monitors pid)
   "Demonitor `pid` — its last entry in this registry is gone — and drop it from `monitors`.
@@ -96,6 +100,7 @@
   (let (ref (get monitors pid))
     (when ref (demonitor ref)))
   (dissoc monitors pid))
+(sig release-monitor (map any -> map))
 
 ;; ---- watching the vault -------------------------------------------------------------
 

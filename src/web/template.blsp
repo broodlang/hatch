@@ -76,6 +76,23 @@
         "'" "&#39;")
       text)))
 
+(defn script-safe (s)
+  "Text made safe to sit inside a `<script>` element — JSON-LD, a WebMCP tool block, any data
+  embedded as script content.
+
+  Escaping the way `escape-html` does is not merely unnecessary inside a `<script>`, it is the
+  wrong operation: the tokenizer is not reading JavaScript there, it is watching for `</` to
+  end the element and `<!--` to enter the legacy comment state. So a `</script>` inside a JSON
+  *string value* ends the element early and spills the rest of the data into the document as
+  markup — an injection out of data that never looked like markup.
+
+  `web/seo` and `web/mcp` each carried a copy of this, byte for byte identical. Two copies of
+  an escaper is how one of them gets hardened and the other does not, and the one left behind
+  is the hole. It lives here because escaping for an HTML context is this module's job.
+
+  (hatch/web/template/script-safe \"a</script>b\") ;=> \"a<\\\\/script>b\""
+  (string/replace (string/replace s "</" "<\\/") "<!--" "<\\!--"))
+
 ; Attributes whose value is a URL — a `javascript:`/`vbscript:` value (or a `data:` document)
 ; here executes script on click/load, which escaping does NOT stop (the scheme survives
 ; escaping). `render` neutralizes those on these attributes; `http(s)`/`mailto`/relative and a

@@ -48,18 +48,19 @@
 
 (describe "fetch-session plug"
   (test "no cookie → empty :session"
-    (let (conn ((fetch-session *secret*) (conn-with nil)))
+    (let (conn ((fetch-session (cookie-store *secret* {})) (conn-with nil)))
       (assert= (get conn :session) {})))
   (test "loads an existing signed session"
     (let (cookie (encode-session *secret* {"user" "bob"})
-          conn ((fetch-session *secret*) (conn-with cookie)))
+          conn ((fetch-session (cookie-store *secret* {})) (conn-with cookie)))
       (assert= (get-session conn "user") "bob")))
   (test "unchanged session writes no Set-Cookie"
-    (let (conn ((fetch-session *secret*) (conn-with nil))
+    (let (conn ((fetch-session (cookie-store *secret* {})) (conn-with nil))
           r (conn->response conn))
       (assert= (get (get r :headers) :set-cookie) nil)))
   (test "changed session is re-signed and round-trips"
-    (let (conn (put-session ((fetch-session *secret*) (conn-with nil)) "user" "carol")
+    (let (conn (put-session ((fetch-session (cookie-store *secret* {})) (conn-with nil))
+                 "user" "carol")
           r (conn->response conn))
       (assert= (decode-session *secret* (session-cookie-value r)) {"user" "carol"}))))
 
@@ -95,12 +96,22 @@
           :headers (if (nil? id) {} {:cookie (str "_sid=" id)})
           :body ""}))
 
-(describe "SessionStore: fetch-session takes a store, not only a secret"
-  (test "a bare secret still means the cookie store"
-    (let (plug (fetch-session *secret*)
+(describe "SessionStore: fetch-session takes a store, and only a store"
+  (test "the cookie store is one, and the conn carries it"
+    (let (plug (fetch-session (cookie-store *secret* {}))
           conn (plug (conn-with nil)))
       (is (record? (get conn :session-store)))
       (assert= (->string (get conn :session-store)) "#<session cookie-store _hatch_session>")))
+
+  ;; One shape, not "sometimes a secret and sometimes a store". A bare secret is a string,
+  ;; which implements nothing, so it fails at the plug rather than several frames later.
+  (test "a bare secret is not a store"
+    (is (not (satisfies? 'SessionStore *secret*)))
+    (assert= (check-allow :discarded-catch
+               (try
+                 (do ((fetch-session *secret*) (conn-with nil)) :no-raise)
+                 (catch _e :raised)))
+      :raised))
 
   (test "reads through the store's own impl"
     (do
@@ -144,9 +155,10 @@
 
 (describe "session accessors"
   (test "get-session default when absent"
-    (assert= (get-session ((fetch-session *secret*) (conn-with nil)) "x" "def") "def"))
+    (assert= (get-session ((fetch-session (cookie-store *secret* {})) (conn-with nil)) "x" "def")
+      "def"))
   (test "delete-session removes a key"
-    (let (conn (-> ((fetch-session *secret*) (conn-with nil))
+    (let (conn (-> ((fetch-session (cookie-store *secret* {})) (conn-with nil))
                  (put-session "a" "1")
                  (put-session "b" "2")
                  (delete-session "a")))
@@ -154,13 +166,14 @@
       (assert= (get-session conn "b") "2")))
   (test "clear-session expires the cookie (Max-Age=0), not an empty signed session"
     (let (cookie (encode-session *secret* {"user" "z"})
-          conn (clear-session ((fetch-session *secret*) (conn-with cookie)))
+          conn (clear-session ((fetch-session (cookie-store *secret* {})) (conn-with cookie)))
           sc (first (get (get (conn->response conn) :headers) :set-cookie)))
       ; the browser is told to drop the cookie, and there's no decodable session left
       (assert= (includes? sc "Max-Age=0") true)
       (assert= (decode-session *secret* (session-cookie-value (conn->response conn))) {})))
   (test "rotate-session discards all prior keys (fixation defense) and marks dirty"
-    (let (conn (-> ((fetch-session *secret*) (conn-with (encode-session *secret* {"_csrf" "leaked"})))
+    (let (conn (-> ((fetch-session (cookie-store *secret* {})) (conn-with (encode-session *secret*
+                                                                            {"_csrf" "leaked"})))
                  (rotate-session)
                  (put-session "user_id" "42")))
       ; the pre-auth token is gone; only the freshly-set state remains
@@ -191,23 +204,26 @@
   (test "put-flash on request 1 → readable on request 2 → gone on request 3"
     (let (
           ; request 1: stash a flash, redirect (write session cookie)
-          c1 (put-flash ((fetch-session *secret*) (conn-with nil)) "info" "Saved!")
+          c1 (put-flash ((fetch-session (cookie-store *secret* {})) (conn-with nil))
+               "info" "Saved!")
           cookie1 (session-cookie-value (conn->response c1))
           ; request 2: fetch-flash exposes it, then clears it from the session
-          c2 (fetch-flash ((fetch-session *secret*) (conn-with cookie1)))
+          c2 (fetch-flash ((fetch-session (cookie-store *secret* {})) (conn-with cookie1)))
           cookie2 (session-cookie-value (conn->response c2))
           ; request 3: the flash is gone
-          c3 (fetch-flash ((fetch-session *secret*) (conn-with cookie2))))
+          c3 (fetch-flash ((fetch-session (cookie-store *secret* {})) (conn-with cookie2))))
       (assert= (get-flash c2 "info") "Saved!")
       (assert= (get-flash c3 "info") nil)))
   (test "get-flash default when no flash"
-    (assert= (get-flash (fetch-flash ((fetch-session *secret*) (conn-with nil))) "info" "—") "—"))
+    (assert= (get-flash (fetch-flash ((fetch-session (cookie-store *secret* {})) (conn-with nil)))
+               "info" "—")
+      "—"))
   (test "multiple flash keys both survive to the next request"
-    (let (c1 (-> ((fetch-session *secret*) (conn-with nil))
+    (let (c1 (-> ((fetch-session (cookie-store *secret* {})) (conn-with nil))
                (put-flash "info" "saved")
                (put-flash "error" "careful"))
           cookie (session-cookie-value (conn->response c1))
-          c2 (fetch-flash ((fetch-session *secret*) (conn-with cookie))))
+          c2 (fetch-flash ((fetch-session (cookie-store *secret* {})) (conn-with cookie))))
       (assert= (get-flash c2 "info") "saved")
       (assert= (get-flash c2 "error") "careful"))))
 
@@ -304,3 +320,47 @@
           _ (for (i (range 20)) (encode-session *sec* {"n" i} {:encrypt true}))
           elapsed (- (os/now) t0))
       (is (< elapsed 500)))))
+
+;; Every case above calls `encode-session` directly. The path an app actually uses is the
+;; PLUG — `(fetch-session (cookie-store secret {:encrypt true}))` — which threads those opts
+;; through the store to the encoder, and that wiring was untested: hive runs exactly this
+;; configuration in production, and nothing here would have noticed it coming apart.
+(describe "the fetch-session plug carries its options to the store"
+  (def *plug-secret* "a-strong-enough-secret-for-tests-0123456789")
+
+  (test ":encrypt true seals the cookie the plug writes"
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with nil))
+                 "role" "admin")
+          cookie (session-cookie-value (conn->response conn)))
+      ;; sealed, not signed — the E1. format, and the role is not readable in the cookie
+      (is (string/starts-with? cookie "E1."))
+      (is (not (includes? cookie "admin")))
+      ;; and it reads back through the same plug
+      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with cookie))
+                 "role")
+        "admin")))
+
+  (test "a signed cookie still opens after encryption is switched on"
+    ;; the reason the reader accepts both formats: turning :encrypt on must not sign out
+    ;; everyone holding a cookie issued before it
+    (let (signed (encode-session *plug-secret* {"role" "editor"}))
+      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with signed))
+                 "role")
+        "editor")))
+
+  (test ":cookie names the cookie the plug reads and writes"
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:cookie "_my_app"})) (build {:method "GET"
+                                                                                                      :path "/"
+                                                                                                      :query ""
+                                                                                                      :params {}
+                                                                                                      :headers {}
+                                                                                                      :body ""}))
+                 "k" "v")
+          line (first (get (get (conn->response conn) :headers) :set-cookie)))
+      (is (string/starts-with? line "_my_app="))))
+
+  (test ":max-age reaches the Set-Cookie the store writes"
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:max-age 60})) (conn-with nil))
+                 "k" "v")
+          line (first (get (get (conn->response conn) :headers) :set-cookie)))
+      (is (includes? line "Max-Age=60")))))

@@ -9,7 +9,8 @@
 
   Wire it after the session plug, and embed the token in every form:
 
-    (through [(session/fetch-session secret) session/fetch-flash csrf/protect-from-forgery]
+    (through [(session/fetch-session (session/cookie-store secret {})) session/fetch-flash
+              csrf/protect-from-forgery]
       (get  \"/account\" account/index)
       (post \"/account\" account/save))
 
@@ -116,7 +117,7 @@
   that might render before that should treat nil as \"no token yet\" rather than emitting an
   empty field that will be rejected."
   (let (conn (web/live/live-conn))
-    (if (nil? conn) nil (token ((session/fetch-session secret opts) conn)))))
+    (if (nil? conn) nil (token ((session/fetch-session (session/cookie-store secret opts)) conn)))))
 
 (defn live-csrf-input (secret &optional (opts {}))
   "`csrf-input` for a live view: a hidden `_csrf_token` field carrying `live-token`. Returns

@@ -93,11 +93,7 @@
     ""
     [:script
       {:type "application/ld+json"}
-      (web/template/raw (script-safe (json/encode data)))]))
-
-(defn- script-safe (s)
-  "JSON made safe to sit inside a `<script>` element."
-  (string/replace (string/replace s "</" "<\\/") "<!--" "<\\!--"))
+      (web/template/raw (web/template/script-safe (json/encode data)))]))
 
 (defn- tag-when (present node) (if present node ""))
 
@@ -273,12 +269,16 @@
   "How many consecutive `character`s `line` has from index `from`, capped at `limit`."
   (let (n (count line)
         step (fn (i seen)
-               (if (or (>= i n)
-                     (>= seen limit)
-                     (not (= (string/substring line i (inc i)) character)))
+               ;; `char-at`, not a one-character `substring`: it says what is being asked,
+               ;; allocates no slice, and needs no computed end index. `or` short-circuits,
+               ;; so the read only happens once `i` is known to be in bounds.
+               (if (or (>= i n) (>= seen limit) (not (= (string/char-at line i) character)))
                  seen
                  (step (inc i) (inc seen)))))
     (step from 0)))
+;; Declared `int` so the index arithmetic at its call site stays an index: the body folds
+;; through `inc`, which the checker widens to `number`, and `string/char-at` wants an int.
+(sig run-length (string string int int -> int))
 
 (defn heading-line? (text)
   "Whether any line of `text` begins an ATX markdown heading (`#` through `######`).
@@ -301,7 +301,8 @@
             hashes (run-length line "#" indent 6))
         (and (> hashes 0)
           (< (+ indent hashes) n)
-          (= (string/substring line (+ indent hashes) (+ indent hashes 1)) " "))))))
+          ;; the character after the hashes must be a space — an ATX heading, not `#tag`
+          (= (string/char-at line (+ indent hashes)) " "))))))
 
 (defn- llms-section (site section)
   "One H2 section and its link list."
@@ -432,7 +433,13 @@
 
       (hatch/web/seo/sitemap-date 1757548800000) ;=> \"2025-09-11\"
       (hatch/web/seo/sitemap-date nil) ;=> nil"
-  (if (number? ms) (string/substring (datetime/->iso (datetime/epoch-ms-> ms)) 0 10) nil))
+  ;; `math/floor` rather than handing `ms` over as it arrives: the guard admits any number,
+  ;; `epoch-ms->` takes an int, and a caller that computed its timestamp (`(* 1000 seconds)`
+  ;; on a float) would otherwise reach it with a fraction of a millisecond attached. Flooring
+  ;; loses nothing — the result is truncated to a bare date two lines later.
+  (if (number? ms)
+    (string/substring (datetime/->iso (datetime/epoch-ms-> (math/floor ms))) 0 10)
+    nil))
 
 (defn sitemap-xml (site entries)
   "A `sitemap.xml` document for `entries` — each a path string or a
@@ -442,9 +449,14 @@
     (apply str (map entries (fn (entry) (url-entry site entry))))
     "</urlset>\n"))
 
-(defn sitemap-entries (site routes opts)
+(defn sitemap-entries (routes opts)
   "The sitemap's entries: every fixed `GET` path in `routes`, minus `:exclude`, plus
   `:extra`.
+
+  Took a `site` it never read — the rest of the family (`sitemap-xml`, `robots-text`) needs
+  one to build absolute URLs, and this one was given it for symmetry. Entries are paths; the
+  origin is applied by `url-entry` when each is rendered, so there was nothing here to use it
+  for and a reader had to go looking to find that out.
 
   `routes` is the table or a thunk returning it (see `route-table`).
 
@@ -475,4 +487,4 @@
                  (put-resp-header :cache-control
                    (web/cache/public-for (get opts :max-age 3600))))
       200
-      (sitemap-xml site (sitemap-entries site routes opts)))))
+      (sitemap-xml site (sitemap-entries routes opts)))))

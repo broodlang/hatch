@@ -10,7 +10,7 @@
   Wire two plugs into a `through` group, session first:
 
     (def secret (session/secret-from-env))   ; strong prod secret, or a loud boot failure
-    (through [(session/fetch-session secret) session/fetch-flash]
+    (through [(session/fetch-session (cookie-store secret {})) session/fetch-flash]
       (get  \"/login\"  login/form)
       (post \"/login\"  login/create))
 
@@ -26,9 +26,9 @@
   you turn `:encrypt` on, and a cookie already issued cannot be revoked before its `__exp__`.
 
   When those limits bite, the store is replaceable rather than the module. `fetch-session`
-  takes either a signing secret (meaning the built-in `cookie-store`) or any value
-  implementing `SessionStore`:
+  takes a value implementing `SessionStore` — the built-in one, or someone else's:
 
+      (through [(session/fetch-session (session/cookie-store secret {:encrypt true}))] …)
       (through [(session/fetch-session (my-redis-store pool))] …)
 
   A store is a value you pass, not a name resolved through configuration, so it carries its
@@ -44,6 +44,8 @@
   ; constant-time-equal? — constant-time signature comparison (no timing oracle);
   ; encrypt/decrypt/random-nonce/pbkdf2 — the sealed cookie format
   (:use crypto)
+  ; stringify-keys — one deep keyword→string normalization for every JSON hatch decodes
+  (:alias http/util)
   ; table/new — memoising the derived AEAD key, which costs a 600k pbkdf2 to make
   (:alias table))
 
@@ -220,24 +222,16 @@
 
 (defn decode-json (json)
   "A JSON object as a string-keyed map; `{}` for anything else. Shared by the signed and the
-  sealed formats, so both agree on what a session that does not parse reads as."
+  sealed formats, so both agree on what a session that does not parse reads as.
+
+  `stringify-keys` is `http/util`'s: `json/decode` yields keyword keys, and a session is
+  string-keyed end to end to match query/form params — the same normalization a JSON request
+  body needs, which is why it lives one layer down rather than in a copy here. There were two
+  copies, identical down to the `mapv`."
   (try
     (let (parsed (if json (json/decode json) nil))
-      (if (map? parsed) (stringify-keys parsed) {}))
+      (if (map? parsed) (http/util/stringify-keys parsed) {}))
     (catch _e {})))
-
-(defn stringify-keys (v)
-  "Recursively replace every map key in `v` with its string name, recursing through map
-  values and vectors. JSON parses object keys to keywords, but sessions are string-keyed
-  end to end (to match query/form params) — including nested maps like the flash store, so
-  the normalization must be deep, not just top-level."
-  (cond
-    (map? v)
-      (fold (%map-pairs v)
-        {}
-        (fn (acc kv) (assoc acc (->string (first kv)) (stringify-keys (first (rest kv))))))
-    (vector? v) (mapv v stringify-keys)
-    else v))
 
 ; ---- the SessionStore ability ----
 
@@ -269,13 +263,30 @@
 
   Hatch ships one implementation, `cookie-store`, and it is the default — see the module
   docstring for why a stateless session is the right thing to reach for first."
-  (session-read [self conn] :-> map)
+  ;; `session-read` answers a string-keyed map — declared `any` because every implementation
+  ;; builds it out of a `cond` the checker widens to `countable` (the cookie store's
+  ;; `decode-session` is the built-in example), and a return type that cannot be satisfied is
+  ;; a warning every implementor would have to work around rather than a contract.
+  (session-read [self conn] :-> any)
   (session-write [self conn data] :-> map))
 
 (defn session-cookie-name (opts)
   "The cookie a session is carried in — `:cookie` in `opts`, else `_hatch_session`."
   (get opts :cookie *default-cookie*))
 
+;; `(cookie-store secret opts)` — hatch's `SessionStore`, and what `fetch-session` is given.
+;;
+;; `opts` is required rather than optional because a record constructor is exact-arity, and
+;; that turns out to be the better API anyway: `{}` at the call site is where a reader looks
+;; to find that there ARE options, and what they are —
+;;
+;;   :cookie     the cookie name (default `_hatch_session`)
+;;   :max-age    seconds; also bounds the signed value itself (see `with-expiry`)
+;;   :encrypt    seal the payload rather than only signing it (see `encode-session`)
+;;   :path       default "/"
+;;   :same-site  default "Lax"
+;;   :http-only  default true
+;;   :secure     default: on outside dev (see `secure-cookie-default?`)
 (defrecord cookie-store (secret opts))
 
 ;; The default store, and everything above this line: the session IS the cookie, signed (or
@@ -302,40 +313,33 @@
 
 (impl Display
   web/session/cookie-store
-  (->string [store] (str "#<session cookie-store " (session-cookie-name (cookie-store-opts store)) ">")))
-
-(defn as-store (store-or-secret opts)
-  "The store `fetch-session` was given: a `SessionStore` value passed through, or a bare
-  signing secret wrapped in a `cookie-store` with `opts`.
-
-  The bare secret is the older spelling and by far the common one — `(fetch-session secret)`
-  is what every app, and this repo's own docs, already write. It keeps working, and it now
-  means exactly \"the cookie store, with this secret\"."
-  (if (string? store-or-secret)
-    (cookie-store store-or-secret opts)
-    store-or-secret))
+  (->string [store]
+    (str "#<session cookie-store " (session-cookie-name (cookie-store-opts store)) ">")))
 
 ; ---- the fetch-session plug ----
 
-(defn fetch-session (store-or-secret &optional (opts {}))
+(defn fetch-session (store)
   "A plug that loads the session into `conn :session` and registers a before-send callback to
   write it back — but only if a handler changed it.
 
-  Give it a signing secret for the default cookie store, or any `SessionStore` value:
+  `store` is a `SessionStore` value. For the built-in signed cookie that is
+  `(cookie-store secret opts)`:
 
-      (through [(session/fetch-session secret)] …)                 ; signed cookie
-      (through [(session/fetch-session (my-redis-store pool))] …)  ; someone else's store
+      (through [(session/fetch-session (session/cookie-store secret {}))] …)
+      (through [(session/fetch-session (session/cookie-store secret {:encrypt true}))] …)
+      (through [(session/fetch-session (my-redis-store pool))] …)
 
-  `opts` (cookie store only): `:cookie` (name, default `_hatch_session`), `:max-age`
-  (seconds), `:path` (default \"/\"), `:same-site` (default \"Lax\"), `:http-only` (default
-  true), `:secure`. A store value carries its own configuration, so `opts` is ignored for one."
-  (let (store (as-store store-or-secret opts))
-    (fn (conn)
-      (register-before-send (assoc conn
-                              :session (session-read store conn)
-                              :session-store store
-                              :session-changed? false)
-        write-session))))
+  It took a bare secret too, meaning \"the cookie store with this secret\". One argument that
+  is sometimes a secret and sometimes a store is two shapes to recognise and two branches to
+  keep working, for two saved characters — and it hid the store from the call site, which is
+  the thing worth seeing. `(cookie-store secret {})` says which store is in use and where its
+  options go; see `cookie-store` for what they are."
+  (fn (conn)
+    (register-before-send (assoc conn
+                            :session (session-read store conn)
+                            :session-store store
+                            :session-changed? false)
+      write-session)))
 
 (defn write-session (conn)
   "Before-send callback: if the session changed this request, hand it to the store. Unchanged

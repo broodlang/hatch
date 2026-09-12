@@ -74,7 +74,23 @@
     (assert= "1.1.1.1" (client-ip (ip-conn {:x-forwarded-for "1.1.1.1, 10.0.0.1, 10.0.0.2"}))))
 
   (test "no header at all means unknown"
-    (is (nil? (client-ip (ip-conn {}))))))
+    (is (nil? (client-ip (ip-conn {})))))
+
+  ;; A forwarded address may carry the source PORT — RFC 7239 spells it
+  ;; `for="192.0.2.43:47011"` and proxies do it. This answer is what web/ratelimit keys a
+  ;; bucket on, so an unnormalised one gave a single client a fresh bucket per CONNECTION
+  ;; and the limiter never limited. `allow-ips` normalised already; these two layers must
+  ;; agree about who a caller is.
+  (test "a v4 address keeps its host when the proxy appended a port"
+    (assert= "203.0.113.9" (client-ip (ip-conn {:x-forwarded-for "203.0.113.9:41001"})))
+    (assert= "203.0.113.9" (client-ip (ip-conn {:fly-client-ip "203.0.113.9:41002"}))))
+
+  (test "a bracketed v6 address loses its brackets and port, not its colons"
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-forwarded-for "[2001:db8::1]:5000"})))
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-real-ip "2001:db8::1"}))))
+
+  (test "case and surrounding space do not make a second client"
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-real-ip "  2001:DB8::1  "})))))
 
 (describe "allowed-ip?"
   (test "an allowed v4 address passes"

@@ -29,6 +29,9 @@
   ; watch-vault / rewatch-vault / monitor-each / hold-monitor / release-monitor — the
   ; monitor + vault bookkeeping every registry on this scaffolding needs, in one place
   (:use web/registry)
+  ; remote-nodes — the peers a locally-published broadcast is replicated to; web/cluster owns
+  ; what a peer is, and this module used to carry its own copy of the question
+  (:alias web/cluster)
   ; set/union — subscriber sets are first-class #{} sets (ADR-060), O(log n)
   ; add/remove/membership vs the old O(n) list scans on the subscribe/DOWN churn.
   ; (`conj`/`disj` need no alias: they are polymorphic prelude fns — ADR-156.)
@@ -109,17 +112,12 @@
 ; location-transparent `send` (via `send-info`). When the runtime isn't a distributed node,
 ; `(node/list)` is empty and this is a no-op, so single-node apps are entirely unaffected.
 
-(defn remote-nodes ()
-  "The connected peer node names, or an empty list when this runtime isn't a distributed
-  node (so cross-node fan-out is a safe no-op)."
-  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
-
 (defn- pubsub-fanout-remote (topic payload)
   "Replicate a locally-originated broadcast to every peer node's registry — once each, marked
   `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
   O(node/list) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
   that just dropped, is skipped rather than failing the publish."
-  (dolist (n (remote-nodes))
+  (dolist (n (web/cluster/remote-nodes))
     (check-allow :discarded-catch
       (try
         (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])

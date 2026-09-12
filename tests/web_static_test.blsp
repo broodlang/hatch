@@ -346,3 +346,43 @@
     (assert= "fonts/body.woff2" (relative-to "static/fonts/body.woff2" "static"))
     (assert= "app.css" (relative-to "static/app.css" "static"))
     (assert= "other/app.css" (relative-to "other/app.css" "static"))))
+
+;; Six near-identical header maps were written out across the 200, 206 and 416 paths, and
+;; they had already drifted: `Vary: Accept-Encoding` was on the 200s and missing from every
+;; range response and from the 304. A shared cache storing one of those holds a body with
+;; nothing saying it varies by content coding, and can hand a gzip entity to a client that
+;; never asked for one. They come from one place now; this is what stops them separating again.
+(defn- headers-of (resp) (get resp :resp-headers))
+
+(describe "every static response carries the same core headers"
+  (test "a 200 does"
+    (let (h (headers-of (serve-body (conn-with {} {}) "text/plain" "0123456789" "f.txt")))
+      (assert= (get h :vary) "Accept-Encoding")
+      (assert= (get h :x-content-type-options) "nosniff")
+      (assert= (get h :accept-ranges) "bytes")
+      (assert= (get h :content-type) "text/plain")))
+
+  (test "a 206 does — this is where Vary used to go missing"
+    (let (h (headers-of (serve-body (conn-with {} {:range "bytes=0-3"})
+                          "text/plain" "0123456789" "f.txt")))
+      (assert= (get h :vary) "Accept-Encoding")
+      (assert= (get h :x-content-type-options) "nosniff")
+      (assert= (get h :accept-ranges) "bytes")
+      (assert= (get h :content-range) "bytes 0-3/10")))
+
+  (test "a 416 does too"
+    (let (h (headers-of (serve-body (conn-with {} {:range "bytes=99-"})
+                          "text/plain" "0123456789" "f.txt")))
+      (assert= (get h :vary) "Accept-Encoding")
+      (assert= (get h :x-content-type-options) "nosniff")
+      (assert= (get h :content-range) "bytes */10")))
+
+  ;; A 304 has no body, so the headers describing one have nothing to say — but `Vary` does,
+  ;; because the stored response it refreshes varies by encoding (RFC 9110 §15.4.5).
+  (test "a 304 carries its validators and Vary, and nothing about a body"
+    (let (tag (etag "0123456789")
+          h (headers-of (serve-body (conn-with {} {:if-none-match tag})
+                          "text/plain" "0123456789" "f.txt")))
+      (assert= (get h :vary) "Accept-Encoding")
+      (assert= (string/blank? (get h :etag)) false)
+      (assert= (get h :content-type) nil))))

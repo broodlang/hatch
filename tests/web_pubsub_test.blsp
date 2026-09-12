@@ -2,6 +2,7 @@
   (:use web/pubsub)
   ; pubsub--* registry internals are module-private (ADR-146 `--` names); tested directly here
   (:use-internals web/pubsub)
+  (:alias web/cluster)
   (:use test))
 
 ;; PubSub is process-level: a registry process fans broadcasts out to subscriber pids via
@@ -76,7 +77,7 @@
 ;; local subscribers without re-forwarding.
 (describe "cross-node fan-out"
   (test "remote-nodes is empty when the runtime isn't a distributed node"
-    (assert= (remote-nodes) (list)))
+    (assert= (web/cluster/remote-nodes) (list)))
   (test "pubsub--fanout-remote is a safe no-op with no peers"
     (assert= (web/pubsub/pubsub-fanout-remote "room:noop" {:a 1}) nil))
   (test "a :remote-origin broadcast (as a peer replicates it) reaches local subscribers"

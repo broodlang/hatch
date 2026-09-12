@@ -9,7 +9,10 @@
   A part with a `filename` in its Content-Disposition is a file (its content is kept as raw
   `bytes`, so a handler can `spit-bytes` it to disk or hash it); a part without one is a text
   field (decoded to a string, like a form field). Parsing is done entirely on `bytes` so
-  binary content is never UTF-8-mangled.")
+  binary content is never UTF-8-mangled."
+  ; crlf-at? — shared with http/request, which had its own copy under the same name and a
+  ; different (unchecked) contract
+  (:use http/util))
 
 ; The part header/body separator and a reusable CRLF, as bytes.
 (def sep-bytes (string/->bytes "\r\n\r\n"))
@@ -49,14 +52,6 @@
 
 ; ---- one part ----
 
-(defn crlf-at? (b i)
-  "True if bytes `i`,`i+1` of `b` are CR,LF."
-  (and (>= i 0)
-    (>= (bytes/length b) (+ i 2))
-    (= (bytes/at b i) 13)
-    (= (bytes/at b (+ i 1)) 10)))
-
-(sig crlf-at? (bytes int -> bool))
 (defn part-trim (seg)
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
   body). The CRLF that precedes the next delimiter is already excluded from `seg` — it belongs

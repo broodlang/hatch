@@ -242,6 +242,12 @@
 ; Inbound WS event params arrive as JSON; the decoder must handle every escape JSON.stringify
 ; can emit — including \uXXXX (control chars) and the named \b/\f — and must never crash the
 ; session process on a hostile escape (a lone surrogate, bad hex), falling back to U+FFFD.
+(defn decoded-or-refused (json)
+  "`(json-decode json)`, or `:refused` when it raises — the disposition of a frame hatch
+  cannot read. The socket path does exactly this (see `parse-client-frame`), so a test
+  saying `:refused` is saying `the session drops this frame`."
+  (check-allow :discarded-catch (try (json-decode json) (catch _e :refused))))
+
 (describe "json-decode string escapes"
   (test "named escapes n/r/t/b/f and backslash/quote/slash"
     (assert= (json-decode "\"a\\nb\\tc\\\\d\\\"e\\/f\"") "a\nb\tc\\d\"e/f"))
@@ -250,10 +256,13 @@
       (str "A" (string/int->char 233) (string/int->char 201))))
   (test "\\u of a control char round-trips (e.g. tab via \\u0009)"
     (assert= (json-decode "\"x\\u0009y\"") "x\ty"))
-  (test "a lone surrogate falls back to U+FFFD instead of crashing"
-    (assert= (json-decode "\"\\uD83D\"") (string/int->char 65533)))
-  (test "malformed hex falls back to U+FFFD"
-    (assert= (json-decode "\"\\uZZZZ\"") (string/int->char 65533)))
+  ;; A lone surrogate and a bad `\uXXXX` used to decode to U+FFFD, so a crafted frame was
+  ;; delivered with a substituted character in it. They are refused now — see the
+  ;; "refuses malformed input" block below for why refusing beats guessing here.
+  (test "a lone surrogate is refused, not substituted"
+    (assert= (decoded-or-refused "\"\\uD83D\"") :refused))
+  (test "malformed hex is refused, not substituted"
+    (assert= (decoded-or-refused "\"\\uZZZZ\"") :refused))
   (test "\\u inside an object value"
     (assert= (json-decode "{\"k\":\"\\u0041\"}") {"k" "A"})))
 
@@ -324,25 +333,94 @@
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
       {:event "navigate" :params {} :name "" :cid nil :path "/next" :sfp nil})))
 
-;; `jp-num-char?` admits `+ - . e E`, so a token like `-` or `1.2.3` is gathered as a number
-;; and only fails at conversion — where `string/->number` answers a TRUTHY `failure`. Returned
-;; as the decoded value it raises nothing here; it lands in a component's model and surfaces
-;; later as a rendered `#failure{…}` or a type error inside arithmetic, pointing nowhere near
-;; the frame that caused it. The input is the browser's, so reaching this takes only a crafted
-;; message. Malformed input must read as absent, the way the rest of this parser reports it.
-(describe "json-decode never yields a failure value"
-  (test "a number token that cannot parse decodes as nil, not a failure"
+;; What a live socket must never do with a crafted frame: act on the half of it that parsed.
+;;
+;; The hand-rolled parser reported malformed input IN BAND — a token like `-` or `1.2.3`
+;; decoded to nil, a bad escape to U+FFFD — so a frame carrying one was dispatched as an
+;; event with a hole in it, and the hole landed in a model. This is the browser's input, so
+;; reaching it takes only a crafted message.
+;;
+;; `json/decode` raises instead, and the socket path catches: the frame is dropped whole.
+;; Nothing partial is ever dispatched, which is the property worth having — a frame hatch
+;; cannot read is a frame hatch should not obey.
+(describe "json-decode refuses malformed input rather than guessing at it"
+  (test "a number token that cannot parse refuses the frame"
     (dolist (bad (list "-" "+" "." "1.2.3" "1e" "--5" "1e+"))
-      (let (decoded (json-decode (str "{\"n\": " bad "}")))
-        (assert= {"n" nil} decoded))))
+      (assert= (decoded-or-refused (str "{\"n\": " bad "}")) :refused)))
 
-  (test "a bare malformed number at top level decodes as nil"
-    (assert= nil (json-decode "1.2.3")))
+  (test "so does a bare one at top level"
+    (assert= (decoded-or-refused "1.2.3") :refused))
 
-  (test "a malformed number inside an array decodes as nil"
-    (assert= [1 nil 3] (into [] (json-decode "[1, 1.2.3, 3]"))))
+  (test "and one buried in an array — no partially-decoded neighbours survive"
+    (assert= (decoded-or-refused "[1, 1.2.3, 3]") :refused))
+
+  ;; The end of that story, and the one that actually protects the session: a refused frame
+  ;; reaches the actor as an empty event, never as a half-filled one.
+  (test "the session sees an empty event, not a hole in a real one"
+    (assert= (parse-client-frame (string/->bytes "{\"event\":\"pay\",\"params\":{\"n\":1.2.3}}"))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
 
   (test "valid numbers are untouched"
     (assert= {"n" 42} (json-decode "{\"n\": 42}"))
     (assert= {"n" -1.5} (json-decode "{\"n\": -1.5}"))
     (assert= {"n" 1000.0} (json-decode "{\"n\": 1e3}"))))
+
+;; ---- the session view is a record ------------------------------------------------------
+;;
+;; A live connection's whole state. It was a bare map that grew a key wherever one was first
+;; needed, and the read hazard was the same one the specs had, with a worse failure: `(get
+;; view :mounted)` without the `?` is nil, which every out-of-band arm reads as "not mounted
+;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
+;; socket stays open. Each of those reads is now a name.
+
+(deflive (mount (params) {:n 0})
+  (render (model) [:p {} (str (get model :n))])
+  (tick 1000 (model) (assoc model :n (inc (get model :n)))))
+
+(describe "session-view"
+  (test "new-session-view starts unmounted at generation 0"
+    (let (view (web/live/new-session-view (live-spec) live-spec nil {} nil))
+      (assert= (session-view-mounted? view) false)
+      ;; 0 and not nil: the tick arm compares a ticker's stamp against this, and a declared
+      ;; field is always present — so a `(get view :generation 0)` style default would not
+      ;; have fired and every beat would have been discarded as stale.
+      (assert= (session-view-generation view) 0)
+      (assert= (session-view-ticker-pids view) (list))
+      (assert= (session-view-model view) nil)
+      (assert= (session-view-dynamics view) nil)))
+
+  (test "the connection-time fields are the ones it was given"
+    (let (spec (live-spec)
+          conn (build {:method "GET" :path "/x" :query "" :params {} :headers {} :body ""})
+          view (web/live/new-session-view spec live-spec :admin {"a" "1"} conn))
+      (assert= (session-view-spec view) spec)
+      (assert= (session-view-session view) :admin)
+      (assert= (session-view-params view) {"a" "1"})
+      (assert= (session-view-conn view) conn)
+      ;; the component table is live and empty, ready for the first (component …) hole
+      (assert= (table/count (session-view-components view)) 0)))
+
+  (test "two views never share a component table"
+    (let (a (web/live/new-session-view (live-spec) live-spec nil {} nil)
+          b (web/live/new-session-view (live-spec) live-spec nil {} nil))
+      (table/put (session-view-components a) "id" :only-in-a)
+      (assert= (table/get (session-view-components b) "id") nil)))
+
+  (test "it prints as what it is"
+    (assert= (->string (web/live/new-session-view (live-spec) live-spec nil {} nil))
+      "#<live session unmounted gen=0>")
+    (assert= (->string (assoc (web/live/new-session-view (live-spec) live-spec nil {} nil)
+                         :mounted? true
+                         :generation 3))
+      "#<live session mounted gen=3>"))
+
+  ;; The spec is carried whole under one field rather than merged over the view's own keys.
+  ;; Merged, a spec field and a session field could collide silently — and merging a RECORD
+  ;; would have dragged its `:__id__` across, retyping the view as a view-spec.
+  (test "the spec is nested, not splatted"
+    (let (view (web/live/new-session-view (live-spec) live-spec nil {} nil))
+      (assert= (record-id view)
+        (record-id (web/live/new-session-view (live-spec) live-spec nil {} nil)))
+      (is (not (= (record-id view) (record-id (live-spec)))))
+      ;; reaching a spec function goes through the spec, so nothing can shadow it
+      (is (fn? (view-spec-mount (session-view-spec view)))))))

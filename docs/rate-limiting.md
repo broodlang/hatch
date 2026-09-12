@@ -82,10 +82,10 @@ should not spend the same token.
 A value implementing the `BucketStore` ability:
 
 ```brood
-(take-tokens [self key cost cfg now] -> :ok | [:deny retry-ms])
+(take-tokens [self key cost config now] -> :ok | [:deny retry-ms])
 ```
 
-`cfg` is `{:rate :per :burst}` as `bucket-config` resolves it. `now` is epoch milliseconds
+`config` is `{:rate :per :burst}` as `bucket-config` resolves it. `now` is epoch milliseconds
 from the *caller*, passed in rather than read inside — which is what lets a store be tested
 at a time of the test's choosing.
 
@@ -98,17 +98,19 @@ one:
 (defrecord pg-store (pool))
 
 (impl BucketStore my-app/pg-store
-  (take-tokens [store key cost cfg now]
+  (take-tokens [store key cost config now]
     (let (bucket (load-bucket (pg-store-pool store) key)
-          outcome (ratelimit/spend bucket cfg cost now))
+          outcome (ratelimit/spend bucket config cost now))
       (save-bucket (pg-store-pool store) key (nth outcome 0))
       (nth outcome 1))))
 
 (ratelimit/rate-limit {:store (pg-store my-pool) :rate 100 :per 60000})
 ```
 
-A store with nothing to carry can still be the `{:take (fn (key cost cfg now) …)}` map this
-seam originally took — that spelling keeps working, and reaches the same call site.
+There is one spelling. This seam originally took a `{:take fn}` map, and a map is no longer a
+store — two ways to write one thing means two shapes a reader has to recognise, and a map that
+merely looks like a store failing at the call rather than at the definition. Handing one over
+raises with the ability's own name on it.
 
 ### What a rejection looks like — `:on-limit`
 

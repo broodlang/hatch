@@ -52,22 +52,41 @@
 
 ; ---- character helpers ----
 
-(defn ws? (c) (or (= c " ") (= c "\n") (= c "\t") (= c "\r")))
-
-(defn name-char? (c)
-  "A char that may appear in a tag or attribute name (anything but a delimiter)."
-  (not (or (ws? c) (= c ">") (= c "/") (= c "=") (= c "<"))))
+;; The parser's three character sets. Sets rather than predicates because every scan over
+;; them is a native `string/span` / `string/span-until` call — one pass, one slice — instead
+;; of a per-character loop that re-slices the remaining input each step.
+(def- *whitespace* " \n\t\r")
 
 (defn skip-ws (s)
-  (if (and (> (string/length s) 0) (ws? (string/char-at s 0)))
-    (skip-ws (string/substring s 1 (string/length s)))
-    s))
+  "`s` with any leading whitespace dropped.
 
-(defn read-while (s pred acc)
-  "Consume the leading run of chars satisfying `pred`; returns `[run rest]`."
-  (if (and (> (string/length s) 0) (pred (string/char-at s 0)))
-    (read-while (string/substring s 1 (string/length s)) pred (str acc (string/char-at s 0)))
-    [acc s]))
+  One native scan and at most one slice, rather than a recursion that re-sliced the whole
+  remaining input once per space — the same shape of quadratic `parse-text-at` had, and the
+  parser calls this at seven points, several of them per element.
+
+  `string/span` and not `string/triml`: it measures the run against exactly the character set
+  `ws?` names, so there is no second definition of whitespace to keep in step, and a run of
+  length zero — the common case, since an attribute list usually ends right at `>` — returns
+  `s` itself instead of allocating a copy of it."
+  (let (skipped (string/span s 0 *whitespace*))
+    (if (= skipped 0) s (string/substring s skipped (string/length s)))))
+
+;; Every character that can END a tag or attribute name: whitespace and the four delimiters.
+;; A character SET, so the scan is one native call.
+(def- *name-stops* " \n\t\r></=")
+
+(defn read-name (s)
+  "The leading run of tag/attribute-name characters, and the rest: `[name rest]`.
+
+  This was a general `read-while` taking a character predicate — but every one of its six
+  call sites passed the same one, and the generality cost a re-slice of the whole remaining
+  input plus an append to a growing string FOR EVERY CHARACTER of every name. On a template
+  with many small elements that is thousands of full-remainder copies, and it was the
+  parser's dominant cost once `parse-text-at` stopped being.
+
+  `string/span-until` finds the first delimiter in one native scan, so a name is one slice."
+  (let (stop (string/span-until s 0 *name-stops*))
+    [(string/substring s 0 stop) (string/substring s stop (string/length s))]))
 
 ; ---- source positions: report parse errors as bml:line:col ----
 ; Every string the parser holds is a suffix of the original source (we only ever
@@ -249,7 +268,7 @@
     (= (string/char-at s 0) "\"")
       (let ([inner rest] (read-quoted s)) [(attr-string-value inner) rest])
     (= (string/char-at s 0) "{") (parse-interp s)
-    else (read-while s name-char? "")))
+    else (read-name s)))
 
 ; ---- directives (:if / :for) ----
 ; Directives take a brace expression like everything else: `:if={expr}`,
@@ -292,7 +311,7 @@
   (let (s (skip-ws s))
     (if (or (= (string/length s) 0) (= (string/char-at s 0) ">") (= (string/char-at s 0) "/"))
       [attrs directives s]
-      (let ([k s1] (read-while s name-char? "")
+      (let ([k s1] (read-name s)
             s1 (skip-ws s1))
         (if (and (> (string/length s1) 0) (= (string/char-at s1 0) "="))
           (let (s2 (skip-ws (string/substring s1 1 (string/length s1))))
@@ -350,7 +369,7 @@
 (defn parse-component (s)
   "`s` begins with `<.`; returns `[form rest]` for a component call."
   (let (s1 (string/substring s 2 (string/length s))
-        [name s2] (read-while s1 name-char? "")
+        [name s2] (read-name s1)
         [attrs directives s3] (parse-attrs s2 {} {}))
     (cond
       (string/starts-with? s3 "/>")
@@ -370,7 +389,7 @@
   (if (not (string/starts-with? s "</."))
     (bml-error s "expected </." name "> to close component <." name ">")
     (let (s1 (string/substring s 3 (string/length s))
-          [nm s2] (read-while s1 name-char? "")
+          [nm s2] (read-name s1)
           s2 (skip-ws s2))
       (cond
         (not (= nm name))
@@ -385,7 +404,7 @@
   (if (string/starts-with? s "<.")
     (parse-component s)
     (let (s1 (string/substring s 1 (string/length s))
-          [tag s2] (read-while s1 name-char? "")
+          [tag s2] (read-name s1)
           [attrs directives s3] (parse-attrs s2 {} {}))
       (cond
         (string/starts-with? s3 "/>")
@@ -412,7 +431,7 @@
 (defn expect-close (s tag)
   "Consume the `</tag>` closing `tag`; returns the rest. Errors on a mismatch."
   (let (s1 (string/substring s 2 (string/length s))
-        [nm s2] (read-while s1 name-char? "")
+        [nm s2] (read-name s1)
         s2 (skip-ws s2))
     (cond
       (not (= nm tag)) (bml-error s "</" nm "> closes the wrong tag, expected </" tag ">")
@@ -452,17 +471,37 @@
   literal braces (so a `{` need not start an interpolation)."
   (parse-text-at s ""))
 
+;; Every character that can end a text run: `<` starts an element, `{` an interpolation, and
+;; `\` may escape a brace. Everything between two of them is ordinary text and can be taken in
+;; one slice.
+(def- *text-stops* "<{\\")
+
 (defn- parse-text-at (s acc)
-  (cond
-    (= (string/length s) 0) [acc s]
-    (= (string/char-at s 0) "<") [acc s]
-    (= (string/char-at s 0) "{") [acc s]
-    (and (= (string/char-at s 0) "\\") (> (string/length s) 1) (brace-char? (string/char-at s 1)))
-      (parse-text-at (string/substring s 2 (string/length s))
-        (str acc
-          (string/char-at s
-            1)))
-    else (parse-text-at (string/substring s 1 (string/length s)) (str acc (string/char-at s 0)))))
+  "Consume text, one RUN at a time rather than one character at a time.
+
+  This walked the input character by character — `(str acc (char-at s 0))` onto a growing
+  accumulator, `(substring s 1 …)` to advance — which is quadratic twice over, and text is the
+  one thing a template has a lot of. Measured on a single prose block: 16 KB took 77 ms, 32 KB
+  223 ms, 64 KB 753 ms, 128 KB 2.95 SECONDS, each doubling costing four times the last. The
+  `<script>`/`<style>` path next door already scanned with `index-of` and took 0.4 ms for the
+  same 128 KB — a ten-thousandfold difference between two branches of the same parser.
+
+  `string/span-until` finds the next stop character in one native scan, so a run becomes one
+  slice and one append. The per-character branches below are still here, but now they run only
+  AT a stop character — at most once per delimiter, never once per letter."
+  (let (stop (string/span-until s 0 *text-stops*)
+        acc (if (= stop 0) acc (str acc (string/substring s 0 stop)))
+        s (if (= stop 0) s (string/substring s stop (string/length s))))
+    (cond
+      (= (string/length s) 0) [acc s]
+      (= (string/char-at s 0) "<") [acc s]
+      (= (string/char-at s 0) "{") [acc s]
+      ;; `\{` / `\}` are literal braces; a backslash before anything else is ordinary text
+      (and (= (string/char-at s 0) "\\")
+        (> (string/length s) 1)
+        (brace-char? (string/char-at s 1)))
+        (parse-text-at (string/substring s 2 (string/length s)) (str acc (string/char-at s 1)))
+      else (parse-text-at (string/substring s 1 (string/length s)) (str acc (string/char-at s 0))))))
 
 ; ---- entry point ----
 

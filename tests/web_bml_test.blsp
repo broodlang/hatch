@@ -126,3 +126,39 @@
   (test "a directive without a brace value reports line:col"
     (assert= (parse-error "<p :if=\"x\">y</p>")
       "bml:1:8: directive :if needs a brace value, e.g. :if={…}")))
+
+;; A template's text used to be consumed one character at a time — a slice of the whole
+;; remaining input plus an append to a growing accumulator, per character — so parse time went
+;; up FOUR times for every doubling of a prose block: 16 KB took 77 ms, 128 KB took 2.95
+;; seconds. The `<script>`/`<style>` branch right next to it scanned with `index-of` and did
+;; the same 128 KB in 0.4 ms.
+;;
+;; This pins the shape rather than a number: doubling the text must not quadruple the work.
+;; A wall-clock assertion would be flaky, so the test compares two sizes against each other
+;; with generous headroom — it passes comfortably at linear and fails loudly at quadratic.
+(defn- parse-ms (source)
+  (let (t0 (os/now-ns))
+    (parse source)
+    (/ (- (os/now-ns) t0) 1000000.0)))
+
+(defn- prose-of (chunks)
+  (str "<div><p>" (string/join (map (range chunks) (fn (_i) "abcdefgh")) "") "</p></div>"))
+
+(describe "text is consumed in runs, not character by character"
+  (test "the parsed result is unchanged — one text node, verbatim"
+    (assert= (parse "<p>hello world</p>") [:p {} "hello world"]))
+
+  (test "escaped braces still survive the run scan"
+    (assert= (parse "<p>a \\{b\\} c</p>") [:p {} "a {b} c"]))
+
+  (test "a run that ends at an interpolation stops there"
+    (assert= (parse "<p>before {@x} after</p>")
+      [:p {} "before " (list 'get 'model :x) " after"]))
+
+  (test "doubling the text does not quadruple the time"
+    (let (small (parse-ms (prose-of 8000)) ; ~64 KB
+          large (parse-ms (prose-of 16000)) ; ~128 KB
+          ;; quadratic would be ~4x; linear ~2x. 3x leaves room for a noisy machine while
+          ;; still failing the behaviour this test exists to catch.
+          ceiling (* 3.0 (math/max small 0.05)))
+      (is (< large ceiling)))))

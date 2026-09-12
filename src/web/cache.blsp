@@ -45,7 +45,11 @@
   ; ensure-supervised — the registered listener that applies peers' invalidations
   (:use web/registry)
   ; node/list — peers to replicate an invalidation to; empty when not distributed
+  ; node/name — stamped into `stats` so a dashboard can say which machine answered
   (:alias node)
+  ; remote-nodes — what a peer is, and whether there are any, is web/cluster's subject; all
+  ; three cluster-aware modules had an identical copy of it
+  (:alias web/cluster)
   (:use set)
   (:alias web/session)
   (:alias table))
@@ -273,6 +277,44 @@
 
 (def- *fragments* (table/new))
 
+;; `fetch` stores a value; `fetch-ttl` stores a value plus its deadline. They share one table,
+;; so one key used with both is a real hazard, and it used to be a SILENT one: `fetch` on a
+;; key `fetch-ttl` wrote answered the wrapper — so a page memoised one way and read the other
+;; rendered `{:value "<div>…" :ttl-at 1757…}` into itself, correct-looking code producing
+;; visible garbage with nothing raised.
+;;
+;; A record rather than a `{:ttl-at …}` map, for the reason `web/template/raw-node` is one: a
+;; shape test can be satisfied by accident (a cached value that is itself a map with a
+;; `:ttl-at` key), an identity cannot. And with the identity available, the collision can be
+;; NAMED — see `expired-entry?` and the two guards below.
+(defrecord ttl-entry (value deadline))
+
+;; Captured from one sentinel at load, the way `web/template/raw-node-id` is, and for both of
+;; its reasons. It is the id this record actually carries — which differs between hatch
+;; standalone (`:web/cache/ttl-entry`) and hatch as a package (`:hatch/web/cache/…`), so a
+;; hardcoded keyword would be false in exactly one of them. And it is captured ONCE: building
+;; a throwaway record per check would put an allocation on `fetch`, which runs per fragment
+;; per request.
+(def- ttl-entry-id (record-id (ttl-entry nil 0)))
+
+(defn- ttl-entry? (v)
+  "True when `v` is one of `fetch-ttl`'s wrappers rather than a plain cached value."
+  (and (record? v) (= (record-id v) ttl-entry-id)))
+
+(defn- one-policy-per-key (key stored expected-ttl?)
+  "Raise when `key` already holds an entry written by the OTHER of `fetch`/`fetch-ttl`.
+
+  Two caching policies on one key is a bug in the caller, and the alternatives are worse
+  than an error: served silently, the value is the wrong shape (a wrapper where a rendered
+  string was expected); papered over, the TTL either applies to entries that never asked for
+  one or is quietly dropped from entries that did."
+  (when (not (= (ttl-entry? stored) expected-ttl?))
+    (error "web/cache: key "
+      (pr-str key)
+      " is used with both fetch and fetch-ttl — "
+      "one key, one caching policy"))
+  nil)
+
 (defn fetch (key build)
   "The cached value for `key`, computing it with `build` on the first ask.
 
@@ -285,7 +327,10 @@
   keys, each computed once — and makes it the wrong tool for anything keyed by user input,
   which would grow without limit."
   (if (table/has? *fragments* key)
-    (do (bump :hits) (table/get *fragments* key))
+    (let (stored (table/get *fragments* key))
+      (one-policy-per-key key stored false)
+      (bump :hits)
+      stored)
     (let (value (build))
       (bump :misses)
       (table/put *fragments* key value)
@@ -306,18 +351,18 @@
   to notice it. A TTL is wrong for at most `ttl-ms`, always, no matter what changed or who
   forgot.
 
-  Costs one `os/now` per hit. The stored entry is `{:value :at}`, so a key written by
-  `fetch` and read by `fetch-ttl` (or the reverse) is not confused for a value — they do
-  not share a namespace by accident, but do not point both at one key either.
+  Costs one `os/now` per hit. Pointing both this and `fetch` at ONE key is an error rather
+  than a guess — see `one-policy-per-key`; it used to be a silent wrong-shape read.
 
   `invalidate` and `clear` still reach these entries, and still replicate to peers."
-  (let (entry (if (table/has? *fragments* key) (table/get *fragments* key) nil)
+  (let (stored (if (table/has? *fragments* key) (table/get *fragments* key) nil)
         now (os/now))
-    (if (and (map? entry) (contains? entry :ttl-at) (< now (get entry :ttl-at)))
-      (do (bump :hits) (get entry :value))
+    (when stored (one-policy-per-key key stored true))
+    (if (and stored (< now (ttl-entry-deadline stored)))
+      (do (bump :hits) (ttl-entry-value stored))
       (let (value (build))
         (bump :misses)
-        (table/put *fragments* key {:value value :ttl-at (+ now ttl-ms)})
+        (table/put *fragments* key (ttl-entry value (+ now ttl-ms)))
         value))))
 
 ;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
@@ -347,7 +392,7 @@
      :misses misses
      :hit-rate (if (= asked 0) nil (math/round-to (/ (* 100.0 hits) asked) 1))
      :node (check-allow :discarded-catch (try (node/name) (catch _e :nonode)))
-     :peers (into [] (remote-nodes))
+     :peers (into [] (web/cluster/remote-nodes))
      :listening? (not (nil? (check-allow :discarded-catch
                               (try (proc/whereis :hatch-cache) (catch _e nil)))))}))
 
@@ -385,16 +430,11 @@
 ;; mechanism in the framework rather than two, addressed by registered name on each peer and
 ;; best-effort per peer, so a link that just dropped is skipped instead of failing the write.
 
-(defn remote-nodes ()
-  "The connected peer node names, or an empty list when this runtime is not a distributed node
-  (so every cluster path below is a no-op and a single-node app is unaffected)."
-  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
-
 (defn- replicate (msg)
   "Send `msg` to every peer's cache listener — once each, and never re-sent by the receiver,
   so there are no loops and a write costs O(peers) messages. Best-effort: a peer not running
   the listener, or a link that just dropped, is skipped rather than failing the invalidation."
-  (dolist (n (remote-nodes))
+  (dolist (n (web/cluster/remote-nodes))
     (check-allow :discarded-catch
       (try (send {:name :hatch-cache :node n} msg) (catch _e nil)))))
 
@@ -415,7 +455,7 @@
     ([:clear] (do (local-clear) (cache-listener peers)))
     (_ (cache-listener peers))
     (after *cluster-poll-ms*
-      (let (now (into #{} (remote-nodes))
+      (let (now (into #{} (web/cluster/remote-nodes))
             returned (difference now peers))
         (when (not (empty? returned)) (local-clear))
         (cache-listener now)))))
@@ -434,7 +474,7 @@
     [{:id :hatch-cache
       :name :hatch-cache
       :restart :permanent
-      :start (fn () (spawn (cache-listener (into #{} (remote-nodes)))))}]
+      :start (fn () (spawn (cache-listener (into #{} (web/cluster/remote-nodes)))))}]
     :hatch-cache))
 
 ;; ---- compressed representations ---------------------------------------------

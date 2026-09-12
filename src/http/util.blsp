@@ -115,10 +115,26 @@
   upload) from the parsed carrier body."
   (bytes (map (string/->list carrier) string/char->int)))
 
-(defn carrier->text (carrier)
-  "Decode a carrier string's bytes as UTF-8 text, falling back to the carrier itself if the
-  bytes aren't valid UTF-8 (a binary body — which text handlers don't read anyway)."
-  (try (string/bytes-> (carrier->bytes carrier)) (catch _e carrier)))
+;; `carrier->text` used to sit here — the decode `web/conn` did on a body the old parser
+;; handed over as a carrier string. The parser has been bytes-native since ADR-141, so `build`
+;; decodes the `bytes` directly and nothing has called this since. `carrier->bytes` above stays:
+;; the parser cross-check in `http_request_bytes_test` still needs it to compare the two.
+
+(defn crlf-at? (b i)
+  "True if the two bytes at index `i` of `b` are CR LF. False — not an error — when `i` or
+  `i+1` is out of bounds.
+
+  `http/request` and `http/multipart` each had one of these, under the same name and with
+  DIFFERENT contracts: multipart's bounds-checked, request's assumed the caller had already
+  proved `i+1` was in range. Two functions with one name and different preconditions is worse
+  than either alone — a reader who learns the checked one and calls the other reads off the
+  end of the buffer. The checked contract wins because it is the safe one to be wrong about,
+  and the two comparisons it costs are per chunk boundary, not per byte."
+  (and (>= i 0)
+    (>= (bytes/length b) (+ i 2))
+    (= (bytes/at b i) 13)
+    (= (bytes/at b (+ i 1)) 10)))
+(sig crlf-at? (bytes int -> bool))
 
 ;; ---- request body parser ----
 

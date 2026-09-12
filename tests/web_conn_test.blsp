@@ -296,8 +296,6 @@
   (test "a plaintext listener's is not"
     (assert= (secure? (build (assoc *req* :scheme "http"))) false))
   (test "a proxy header still wins over the listener's own scheme"
-    (is (secure? (build (assoc *req*
-                          :scheme "http"
-                          :headers {:x-forwarded-proto "https"})))))
+    (is (secure? (build (assoc *req* :scheme "http" :headers {:x-forwarded-proto "https"})))))
   (test "and no scheme at all is still not secure"
     (assert= (secure? (build *req*)) false)))

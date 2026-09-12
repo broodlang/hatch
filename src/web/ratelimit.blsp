@@ -45,16 +45,16 @@
 
       (defrecord redis-store (pool))
       (impl BucketStore my-app/redis-store
-        (take-tokens [store key cost cfg now] …))   ; -> :ok | [:deny retry-ms]
+        (take-tokens [store key cost config now] …))   ; -> :ok | [:deny retry-ms]
 
   A record, so the store carries its own connection instead of closing over one, and so a
-  store missing the op fails by name rather than as `nil is not callable`. `cfg` is
+  store missing the op fails by name rather than as `nil is not callable`. `config` is
   `{:rate :per :burst}` as `bucket-config` resolves it, and `now` is epoch ms from the
   caller — passed in rather than read inside, so an alternative store is testable at a time
   of the test's choosing. `refill` and `spend` are public so a store can reuse the
   token-bucket arithmetic rather than reimplement it; a Postgres- or Redis-backed store is
-  roughly those two functions around a row. A plain `{:take (fn (key cost cfg now) …)}` map
-  is still accepted for a store with nothing to carry.
+  roughly those two functions around a row. A store is a value implementing the ability and
+  nothing else — a map carrying a function is not one, and dispatch says so by name.
 
   ## What this does not do, and will not pretend to
 
@@ -98,37 +98,37 @@
 
 ; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
 
-(defn refill (bucket cfg dnow)
-  "Refill `bucket` to time `dnow`: add the tokens accrued since its timestamp, capped at the
+(defn refill (bucket config now)
+  "Refill `bucket` to time `now`: add the tokens accrued since its timestamp, capped at the
   bucket's capacity (`:burst`). A fresh key starts full."
-  (let (burst (get cfg :burst)
-        per-ms (/ (get cfg :rate) (* 1.0 (get cfg :per)))
+  (let (burst (get config :burst)
+        per-ms (/ (get config :rate) (* 1.0 (get config :per)))
         tokens (get bucket :tokens (* 1.0 burst))
-        ts (get bucket :ts dnow)
-        refilled (+ tokens (* (- dnow ts) per-ms)))
-    {:tokens (math/min (* 1.0 burst) refilled) :ts dnow}))
+        ts (get bucket :ts now)
+        refilled (+ tokens (* (- now ts) per-ms)))
+    {:tokens (math/min (* 1.0 burst) refilled) :ts now}))
 
-(defn spend (bucket cfg cost dnow)
+(defn spend (bucket config cost now)
   "Try to spend `cost` tokens from a refilled `bucket`. Returns `[new-bucket :ok]` when it had
   enough, else `[unchanged-bucket [:deny retry-ms]]` with the ms until `cost` tokens accrue."
-  (let (b (refill bucket cfg dnow)
-        tokens (get b :tokens))
+  (let (refilled (refill bucket config now)
+        tokens (get refilled :tokens))
     (if (>= tokens cost)
-      [(assoc b :tokens (- tokens cost)) :ok]
-      (let (per-ms (/ (get cfg :rate) (* 1.0 (get cfg :per)))
+      [(assoc refilled :tokens (- tokens cost)) :ok]
+      (let (per-ms (/ (get config :rate) (* 1.0 (get config :per)))
             deficit (- cost tokens)
             retry-ms (math/ceil (/ deficit per-ms)))
-        [b [:deny retry-ms]]))))
+        [refilled [:deny retry-ms]]))))
 
 (defn- ratelimit-loop (buckets)
-  "Serialize every bucket read-refill-spend. `[:take key cost cfg dnow from r]` replies
+  "Serialize every bucket read-refill-spend. `[:take key cost config now from r]` replies
   `[:take r :ok]` or `[:take r [:deny retry-ms]]`; `[:reset from r]` clears all buckets (tests)."
   (receive
-    ([:take key cost cfg dnow from r] (let (result (spend (get buckets key {}) cfg cost dnow)
-                                            bucket (nth result 0)
-                                            decision (nth result 1))
-                                        (send from [:take r decision])
-                                        (ratelimit-loop (assoc buckets key bucket))))
+    ([:take key cost config now from r] (let (result (spend (get buckets key {}) config cost now)
+                                              bucket (nth result 0)
+                                              decision (nth result 1))
+                                          (send from [:take r decision])
+                                          (ratelimit-loop (assoc buckets key bucket))))
     ([:reset from r] (do (send from [:reset r]) (ratelimit-loop {})))
     ;; How many keys are held. Worth being able to ask: the bucket table is keyed by
     ;; whatever `:key-fn` returns, so a key derived from user input grows without bound and
@@ -145,7 +145,7 @@
       :start (fn () (spawn (ratelimit-loop {})))}]
     :hatch-ratelimit))
 
-(defn take-token (key cost cfg &optional (now (os/now)))
+(defn take-token (key cost config &optional (now (os/now)))
   "Ask the in-memory limiter to spend `cost` tokens from `key`'s bucket. Returns `:ok` or
   `[:deny retry-ms]`. The store contract's `:take`, and usable directly.
 
@@ -158,7 +158,7 @@
   drives refill — which is what lets `spend` be tested without a running limiter, and what
   lets an alternative store be exercised at a time of the test's choosing."
   (let (r (ref))
-    (send (limiter) [:take key cost cfg now (self) r])
+    (send (limiter) [:take key cost config now (self) r])
     (receive
       ([:take ^r decision] decision)
       (after 1000 :ok))))
@@ -218,7 +218,7 @@
 
   One op, and everything it needs is an argument: `now` is the caller's clock rather than
   one read inside the store, so an implementation is testable at a time of the test's
-  choosing, and `cfg` is `{:rate :per :burst}` exactly as `bucket-config` resolves it, so a
+  choosing, and `config` is `{:rate :per :burst}` exactly as `bucket-config` resolves it, so a
   store reads the plug's configuration instead of reinventing the defaults. `refill` and
   `spend` are public for the same reason — a Postgres- or Redis-backed store is those two
   functions around a row, not a second token-bucket implementation that drifts from this one.
@@ -228,10 +228,10 @@
 
       (defrecord redis-store (pool))
       (impl BucketStore my-app/redis-store
-        (take-tokens [store key cost cfg now] …))
+        (take-tokens [store key cost config now] …))
 
       (rate-limit {:store (redis-store my-pool) :rate 100 :per 60000})"
-  (take-tokens [self key cost cfg now] :-> any))
+  (take-tokens [self key cost config now] :-> any))
 
 ;; The default bucket store: one supervised process per node, holding every key's bucket.
 ;;
@@ -248,11 +248,11 @@
 
 (impl BucketStore
   web/ratelimit/node-local-store
-  (take-tokens [_store key cost cfg now] (take-token key cost cfg now)))
+  (take-tokens [_store key cost config now] (take-token key cost config now)))
 
 ;; So a misconfigured `:store` names itself in a log line or a REPL, rather than printing as
 ;; the empty map the record is underneath.
-(impl Display web/ratelimit/node-local-store (->string [_s] "#<ratelimit node-local-store>"))
+(impl Display web/ratelimit/node-local-store (->string [_store] "#<ratelimit node-local-store>"))
 
 (def in-memory-store
   ;; The `:store` default, and the name it has always had. A VALUE implementing `BucketStore`
@@ -261,15 +261,13 @@
   ;; error at the point of the call instead of `nil is not callable` one frame in.
   (node-local-store))
 
-;; A `{:take (fn (key cost cfg now) …)}` map is still a store. That was the contract before
-;; the ability and it is a perfectly good one for a store with no state to carry — a closure
-;; over a connection is a record with extra steps. Both spellings reach the same call site.
-(impl BucketStore
-  :map (take-tokens [store key cost cfg now]
-    (let (take (get store :take))
-      (if (fn? take)
-        (take key cost cfg now)
-        (error "web/ratelimit: a map :store must carry a :take function, got: " store)))))
+;; There is deliberately no `:map` impl. A `{:take fn}` map was the contract before the
+;; ability, and carrying both spellings would mean two documented ways to write one thing,
+;; two shapes for a reader to recognise, and a map that merely LOOKS like a store failing at
+;; the call rather than at the definition. A store is a value implementing `BucketStore`.
+;;
+;; The cost of dropping it is a clear error instead of a silent one: a map handed as `:store`
+;; has no impl, so dispatch raises by name.
 
 ; ---- key selection ----
 
@@ -321,7 +319,7 @@
       (hatch/web/ratelimit/ipv6-network \"2c0f:ef18:1b2e:0:231b:1:2:3\") ;=> \"2c0f:ef18:1b2e:0000::/64\"
       (hatch/web/ratelimit/ipv6-network \"::1\") ;=> \"0000:0000:0000:0000::/64\"
       (hatch/web/ratelimit/ipv6-network \"10.0.0.1\") ;=> nil"
-  (let (groups (ipv6-groups (unbracket address)))
+  (let (groups (web/auth/ipv6-groups (unbracket address)))
     (if (nil? groups)
       nil
       (str (string/join (into [] (take groups *ipv6-prefix-groups*)) ":") "::/64"))))
@@ -332,21 +330,6 @@
     (if (string/starts-with? lower "[")
       (let (close (index-of lower "]")) (if (< close 0) lower (string/substring lower 1 close)))
       lower)))
-
-(defn- ipv6-groups (address)
-  "IPv6 `address` as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
-  run. nil for anything that is not IPv6."
-  (if (< (count (seq/filter (string/->list address) (fn (c) (= c ":")))) 2)
-    nil
-    (let (halves (string/split address "::")
-          head (seq/filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
-          after (second halves)
-          tail (if (nil? after) [] (seq/filter (string/split after ":") (fn (g) (not (= g "")))))
-          gap (- 8 (+ (count head) (count tail)))
-          filled (append (into [] head) (map (range (math/max 0 gap)) (fn (_g) "0")) (into [] tail)))
-      (if (= (count filled) 8)
-        (apply vector (map filled (fn (g) (string/pad-left (string/lower g) 4 "0"))))
-        nil))))
 
 ; ---- the plug ----
 
@@ -370,7 +353,7 @@
   Every part of the decision is replaceable — see the module docstring for the four seams
   and their contracts. Emits `[:hatch :ratelimit :denied]` telemetry on a rejection, so a
   429 storm is visible to `web/metrics` and a dashboard rather than only to the access log."
-  (let (cfg (bucket-config opts)
+  (let (config (bucket-config opts)
         cost (get opts :cost 1)
         key-fn (get opts :key-fn client-key)
         on-limit (get opts :on-limit limited)
@@ -384,7 +367,7 @@
               ;; parameter can charge for it (a page size, a batch length) instead of
               ;; pretending every request costs the same.
               spent (if (fn? cost) (cost conn) cost))
-          (match (take-tokens store key spent cfg (os/now))
+          (match (take-tokens store key spent config (os/now))
             (:ok (do (bump :allowed) conn))
             ([:deny retry-ms] (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
                                 (bump :denied)

@@ -139,15 +139,23 @@
   Only trustworthy because the proxy OVERWRITES these on the way in. Read them from a
   request that did not come through one — a direct connection, a misconfigured route — and
   they are whatever the client typed, so an allow-list built on this must be the outer of
-  two defences and never the only one."
+  two defences and never the only one.
+
+  **Normalised, which is not cosmetic.** A forwarded address may carry the source PORT —
+  RFC 7239 spells it `for=\"192.0.2.43:47011\"`, and proxies do it — and this answer is what
+  `web/ratelimit` keys a bucket on. Unnormalised, one client got a DIFFERENT bucket per
+  connection and the rate limiter silently never limited: not a degraded defence, an absent
+  one, on the login form it exists to protect. `allow-ips` already normalised both sides
+  before comparing, so the two layers disagreed about who a caller was — which is what having
+  the rule in one place and not the other looks like from the outside."
   (let (headers (or (conn-headers conn) {})
         direct (first (seq/filter (map *client-ip-headers* (fn (h) (get headers h)))
                         (fn (v) (and (string? v) (not (= v ""))))))
         forwarded (get headers :x-forwarded-for))
     (cond
-      direct (string/trim direct)
+      direct (normalise-ip direct)
       (and (string? forwarded) (not (= forwarded "")))
-        (string/trim (first (string/split forwarded ",")))
+        (normalise-ip (first (string/split forwarded ",")))
       else nil)))
 
 (defn- normalise-ip (address)
@@ -163,9 +171,15 @@
         colons (count (seq/filter (string/->list unbracketed) (fn (c) (= c ":")))))
     (if (= colons 1) (first (string/split unbracketed ":")) unbracketed)))
 
-(defn- ipv6-groups (address)
+(defn ipv6-groups (address)
   "An IPv6 address as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
-  run. nil for anything that is not IPv6."
+  run. nil for anything that is not IPv6.
+
+  Public because `web/ratelimit/network-key` needs it too, and carried its own near-identical
+  copy. That module already borrows `client-ip` from here on the stated principle that the
+  header naming a caller for the auth gate must be the one naming them for the limiter; how
+  that address is then PARSED is the same argument. Two parsers that disagree mean an address
+  the allow-list admits is bucketed as a different client."
   (if (< (count (seq/filter (string/->list address) (fn (c) (= c ":")))) 2)
     nil
     (let (halves (string/split address "::")

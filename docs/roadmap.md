@@ -75,6 +75,152 @@ vary per session rather than per compile. And `web/auth` grew `bearer-auth`, who
 match is case-insensitive as RFC 9110 §11.1 requires; the obvious
 `(string/starts-with? raw "Bearer ")` rejects the `bearer` several clients send.
 
+**0.14.0 names what the framework already had.** Four seams that were maps of functions or
+maps of keys are now abilities and records, which is the difference between a mistake the
+toolchain reports and one that reads as ordinary behaviour.
+
+`web/session` grew the `SessionStore` ability — the answer to Q5 (see *Open design
+questions*). `web/ratelimit`'s `:store` became `BucketStore`, so a store carries its own pool
+as record fields rather than closing over one; the `{:take fn}` map it took before is no
+longer a store, because two spellings for one thing is two shapes a reader has to recognise
+and a look-alike map that fails at the call instead of at the definition. `web/live`'s
+`Encode` fallback now delegates to the stdlib `JsonEncode`, so an app
+writes one impl for both its HTTP JSON bodies and the live wire instead of discovering, on the
+socket, that a second and private ability existed.
+
+The Conn is a record and so are the two specs (`web/live/view-spec`,
+`web/component/component-spec`). The point is the read: `(get conn :halted)` is a silent nil
+that means "not halted", and `(get spec :render-slots)` mistyped means "no slots", which
+degrades change tracking to re-rendering everything — correctly, forever, with nothing to see.
+Both are now undefined functions `nest check` reports. The generated accessors read a plain map
+as happily as a record, so a synthetic conn in a test and a hand-built spec both keep working;
+what changed is that the framework's own reads go through a name. Two traps came with it, both
+now pinned by tests: a declared field is always *present*, so `contains?` cannot ask "was this
+ever set?" (`conn->response` was stamping `:route nil` onto every response), and a record is
+not `=` to a map of the same fields. The session no longer merges a spec's keys over its view
+either — it carries the spec under `:spec`, so a spec field and a session field cannot collide.
+
+Two bugs fell out of declaring the fields. `web/conn/secure?` read a `:scheme` key nothing
+ever set, so its "the server terminated TLS itself" branch could not fire — an app serving its
+own HTTPS reported every request as insecure, which suppressed HSTS and cleared the session
+cookie's `Secure` flag on exactly the deployment that had earned both; `http/server` stamps it
+now. And `web/pubsub` and `web/presence` each carried their own copy of the vault/monitor
+bookkeeping, identical down to the `(when ref (demonitor ref))` — one copy now, in
+`web/registry`, with the demonitor invariant finally under a test.
+
+**One JSON decoder, and it is the fast one.** `web/live` carried a hand-written
+recursive-descent parser — nineteen functions, 175 lines — built to route around two brood
+quadratics on a large inbound frame (`string/char-at` scanning codepoints, per-item append
+copying the accumulator). Both were real when it was written and neither is now, so the
+hand-rolled version had quietly become the slow one: measured on the two frames a session
+actually sees, `json/decode` plus a `stringify-keys` pass runs **2.3x faster on a small event
+and 4.2x on a 48 KB paste**, the stringify included. The keys still come out as strings,
+because a view's `on` handler reads `(get params "value")` — the same spelling a query param
+uses.
+
+The one behaviour that changed is worth stating: **malformed input now refuses the frame
+instead of degrading inside it.** The old parser answered U+FFFD for a bad `\uXXXX` and nil
+for a number token like `1.2.3`, so a crafted frame was dispatched as an event with a hole in
+it and the hole reached a model. `json/decode` raises, `parse-client-frame` already caught, and
+the frame is dropped whole. The safety property is the one the old comments claimed — a
+crafted frame cannot crash the session — reached by refusing the frame rather than guessing at
+it. `stringify-keys` also stopped being two identical copies (`http/util` and `web/session`);
+it is `http/util`'s, one layer below everything that decodes JSON.
+
+**The `.bml` parser had a quadratic in the one thing templates are mostly made of.** Text was
+consumed a character at a time — a slice of the whole remaining input, plus an append to a
+growing accumulator, per character — so a prose block cost four times as much for every
+doubling: 16 KB took 77 ms, 32 KB 223 ms, 64 KB 753 ms, **128 KB 2.95 seconds**. The
+`<script>`/`<style>` branch immediately beside it scanned with `index-of` and did the same
+128 KB in 0.4 ms, which is the measurement that made it obvious: two branches of one parser,
+ten thousand times apart. `string/span-until` finds the next `<`, `{` or `\` in a single
+native scan, so a run of text is now one slice and one append — **2950 ms → 0.6 ms, and flat**.
+
+`read-while` went the same way. It took a character predicate, and all six of its call sites
+passed the same one, so the generality bought nothing and cost a full-remainder copy per
+character of every tag and attribute name; as `read-name` it is one `span-until` and one
+slice, and a 1600-element template parses in 537 ms rather than 1147 ms. `skip-ws` is
+`string/triml` (guarded, since most calls have nothing to skip and `triml` allocates
+regardless) — verified against the hand-rolled loop over every codepoint 1–160.
+
+What remains is bounded and deliberate: the parser still advances by re-slicing once per
+*token*, so a very large template is mildly super-linear. Removing that means threading an
+index cursor through all 500 lines, and index access is itself O(i) on a UTF-8 string, so it
+is not the obvious win it looks like. A realistic template parses in tens of milliseconds, at
+macro-expansion time, once. The catastrophic case was the text one, and it is gone; a test
+pins the shape rather than a wall-clock number.
+
+**`web/static` wrote its response headers out six times, and they had drifted.** The 200, 206
+and 416 paths (each in a text and a bytes flavour) each carried their own literal map of
+content-type, ETag, cache-control, accept-ranges and nosniff — and `Vary: Accept-Encoding` had
+made it onto the two 200s and no range response, nor onto the 304. A shared cache storing a
+206 therefore held a body with nothing saying it varies by content coding, and could hand a
+gzip entity to a client that never asked for one. They come from `asset-headers` now, with
+`rangeable-headers` adding the range advertisement — kept separate deliberately, because the
+precompressed path serves a whole sibling and never honours a `Range`, so it must not claim
+to. The 304 gained `Vary` (RFC 9110 §15.4.5) and nothing else: it has no body, so the headers
+describing one have nothing to say. Four tests pin the set per status.
+
+Two smaller ones alongside it. `web/parts`' `walk-element` bound a local named `second`,
+shadowing the prelude function for its whole body. And the component-table parameter
+`live-components` was a bare symbol agreed on by three files that never see each other — the
+one `deflive` binds, the one `component-slot-form` passes, and the one `deps-of` recognises as
+"always dirty". Renaming the parameter would have left `deps-of` matching a name nothing
+binds, and the failure is silent: a component slot stops being `:all`, so a component's own
+state change — which touches no model key by definition — never marks its slot dirty and the
+component simply freezes on screen. It is `web/parts/*component-table-param*` now, with a test
+asserting the three-way agreement.
+
+**`web/cache`'s two fragment caches shared a table and not a shape.** `fetch` stores a value;
+`fetch-ttl` stores a value plus its deadline. One key used with both read back the *wrapper* —
+so a fragment memoised one way and read the other rendered `{:value "<div>…" :ttl-at 1757…}`
+into the page: correct-looking code, visible garbage, nothing raised. The docstring warned
+against it and nothing enforced it. The wrapper is a record now, for the reason
+`web/template/raw-node` is one — a shape test can be satisfied by accident, an identity cannot
+— and with an identity to test, the collision is named at the point it happens instead of
+travelling into a response.
+
+**A rate-limit bypass, found by pulling on a duplicate.** `web/auth/client-ip` answered the
+forwarded address verbatim, and a forwarded address may carry the source PORT — RFC 7239
+spells it `for="192.0.2.43:47011"`, and proxies do it. That answer is what `web/ratelimit`
+keys a bucket on, so one client got a *different bucket per connection* and the limiter
+silently never limited: not a weakened defence but an absent one, on the login form the plug
+is put in front of. `allow-ips` had normalised both sides before comparing all along, so the
+two layers already disagreed about who a caller was — which is exactly what the same rule
+living in one place and not the other looks like from outside. `client-ip` normalises now
+(`[2001:db8::1]:5000`, `203.0.113.9:41001` and `  203.0.113.9  ` all resolve to one client),
+and tests pin both halves: one client is one bucket, and two clients still are not.
+
+It surfaced while consolidating `ipv6-groups`, which `web/auth` and `web/ratelimit` each had a
+copy of. The duplicate was the symptom; the divergence was the bug.
+
+**Four helpers that existed in two or three copies each now exist once.** The one that
+mattered is `script-safe` — the escaper that stops a `</script>` inside JSON-LD or a WebMCP
+tool block from ending the element and spilling the rest of the data into the page as markup.
+`web/seo` and `web/mcp` each had a copy, byte for byte identical, which is how one gets
+hardened and the other does not; it is `web/template/script-safe` now, beside `escape-html`,
+because escaping for an HTML context is that module's job. `ipv6-groups` was in `web/auth` and
+`web/ratelimit` — the limiter already borrows `client-ip` from auth on the stated principle
+that both layers must agree about who a caller is, and how the address is PARSED is the same
+argument; two parsers that disagree mean an address the allow-list admits is bucketed as
+someone else. `crlf-at?` was in `http/request` and `http/multipart` under one name with
+DIFFERENT contracts — multipart's bounds-checked, request's assumed the caller had proved the
+index — which is worse than either alone, since a reader who learns one and calls the other
+reads off the end of a buffer; the checked contract won and lives in `http/util`.
+`remote-nodes` was in `web/cache`, `web/pubsub` and `web/presence`, identical `try`-guard and
+all, and belongs in `web/cluster`: what a peer is, and whether there are any, is that module's
+subject and the other three only ask.
+
+Also gone: `http/util/carrier->text` (nothing has called it since the parser went bytes-native
+in ADR-141) and `http/server`'s `head-complete?`/`tail3`, left behind by the `tcp/read-until`
+adoption — one of them documented in terms of a `worker-read-head` that no longer exists.
+
+**One breaking change, and it needs to travel with the hive ref bump.**
+`web/seo/sitemap-entries` took a leading `site` it never read; it is `(sitemap-entries routes
+opts)` now. Entries are paths — the origin is applied per entry when the XML is rendered — so
+there was nothing there to use it for and a reader had to go looking to find that out. hive's
+`db_sitemap_test` was the one caller outside this repo and is updated in the same breath.
+
 **0.11.0 adds two checks that were already documented and unenforced.** `web/audit` grew a
 fourth rule: a page that declares WebMCP tools and still has a GET form no single tool can
 stand in for. Both halves work — the agent registers the tools, the form renders — and the
@@ -189,7 +335,14 @@ appetite.
 
 None open. The three stale `bytes` type-signature warnings recorded here (`count`/`fold`
 called directly on `bytes` at `http/response.blsp`, `http/util.blsp`, `web/static.blsp`) are
-**gone as of 2026-08-13** — `nest check` reports zero warnings across `src/` and `tests/`.
+**gone as of 2026-08-13** — `nest check` reports zero warnings across `src/` and `tests/`,
+and as of 2026-09-12 so does `nest check --strict`. The six that had accumulated there were
+all one shape — index arithmetic the checker widens to `number` where a `string/substring` or
+an `epoch-ms->` wants an `int` — and each had a fix worth making on its own terms: a
+one-character `substring` became `string/char-at`, a `math/min` over two indices got the
+`math/floor` that says it is one, `sitemap-date` now floors a computed (float) timestamp
+rather than handing it over, and `web/audit`'s closing-tag widths became named constants
+instead of the same literal `7` written in two functions that had to agree.
 They were never real perf bugs (analysed at the time: `count` on `bytes` dispatches to the
 O(1) native `byte-length`, and the `http/util` fold ran over at most 4 bytes); they cleared
 without a dedicated fix, partly from the bytes-native port routing that fold through `seq`,
@@ -319,14 +472,20 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
 | Q8 | Auth: `on-mount-guard` clause in `deflive`, or convention in `mount`? | Phase 7 |
 | Q10 | Head updates: `[:set-title]` effect, or a `<head>` slot in the layout? | Phase 8 |
 
-**Q5 is answered (0.14.0): pluggable, through an ability.** `fetch-session` takes a signing
-secret — meaning the built-in `cookie-store` — or any value implementing `SessionStore`, whose
-two ops (`session-read` / `session-write`) are both handed the conn, so a store owns both how
-the browser is told which session this is and where the data behind it sits. A store is a
-value passed in rather than a name resolved through configuration, so it carries its own pool
-as fields. Hatch ships only the cookie store, deliberately: a server-side session is per-node
+**Q5 is answered (0.14.0): pluggable, through an ability.** `fetch-session` takes a value
+implementing `SessionStore` — `(cookie-store secret {})` for the built-in one — whose two ops
+(`session-read` / `session-write`) are both handed the conn, so a store owns both how the
+browser is told which session this is and where the data behind it sits. A store is a value
+passed in rather than a name resolved through configuration, so it carries its own pool as
+fields. Hatch ships only the cookie store, deliberately: a server-side session is per-node
 unless it is replicated, and shipping one that quietly logs a user out on every other request
 behind a load balancer would be worse than shipping none.
+
+It briefly also took a bare secret, meaning "the cookie store with this secret". One argument
+that is sometimes a secret and sometimes a store is two shapes to recognise and two branches
+to keep working, for two saved characters — and it hid the store from the call site, which is
+the thing worth seeing. `(cookie-store secret {})` names the store and shows where its options
+go; a bare secret is a string, implements nothing, and now fails at the plug.
 
 ---
 

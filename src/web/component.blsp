@@ -43,6 +43,19 @@
   ; and the tagged slot value the parent diffs it as
   (:alias web/parts))
 
+; ---- the component spec ----
+;
+;; What a `deflive-component` module exposes, as a value — the component's half of what
+;; `web/live/view-spec` is for a view, and named for the same reason: `(get spec
+;; :render-static)` mistyped is a silent nil, and a nil there means "this component predates
+;; the static/dynamic split", which is a real branch. So a typo does not fail — it quietly
+;; drops the component back to shipping its whole HTML on every change.
+;;
+;; The accessors read a plain map as happily as a record, so a hand-built spec still works.
+(defrecord component-spec (mount render render-static render-dynamic handle-event))
+
+(impl Display web/component/component-spec (->string [_spec] "#<live component-spec>"))
+
 ; ---- the LiveComponentModule behaviour ----
 
 (defbehaviour LiveComponentModule
@@ -111,14 +124,12 @@
         handle-body)
       ; A 0-arg thunk, mirroring deflive's live-spec — re-resolves the component's
       ; functions by name each call, so hot-reloaded code is picked up.
+      ;; Positional, in `component-spec`'s declared field order.
       (list 'defn
         'live-component-spec
         (list)
-        {:mount 'mount
-         :render 'render
-         :render-static 'render-static
-         :render-dynamic 'render-dynamic
-         :handle-event 'handle-event}))))
+        (list 'web/component/component-spec
+          'mount 'render 'render-static 'render-dynamic 'handle-event)))))
 
 ; ---- the components table: {id -> {:module 'mod :spec-thunk spec-thunk :state state}} ----
 ; Storing the spec-thunk alongside state (not just state) is what lets an event or an
@@ -150,7 +161,7 @@
         same-component? (and entry (= (get entry :module) module)))
     (if same-component?
       (get entry :state)
-      (let (initial ((get (spec-thunk) :mount) id assigns))
+      (let (initial ((component-spec-mount (spec-thunk)) id assigns))
         (table/put components-table id (component-entry module spec-thunk initial))
         initial))))
 
@@ -201,12 +212,12 @@
   (let (id (get assigns "id")
         state (slot-state module spec-thunk assigns components-table)
         spec (spec-thunk)
-        statics (get spec :render-static))
+        statics (component-spec-render-static spec))
     (if (nil? statics)
-      (web/template/render [:div {:data-cid id} ((get spec :render) state)])
+      (web/template/render [:div {:data-cid id} ((component-spec-render spec) state)])
       (web/parts/component-slot id
         (wrapper-statics id statics)
-        ((get spec :render-dynamic) state)))))
+        ((component-spec-render-dynamic spec) state)))))
 
 (defn render-slot-html (module spec-thunk assigns components-table)
   "`render-slot` as a plain HTML string — the whole component, wrapper included.
@@ -230,7 +241,7 @@
     (when entry
       (let (spec-thunk (get entry :spec-thunk)
             new-state (try
-                        ((get (spec-thunk) :handle-event) name params (get entry :state))
+                        ((component-spec-handle-event (spec-thunk)) name params (get entry :state))
                         (catch _ (get entry :state))))
         (table/put components-table cid (component-entry (get entry :module) spec-thunk new-state)))))
   nil)

@@ -34,6 +34,9 @@
   (:use web/registry)
   ; broadcast/subscribe — non-present observers ride pubsub (monitored + cross-node for free)
   (:alias web/pubsub)
+  ; remote-nodes — the peers a roster change is replicated to; web/cluster owns what a peer
+  ; is, and this module used to carry its own copy of the question
+  (:alias web/cluster)
   ; set/set — distinct tracked pids as a first-class #{} set (ADR-060), no O(n²) dedupe
   (:alias set))
 
@@ -184,10 +187,6 @@
 ; node started, `(node/list)` is empty and every peer step is a no-op — single-node behaviour is
 ; unchanged.
 
-(defn remote-nodes ()
-  "Connected peer node names, or empty when this runtime isn't a distributed node."
-  (or (check-allow :discarded-catch (try (node/list) (catch _e nil))) (list)))
-
 (defn- presence-remote-roster (remotes topic)
   "The concatenation of every peer's last-reported roster for `topic`."
   (apply append (map (%map-pairs remotes) (fn (kv) (get (first (rest kv)) topic (list))))))
@@ -227,7 +226,7 @@
   replication). A no-op with no peers."
   (let (me (node/name)
         roster (presence-roster state topic))
-    (dolist (n (remote-nodes)) (presence-sync-to n me topic roster))))
+    (dolist (n (web/cluster/remote-nodes)) (presence-sync-to n me topic roster))))
 
 (defn- presence-sync-all-to (state target-node)
   "Send this node's full local rosters (every topic) to `target-node` — the one-time bootstrap

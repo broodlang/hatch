@@ -42,7 +42,7 @@
       {}
       [:script
         {:type "application/json" :id *block-id*}
-        (web/template/raw (script-safe (json/encode (map tools validated-tool))))]
+        (web/template/raw (web/template/script-safe (json/encode (map tools validated-tool))))]
       [:script {:type "module" :src (client-path)}]]))
 
 (def *form-tool-attr* "toolname")
@@ -118,25 +118,17 @@
      :inputSchema schema
      :endpoint (get tool :endpoint)}))
 
+;; The characters a tool name may contain, as a SET — the same shape `web/bml` and
+;; `http/request` use, so the check is one native scan rather than a per-character loop
+;; comparing codepoint ranges by hand.
+(def- *name-chars*
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
 (defn valid-name? (name)
   "A tool name an agent can address: letters, digits, `_` or `-`, nothing else."
   (and (string? name)
     (> (string/length name) 0)
-    (all-chars? name
-      (fn (c)
-        (or (and (>= (string/char->int c) 48) (<= (string/char->int c) 57))
-          (and (>= (string/char->int c) 65) (<= (string/char->int c) 90))
-          (and (>= (string/char->int c) 97) (<= (string/char->int c) 122))
-          (= c "_")
-          (= c "-"))))))
-
-(defn- all-chars? (s pred)
-  (letrec (go (fn (i)
-                (cond
-                  (>= i (string/length s)) true
-                  (not (pred (string/char-at s i))) false
-                  else (go (+ i 1)))))
-    (go 0)))
+    (= (string/span name 0 *name-chars*) (string/length name))))
 
 (defn object-schema? (schema)
   "Whether `schema` is the object JSON Schema the tool contract requires. A tool takes named
@@ -145,10 +137,6 @@
   (and (map? schema)
     (= (get schema :type) "object")
     (map? (get schema :properties))))
-
-(defn- script-safe (s)
-  "JSON made safe to sit inside a `<script>` element."
-  (string/replace (string/replace s "</" "<\\/") "<!--" "<\\!--"))
 
 ;; ---- serving the bundled client ---------------------------------------------
 

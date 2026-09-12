@@ -4,6 +4,7 @@
   (:use-internals web/presence)
   ; observer mode rides pubsub; the test barriers on a synchronous pubsub call
   (:alias web/pubsub)
+  (:alias web/cluster)
   (:use test))
 
 ;; Presence is process-level: a registry tracks {topic -> members} and pushes the roster to
@@ -164,7 +165,7 @@
       (assert= (includes? ts "r2") true)
       (assert= (count ts) 2)))
   (test "remote-nodes is empty on a single (non-distributed) runtime"
-    (assert= (remote-nodes) (list))))
+    (assert= (web/cluster/remote-nodes) (list))))
 
 (describe "presence--record-remote: peer state doesn't leak empty rosters"
   (test "a non-empty roster is recorded"

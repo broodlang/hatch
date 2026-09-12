@@ -20,12 +20,12 @@
                   (get opts :headers {})
                   (assoc (get opts :headers {})
                     :content-type "application/x-www-form-urlencoded")))
-    ((session/fetch-session secret) (build {:method method
-                                            :path "/x"
-                                            :query ""
-                                            :params (get opts :params {})
-                                            :headers headers
-                                            :body (form-encode bp)}))))
+    ((session/fetch-session (session/cookie-store secret {})) (build {:method method
+                                                                      :path "/x"
+                                                                      :query ""
+                                                                      :params (get opts :params {})
+                                                                      :headers headers
+                                                                      :body (form-encode bp)}))))
 
 (describe "protect-from-forgery"
   (test "GET is never blocked and mints a session token"

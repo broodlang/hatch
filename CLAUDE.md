@@ -11,8 +11,15 @@ See `docs/web-framework-design.md` for the full design rationale.
 
 Hatch is a **library package**: `src/` holds only the framework (`http/` +
 `web/`). The demo app lives in a separate sibling project, `../hatch-demo`,
-which depends on Hatch via a local `:path` dep (`[hatch :path "../hatch"]`) —
-so the demo is also our proof that Hatch installs and loads as a real package.
+which depends on a **published** Hatch (`[hatch :version "^0.15.0"]`) — so the
+demo is also our proof that Hatch installs and loads as a real package, from
+the registry, the way anyone else gets it.
+
+**When you change hatch, the demo cannot see it until you release.** For local
+co-development swap the dep to `[hatch :path "../hatch"]` and re-run `nest
+fetch`; `../hive` documents the same swap in its own `project.blsp`. Put the
+pin back before committing either — hive's Dockerfile builds from its git ref,
+and a `:path` dep there is a broken deploy.
 
 New apps are scaffolded with `nest new myapp --template hatch` (a full
 Postgres-backed app) or `--template web-api` (a minimal JSON API, no live layer).
@@ -29,8 +36,8 @@ nest format        # format all .blsp source
 nest doctest       # check every `expr ;=> result` example in a docstring still holds
 nest docs          # generate the HTML API site into doc/ (gitignored)
 
-# In ../hatch-demo/ (the demo app, consumes Hatch via :path):
-nest fetch         # resolve the :path dep → project.lock.blsp
+# In ../hatch-demo/ (the demo app, consumes a published Hatch):
+nest fetch         # resolve deps → project.lock.blsp (after a dep or version change)
 nest test          # loads `main`, exercising the dep end-to-end
 nest run           # start the demo server ($HATCH_PORT, default 5000)
 ```

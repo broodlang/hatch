@@ -61,8 +61,7 @@
 
 ; The view under test: its render simply emits whatever token the connection carries, so a
 ; token in the rendered frame can only have come through *live-conn*.
-(deflive
-  (mount (params) {:n 0})
+(deflive (mount (params) {:n 0})
   (render (model)
     [:div {} [:span {} (str "token=" (or (csrf/live-token secret) "none"))]]))
 
@@ -93,10 +92,17 @@
   "Block until one complete server frame is buffered; return its payload as text."
   (match (frame-payload buf)
     ([:ok text] text)
-    ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
-                     ([:tcp-closed ^sock] :closed)
-                     (after 3000 :timeout)))))
+    ([:incomplete]
+      (receive
+        ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+        ([:tcp-closed ^sock] :closed)
+        ;; 10s, not 3s. This spawns a session process and does a real socket
+        ;; round trip, and on a loaded machine 3s occasionally was not enough —
+        ;; observed once in six full-suite runs. `run-session` turns a miss into
+        ;; an explicit failure, because as an ordinary return value it made the
+        ;; assertions below fail as "the join carried no statics", which points
+        ;; at the renderer rather than at the socket.
+        (after 10000 :timeout)))))
 
 (defn join-frame (sfp)
   "A client `join` frame, optionally claiming cached statics by fingerprint."
@@ -127,6 +133,10 @@
         (let (frame (read-frame client (bytes [])))
           (tcp/close client)
           (tcp/close ls)
+          ;; Name a socket failure as one. Returned as-is, `:timeout`/`:closed` flow into the
+          ;; content assertions and fail as though the server rendered the wrong frame.
+          (when (or (= frame :timeout) (= frame :closed))
+            (error "test: no join frame from the live session (" (->string frame) ")"))
           frame)))))
 
 (describe "statics fingerprinting on reconnect"

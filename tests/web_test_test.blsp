@@ -69,8 +69,7 @@
 
 ; ---- live views ------------------------------------------------------------
 
-(deflive
-  (mount (params) {:count (string/->number (get params "start" "0"))})
+(deflive (mount (params) {:count (string/->number (get params "start" "0"))})
   (render (model) [:div {:class "c"} [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count))))
   (tick 1000 (model) (assoc model :count (+ (get model :count) 10)))
@@ -112,7 +111,54 @@
   ; rendered dynamic slots reproduces the full render exactly, for any model.
   (test "weave(static, dynamic(model)) == full render"
     (let (spec (live-spec))
-      (assert= (web/parts/weave (get spec :render-static) ((get spec :render-dynamic) {:count 7}))
+      (assert= (web/parts/weave (view-spec-render-static spec)
+                 ((view-spec-render-dynamic spec) {:count 7}))
         (live-render spec {:count 7}))
-      (assert= (web/parts/weave (get spec :render-static) ((get spec :render-dynamic) {:count -3}))
+      (assert= (web/parts/weave (view-spec-render-static spec)
+                 ((view-spec-render-dynamic spec) {:count -3}))
         (live-render spec {:count -3})))))
+
+;; ---- the specs are records ------------------------------------------------------------
+;;
+;; What that buys: a field read is a NAME. `(get spec :render-slots)` mistyped answers nil,
+;; and a nil there means "this view has no slots" — so change tracking quietly degrades to
+;; re-rendering everything, correctly, forever. `(view-spec-render-slot spec)` is an
+;; undefined function `nest check` reports before it ever runs.
+;;
+;; What it must NOT cost: a hand-built spec. web/live has always accepted one (a module that
+;; never went through the `deflive` macro), and web/test documents passing any spec to these
+;; drivers. Accessors read a plain map, so both keep working.
+
+(describe "live-spec is a record"
+  (test "the thunk produces one"
+    (is (record? (live-spec)))
+    (assert= (->string (live-spec)) "#<live view-spec>"))
+
+  (test "every field the session reads is populated"
+    (let (spec (live-spec))
+      (is (fn? (view-spec-mount spec)))
+      (is (fn? (view-spec-render spec)))
+      (is (fn? (view-spec-render-dynamic spec)))
+      (is (fn? (view-spec-handle-event spec)))
+      (is (fn? (view-spec-handle-tick spec)))
+      (is (fn? (view-spec-handle-info spec)))
+      (is (fn? (view-spec-unmount spec)))
+      (is (fn? (view-spec-mount-guard spec)))
+      (is (fn? (view-spec-handle-params spec)))
+      (is (vector? (view-spec-render-static spec)))
+      (is (vector? (view-spec-render-slots spec)))
+      (is (vector? (view-spec-slot-deps spec)))
+      (is (vector? (view-spec-ticks spec)))))
+
+  ;; The seam stays open: a spec assembled by hand drives the harness exactly as one from
+  ;; the macro, because an accessor is a read and not a type check.
+  (test "a hand-built map spec still drives the harness"
+    (let (spec {:mount (fn (params) {:n (or (get params "n") 1)})
+                :render (fn (model) [:b {} (str (get model :n))])
+                :handle-event (fn (name params model) (assoc model :n 99))})
+      (assert= (live-mount spec {"n" 4}) {:n 4})
+      (assert= (live-render spec {:n 4}) "<b>4</b>")
+      (assert= (live-event spec "anything" {} {:n 4}) {:n 99})))
+
+  (test "a hand-built spec missing a field reads as nil, as it did when it was a map"
+    (assert= (view-spec-ticks {:mount (fn (_p) {})}) nil)))

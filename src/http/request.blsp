@@ -269,11 +269,6 @@
                     (+ dlen size))
                   [:error "malformed chunk"]))))))))
 
-(defn crlf-at? (buf i)
-  "True if the two bytes at index `i` of `buf` are CR LF. Assumes `i+1` is in bounds."
-  (and (= (bytes/at buf i) 13) (= (bytes/at buf (+ i 1)) 10)))
-
-(sig crlf-at? (bytes int -> bool))
 (defn dechunk-trailers-bytes (buf pos buflen)
   "Bytes-native `dechunk-trailers`: skip trailer headers after the 0-size chunk; return the index
   past the terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
@@ -366,11 +361,16 @@
                     (+ dlen size))
                   [:error "malformed chunk"]))))))))
 
+(def- *digits* "0123456789")
+
 (defn all-digits? (s)
-  "True if `s` is non-empty and every character is an ASCII digit 0–9."
-  (and (not (string/blank? s))
-    (empty? (seq/filter (string/->list s)
-              (fn (c) (let (n (string/char->int c)) (or (< n 48) (> n 57))))))))
+  "True if `s` is non-empty and every character is an ASCII digit 0–9.
+
+  One native scan. It used to explode the string into a list of one-character strings, map
+  each through `char->int`, filter, and ask whether the result was empty — four allocations
+  and a closure call per character, to answer a question `string/span` answers in one pass.
+  This gates every `Content-Length`, so it runs on every request that has a body."
+  (and (not (string/blank? s)) (= (string/span s 0 *digits*) (string/length s))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,

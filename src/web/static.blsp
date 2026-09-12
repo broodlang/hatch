@@ -210,10 +210,37 @@
   "Add every `keyword → value` in `hmap` as a response header."
   (fold (%map-pairs hmap) conn (fn (c kv) (put-resp-header c (first kv) (first (rest kv))))))
 
+(defn- asset-headers (content-type tag cc)
+  "The headers every static response carries, whatever its status: what the representation
+  is, how to validate it, how long to keep it, that it varies by encoding, and not to sniff it.
+
+  These were written out at six call sites — two 200s, two 206s, two 416s — and they had
+  already drifted. `Vary: Accept-Encoding` was on the 200s and missing from every range
+  response and from the 304, so a shared cache storing one of those held a body with nothing
+  saying it varies by content coding, and could hand a gzip entity to a client that never
+  asked for one. That is the failure mode of writing a header set out six times."
+  {:content-type content-type
+   :etag tag
+   :cache-control cc
+   :vary "Accept-Encoding"
+   :x-content-type-options "nosniff"})
+
+(defn- rangeable-headers (content-type tag cc)
+  "`asset-headers` plus the advertisement that byte ranges are served. Separate because the
+  precompressed path does NOT honour `Range` — advertising it there would be a promise this
+  module does not keep."
+  (assoc (asset-headers content-type tag cc) :accept-ranges "bytes"))
+
 (defn not-modified (conn tag cc)
-  "A 304 Not Modified — no body, but it still carries the validators a cache needs to keep
-  trusting (and re-using) its stored copy: the ETag and the Cache-Control."
-  (send-resp (with-resp-headers conn {:etag tag :cache-control cc}) 304 ""))
+  "A 304 Not Modified — no body, but it still carries what a cache needs to keep trusting
+  (and re-using) its stored copy: the ETag, the Cache-Control, and `Vary`.
+
+  `Vary` because the stored response it is refreshing varies by `Accept-Encoding`; a 304 that
+  omits it can leave a cache revalidating an entry it has no key for (RFC 9110 §15.4.5 lists
+  `Vary` among the headers a 304 SHOULD carry). Deliberately not the full `asset-headers`
+  set: a 304 has no body, so the representation headers describing one have nothing to say."
+  (send-resp (with-resp-headers conn {:etag tag :cache-control cc :vary "Accept-Encoding"})
+    304 ""))
 
 (defn if-none-match? (conn tag)
   "True if the request's `If-None-Match` lists `tag` (or is the `*` wildcard) — i.e. the
@@ -295,12 +322,8 @@
         (nil? r) nil
         (= r :unsatisfiable)
           (send-resp (with-resp-headers conn
-                       {:content-type content-type
-                        :etag tag
-                        :cache-control cc
-                        :accept-ranges "bytes"
-                        :x-content-type-options "nosniff"
-                        :content-range (str "bytes */" len)})
+                       (assoc (rangeable-headers content-type tag cc)
+                         :content-range (str "bytes */" len)))
             416 "")
         else
         ;; floored: byte offsets are integral by construction, but they arrive by
@@ -309,12 +332,8 @@
                 start (math/floor start-raw)
                 end (math/floor end-raw))
             (send-resp (with-resp-headers conn
-                         {:content-type content-type
-                          :etag tag
-                          :cache-control cc
-                          :accept-ranges "bytes"
-                          :x-content-type-options "nosniff"
-                          :content-range (str "bytes " start "-" end "/" len)})
+                         (assoc (rangeable-headers content-type tag cc)
+                           :content-range (str "bytes " start "-" end "/" len)))
               206
               (string/substring body start (+ end 1))))))))
 
@@ -336,13 +355,7 @@
       ;; paying to encode a 150 KB stylesheet in order to conclude it was not ranging.
         (or (and (get (conn-headers conn) :range)
               (serve-range conn content-type body tag cc (count (string/->bytes body))))
-          (send-resp (with-resp-headers conn
-                       {:content-type content-type
-                        :etag tag
-                        :cache-control cc
-                        :accept-ranges "bytes"
-                        :vary "Accept-Encoding"
-                        :x-content-type-options "nosniff"})
+          (send-resp (with-resp-headers conn (rangeable-headers content-type tag cc))
             200 body)))))
 
 (defn fresh-cached-etag (path)
@@ -397,16 +410,12 @@
           (let (tag (cached-bytes-etag sibling body)
                 cc (cache-control path root))
             (if (if-none-match? conn tag)
+              (not-modified conn tag cc)
+              ;; `asset-headers`, not `rangeable-headers`: this path serves the whole
+              ;; precompressed sibling and never honours a `Range`, so it must not claim to.
               (send-resp (with-resp-headers conn
-                           {:etag tag :cache-control cc :vary "Accept-Encoding"})
-                304 "")
-              (send-resp (with-resp-headers conn
-                           {:content-type (mime-type path)
-                            :content-encoding coding
-                            :vary "Accept-Encoding"
-                            :etag tag
-                            :cache-control cc
-                            :x-content-type-options "nosniff"})
+                           (assoc (asset-headers (mime-type path) tag cc)
+                             :content-encoding coding))
                 200 body))))))))
 
 (defn serve (conn root rel)
@@ -462,13 +471,7 @@
       (if-none-match? conn tag) (not-modified conn tag cc)
       else
         (or (serve-bytes-range conn content-type body tag cc len)
-          (send-resp (with-resp-headers conn
-                       {:content-type content-type
-                        :etag tag
-                        :cache-control cc
-                        :accept-ranges "bytes"
-                        :vary "Accept-Encoding"
-                        :x-content-type-options "nosniff"})
+          (send-resp (with-resp-headers conn (rangeable-headers content-type tag cc))
             200 body)))))
 
 (defn serve-bytes-range (conn content-type body tag cc len)
@@ -479,22 +482,14 @@
       (nil? r) nil
       (= r :unsatisfiable)
         (send-resp (with-resp-headers conn
-                     {:content-type content-type
-                      :etag tag
-                      :cache-control cc
-                      :accept-ranges "bytes"
-                      :x-content-type-options "nosniff"
-                      :content-range (str "bytes */" len)})
+                     (assoc (rangeable-headers content-type tag cc)
+                       :content-range (str "bytes */" len)))
           416 "")
       else
         (let ([start end] r)
           (send-resp (with-resp-headers conn
-                       {:content-type content-type
-                        :etag tag
-                        :cache-control cc
-                        :accept-ranges "bytes"
-                        :x-content-type-options "nosniff"
-                        :content-range (str "bytes " start "-" end "/" len)})
+                       (assoc (rangeable-headers content-type tag cc)
+                         :content-range (str "bytes " start "-" end "/" len)))
             206
             (bytes/slice body start (+ end 1)))))))
 

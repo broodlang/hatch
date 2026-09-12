@@ -22,8 +22,11 @@
   ; start — the live registries run under a supervisor (docs/robustness.md)
   (:alias supervisor)
   ; ->json — the stdlib `JsonEncode` ability, which `Encode`'s fallback delegates to, so an
-  ; app writes ONE impl for both the HTTP JSON body and the live wire (see below)
+  ; app writes ONE impl for both the HTTP JSON body and the live wire (see below); decode —
+  ; the inbound half, which used to be a hand-rolled parser here
   (:alias json)
+  ; stringify-keys — a decoded frame is string-keyed, like every other param map in hatch
+  (:alias http/util)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
 ; ---- JSON encode via the Encode protocol -----------------------------------
@@ -126,180 +129,112 @@
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (->string k) (str k))) ":" (encode val))))
 
-; ---- JSON decode (minimal, for incoming WS messages) ----
+; ---- JSON decode (for incoming WS messages) ----
 
-; The parser walks the input as a *list of chars* (`string->list` once), consuming with
-; `first`/`rest` — both O(1). This sidesteps two brood quadratics that bite on a large inbound
-; frame (a pasted textarea, a big form): `(string/char-at s i)` is O(i) on a UTF-8 string (it scans
-; codepoints), and appending to a string/vector one element at a time copies it each step. So
-; string/number content is gathered into a reversed list and joined once, and array items are
-; consed and turned into a vector once at the end (never `(into vec [x])` per item). This is
-; dramatically faster than the old per-char substring/append version (a 5k-element array went
-; ~21 s → ~0.4 s); objects still assoc per key, so a pathological huge object is the remaining
-; superlinear case — bounded by *ws-max-message-bytes* and far off the tiny-event hot path.
-; Each parser takes a char list and returns `[value remaining-chars]`.
-
+;; `json/decode` plus one deep keyword→string pass, and nothing else.
+;;
+;; This used to be a hand-written recursive-descent parser — nineteen functions, 175 lines —
+;; written to route around two brood quadratics on a large inbound frame: `string/char-at`
+;; scanning codepoints, and per-item append copying the accumulator. Both were real, and the
+;; parser was a large improvement on what preceded it.
+;;
+;; They are not real any more, and the hand-rolled version is now the slow one. Measured on
+;; the two frames a session actually sees — a tiny event and a 48 KB paste — `json/decode`
+;; plus `stringify-keys` runs 2.4x and 4.2x faster respectively, INCLUDING the stringify pass.
+;; So the parser was 175 lines of code, its own escape and number handling, and its own bugs,
+;; to be several times slower than the function next to it.
+;;
+;; The keys must be strings, not the keywords `json/decode` yields: a view's `on` handler
+;; reads `(get params "value")`, the same spelling a query or form param uses, and that
+;; contract predates the wire protocol.
+;;
+;; **Malformed input now rejects the whole frame rather than degrading in place.** The old
+;; parser answered U+FFFD for a lone surrogate or bad `\uXXXX`, and nil for a number token
+;; like `-` or `1.2.3`, so a hand-crafted frame decoded partially and the session acted on
+;; what survived. `json/decode` raises, `parse-client-frame` already catches it, and the frame
+;; is ignored. The safety property is the one the old comments claimed — a crafted frame
+;; cannot crash the session — reached by refusing the frame instead of guessing at it, which
+;; is the better answer for input arriving off an untrusted socket.
 (defn json-decode (s)
-  "Parse a JSON string into a Brood value.
-  Handles objects, arrays, strings, numbers, true/false/null."
-  (let ([v _] (jp-value (string/->list s)))
-    v))
+  "Parse a JSON string into a Brood value, with object keys as STRINGS (matching query/form
+  params). Raises on malformed input; callers on the socket path catch it and drop the frame.
 
-(defn jp-ws? (c)
-  "True if `c` is JSON insignificant whitespace (space, tab, CR, LF)."
-  (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+  (hatch/web/live/json-decode \"{\\\"a\\\":[1,2]}\") ;=> {\"a\" [1 2]}"
+  (http/util/stringify-keys (json/decode s)))
 
-(defn jp-skip-ws (cs)
-  "Drop leading whitespace chars from char list `cs`."
-  (match cs
-    (nil nil)
-    ((c & rest) (if (jp-ws? c) (jp-skip-ws rest) cs))))
+; ---- the view spec ----
+;
+;; What a `deflive` module exposes, as a value. It was a thirteen-key map, and every read of
+;; it — a `(get spec :render-dynamic)` or a `(get view :slot-deps)` — was a keyword one character
+;; away from a silent nil. A nil there is not a crash: `render-slots` nil means "no slots",
+;; so a mistyped read degrades a view to re-rendering everything, correctly, forever, with
+;; nothing to see. The accessors below turn each of those into a name `nest check` knows.
+;;
+;; The generated accessors read a plain MAP as happily as a record, so a hand-built spec —
+;; which this module has always accepted, and `web/test` documents — keeps working unchanged;
+;; a spec that predates a field simply answers nil for it, exactly as `get` did.
+;;
+;; REORDERING THESE FIELDS MEANS EDITING `deflive` TOO. The macro builds the value with the
+;; positional constructor, so the field order here and the argument order there are one
+;; contract in two places. What keeps that honest is that every field is pinned by a
+;; behavioural test (`web_test_test`'s drivers, `web_change_tracking_test`'s slot deps), so a
+;; swap fails the suite rather than shipping a view whose ticks run its event handler.
+(defrecord view-spec
+  (mount render
+    render-static render-dynamic render-slots slot-deps handle-event handle-tick handle-info unmount
+    mount-guard handle-params ticks))
 
-(defn jp-drop (cs n)
-  "The char list `cs` with its first `n` chars dropped."
-  (if (or (= n 0) (nil? cs)) cs (jp-drop (rest cs) (- n 1))))
+(impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
 
-(defn jp-value (cs0)
-  "Parse one JSON value from char list `cs0` (leading whitespace skipped). `[value rest]`."
-  (let (cs (jp-skip-ws cs0))
-    (match cs
-      (nil [nil nil])
-      (("\"" & _) (jp-string cs))
-      (("{" & _) (jp-object cs))
-      (("[" & _) (jp-array cs))
-      (("t" & _) [true (jp-drop cs 4)])
-      (("f" & _) [false (jp-drop cs 5)])
-      (("n" & _) [nil (jp-drop cs 4)])
-      (_ (jp-number cs)))))
+; ---- the session view ----
+;
+;; One live connection's whole state: which view is mounted, its model, and the bookkeeping
+;; the loop keeps around it. It was a bare map that grew a key wherever one was first needed,
+;; and reading it was the same hazard the spec was — `(get view :mounted)` without the `?` is
+;; nil, which reads as "not yet mounted", so every out-of-band arm silently drops its message
+;; and a live view simply stops updating with nothing logged.
+;;
+;; The fields divide in two. `spec`/`spec-fn`/`session`/`params`/`conn`/`components` are fixed
+;; when the socket connects (and replaced wholesale on a live-navigate); `model` through
+;; `client-sfp` are what the loop accumulates. `generation` starts at 0 rather than nil
+;; because a declared field is always present — `(session-view-generation view)` would answer nil,
+;; and the tick arm compares it against a ticker's stamp.
+;;
+;; Built through `new-session-view` below, never positionally at a call site: fourteen
+;; positional arguments is a swap waiting to happen, and the two places that make one care
+;; about different halves of the list.
+(defrecord session-view
+  (spec spec-fn
+    session params conn components model mounted? generation ticker-pids watchdog dynamics
+    render-model client-sfp))
 
-(defn jp-join (acc)
-  "Assemble a reversed list of chars into a string in one linear pass."
-  (string/join (reverse acc) ""))
+(impl Display
+  web/live/session-view
+  (->string [view]
+    (str "#<live session "
+      (if (session-view-mounted? view) "mounted" "unmounted")
+      " gen="
+      (session-view-generation view)
+      ">")))
 
-(defn jp-string (cs)
-  "Parse the JSON string whose opening quote is the head of `cs`. `[value rest]`."
-  (jp-str-acc (rest cs) nil))
-
-(defn jp-str-acc (cs acc)
-  "Gather string chars (reversed) until the closing quote; `\\` hands off to `jp-str-esc`."
-  (match cs
-    (nil [(jp-join acc) nil])
-    (("\"" & rest) [(jp-join acc) rest])
-    (("\\" & rest) (jp-str-esc rest acc))
-    ((c & rest) (jp-str-acc rest (cons c acc)))))
-
-(defn jp-str-esc (cs acc)
-  "Decode the escape whose char heads `cs`, then resume the string. `\\uXXXX` → `jp-str-uni`."
-  (match cs
-    (nil [(jp-join acc) nil])
-    (("u" & rest) (jp-str-uni rest acc))
-    ((e & rest) (jp-str-acc rest (cons (jp-unescape e) acc)))))
-
-(defn jp-unescape (e)
-  "The character a single-letter escape `\\e` denotes. `\\\\`, `\\\"`, `\\/`, and any stray
-  escape keep the escaped char verbatim (so `e` itself)."
-  (cond
-    (= e "n") "\n"
-    (= e "r") "\r"
-    (= e "t") "\t"
-    (= e "b") (string/int->char 8)
-    (= e "f") (string/int->char 12)
-    else e))
-
-; U+FFFD, substituted for a \uXXXX escape we can't represent (see jp-str-uni).
-(def- json-replacement-char (string/int->char 65533))
-
-(defn- json-hex-val (c)
-  "Hex digit (0-9, a-f, case-insensitive) → its value 0-15, or -1 for a non-hex char."
-  (index-of "0123456789abcdef" (string/lower c)))
-
-(defn jp-str-uni (cs acc)
-  "Decode a `\\uXXXX` escape: the 4 hex chars head `cs`. Falls back to U+FFFD for a
-  malformed or unrepresentable escape — truncated, non-hex, or a lone surrogate, which
-  `int->char` rejects — so a hand-crafted frame from a non-browser client can't crash the
-  session. (BMP only: a surrogate pair decodes to two replacement chars, which is all
-  JSON.stringify ever needs since it escapes only control chars.)"
-  (match cs
-    ((h0 h1 h2 h3 & rest) (let (v0 (json-hex-val h0)
-                                v1 (json-hex-val h1)
-                                v2 (json-hex-val h2)
-                                v3 (json-hex-val h3))
-                            (if (or (< v0 0) (< v1 0) (< v2 0) (< v3 0))
-                              (jp-str-acc rest (cons json-replacement-char acc))
-                              (let (cp (+ (* 4096 v0) (* 256 v1) (* 16 v2) v3)
-                                    ch (try (string/int->char cp) (catch e json-replacement-char)))
-                                (jp-str-acc rest (cons ch acc))))))
-    (_ [(jp-join (cons json-replacement-char acc)) nil])))
-
-(defn jp-num-char? (c)
-  "True if `c` can appear in a JSON number token (digit, sign, dot, exponent)."
-  (includes? "0123456789.-+eE" c))
-
-(defn jp-number (cs)
-  "Parse a JSON number from the head of `cs`. `[number rest]`."
-  (jp-num-acc cs nil))
-
-(defn jp-num-acc (cs acc)
-  (match cs
-    (nil (jp-num-finish acc nil))
-    ((c & rest) (if (jp-num-char? c) (jp-num-acc rest (cons c acc)) (jp-num-finish acc cs)))))
-
-(defn jp-num-finish (acc cs)
-  "Convert the gathered number chars to a value, or nil when they are not a number.
-
-  Two ways that happens, and both must answer nil because this parser reports malformed
-  input in-band — `jp-value` on exhausted input answers nil too, and every caller reads a
-  nil value as \"absent\", never as a parse error.
-
-  Empty `acc` is a stray non-number at value position. NON-empty `acc` that still will not
-  parse is the one that bites: `jp-num-char?` admits `+ - . e E`, so `-`, `1.2.3` and `1e`
-  are all gathered happily and only fail at conversion — and `string/->number` answers a
-  `failure`, which is TRUTHY. Returned as-is it does not raise here; it is stored as the
-  decoded value and surfaces much later, as a render of `#failure{…}` or a type error deep
-  inside arithmetic on a model field, with nothing pointing back at the payload.
-
-  That payload is the browser's: this decodes LiveView client messages, so the malformed
-  input is untrusted and reaching it takes only a crafted frame."
-  (if (nil? acc)
-    [nil cs]
-    (let (n (string/->number (jp-join acc)))
-      [(if (failure? n) nil n) cs])))
-
-(defn jp-object (cs)
-  "Parse a JSON object; `{` heads `cs`. `[map rest]`."
-  (jp-obj-entries (rest cs) {}))
-
-(defn jp-obj-entries (cs0 acc)
-  (let (cs (jp-skip-ws cs0))
-    (match cs
-      (nil [acc nil])
-      (("}" & rest) [acc rest])
-      (("," & rest) (jp-obj-entries rest acc))
-      (_ (let ([k cs1] (jp-string cs)
-               cs2 (jp-skip-colon (jp-skip-ws cs1))
-               [v cs3] (jp-value cs2))
-           (jp-obj-entries cs3 (assoc acc k v)))))))
-
-(defn jp-skip-colon (cs)
-  "Drop a leading `:` between an object key and its value, if present."
-  (match cs
-    ((":" & rest) rest)
-    (_ cs)))
-
-(defn jp-array (cs)
-  "Parse a JSON array; `[` heads `cs`. `[vector rest]`."
-  (jp-arr-entries (rest cs) nil))
-
-(defn jp-arr-entries (cs0 acc)
-  ; acc gathers items in reverse via `cons` (O(1)); the vector is built once at the end.
-  ; `(into vector [v])` per element would copy the vector each time — O(n²) for a big array.
-  (let (cs (jp-skip-ws cs0))
-    (match cs
-      (nil [(vec (reverse acc)) nil])
-      (("]" & rest) [(vec (reverse acc)) rest])
-      (("," & rest) (jp-arr-entries rest acc))
-      (_ (let ([v cs1] (jp-value cs)) (jp-arr-entries cs1 (cons v acc)))))))
-
+(defn- new-session-view (spec spec-fn session params conn)
+  "A freshly connected session's view: what the connection settles at connect time, with
+  everything the loop accumulates starting empty. `mounted?` is false because mount waits for
+  the client's `join` frame (which carries the real URL params) — see `session-dispatch`."
+  (session-view spec
+    spec-fn
+    session
+    params
+    conn
+    (table/new) ; components — the session's live per-id LiveComponent state
+    nil ; model
+    false ; mounted?
+    0 ; generation
+    (list) ; ticker-pids
+    nil ; watchdog
+    nil ; dynamics
+    nil ; render-model
+    nil)) ; client-sfp
 ; ---- wire protocol messages ----
 
 (defn send-msg (sock msg-map)
@@ -411,7 +346,7 @@
 (defn kick-watchdog (view)
   "Tell this session's idle watchdog that a client frame arrived — resets its ping/idle
   timer. A no-op if the session has no watchdog (e.g. in a unit test)."
-  (let (w (get view :watchdog))
+  (let (w (session-view-watchdog view))
     (when w (send w [:alive])))
   nil)
 
@@ -605,9 +540,9 @@
   ; for the client's `join` frame (which carries the real URL params), so each happens exactly
   ; once (see the `join` arm of session-dispatch). Start only the idle watchdog so a peer that
   ; connects but never joins is still pinged and eventually reaped. Enter the recv loop.
-  (let (view (assoc view
-               :generation 0
-               :watchdog (spawn (idle-watchdog (self) sock 0))))
+  ;; `:generation` needs no setting here — `new-session-view` starts it at 0, which is what
+  ;; the tick arm compares a ticker's stamp against.
+  (let (view (assoc view :watchdog (spawn (idle-watchdog (self) sock 0))))
     (session-recv sock view buf)))
 
 ; The loop's one render-and-reply step: set the new model on the view, push a frame
@@ -636,13 +571,14 @@
   stops re-downloading its own markup on every drop. A mismatch (a first connect, a
   live-navigate to a different view, a hot-reloaded template) sends them as usual, so the
   client can never be left weaving against a stale skeleton."
-  (let (statics (get view :render-static)
-        model (get view :model)
+  (let (spec (session-view-spec view)
+        statics (view-spec-render-static spec)
+        model (session-view-model view)
         ; Guard the render like every other view hook: a template that throws (a nil deref, a
         ; bad `get`) fails to an isolated, logged `[:hatch :live :exception]` and ends the
         ; session, rather than crashing the whole session process with no telemetry.
         dynamics (try
-                   ((get view :render-dynamic) model (get view :components))
+                   ((view-spec-render-dynamic spec) model (session-view-components view))
                    (catch e (live-handler-error "render" :render e nil))))
     (if (nil? dynamics)
       (close-session sock view)
@@ -650,12 +586,14 @@
             fp (web/parts/statics-fingerprint statics)
             ; the client's claim is consumed by this join and not carried forward: a later
             ; re-join on the same socket (a live-navigate) is a fresh negotiation
-            cached? (= fp (get view :client-sfp))
+            cached? (= fp (session-view-client-sfp view))
             frame (if cached?
                     {:event "join" :d dynamics :f fp}
                     {:event "join" :s statics :d dynamics :f fp}))
         (if (send-msg sock frame)
-          (session-recv sock (dissoc view :client-sfp) buf)
+          ;; cleared, not dissoc'd: every field of the record stays present, and the claim is
+          ;; consumed by this join either way
+          (session-recv sock (assoc view :client-sfp nil) buf)
           (close-session sock view))))))
 
 (defn slot-dirty? (dep old-model model)
@@ -680,12 +618,13 @@
   table) is threaded through every slot call, same as `push-full` — a component-holding
   slot's dependency is always `:all` (see web/parts' `deps-of`), so it's never skipped here,
   but it still needs the table to actually render."
-  (let (slots (get view :render-slots)
-        deps (get view :slot-deps)
-        old-model (get view :render-model)
-        components (get view :components))
+  (let (spec (session-view-spec view)
+        slots (view-spec-render-slots spec)
+        deps (view-spec-slot-deps spec)
+        old-model (session-view-render-model view)
+        components (session-view-components view))
     (if (or (nil? slots) (nil? deps) (nil? old-model))
-      ((get view :render-dynamic) model components)
+      ((view-spec-render-dynamic spec) model components)
       (into []
         (map (range (count old))
           (fn (i)
@@ -697,10 +636,10 @@
   "Re-render the dynamic slots that a state change actually touched and send only those that
   changed — `{:event \"diff\" :d {idx val}}`. No prior dynamics (no join yet) → a full push;
   nothing changed → send nothing."
-  (if (nil? (get view :dynamics))
+  (if (nil? (session-view-dynamics view))
     (push-full sock view buf)
-    (let (old (get view :dynamics)
-          model (get view :model)
+    (let (old (session-view-dynamics view)
+          model (session-view-model view)
           ; Guard the re-render (see push-full). On a throw, keep the prior render and keep
           ; listening — a transient bad model shouldn't tear down the session.
           dynamics (try
@@ -727,7 +666,7 @@
   "Drop out of the reload registry, free the session's live component table (web/component),
   and close the socket."
   (live-unregister (self))
-  (check-allow :discarded-catch (try (table/drop (get view :components)) (catch _ nil)))
+  (check-allow :discarded-catch (try (table/drop (session-view-components view)) (catch _ nil)))
   (close-socket sock))
 
 (defn redirect-and-close (sock path)
@@ -793,14 +732,16 @@
     ; A generation-stamped beat. Drop it if it's from a view we've navigated away from
     ; (its ticker was killed, but this beat was already in the mailbox) — otherwise it'd
     ; fire the new view's handle-tick with the old view's interval key.
-    ([:tick key gen buf2] (if (= gen (get view :generation 0))
+    ([:tick key gen buf2] (if (= gen (session-view-generation view))
                             (push-update sock
                               view
                               buf2
                               "diff"
                               (try
-                                ((get view :handle-tick) key (get view :model))
-                                (catch e (live-handler-error "tick" key e (get view :model)))))
+                                ((view-spec-handle-tick (session-view-spec view)) key
+                                  (session-view-model view))
+                                (catch e
+                                  (live-handler-error "tick" key e (session-view-model view)))))
                             (session-recv sock view buf2)))
     ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
     ; view's handle-info and push the resulting diff. A view without a handle-info clause
@@ -809,37 +750,46 @@
     ; rendering nil would push a bogus frame or crash the session; just keep listening. (Pre-
     ; join, an :info/:update-component can't arrive anyway — mount is what subscribes — but a
     ; `:reload` CAN, since the reload registry holds this pid from connect.)
-    ([:info payload buf2] (if (get view :mounted?)
+    ([:info payload buf2] (if (session-view-mounted? view)
                             (push-update sock
                               view
                               buf2
                               "diff"
-                              (let (h (get view :handle-info))
+                              (let (h (view-spec-handle-info (session-view-spec view)))
                                 (if h
                                   (try
-                                    (h payload (get view :model))
+                                    (h payload (session-view-model view))
                                     (catch e
-                                      (live-handler-error "info" :message e (get view :model))))
-                                  (get view :model))))
+                                      (live-handler-error "info"
+                                        :message e
+                                        (session-view-model view))))
+                                  (session-view-model view))))
                             (session-recv sock view buf2)))
     ; a web/component/send-update push: merge into that component's stored state (a no-op
     ; if cid names no mounted component) and re-render — the parent's :model is untouched,
     ; but its next render-dynamic pass picks up the component's fresh state.
-    ([:update-component cid changes buf2] (if (get view :mounted?)
+    ([:update-component cid changes buf2] (if (session-view-mounted? view)
                                             (do
                                               (try
-                                                (web/component/apply-update (get view :components)
+                                                (web/component/apply-update (session-view-components view)
                                                   cid changes)
                                                 (catch e
                                                   (live-handler-error "update-component" cid e nil)))
-                                              (push-update sock view buf2 "diff" (get view :model)))
+                                              (push-update sock
+                                                view
+                                                buf2
+                                                "diff"
+                                                (session-view-model view)))
                                             (session-recv sock view buf2)))
-    ([:reload buf2] (if (get view :mounted?)
-                      (let (spec (check-allow :discarded-catch
-                                   (try ((get view :spec-fn)) (catch _ nil)))
-                            view (if spec (merge view spec) view))
-                        (push-update sock view buf2 "render" (get view :model)))
-                      (session-recv sock view buf2)))
+    ([:reload buf2]
+      (if (session-view-mounted? view)
+        (let (spec (check-allow :discarded-catch
+                     (try ((session-view-spec-fn view)) (catch _ nil)))
+              ;; a hot reload re-resolves the view's functions; swap the whole
+              ;; spec in rather than merging its keys over the view's own
+              view (if spec (assoc view :spec spec) view))
+          (push-update sock view buf2 "render" (session-view-model view)))
+        (session-recv sock view buf2)))
     ; CSS-only rebuild: tell the client to re-stamp its stylesheet links — no
     ; re-render, so the live model (form state, scroll, focus) is preserved.
     ([:reload-css buf2] (if (send-msg sock {:event "reload-css"})
@@ -895,10 +845,10 @@
       ; or hostile client) is ignored: re-running `mount` would fire its side effects twice and
       ; skip unmount/generation-bump — a re-mount is what `navigate` is for.
       ("join"
-        (if (get view :mounted?)
+        (if (session-view-mounted? view)
           (session-recv sock view buf)
           (let (model (try
-                        ((get view :mount) params)
+                        ((view-spec-mount (session-view-spec view)) params)
                         (catch e (live-handler-error "mount" :mount e :hatch/mount-error))))
             (if (= model :hatch/mount-error)
               (close-session sock view)
@@ -908,7 +858,9 @@
                   ; what statics this client says it still holds (nil on a first
                   ; connect) — push-full drops them from the frame if they match
                   :client-sfp (get frame :sfp)
-                  :ticker-pids (start-tickers (get view :ticks) (get view :generation 0)))
+                  :ticker-pids
+                    (start-tickers (view-spec-ticks (session-view-spec view))
+                      (session-view-generation view)))
                 buf
                 "render"
                 model)))))
@@ -918,11 +870,11 @@
       ; slot picks up its fresh state on the next render-dynamic pass).
       ("event" (let (name (get frame :name)
                      cid (get frame :cid)
-                     model (get view :model))
+                     model (session-view-model view))
                  (if cid
                    (do
                      (try
-                       (web/component/dispatch-event (get view :components) cid name params)
+                       (web/component/dispatch-event (session-view-components view) cid name params)
                        (catch e (live-handler-error "event" name e nil)))
                      (push-update sock view buf "diff" model))
                    (push-update sock
@@ -930,7 +882,7 @@
                      buf
                      "diff"
                      (try
-                       ((get view :handle-event) name params model)
+                       ((view-spec-handle-event (session-view-spec view)) name params model)
                        (catch e (live-handler-error "event" name e model)))))))
       ; Live-patch: the client already updated the URL/history itself (session.patch in
       ; brood_live.js); this just runs handle-params against the *current* view/model — no
@@ -940,8 +892,9 @@
                  buf
                  "diff"
                  (try
-                   ((get view :handle-params) params (get view :model))
-                   (catch e (live-handler-error "patch" :params e (get view :model))))))
+                   ((view-spec-handle-params (session-view-spec view)) params
+                     (session-view-model view))
+                   (catch e (live-handler-error "patch" :params e (session-view-model view))))))
       ; Live navigation: switch this session to the live view registered at `path`
       ; WITHOUT a page reload — stop the old view's tickers, mount the target, start
       ; its tickers, and push a full render (the client swaps the live container and
@@ -950,7 +903,7 @@
       ("navigate"
         (let (path (get frame :path)
               entry (lookup-live path))
-          (if (and entry (= (get entry :session) (get view :session)))
+          (if (and entry (= (get entry :session) (session-view-session view)))
             ; same live-session group → run the target's on-mount-guard (against the Conn
             ; built once at connect time) before swapping the view over this socket. The
             ; whole check-and-swap is try-wrapped: a throwing guard (or spec-fn) has no
@@ -961,7 +914,7 @@
             (try
               (let (spec-fn (get entry :spec)
                     spec (spec-fn)
-                    guard-result ((get spec :mount-guard) (get view :conn)))
+                    guard-result ((view-spec-mount-guard spec) (session-view-conn view)))
                 (if guard-result
                   ; the target view vetoed — redirect there (full reload) instead of
                   ; swapping, and stay on the current view (mirrors the cross-group
@@ -973,9 +926,9 @@
                         ; so the monitor-based cleanup never fires for it. Runs here in the session
                         ; process, so (self) is the same pid that mount subscribed/tracked.
                         _unmount (try
-                                   ((get view :unmount) (get view :model))
+                                   ((view-spec-unmount (session-view-spec view)) (session-view-model view))
                                    (catch e (live-handler-error "unmount" :unmount e nil)))
-                        _ (stop-tickers (get view :ticker-pids))
+                        _ (stop-tickers (session-view-ticker-pids view))
                         ; barrier the pubsub/presence registries so every broadcast queued before
                         ; the old view's unsubscribe (run in unmount above) has landed here, THEN
                         ; drop those stale out-of-band messages so none reaches the new view.
@@ -985,27 +938,27 @@
                         ; fresh one: carrying it leaked every navigated-away view's component
                         ; state and let a same-id component in the new view silently reuse it.
                         _drop (check-allow :discarded-catch
-                                (try (table/drop (get view :components)) (catch _ nil)))
+                                (try (table/drop (session-view-components view)) (catch _ nil)))
                         ; bump the generation so a beat still queued from the OLD view's ticker
                         ; (killed just above, but a message already sent lingers) is dropped
                         ; rather than dispatched into the new view's handle-tick.
-                        gen (+ 1 (get view :generation 0))
-                        model ((get spec :mount) params)
-                        new-view (merge spec
-                                   {:spec-fn spec-fn
-                                    :session (get entry :session)
-                                    :params params
-                                    :model model
-                                    ; the target view is mounted here (its mount ran above), so
-                                    ; out-of-band arms stay ungated after the swap
-                                    :mounted? true
-                                    :generation gen
-                                    :ticker-pids (start-tickers (get spec :ticks) gen)
-                                    ; carry the idle watchdog + Conn across the swap (same socket,
-                                    ; same session lifetime); the component table starts fresh
-                                    :watchdog (get view :watchdog)
-                                    :conn (get view :conn)
-                                    :components (table/new)}))
+                        gen (+ 1 (session-view-generation view))
+                        model ((view-spec-mount spec) params)
+                        ; a fresh view over the same connection: the Conn carries across (same
+                        ; socket, same session lifetime) and the component table starts empty
+                        new-view (assoc (new-session-view spec
+                                          spec-fn
+                                          (get entry :session)
+                                          params
+                                          (session-view-conn view))
+                                   :model model
+                                   ; the target view is mounted here (its mount ran above), so
+                                   ; out-of-band arms stay ungated after the swap
+                                   :mounted? true
+                                   :generation gen
+                                   :ticker-pids (start-tickers (view-spec-ticks spec) gen)
+                                   ; the idle watchdog is the socket's, not the view's
+                                   :watchdog (session-view-watchdog view)))
                     (push-update sock new-view buf "render" model))))
               (catch _ (close-session sock view)))
             ; unknown path, OR a different live-session group → full reload, which
@@ -1032,7 +985,7 @@
         ; target, so it fails closed — the raw socket is just closed, no session ever
         ; starts — rather than crashing, matching how every other optional hook
         ; (handle-info/tick/unmount) is guarded against a user-code exception
-        guard-result (try ((get spec :mount-guard) conn) (catch _ :hatch/guard-error)))
+        guard-result (try ((view-spec-mount-guard spec) conn) (catch _ :hatch/guard-error)))
     (cond
       (= guard-result :hatch/guard-error)
         (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
@@ -1042,14 +995,9 @@
       ; carries the real URL params and mounts anyway, so mounting here runs `mount` (and its
       ; side effects) twice. Enter the loop unmounted; the `join` arm mounts exactly once.
       else
-        (let (view (merge spec
-                     {:spec-fn spec-fn
-                      :session (get entry :session)
-                      :params params
-                      :conn conn
-                      ; the session's live per-id LiveComponent state (web/component); lives
-                      ; for the socket's lifetime, reset on live-navigate
-                      :components (table/new)}))
+      ;; the component table it starts with lives for the socket's lifetime and is reset on
+      ;; a live-navigate — see `new-session-view`
+        (let (view (new-session-view spec spec-fn (get entry :session) params conn))
           ; Bind the connection's Conn for the whole session — every hook the loop ever runs
           ; is inside this frame, so `(live-conn)` works in mount/render/handlers without
           ; widening any signature (see *live-conn* above). The loop recurses to itself
@@ -1340,7 +1288,8 @@
   An optional `(on-mount-guard (conn) …)` clause runs before `mount`, both on the initial
   WebSocket connect and on every live-navigate into this view — `conn` is a read-only Conn
   built from the WS upgrade request (cookies parsed, so a plug like `web/session/fetch-session`
-  can run against it: `((session/fetch-session secret) conn)`). Return `nil`/`false` to allow
+  can run against it: `((session/fetch-session (session/cookie-store secret {})) conn)`).
+  Return `nil`/`false` to allow
   the mount; any other value (a path string) redirects the client there instead, via the same
   `{\"event\":\"redirect\"}` message live-navigation already sends for a cross-live-session jump
   — `brood_live.js` does a full page load, so the target path's own HTTP-side `through` plugs
@@ -1404,7 +1353,7 @@
         ; only component holes ever reference `live-components`.
         render-with-components-args (list (first render-dyn-args)
                                       '&optional
-                                      (list 'live-components (list 'table/new)))
+                                      (list web/parts/*component-table-param* (list 'table/new)))
         ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap
         ; it in web/template/render themselves), so it can't just call render-dynamic
         ; (which returns an already-rendered *string*,
@@ -1513,22 +1462,13 @@
       (list 'def 'live-ticks (apply vector (map tick-clauses (fn (c) (first (rest c))))))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
+      ;; Positional, in `view-spec`'s declared field order — change one and change the other.
       (list 'defn
         'live-spec
         (list)
-        {:mount 'mount
-         :render 'render
-         :render-static 'render-static
-         :render-dynamic 'render-dynamic
-         :render-slots 'render-slots
-         :slot-deps 'slot-deps
-         :handle-event 'handle-event
-         :handle-tick 'handle-tick
-         :handle-info 'handle-info
-         :unmount 'unmount
-         :mount-guard 'mount-guard
-         :handle-params 'handle-params
-         :ticks 'live-ticks})
+        (list 'web/live/view-spec
+          'mount 'render 'render-static 'render-dynamic 'render-slots 'slot-deps 'handle-event
+          'handle-tick 'handle-info 'unmount 'mount-guard 'handle-params 'live-ticks))
       ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
       ; top-level defs), so a save signals open sessions to re-render. No-op at first
       ; load (no registry yet).

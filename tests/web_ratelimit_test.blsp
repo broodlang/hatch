@@ -5,30 +5,30 @@
   (:alias table)
   (:use test))
 
-(def cfg {:rate 1 :per 1000 :burst 2})
+(def config {:rate 1 :per 1000 :burst 2})
 
 (describe "refill"
   (test "a fresh key starts full (capacity)"
-    (assert= (get (web/ratelimit/refill {} cfg 0) :tokens) 2.0))
+    (assert= (get (web/ratelimit/refill {} config 0) :tokens) 2.0))
   (test "accrues tokens over elapsed time, capped at burst"
     ; rate 1 / 1000ms → 0.001 tok/ms; 500ms from empty → 0.5
-    (assert= (get (web/ratelimit/refill {:tokens 0.0 :ts 0} cfg 500) :tokens) 0.5))
+    (assert= (get (web/ratelimit/refill {:tokens 0.0 :ts 0} config 500) :tokens) 0.5))
   (test "never exceeds capacity"
-    (assert= (get (web/ratelimit/refill {:tokens 1.0 :ts 0} cfg 100000) :tokens) 2.0)))
+    (assert= (get (web/ratelimit/refill {:tokens 1.0 :ts 0} config 100000) :tokens) 2.0)))
 
 (describe "spend"
   (test "spends a token when the bucket has one"
-    (let (result (web/ratelimit/spend {} cfg 1 0))
+    (let (result (web/ratelimit/spend {} config 1 0))
       (assert= (nth result 1) :ok)
       (assert= (get (nth result 0) :tokens) 1.0)))
   (test "an empty bucket denies with the ms until a token frees"
-    (let (result (web/ratelimit/spend {:tokens 0.0 :ts 0} cfg 1 0))
+    (let (result (web/ratelimit/spend {:tokens 0.0 :ts 0} config 1 0))
       (assert= (nth result 1) [:deny 1000])))
   (test "the burst allows N immediate requests, then denies"
     ; two tokens → two :ok, third denied (no time elapses between them)
-    (let (a (web/ratelimit/spend {} cfg 1 0)
-          b (web/ratelimit/spend (nth a 0) cfg 1 0)
-          c (web/ratelimit/spend (nth b 0) cfg 1 0))
+    (let (a (web/ratelimit/spend {} config 1 0)
+          b (web/ratelimit/spend (nth a 0) config 1 0)
+          c (web/ratelimit/spend (nth b 0) config 1 0))
       (assert= (nth a 1) :ok)
       (assert= (nth b 1) :ok)
       (assert= (first (nth c 1)) :deny))))
@@ -156,14 +156,19 @@
 ;; decision is replaceable: where buckets live, who is exempt, what a request costs, how a
 ;; caller is identified, and what a rejection looks like.
 
-(defn- recording-store (calls decision)
-  "A `:store` that records how it was called and answers `decision`."
-  {:take (fn (key cost cfg now)
-           (table/put calls :key key)
-           (table/put calls :cost cost)
-           (table/put calls :cfg cfg)
-           (table/put calls :now now)
-           decision)})
+;; A store the way an app writes one: a record implementing the ability, carrying its own
+;; state as fields rather than closing over it.
+(defrecord recording-store (calls decision))
+
+(impl BucketStore
+  web-ratelimit-test/recording-store
+  (take-tokens [store key cost config now]
+    (let (calls (recording-store-calls store))
+      (table/put calls :key key)
+      (table/put calls :cost cost)
+      (table/put calls :config config)
+      (table/put calls :now now)
+      (recording-store-decision store))))
 
 (describe ":store replaces where the buckets live"
   (test "the plug asks the store, not the built-in limiter"
@@ -184,7 +189,7 @@
     (let (calls (table/new)
           plug (rate-limit {:store (recording-store calls :ok) :rate 30 :burst 10}))
       (plug (conn-from {}))
-      (assert= (table/get calls :cfg) {:rate 30 :per 60000 :burst 10})))
+      (assert= (table/get calls :config) {:rate 30 :per 60000 :burst 10})))
 
   (test "and the caller's clock, so an alternative store is testable at a chosen time"
     (let (calls (table/new)
@@ -197,32 +202,19 @@
     (assert= (bucket-config {:rate 10}) {:rate 10 :per 60000 :burst 10})
     (assert= (bucket-config {:rate 10 :burst 3 :per 1000}) {:rate 10 :per 1000 :burst 3})))
 
-;; The seam's real shape: a store is a VALUE implementing `BucketStore`, so it carries its
-;; own connection rather than closing over one. The `{:take fn}` map above is the older
-;; spelling and still works — both are exercised here, because a store an app already wrote
-;; must not stop being a store.
-
-(defrecord fake-store (calls decision))
-
-(impl BucketStore
-  web-ratelimit-test/fake-store
-  (take-tokens [store key cost cfg now]
-    (let (calls (fake-store-calls store))
-      (table/put calls :key key)
-      (table/put calls :cost cost)
-      (table/put calls :cfg cfg)
-      (table/put calls :now now)
-      (fake-store-decision store))))
+;; The seam's shape: a store is a VALUE implementing `BucketStore`, carrying its own state as
+;; fields rather than closing over it. There is one spelling — a `{:take fn}` map is not a
+;; store, and says so.
 
 (describe "BucketStore: a store is a value that implements the ability"
   (test "the plug dispatches to the record's impl"
     (let (calls (table/new)
-          plug (rate-limit {:store (fake-store calls :ok) :key-fn (fn (_c) "by-record")}))
+          plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "by-record")}))
       (assert= (conn/halted? (plug (conn-from {}))) false)
       (assert= (table/get calls :key) "by-record")))
 
-  (test "a denying record store halts with a 429 like any other"
-    (let (plug (rate-limit {:store (fake-store (table/new) [:deny 3000])}))
+  (test "a denying store halts with a 429 like any other"
+    (let (plug (rate-limit {:store (recording-store (table/new) [:deny 3000])}))
       (let (out (plug (conn-from {})))
         (assert= (conn/halted? out) true)
         (assert= (get out :status) 429)
@@ -232,8 +224,8 @@
   (test "two stores of the same type keep their own state"
     (let (a (table/new)
           b (table/new))
-      ((rate-limit {:store (fake-store a :ok) :key-fn (fn (_c) "a")}) (conn-from {}))
-      ((rate-limit {:store (fake-store b :ok) :key-fn (fn (_c) "b")}) (conn-from {}))
+      ((rate-limit {:store (recording-store a :ok) :key-fn (fn (_c) "a")}) (conn-from {}))
+      ((rate-limit {:store (recording-store b :ok) :key-fn (fn (_c) "b")}) (conn-from {}))
       (assert= (table/get a :key) "a")
       (assert= (table/get b :key) "b")))
 
@@ -244,15 +236,11 @@
     (is (satisfies? 'BucketStore in-memory-store))
     (assert= (->string in-memory-store) "#<ratelimit node-local-store>"))
 
-  ;; Back-compat, stated as a test so it can't be broken silently.
-  (test "a {:take fn} map is still a store"
-    (let (calls (table/new)
-          plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "by-map")}))
-      (plug (conn-from {}))
-      (assert= (table/get calls :key) "by-map")))
-
-  (test "a map with no :take says so by name"
-    (let (plug (rate-limit {:store {:takee (fn (_k _c _cfg _n) :ok)}}))
+  ;; One way to write a store. A map is not one, and the failure is at the call with the
+  ;; ability's own name on it rather than `nil is not callable` a frame deeper.
+  (test "a plain map is not a store"
+    (is (not (satisfies? 'BucketStore {:take (fn (_k _c _cfg _n) :ok)})))
+    (let (plug (rate-limit {:store {:take (fn (_k _c _cfg _n) :ok)}}))
       (assert= (check-allow :discarded-catch
                  (try (do (plug (conn-from {})) :no-raise) (catch _e :raised)))
         :raised))))
@@ -314,3 +302,35 @@
 
   (test "bucket-count answers a number from the live limiter"
     (is (int? (bucket-count)))))
+
+;; The bypass this closes: a proxy that appends the source port (RFC 7239 allows
+;; `for="192.0.2.43:47011"`) made every connection from one client a DIFFERENT bucket key.
+;; Not a weaker limit — no limit at all, on whatever the plug was put in front of.
+(describe "one client is one bucket, whatever the proxy wrote"
+  (defn- key-for (forwarded)
+    (client-key (conn/build {:method "POST"
+                             :path "/login"
+                             :query ""
+                             :params {}
+                             :headers {:x-forwarded-for forwarded}
+                             :body ""})))
+
+  (test "a v4 client with rotating source ports shares one key"
+    (assert= (key-for "203.0.113.9:41001") (key-for "203.0.113.9:41002"))
+    (assert= (key-for "203.0.113.9:41001") (key-for "203.0.113.9")))
+
+  (test "a bracketed v6 client with a port shares the key of its plain form"
+    (assert= (key-for "[2001:db8::1]:5000") (key-for "2001:db8::1")))
+
+  ;; and it must not over-merge: two genuinely different clients stay apart
+  (test "different clients still get different keys"
+    (is (not (= (key-for "203.0.113.9:41001") (key-for "203.0.113.10:41001")))))
+
+  (test "network-key still groups a v6 caller by its /64 after normalisation"
+    (assert= (network-key (conn/build {:method "GET"
+                                       :path "/"
+                                       :query ""
+                                       :params {}
+                                       :headers {:x-forwarded-for "[2001:db8::1]:5000"}
+                                       :body ""}))
+      "2001:0db8:0000:0000::/64")))

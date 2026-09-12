@@ -124,3 +124,23 @@
     (assert= (diff-dynamics [(comp-slot ["a" "b"])] [(comp-slot ["a" "b"])]) {}))
   (test "a scalar slot beside a comprehension still diffs scalar-wise"
     (assert= (diff-dynamics ["x" (comp-slot ["a"])] ["y" (comp-slot ["a"])]) {0 "y"})))
+
+;; The three-way agreement that keeps a LiveComponent updating. `deflive` binds a parameter,
+;; `component-slot-form` passes it, and `deps-of` recognises it as "always dirty". They are
+;; three separate files agreeing on one macro-time symbol, and if they stop agreeing nothing
+;; raises — the component's slot silently stops being re-rendered, so its own state changes
+;; (which touch no model key by definition) never reach the client again.
+(describe "the component-table parameter is one name, not three"
+  (test "component-slot-form passes the parameter deflive binds"
+    (let (emitted (component-slot-form '(component web/views/like {"id" "a"})))
+      (assert= (nth emitted 4) *component-table-param*)))
+
+  (test "deps-of reads that same symbol as :all"
+    (assert= (deps-of *component-table-param* 'model) :all))
+
+  ;; and therefore any slot mentioning it is always dirty, whatever else it reads
+  (test "a slot carrying it is :all even beside a pinned model read"
+    (assert= (form-deps (list 'f (list 'get 'model :n) *component-table-param*) 'model) :all))
+
+  (test "a slot without it still pins to its keys"
+    (assert= (form-deps (list 'f (list 'get 'model :n)) 'model) [:n])))

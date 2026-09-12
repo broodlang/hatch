@@ -14,9 +14,8 @@
 (defn live-component-spec ()
   {:mount widget-mount :render widget-render :handle-event widget-handle-event})
 
-(deflive
-  (mount (params)
-    {:authed (= (get params "authed") "1") :n (string/->number (get params "n" "5"))})
+(deflive (mount (params)
+           {:authed (= (get params "authed") "1") :n (string/->number (get params "n" "5"))})
   (render (model)
     [:div
       {}
@@ -66,14 +65,15 @@
   ; component-only state change (the parent's model never touched) would be wrongly
   ; skipped by recompute-dynamics and the client would keep showing stale component HTML.
   (test "the plain slot is pinned to its model key; the component slot is :all"
-    (assert= (get (live-spec) :slot-deps) [[:n] :all :all]))
+    (assert= (view-spec-slot-deps (live-spec)) [[:n] :all :all]))
   (test "recompute-dynamics picks up a component-only state change with model unchanged"
     (let (spec (live-spec)
           components (table/new)
           model {:authed true :n 5}
-          dyn1 ((get spec :render-dynamic) model components)
-          view {:render-slots (get spec :render-slots)
-                :slot-deps (get spec :slot-deps)
+          dyn1 ((view-spec-render-dynamic spec) model components)
+          ;; a session carries the whole spec under `:spec`, not its keys splatted over
+          ;; the view's own
+          view {:spec spec
                 :render-model model
                 :dynamics dyn1
                 :components components}

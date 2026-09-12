@@ -27,35 +27,15 @@
 ;; readable in one place. An app is still free to `assoc` its own keys on; that keeps working
 ;; and the value stays a record.
 (defrecord conn
-  (method
-    path
-    query
-    scheme
-    params
-    body-params
-    files
-    body-file
-    headers
-    body
-    body-bytes
-    cookies
-    assigns
-    status
-    resp-body
-    resp-headers
-    resp-cookies
-    before-send
-    halted?
-    route
-    stream
-    session
-    session-store
-    session-changed?
-    flash))
+  (method path
+    query scheme params body-params files body-file headers body body-bytes cookies assigns status
+    resp-body resp-headers resp-cookies before-send halted? route stream session session-store
+    session-changed? flash))
 
 (impl Display
   web/conn/conn
-  (->string [c] (str "#<conn " (conn-method c) " " (conn-path c) ">")))
+  (->string [connection]
+    (str "#<conn " (conn-method connection) " " (conn-path connection) ">")))
 
 (defn build (request)
   "Construct a Conn from a raw parsed request map. `:params` merges the request's query
@@ -116,7 +96,6 @@
       nil ; session-store
       false ; session-changed?
       {}))) ; flash — replaced by fetch-flash
-
 (defn parse-conn-body (headers body-text body-bytes)
   "Parse the request body into `{:params <string→value> :files <name→file-map>}`.
   `multipart/form-data` splits file parts out into `:files` (raw bytes) and merges its text

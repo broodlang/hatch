@@ -96,14 +96,14 @@
 
   (test "machine-facing paths can be excluded"
     (assert= ["/" "/about"]
-      (apply vector (sitemap-entries *site* seo-test-router--routes {:exclude ["/health"]}))))
+      (apply vector (sitemap-entries seo-test-router--routes {:exclude ["/health"]}))))
 
   ;; Dynamic URLs are the app's to enumerate, and a THUNK so the listing is read per
   ;; request rather than frozen at boot.
   (test "extra urls are appended, and a thunk is called"
     (assert= ["/" "/about" "/health" "/widgets/1"]
       (apply vector
-        (sitemap-entries *site* seo-test-router--routes {:extra (fn () ["/widgets/1"])}))))
+        (sitemap-entries seo-test-router--routes {:extra (fn () ["/widgets/1"])}))))
 
   (test "the document is well-formed and absolute"
     (let (xml (sitemap-xml *site* ["/about"]))
@@ -223,7 +223,15 @@
     (assert= (sitemap-date nil) nil)
     (assert= (sitemap-date "yesterday") nil))
   (test "the result is a date, not a full instant — the precision the timestamp deserves"
-    (assert= (string/length (sitemap-date 1757548800000)) 10))
+    (let (formatted (or (sitemap-date 1757548800000) ""))
+      (assert= (string/length formatted) 10)
+      ;; what "not a full instant" actually means: no time component survives
+      (assert= (includes? formatted "T") false)))
+  ;; A float reaches `epoch-ms->`, which takes an int — a caller that computed its timestamp
+  ;; rather than reading one has a fraction of a millisecond attached, and that is not a
+  ;; malformed date, just a more precise one than a `<lastmod>` can carry.
+  (test "a computed (float) timestamp is floored, not rejected"
+    (assert= (sitemap-date 1757548800000.7) "2025-09-11"))
   (test "it drops into a sitemap entry map"
     (let (xml (sitemap-xml {:url "https://example.com"}
                 [{:path "/a" :lastmod (sitemap-date 1757548800000)}]))

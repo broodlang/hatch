@@ -250,16 +250,11 @@ port) still returns and lets the caller fail on its own terms."
         (gen/stop sup)))
     (:stop (do (tcp/close lsock) (gen/stop sup) (io/puts "http/server: stopped")))))
 
-(defn head-complete? (buf)
-  "True once the request head terminator (`\\r\\n\\r\\n`) is present in `buf` (a `bytes` value) —
-  i.e. the head can be parsed and we can decide how to handle the body."
-  (not (= -1 (bytes/index-of buf crlf-crlf-bytes))))
-
-(defn tail3 (b)
-  "The last ≤3 bytes of `b` — the overlap `worker-read-head` keeps between reads so a head
-  terminator split across a read boundary is still detected, without re-scanning the whole buffer."
-  (let (n (count b))
-    (if (<= n 3) b (bytes/slice b (- n 3) n))))
+;; `head-complete?` and `tail3` used to live here — the terminator test and the three-byte
+;; overlap a hand-rolled read loop kept between chunks so a `\r\n\r\n` split across a read
+;; boundary was still found. `tcp/read-until` owns that arithmetic now (see `worker-run`), and
+;; both were left behind unused, one of them documented in terms of a `worker-read-head` that
+;; no longer exists.
 
 (defn- worker-run (sock handler ws-handler config buf)
   "Handle one request off `sock`, then loop for the next (keep-alive) or close. Reads the head

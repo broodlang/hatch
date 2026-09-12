@@ -3,7 +3,7 @@
 ;; The failure this module exists for is silent: `no-cache` is CORRECT on a page whose nav
 ;; changes with the session, but with no validator on it every mandated revalidation is a
 ;; full 200 with the whole body. Nothing errors; the bytes just go out again, forever.
-(defmodule web-cache-test (:use test) (:use web/cache) (:use web/conn))
+(defmodule web-cache-test (:use test) (:use web/cache) (:use web/conn) (:alias web/cluster))
 
 (defn- req (&optional (headers {}))
   (build {:method "GET" :path "/" :query "" :params {} :headers headers :body ""}))
@@ -302,7 +302,7 @@
   ;; Everything here must be a no-op on a single node — most apps are one node, and a cache
   ;; that needed a cluster to work would be a cache nobody could use.
   (test "a runtime that is not a distributed node has no peers"
-    (assert= [] (into [] (remote-nodes))))
+    (assert= [] (into [] (web/cluster/remote-nodes))))
 
   (test "invalidate and clear still work locally with no cluster"
     (fetch :cluster-a (fn () :first))
@@ -401,3 +401,34 @@
       (assert= (fetch-ttl [:ttl-test :a] 60000 (counting-build calls "a")) "a")
       (assert= (fetch-ttl [:ttl-test :b] 60000 (counting-build calls "b")) "b")
       (assert= (table/get calls :n) 2))))
+
+;; `fetch` and `fetch-ttl` share one table but store different things — a bare value, and a
+;; value with its deadline. One key used with both used to read back the WRAPPER: a fragment
+;; memoised one way and read the other rendered `{:value "<div>…" :ttl-at 1757…}` straight
+;; into the page. Correct-looking code, visible garbage, nothing raised.
+(describe "one key, one caching policy"
+  (test "fetch on a key fetch-ttl wrote is an error, not a wrapper"
+    (fetch-ttl [:policy :a] 60000 (fn () "the value"))
+    (assert= (check-allow :discarded-catch
+               (try (fetch [:policy :a] (fn () "other")) (catch _e :raised)))
+      :raised))
+
+  (test "fetch-ttl on a key fetch wrote is an error too"
+    (fetch [:policy :b] (fn () "the value"))
+    (assert= (check-allow :discarded-catch
+               (try (fetch-ttl [:policy :b] 60000 (fn () "other")) (catch _e :raised)))
+      :raised))
+
+  ;; the whole point: neither ever hands back the other's storage shape
+  (test "each still returns a plain value on its own key"
+    (assert= (fetch [:policy :c] (fn () "plain")) "plain")
+    (assert= (fetch [:policy :c] (fn () "rebuilt")) "plain")
+    (assert= (fetch-ttl [:policy :d] 60000 (fn () "timed")) "timed")
+    (assert= (fetch-ttl [:policy :d] 60000 (fn () "rebuilt")) "timed"))
+
+  ;; a cached value that is ITSELF a map with the old marker key is just a value — which is
+  ;; why the wrapper is a record and not a `{:ttl-at …}` map
+  (test "a cached value shaped like the old wrapper is still just a value"
+    (let (look-alike {:value "not a wrapper" :ttl-at 1})
+      (assert= (fetch [:policy :e] (fn () look-alike)) look-alike)
+      (assert= (fetch [:policy :e] (fn () "rebuilt")) look-alike))))

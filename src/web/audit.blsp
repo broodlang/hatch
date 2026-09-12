@@ -91,20 +91,45 @@
           (reverse (cons [start (count document)] acc))
           (ranges document open close width (+ end width) (cons [start end] acc)))))))
 
+;; The lengths of the closing tags `ranges` scans for. Named because each was written as a
+;; bare number at every call, and `region-text` has to add the same one back — two literals
+;; that must agree, in different functions, with nothing connecting them.
+(def- *form-close-width* 7) ; "</form>"
+(def- *script-close-width* 9) ; "</script>"
+(defn- region-text (document region width)
+  "The text of `region`, its closing tag included.
+
+  `ranges` reports `end` at the START of the closing tag — which is what `within?` needs —
+  so the tag's own `width` is added back here rather than at each call site, where it was
+  the same literal 7 written a second time and free to disagree with the one handed to
+  `ranges`. Clamped to the document, for the unclosed-region case `ranges` reports as
+  ending at the end of the input.
+
+  `math/floor` because it answers an `int`: `count` and `index-of` are ints, but `math/min`
+  over them widens to `number`, and `string/substring` takes an index."
+  (string/substring document
+    (first region)
+    (math/floor (math/min (count document) (+ (second region) width)))))
+
 (defn- within? (position rs)
   "Whether `position` falls inside any `[start end]` range in `rs`."
   (any? rs (fn (r) (and (> position (first r)) (< position (second r))))))
 
 (defn- inline-script-text (document)
   "Every inline `<script>` body in `document`, concatenated. External scripts contribute
-  nothing here — see [[inert-controls]], which declines to judge a page that has any."
-  (fold (ranges document "<script" "</script>" 9 0 nil)
-    ""
-    (fn (acc r)
-      (let (body-start (index-of document ">" (first r)))
-        (if (< body-start 0)
-          acc
-          (str acc " " (string/substring document (inc body-start) (second r))))))))
+  nothing here — see [[inert-controls]], which declines to judge a page that has any.
+
+  Collected and joined once rather than `(str acc …)` per block, which re-copies everything
+  gathered so far for each one. Bounded either way — a page has a handful of scripts, not a
+  thousand — but this is the shape the rest of the codebase uses, and the separator falls out
+  of the join instead of being prepended to every piece including the first."
+  (string/join (map (ranges document "<script" "</script>" *script-close-width* 0 nil)
+                 (fn (r)
+                   (let (body-start (index-of document ">" (first r)))
+                     (if (< body-start 0)
+                       ""
+                       (string/substring document (inc body-start) (second r))))))
+    " "))
 
 (defn- has-external-script? (document)
   "Whether `document` carries a `<script>` with a `src`, in ANY attribute order.
@@ -145,7 +170,7 @@
     nil
     (let (external? (has-external-script? document)
           script-text (inline-script-text document)
-          form-ranges (ranges document "<form" "</form>" 7 0 nil))
+          form-ranges (ranges document "<form" "</form>" *form-close-width* 0 nil))
       (if external?
         nil
         (fold *controls*
@@ -413,13 +438,11 @@
     ;; has made no claim to be inconsistent with, so it is not audited at all.
     (if (and (nil? tools) (not (includes? document (str web/mcp/*form-tool-attr* "="))))
       []
-      (fold (ranges document "<form" "</form>" 7 0 nil)
+      (fold (ranges document "<form" "</form>" *form-close-width* 0 nil)
         []
         (fn (acc region)
           (let (start (first region)
-                form (string/substring document
-                       start
-                       (math/min (count document) (+ (second region) 7)))
+                form (region-text document region *form-close-width*)
                 open-tag (tag-text document start)
                 method (string/lower (or (attr-value open-tag "method") "get"))
                 fields (field-names form))
@@ -554,5 +577,22 @@
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
   Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]],
-  [[warn-tool-coverage!]], [[warn-headings!]] and [[warn-favicon!]]."
-  (warn-favicon! (warn-headings! (warn-tool-coverage! (warn-canvas-flash! (warn-first-flight! (warn-inert! document)))))))
+  [[warn-tool-coverage!]], [[warn-headings!]] and [[warn-favicon!]].
+
+  A thread rather than the six-deep nest of calls this was: every audit takes the document
+  and answers it unchanged, which is a pipeline, and written inside-out it read backwards
+  from the order it runs in. Adding one is now a line rather than another layer of parens.
+
+  The `dev?` gate is here as well as inside each audit. Each keeps its own so it stays
+  independently callable, but in prod this is the one that matters — it turns six calls that
+  each check and return into one check. That is the same cost the memoised `dev?` was
+  introduced for, six times over now rather than three."
+  (if (dev?)
+    (-> document
+      (warn-inert!)
+      (warn-first-flight!)
+      (warn-canvas-flash!)
+      (warn-tool-coverage!)
+      (warn-headings!)
+      (warn-favicon!))
+    document))
