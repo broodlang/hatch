@@ -108,7 +108,7 @@ prompted it was whether to split it into a package; the answer is that the packa
 was never what people would want from it. What they want is to change parts of the decision,
 so all four are now seams: `:key-fn` (who), `:skip?` (whether at all, per request rather than
 per route), `:cost` as a function of the conn (what the request is worth), and `:store` —
-`{:take (fn (key cost cfg now))}` — for where the buckets live. `refill` and `spend` are
+a value implementing the `BucketStore` ability — for where the buckets live. `refill` and `spend` are
 public so an alternative store reuses the token-bucket arithmetic rather than reimplementing
 it; a Postgres-backed store is those two functions around a row.
 
@@ -316,9 +316,17 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
 | # | Question | Decision needed |
 |---|----------|-----------------|
 | Q1 | Slot annotation: explicit `(slot :key expr)` or static analysis of `(get model :key)`? | Phase 6 |
-| Q5 | Sessions: process-store only, or pluggable adapters (disk/DB) from day one? | Phase 7 |
 | Q8 | Auth: `on-mount-guard` clause in `deflive`, or convention in `mount`? | Phase 7 |
 | Q10 | Head updates: `[:set-title]` effect, or a `<head>` slot in the layout? | Phase 8 |
+
+**Q5 is answered (0.14.0): pluggable, through an ability.** `fetch-session` takes a signing
+secret — meaning the built-in `cookie-store` — or any value implementing `SessionStore`, whose
+two ops (`session-read` / `session-write`) are both handed the conn, so a store owns both how
+the browser is told which session this is and where the data behind it sits. A store is a
+value passed in rather than a name resolved through configuration, so it carries its own pool
+as fields. Hatch ships only the cookie store, deliberately: a server-side session is per-node
+unless it is replicated, and shipping one that quietly logs a user out on every other request
+behind a load balancer would be worse than shipping none.
 
 ---
 

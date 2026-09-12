@@ -28,7 +28,9 @@
   registry, unchanged."
   ; send-info — push the roster to a tracked session
   (:use web/live)
-  ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry
+  ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry;
+  ; watch-vault / rewatch-vault / monitor-each / hold-monitor / release-monitor — the
+  ; monitor + vault bookkeeping every registry on this scaffolding needs, in one place
   (:use web/registry)
   ; broadcast/subscribe — non-present observers ride pubsub (monitored + cross-node for free)
   (:alias web/pubsub)
@@ -51,19 +53,14 @@
 ; from re-syncs, so it is NOT vaulted — only local `state` is. The roster a member sees is the
 ; *merge*: this node's local presences plus every peer's reported roster (see below).
 
-(defn- presence-watch-vault ()
-  "Monitor the vault so its death delivers a `[:down]` here, letting the registry re-mirror to
-  the restarted vault. Returns the monitor ref, or nil if the vault isn't up yet."
-  (let (v (proc/whereis vault-name)) (if v (monitor v) nil)))
-
 (defn- presence-boot ()
   "Start (or restart) the registry: recover local state from the vault, re-monitor each restored
   pid (a dead one re-fires [:down] at once and is removed), monitor the vault, then enter the
   loop with empty peer state (it re-populates as peers sync)."
   (await vault-name 60)
   (let (state (pull-snapshot vault-name {})
-        refs (fold (presence-all-pids state) {} (fn (m pid) (assoc m pid (monitor pid)))))
-    (presence-loop state refs {} (presence-watch-vault))))
+        refs (monitor-each (presence-all-pids state)))
+    (presence-loop state refs {} (watch-vault vault-name))))
 
 (defn- presence-save (state refs remotes vault-ref)
   "Mirror the new *local* state to the vault (peer state isn't durable), then continue."
@@ -74,9 +71,7 @@
   (receive
     ; A local track: update local state, tell peers our new roster for the topic, and notify
     ; local members with the merged (local + peers) roster.
-    ([:track topic pid key meta] (let (refs2 (if (contains? refs pid)
-                                               refs
-                                               (assoc refs pid (monitor pid)))
+    ([:track topic pid key meta] (let (refs2 (hold-monitor refs pid)
                                        state2 (presence-put state topic pid key meta))
                                    (presence-broadcast-sync state2 topic)
                                    (presence-notify-merged state2 remotes topic)
@@ -84,18 +79,15 @@
     ([:untrack topic pid]
       (let (state2 (presence-remove state topic pid)
             ; demonitor on the last untrack so monitors don't leak
-            refs2 (if (presence-tracked? state2 pid) refs (presence-drop-ref refs pid)))
+            refs2 (if (presence-tracked? state2 pid) refs (release-monitor refs pid)))
         (presence-broadcast-sync state2 topic)
         (presence-notify-merged state2 remotes topic)
         (presence-save state2 refs2 remotes vault-ref)))
-    ; The vault we monitor died: wait for the supervisor to restart it, re-mirror our whole
-    ; local state so the backup is whole again, and re-watch the fresh vault — the durability
-    ; web/live's route registry has (a vault restart then a registry restart would otherwise
-    ; recover empty rosters). Matched by the vault's ref, ahead of the session-down clause.
-    ([:down ^vault-ref _ _] (do
-                              (await vault-name 60)
-                              (mirror vault-name state)
-                              (presence-loop state refs remotes (presence-watch-vault))))
+    ; The vault we monitor died — `rewatch-vault` waits for its restart, re-mirrors our whole
+    ; local state and re-watches the fresh process (see web/registry for why the re-mirror is
+    ; not optional). Peer state isn't vaulted, so `remotes` carries through untouched. Matched
+    ; by the vault's ref, ahead of the session-down clause.
+    ([:down ^vault-ref _ _] (presence-loop state refs remotes (rewatch-vault vault-name state)))
     ; a tracked session died — drop it everywhere, resync + refresh each affected topic; its
     ; monitor already fired, so just drop the ref ([:down ref pid reason])
     ([:down _ pid _] (let (affected (presence-topics-of state pid)
@@ -133,12 +125,6 @@
 (defn- presence-tracked? (state pid)
   "True if `pid` is still tracked on any topic."
   (presence-known? state pid))
-
-(defn- presence-drop-ref (refs pid)
-  "Demonitor `pid` (its last presence is gone) and drop its ref."
-  (let (ref (get refs pid))
-    (when ref (demonitor ref)))
-  (dissoc refs pid))
 
 (defn- presence-entries (state topic)
   "The raw {:pid :key :meta} entries tracked on `topic`."

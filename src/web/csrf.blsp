@@ -49,7 +49,7 @@
 
 (defn safe-method? (conn)
   "True for methods that don't change state — never CSRF-checked."
-  (let (m (get conn :method))
+  (let (m (conn-method conn))
     (or (= m "GET") (= m "HEAD") (= m "OPTIONS"))))
 
 (defn submitted-token (conn)

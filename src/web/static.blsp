@@ -290,7 +290,7 @@
   (if (not (= (string/length body) len))
     ; multibyte body — can't slice by byte safely; let the caller send 200
     nil
-    (let (r (parse-range (get (get conn :headers) :range) len))
+    (let (r (parse-range (get (conn-headers conn) :range) len))
       (cond
         (nil? r) nil
         (= r :unsatisfiable)
@@ -334,7 +334,7 @@
       ;; asset — and `serve-range` needs it only to decide whether a byte slice is safe and
       ;; to parse the header. Almost no request carries `Range`, so almost every one was
       ;; paying to encode a 150 KB stylesheet in order to conclude it was not ranging.
-        (or (and (get (get conn :headers) :range)
+        (or (and (get (conn-headers conn) :range)
               (serve-range conn content-type body tag cc (count (string/->bytes body))))
           (send-resp (with-resp-headers conn
                        {:content-type content-type
@@ -362,7 +362,7 @@
 (defn accepts? (conn coding)
   "True if the request's `Accept-Encoding` offers `coding`. A crude substring test is enough —
   a `coding;q=0` opt-out is the only false positive and is vanishingly rare in practice."
-  (let (accept-encoding (get (get conn :headers) :accept-encoding))
+  (let (accept-encoding (get (conn-headers conn) :accept-encoding))
     (and (string? accept-encoding) (includes? accept-encoding coding))))
 
 (defn accepts-gzip? (conn)
@@ -427,7 +427,7 @@
           ;; A request with no `If-None-Match` is not revalidating, so it was a syscall spent
           ;; to learn something nobody asked — and the read path stats again anyway, through
           ;; `cached-etag`.
-          (let (fresh (and (get (get conn :headers) :if-none-match) (fresh-cached-etag path)))
+          (let (fresh (and (get (conn-headers conn) :if-none-match) (fresh-cached-etag path)))
             (if (and fresh (if-none-match? conn fresh))
               (not-modified conn fresh (cache-control path root))
               ; text types are read as a string (file/slurp); everything else (images, fonts,
@@ -474,7 +474,7 @@
 (defn serve-bytes-range (conn content-type body tag cc len)
   "Honour a `Range` request against a `bytes` body: a 206 with the sliced bytes, a 416 for an
   unsatisfiable range, or nil (no/garbled Range) to mean 'send the whole body'."
-  (let (r (parse-range (get (get conn :headers) :range) len))
+  (let (r (parse-range (get (conn-headers conn) :range) len))
     (cond
       (nil? r) nil
       (= r :unsatisfiable)

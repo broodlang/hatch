@@ -356,3 +356,25 @@
       (tcp/close sock)
       (server/stop port)
       (assert= (includes? resp "408") true))))
+
+; The scheme a listener answers on reaches the handler. Until it did, `web/conn/secure?`
+; read a `:scheme` key nothing ever set, so its "the server terminated TLS itself" branch
+; could not fire — an app serving its own HTTPS reported every request as insecure, which
+; suppressed HSTS and cleared the session cookie's Secure flag. Asserted on the plaintext
+; listener because that is the half a test can drive end to end; the TLS half is
+; `request-scheme`'s own doctest plus the bind test above.
+(describe "the request carries the listener's scheme"
+  (test "a plaintext listener stamps :scheme \"http\" onto the request"
+    (let (port 24791
+          seen (table/new)
+          _sup (server/start port
+                 (fn (req)
+                   (table/put seen :scheme (get req :scheme))
+                   {:status 200 :headers {} :body "ok"}))
+          _resp (get-response port "/"))
+      (server/stop port)
+      (assert= (table/get seen :scheme) "http")))
+
+  (test "request-scheme reads it off the listener config, not the request"
+    (assert= (server/request-scheme {}) "http")
+    (assert= (server/request-scheme {:tls {:cert "c" :key "k"}}) "https")))

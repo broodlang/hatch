@@ -68,7 +68,7 @@
   The `q=0` check is what separates this from a substring test. A client sending
   `gzip;q=0` is asking NOT to be gzipped, and a substring test reads that as a yes —
   which is the one false positive worth removing, because it inverts the client's request."
-  (let (accept-encoding (get (get conn :headers) :accept-encoding))
+  (let (accept-encoding (get (conn-headers conn) :accept-encoding))
     (and (string? accept-encoding)
       (includes? accept-encoding coding)
       (not (refused? accept-encoding coding)))))
@@ -118,8 +118,8 @@
   `compress`."
   (let (min-bytes (get opts :min-bytes 1024)
         types (get opts :types default-compressible-types)
-        status (or (get conn :status) 200)
-        headers (get conn :resp-headers {})
+        status (or (conn-status conn) 200)
+        headers (or (conn-resp-headers conn) {})
         coding (chosen-encoding conn))
     (if (and coding
           (not (http/response/bodyless-status? status))
@@ -127,7 +127,7 @@
           (compressible-type? (get headers :content-type) types))
       ; Flatten the body to bytes once (a string, `bytes`, or an ADR-139 iolist) — its length
       ; gates the size floor and its bytes are what we compress, so there's no second pass.
-      (let (raw (bytes/concat (get conn :resp-body "")))
+      (let (raw (bytes/concat (or (conn-resp-body conn) "")))
         (if (< (count raw) min-bytes)
           conn
           (-> conn

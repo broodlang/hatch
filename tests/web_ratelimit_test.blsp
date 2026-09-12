@@ -197,6 +197,66 @@
     (assert= (bucket-config {:rate 10}) {:rate 10 :per 60000 :burst 10})
     (assert= (bucket-config {:rate 10 :burst 3 :per 1000}) {:rate 10 :per 1000 :burst 3})))
 
+;; The seam's real shape: a store is a VALUE implementing `BucketStore`, so it carries its
+;; own connection rather than closing over one. The `{:take fn}` map above is the older
+;; spelling and still works — both are exercised here, because a store an app already wrote
+;; must not stop being a store.
+
+(defrecord fake-store (calls decision))
+
+(impl BucketStore
+  web-ratelimit-test/fake-store
+  (take-tokens [store key cost cfg now]
+    (let (calls (fake-store-calls store))
+      (table/put calls :key key)
+      (table/put calls :cost cost)
+      (table/put calls :cfg cfg)
+      (table/put calls :now now)
+      (fake-store-decision store))))
+
+(describe "BucketStore: a store is a value that implements the ability"
+  (test "the plug dispatches to the record's impl"
+    (let (calls (table/new)
+          plug (rate-limit {:store (fake-store calls :ok) :key-fn (fn (_c) "by-record")}))
+      (assert= (conn/halted? (plug (conn-from {}))) false)
+      (assert= (table/get calls :key) "by-record")))
+
+  (test "a denying record store halts with a 429 like any other"
+    (let (plug (rate-limit {:store (fake-store (table/new) [:deny 3000])}))
+      (let (out (plug (conn-from {})))
+        (assert= (conn/halted? out) true)
+        (assert= (get out :status) 429)
+        (assert= (get-in out [:resp-headers :retry-after]) "3"))))
+
+  ;; The store carries its state as fields — the point of a record over a closure map.
+  (test "two stores of the same type keep their own state"
+    (let (a (table/new)
+          b (table/new))
+      ((rate-limit {:store (fake-store a :ok) :key-fn (fn (_c) "a")}) (conn-from {}))
+      ((rate-limit {:store (fake-store b :ok) :key-fn (fn (_c) "b")}) (conn-from {}))
+      (assert= (table/get a :key) "a")
+      (assert= (table/get b :key) "b")))
+
+  (test "the default store is one of these, not a map"
+    (is (record? in-memory-store))
+    ;; the impl really is registered under the id this record carries — which differs
+    ;; between hatch standalone and hatch as a package, so it is worth asserting
+    (is (satisfies? 'BucketStore in-memory-store))
+    (assert= (->string in-memory-store) "#<ratelimit node-local-store>"))
+
+  ;; Back-compat, stated as a test so it can't be broken silently.
+  (test "a {:take fn} map is still a store"
+    (let (calls (table/new)
+          plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "by-map")}))
+      (plug (conn-from {}))
+      (assert= (table/get calls :key) "by-map")))
+
+  (test "a map with no :take says so by name"
+    (let (plug (rate-limit {:store {:takee (fn (_k _c _cfg _n) :ok)}}))
+      (assert= (check-allow :discarded-catch
+                 (try (do (plug (conn-from {})) :no-raise) (catch _e :raised)))
+        :raised))))
+
 (describe ":skip? exempts a request without unwiring the plug"
   (test "a skipped request never reaches the store"
     (let (calls (table/new)

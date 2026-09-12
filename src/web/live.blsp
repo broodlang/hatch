@@ -21,6 +21,9 @@
   (:alias web/static)
   ; start — the live registries run under a supervisor (docs/robustness.md)
   (:alias supervisor)
+  ; ->json — the stdlib `JsonEncode` ability, which `Encode`'s fallback delegates to, so an
+  ; app writes ONE impl for both the HTTP JSON body and the live wire (see below)
+  (:alias json)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
 ; ---- JSON encode via the Encode protocol -----------------------------------
@@ -103,8 +106,22 @@
 (impl Encode :vector (encode [v] (str "[" (string/join (map v encode) ",") "]")))
 (impl Encode :pair (encode [v] (str "[" (string/join (map v encode) ",") "]")))
 (impl Encode :map (encode [m] (str "{" (string/join (map (%map-pairs m) encode-entry) ",") "}")))
-; keywords, symbols, …
-(impl Encode :default (encode [v] (json-str (str v))))
+;; Keywords, symbols, pids — and an app's own records, via the stdlib ability.
+;;
+;; Hatch encodes JSON in two places: `json/encode` for an HTTP body (`web/conn/json-resp`),
+;; the session cookie and `web/seo`'s JSON-LD, and this `Encode` for the live wire, which
+;; exists for the reasons above it — a `:default` (`json/encode` has none and raises on an
+;; unknown kind, which on a socket means a dropped frame rather than a 500) and the
+;; three-tier `json-str`.
+;;
+;; Two encoders is fine. Two *extension points* was not: `(impl JsonEncode app/money …)`
+;; got `"$2.50"` in a JSON response and `"#<money …>"` in a live push, and the fix was to
+;; find and implement a hatch-private ability the app had no reason to know about. A record
+;; with no impl still falls here (dispatch drops a record straight to `:default`, never to
+;; `:map`), so nothing that worked before changes — this only stops the wire from ignoring
+;; an impl the app already wrote.
+(impl Encode
+  :default (encode [v] (if (satisfies? 'JsonEncode v) (json/->json v) (json-str (str v)))))
 (defn- encode-entry (kv)
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (->string k) (str k))) ":" (encode val))))

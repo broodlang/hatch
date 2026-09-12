@@ -66,3 +66,55 @@
   (let (v (proc/whereis vault-name))
     (when v (send v [:set snapshot])))
   nil)
+
+;; ---- monitor bookkeeping ------------------------------------------------------------
+;;
+;; Every registry built on this scaffolding holds the same second map alongside its state: a
+;; `monitors` map of `pid → ref`. It exists so a registry can *demonitor* — a long-lived live
+;; session subscribes and unsubscribes across every live-navigation, and monitoring on each
+;; one without releasing the last piles refs onto the session pid without bound. That is a
+;; leak with no symptom until a session has navigated a few hundred times.
+;;
+;; web/pubsub and web/presence each carried their own copy of these three, identical down to
+;; the `(when ref (demonitor ref))`. One copy, one place to fix, and a registry the two of
+;; them do not yet share (web/live's route table) can adopt it without re-deriving the rule.
+
+(defn monitor-each (pids)
+  "A fresh `pid → ref` map monitoring every pid in `pids` — what a registry rebuilds on boot
+  for the pids it just recovered from the vault. One that died during the crash window
+  re-fires `[:down]` immediately and is cleaned up by the loop's ordinary dead-pid arm."
+  (fold pids {} (fn (monitors pid) (assoc monitors pid (monitor pid)))))
+
+(defn hold-monitor (monitors pid)
+  "`monitors` with `pid` monitored, if it isn't already. Idempotent: a pid subscribing to a
+  second topic must not take a second ref on the same process."
+  (if (contains? monitors pid) monitors (assoc monitors pid (monitor pid))))
+
+(defn release-monitor (monitors pid)
+  "Demonitor `pid` — its last entry in this registry is gone — and drop it from `monitors`.
+  Safe on a pid that was never monitored."
+  (let (ref (get monitors pid))
+    (when ref (demonitor ref)))
+  (dissoc monitors pid))
+
+;; ---- watching the vault -------------------------------------------------------------
+
+(defn watch-vault (vault-name)
+  "Monitor the vault registered as `vault-name`, so its death arrives as a `[:down]` in the
+  registry's own mailbox and the registry can re-mirror to the restarted one. The ref, or nil
+  if the vault isn't up yet (the registry then simply never hears about it — the next
+  `mirror` repopulates whatever came back)."
+  (let (vault (proc/whereis vault-name))
+    (if vault (monitor vault) nil)))
+
+(defn rewatch-vault (vault-name snapshot)
+  "Recover from the vault's death: wait for the supervisor to bring it back, push `snapshot`
+  so the backup is whole again, and monitor the fresh process. Returns the new ref, which the
+  registry loop carries in place of the dead one.
+
+  Without the re-mirror a vault restart (empty) followed by a registry restart before the next
+  state change would recover an empty registry — a silent, total loss of subscriptions or
+  rosters that no crash report names."
+  (await vault-name 60)
+  (mirror vault-name snapshot)
+  (watch-vault vault-name))

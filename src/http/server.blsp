@@ -400,12 +400,28 @@ port) still returns and lets the caller fail on its own terms."
 
 ; ---- buffered request dispatch (shared by the fast path and the O(n) body drain) ----
 
+(defn request-scheme (config)
+  "The URL scheme this listener answers on: `\"https\"` when it terminates TLS itself
+  (`:tls` is configured), else `\"http\"`.
+
+  Stamped onto every request as `:scheme`, which `web/conn/build` carries onto the conn and
+  `web/conn/secure?` falls back to when no proxy header names the protocol. Until this was
+  stamped, that fallback could not fire: `secure?` read a key nothing ever set, so an app
+  terminating its own TLS reported every request as insecure — which suppressed HSTS and
+  turned off the session cookie's `Secure` flag on exactly the deployment that had earned
+  both.
+
+  (hatch/http/server/request-scheme {}) ;=> \"http\"
+  (hatch/http/server/request-scheme {:tls {:cert \"c\" :key \"k\"}}) ;=> \"https\""
+  (if (get config :tls) "https" "http"))
+
 (defn dispatch-buffered (sock handler ws-handler config request remainder)
   "Run `handler` on a fully-buffered `request`, send the response, then either loop for the
   next pipelined request (`remainder`) on a kept-alive socket or close. Shared by the
   single-read fast path and the streamed-body drain so both get identical telemetry,
   error isolation, keep-alive and HEAD handling."
-  (let (t0 (os/now)
+  (let (request (assoc request :scheme (request-scheme config))
+        t0 (os/now)
         response (try
                    (handler request)
                    (catch e
@@ -741,7 +757,11 @@ port) still returns and lets the caller fail on its own terms."
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
   remove the temp file unless the handler moved it. A spooled request always closes the
   connection afterwards — no keep-alive/pipelining bookkeeping across a multi-megabyte body."
-  (let (request (assoc head :body "" :body-file path :body-length clen)
+  (let (request (assoc head
+                  :body ""
+                  :body-file path
+                  :body-length clen
+                  :scheme (request-scheme config))
         t0 (os/now)
         response (try
                    (handler request)

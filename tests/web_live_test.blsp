@@ -31,6 +31,26 @@
   (test "vertical tab → \\u000b"
     (assert= (json-str (string/bytes-> (bytes [11]))) "\"\\u000b\"")))
 
+;; An app's own type on the live wire. `Encode`'s fallback delegates to the stdlib
+;; `JsonEncode` ability, so the impl an app writes for `json/encode` (an HTTP JSON body,
+;; the session cookie) is the one the socket uses too — one extension point, not two.
+(defrecord money (cents))
+(impl JsonEncode
+  web-live-test/money
+  (->json [m] (str "\"$" (math/quot (money-cents m) 100) "." (math/mod (money-cents m) 100) "\"")))
+
+(defrecord opaque (x))
+
+(describe "encode: an app type reaches the wire through its JsonEncode impl"
+  (test "a record with an impl encodes as the app said"
+    (assert= (encode (money 250)) "\"$2.50\""))
+  (test "nested in the frame a session actually sends"
+    (assert= (encode {:price (money 250)}) "{\"price\":\"$2.50\"}"))
+  ; unchanged behaviour: no impl → the stringified fallback, never a raised frame
+  (test "a record with no impl still falls back to its string form"
+    (assert= (encode (opaque 1)) (json-str (str (opaque 1)))))
+  (test "a keyword still falls back" (assert= (encode :ok) "\":ok\"")))
+
 (describe "client-script"
   (test "default src + defer"
     (let (h (render (client-script)))

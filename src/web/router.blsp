@@ -78,8 +78,8 @@
   the conn (path params merged into `:params`). With no method+path match, returns a 405
   (`Allow` header listing the path's methods) when the path exists for other methods, a 204
   `Allow` response to an `OPTIONS` probe, or a 404 when the path matches nothing."
-  (let (method (get conn :method)
-        segments (path-segments (get conn :path))
+  (let (method (conn-method conn)
+        segments (path-segments (conn-path conn))
         found (find-route (candidates routes segments) method segments))
     (if found
       (let (route (first found)
@@ -90,7 +90,7 @@
             ;; unbounded key space or guessing which segments were values. The router is the
             ;; one place that does not have to guess.
             conn (assoc conn
-                   :params (into (get conn :params {}) matched)
+                   :params (into (or (conn-params conn) {}) matched)
                    :route (pattern->string (get route :pattern))))
         (->resp-conn conn ((get route :handler) conn)))
       ;; `candidates` and not the whole table: a route whose first segment differs

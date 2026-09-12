@@ -211,7 +211,7 @@
   the caller — but it goes SOMEWHERE, which is the whole difference between a diagnosable
   500 and a mystery one."
   (log/error (str "handler raised: " message)
-    {:method (get conn :method) :path (get conn :path) :status 500 :error (str message)})
+    {:method (web/conn/conn-method conn) :path (web/conn/conn-path conn) :status 500 :error (str message)})
   (failure-response 500 config))
 
 (defn- log-timeout (conn timeout-ms config)
@@ -220,7 +220,7 @@
   Logged distinctly from a crash on purpose: a slow handler and a broken one look identical
   in a log that records only the status, and they want opposite responses."
   (log/error (str "handler timed out after " timeout-ms "ms")
-    {:method (get conn :method) :path (get conn :path) :status 504 :timeout_ms timeout-ms})
+    {:method (web/conn/conn-method conn) :path (web/conn/conn-path conn) :status 504 :timeout_ms timeout-ms})
   (failure-response 504 config))
 
 ;; ---- the adapter ------------------------------------------------------------

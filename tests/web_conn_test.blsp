@@ -230,3 +230,74 @@
     (assert= (get-in (json-resp (build *req*) {}) [:resp-headers :cache-control]) nil))
   (test "a list body is encoded as an array"
     (assert= (get (json-resp (build *req*) [1 2 3]) :resp-body) "[1,2,3]")))
+
+;; ---- the Conn is a record ------------------------------------------------------------
+;;
+;; The reason it is: a field read now goes through a NAME. `(get conn :halted)` — one
+;; character short — is a silent nil that reads as "not halted"; `(conn-halted conn)` is an
+;; undefined function `nest check` reports at edit time. What is asserted here is the shape
+;; that makes that safe to rely on, and the two traps it introduces.
+
+(describe "conn as a record"
+  (test "build produces a record, not a bare map"
+    (is (record? (build *req*))))
+
+  (test "it prints as itself rather than dumping its fields"
+    (assert= (->string (build *req*)) "#<conn GET /hello>"))
+
+  ;; The property the whole sweep rests on: an accessor is not a type check, so a synthetic
+  ;; conn built by hand in a test — or the `{:headers {…}}` literal in a doctest — still works.
+  (test "an accessor reads a plain map too"
+    (assert= (conn-method {:method "POST" :path "/x"}) "POST")
+    (assert= (conn-path {:method "POST" :path "/x"}) "/x"))
+
+  ;; Trap one: a declared field is always PRESENT, so `contains?` cannot answer "was this
+  ;; ever set?". conn->response depends on getting this right.
+  (test "contains? is true for a declared field that is nil"
+    (is (contains? (build *req*) :route))
+    (assert= (conn-route (build *req*)) nil))
+
+  (test "a fresh conn stamps no :route or :stream onto the response"
+    (let (r (conn->response (build *req*)))
+      (assert= (contains? r :route) false)
+      (assert= (contains? r :stream) false)))
+
+  (test "a routed conn still does"
+    (assert= (get (conn->response (assoc (build *req*) :route "/hello/:id")) :route) "/hello/:id"))
+
+  ;; Trap two: nominal equality. A conn is not `=` to a map with the same fields, so a test
+  ;; may not compare one against a map literal.
+  (test "a conn is not = to a bare map of its fields"
+    (assert= (= (build *req*) (fields (build *req*))) false))
+
+  ;; An app's own keys still work, and the value stays a conn.
+  (test "assoc of an undeclared key keeps it a record"
+    (let (c (assoc (build *req*) :tenant-id 7))
+      (is (record? c))
+      (assert= (get c :tenant-id) 7)
+      (assert= (conn-method c) "GET")))
+
+  ;; Session and flash start empty rather than nil, so the accessors that used to coerce a
+  ;; missing map to `{}` keep answering a map.
+  (test "session and flash start as empty maps, not nil"
+    (assert= (conn-session (build *req*)) {})
+    (assert= (conn-flash (build *req*)) {})))
+
+;; ---- secure? now has a scheme to fall back to ----------------------------------------
+;;
+;; `secure?`'s "the server terminated TLS itself" branch read `:scheme`, which nothing ever
+;; set — so it could not fire, and an app serving its own HTTPS reported every request as
+;; insecure. That suppressed HSTS and cleared the session cookie's Secure flag on exactly
+;; the deployment that had earned both. http/server stamps it now, and `build` carries it.
+
+(describe "build carries the request scheme"
+  (test "an https listener's request is secure"
+    (is (secure? (build (assoc *req* :scheme "https")))))
+  (test "a plaintext listener's is not"
+    (assert= (secure? (build (assoc *req* :scheme "http"))) false))
+  (test "a proxy header still wins over the listener's own scheme"
+    (is (secure? (build (assoc *req*
+                          :scheme "http"
+                          :headers {:x-forwarded-proto "https"})))))
+  (test "and no scheme at all is still not secure"
+    (assert= (secure? (build *req*)) false)))

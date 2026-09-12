@@ -79,8 +79,10 @@ should not spend the same token.
 
 ### Where the buckets live — `:store`
 
+A value implementing the `BucketStore` ability:
+
 ```brood
-{:take (fn (key cost cfg now) -> :ok | [:deny retry-ms])}
+(take-tokens [self key cost cfg now] -> :ok | [:deny retry-ms])
 ```
 
 `cfg` is `{:rate :per :burst}` as `bucket-config` resolves it. `now` is epoch milliseconds
@@ -89,16 +91,24 @@ at a time of the test's choosing.
 
 `refill` and `spend` are public, so a store reuses the token-bucket arithmetic rather than
 reimplementing it. A Postgres- or Redis-backed store is roughly those two functions around a
-row:
+row — and because the store is a record, it carries its own pool rather than closing over
+one:
 
 ```brood
-(def pg-store
-  {:take (fn (key cost cfg now)
-           (let (bucket (load-bucket key)
-                 outcome (ratelimit/spend bucket cfg cost now))
-             (save-bucket key (nth outcome 0))
-             (nth outcome 1)))})
+(defrecord pg-store (pool))
+
+(impl BucketStore my-app/pg-store
+  (take-tokens [store key cost cfg now]
+    (let (bucket (load-bucket (pg-store-pool store) key)
+          outcome (ratelimit/spend bucket cfg cost now))
+      (save-bucket (pg-store-pool store) key (nth outcome 0))
+      (nth outcome 1))))
+
+(ratelimit/rate-limit {:store (pg-store my-pool) :rate 100 :per 60000})
 ```
+
+A store with nothing to carry can still be the `{:take (fn (key cost cfg now) …)}` map this
+seam originally took — that spelling keeps working, and reaches the same call site.
 
 ### What a rejection looks like — `:on-limit`
 

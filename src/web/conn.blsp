@@ -5,6 +5,58 @@
   ; parse — multipart/form-data (file upload) body parsing
   (:use http/multipart))
 
+;; The Conn is a RECORD, not a bare map, for the reason Phoenix's `%Plug.Conn{}` is a struct:
+;; every field it carries is now a name the toolchain knows. `(get conn :halted)` — one
+;; character off `:halted?` — is a silent nil that reads as "not halted", and a plug that
+;; wrote it would let a halted request through with nothing to see. `(conn-halted? conn)` is
+;; an undefined function: a `nest check` warning at edit time.
+;;
+;; The generated accessors work on ANY map, not only on a record (verified: `(conn-method
+;; {:method "POST"})` answers "POST"), so a synthetic conn built by hand in a test — or the
+;; `{:headers {…}}` literal in a doctest — keeps working exactly as before. What changes is
+;; that the *framework's* reads go through a name instead of a keyword.
+;;
+;; Two consequences worth knowing. A record is NOT `=` to a map with the same fields, so a
+;; test may not compare a whole conn against a map literal. And `contains?` answers true for
+;; a declared field even when it is nil, so "was this ever set?" is `(nil? (conn-route c))`,
+;; never `contains?` — see `conn->response`, which is where that distinction is load-bearing.
+;;
+;; The fields below are every key the framework itself reads. The response-side and
+;; plug-owned ones (`:session`, `:flash`, `:route`, `:stream`) are declared here rather than
+;; accreted by `assoc` in whichever module happens to add them, so the shape of a conn is
+;; readable in one place. An app is still free to `assoc` its own keys on; that keeps working
+;; and the value stays a record.
+(defrecord conn
+  (method
+    path
+    query
+    scheme
+    params
+    body-params
+    files
+    body-file
+    headers
+    body
+    body-bytes
+    cookies
+    assigns
+    status
+    resp-body
+    resp-headers
+    resp-cookies
+    before-send
+    halted?
+    route
+    stream
+    session
+    session-store
+    session-changed?
+    flash))
+
+(impl Display
+  web/conn/conn
+  (->string [c] (str "#<conn " (conn-method c) " " (conn-path c) ">")))
+
 (defn build (request)
   "Construct a Conn from a raw parsed request map. `:params` merges the request's query
   params (already parsed by http/request) with any form/JSON body params, body winning on
@@ -30,24 +82,40 @@
         body-text (check-allow :discarded-catch (try (string/bytes-> body-bytes) (catch _e "")))
         parsed (parse-conn-body headers body-text body-bytes)
         body-params (get parsed :params))
-    {:method (get request :method)
-     :path (get request :path)
-     :query (get request :query)
-     :params (into query-params body-params)
-     :body-params body-params
-     :files (get parsed :files)
-     :body-file (get request :body-file)
-     :headers headers
-     :body body-text
-     :body-bytes body-bytes
-     :cookies (parse-cookies headers)
-     :assigns {}
-     :status nil
-     :resp-body ""
-     :resp-headers {}
-     :resp-cookies (list)
-     :before-send (list)
-     :halted? false}))
+    ;; Positional, in the record's declared order — the one construction site in the
+    ;; framework, so the ordering is checked here once rather than trusted everywhere.
+    ;;
+    ;; `:session` and `:flash` start as `{}` rather than nil. A DECLARED field is always
+    ;; present, so a `(get conn :session {})` style read would answer nil (a default fires
+    ;; only on an ABSENT key) and every accessor that coerced a missing session to `{}` would
+    ;; start handing nil to `get` instead. Empty is also the truer value: no session plug has
+    ;; run, so there is nothing in the session.
+    (conn (get request :method)
+      (get request :path)
+      (get request :query)
+      ;; stamped by http/server from its own `:tls` config — see `request-scheme`
+      (get request :scheme)
+      (into query-params body-params)
+      body-params
+      (get parsed :files)
+      (get request :body-file)
+      headers
+      body-text
+      body-bytes
+      (parse-cookies headers)
+      {} ; assigns
+      nil ; status
+      "" ; resp-body
+      {} ; resp-headers
+      (list) ; resp-cookies
+      (list) ; before-send
+      false ; halted?
+      nil ; route — set by the router when a pattern matched
+      nil ; stream — set by stream-resp
+      {} ; session — replaced by fetch-session
+      nil ; session-store
+      false ; session-changed?
+      {}))) ; flash — replaced by fetch-flash
 
 (defn parse-conn-body (headers body-text body-bytes)
   "Parse the request body into `{:params <string→value> :files <name→file-map>}`.
@@ -82,7 +150,7 @@
 
 (defn get-assign (conn key)
   "Get a value from the conn's assigns map."
-  (get (get conn :assigns) key))
+  (get (conn-assigns conn) key))
 
 (defn put-status (conn status)
   "Set the response status."
@@ -102,43 +170,43 @@
 
 (defn halted? (conn)
   "True if the conn has been halted."
-  (get conn :halted? false))
+  (or (conn-halted? conn) false))
 
 (defn param (conn key)
   "Get a request param by string key."
-  (get (get conn :params) key))
+  (get (conn-params conn) key))
 
 (defn body-param (conn key)
   "Get a request param that came from the request *body* (form/JSON) by string key — not the
   query string. Use this where a query-string value must not be honored, e.g. a CSRF token
   (which leaks via Referer/logs/history if accepted from the URL)."
-  (get (get conn :body-params {}) key))
+  (get (or (conn-body-params conn) {}) key))
 
 (defn files (conn)
   "The uploaded files from a multipart/form-data request: `{name → {:filename :content-type
   :bytes}}`. Empty when the request wasn't a multipart upload."
-  (get conn :files {}))
+  (or (conn-files conn) {}))
 
 (defn file (conn name)
   "One uploaded file by its form field `name` — a `{:filename :content-type :bytes}` map, or
   nil if no file was uploaded under that name. `spit-bytes` the `:bytes` to store it."
-  (get (get conn :files {}) name))
+  (get (or (conn-files conn) {}) name))
 
 (defn body-file (conn)
   "The path of the on-disk spool for a large request body the server streamed to disk (see
   http/server `:spool-threshold`), or nil for an ordinary in-memory request. When set, `:body`/
   `:body-bytes`/`:files` are empty — read the body via `save-body` or `parse-upload-file`."
-  (get conn :body-file))
+  (conn-body-file conn))
 
 (defn spooled? (conn)
   "True if this request's body was streamed to disk rather than buffered in memory."
-  (not (nil? (get conn :body-file))))
+  (not (nil? (conn-body-file conn))))
 
 (defn save-body (conn dest)
   "Persist a spooled request body to `dest` by moving the temp spool file — zero-copy (a
   rename, no read-back into memory), which is the point of streaming a large upload to disk.
   Returns `dest`. Errors if the request wasn't spooled (no `:body-file`)."
-  (let (src (get conn :body-file))
+  (let (src (conn-body-file conn))
     (if (nil? src)
       (error "save-body: request body was not spooled to disk (no :body-file)")
       (do (file/rename src dest) dest))))
@@ -148,19 +216,19 @@
   http/multipart returns). Reads the spool file once — use only when the app needs the parsed
   fields; to merely store the upload, prefer the zero-copy `save-body`. Returns nil if the
   request wasn't spooled."
-  (let (src (get conn :body-file))
+  (let (src (conn-body-file conn))
     (if (nil? src)
       nil
       (http/multipart/parse (file/slurp-bytes src)
-        (content-type-param (get conn :headers {}) "boundary")))))
+        (content-type-param (or (conn-headers conn) {}) "boundary")))))
 
 (defn header (conn key)
   "Get a request header by keyword key."
-  (get (get conn :headers) key))
+  (get (conn-headers conn) key))
 
 (defn get-cookie (conn name &optional (default nil))
   "Get a request cookie value by string name, or `default` if absent."
-  (get (get conn :cookies {}) name default))
+  (get (or (conn-cookies conn) {}) name default))
 
 (defn put-cookie (conn name value &optional (opts {}))
   "Add a `Set-Cookie` to the response. `opts`: `:path` (default \"/\"), `:max-age` (in
@@ -169,7 +237,7 @@
   line (see http/response). The caller is responsible for any value encoding."
   (assoc conn
     :resp-cookies
-      (append (get conn :resp-cookies (list))
+      (append (or (conn-resp-cookies conn) (list))
         (list (format-set-cookie name value opts)))))
 
 (defn delete-cookie (conn name &optional (opts {}))
@@ -211,11 +279,11 @@
   `conn->response`. Callbacks run in registration order. This is how a plug writes a value
   computed from the *finished* conn — e.g. the session/flash cookie, set after the handler
   has mutated the session (mirrors Plug's `register_before_send`)."
-  (assoc conn :before-send (append (get conn :before-send (list)) (list f))))
+  (assoc conn :before-send (append (or (conn-before-send conn) (list)) (list f))))
 
 (defn run-before-send (conn)
   "Run the conn's registered before-send callbacks left-to-right, threading the conn."
-  (fold (get conn :before-send (list)) conn (fn (c f) (f c))))
+  (fold (or (conn-before-send conn) (list)) conn (fn (c f) (f c))))
 
 (defn send-resp (conn status body)
   "Set the response status and body on the conn, returning the conn. The web layer
@@ -230,16 +298,22 @@
   `:stream` function (see `stream-resp`) passes it through so http/server sends the response
   chunked."
   (let (conn (run-before-send conn)
-        cookies (get conn :resp-cookies (list))
-        headers (get conn :resp-headers {})
+        cookies (or (conn-resp-cookies conn) (list))
+        headers (or (conn-resp-headers conn) {})
         headers (if (empty? cookies) headers (assoc headers :set-cookie cookies))
-        base {:status (or (get conn :status) 200)
+        base {:status (or (conn-status conn) 200)
               :headers headers
-              :body (get conn :resp-body "")}
+              :body (or (conn-resp-body conn) "")}
         ;; Carried through so the server's telemetry can name the ROUTE rather than the
         ;; path — the difference between one row per route and one per URL anyone visits.
-        base (if (contains? conn :route) (assoc base :route (get conn :route)) base))
-    (if (contains? conn :stream) (assoc base :stream (get conn :stream)) base)))
+        ;;
+        ;; `nil?`, not `contains?`: `:route` and `:stream` are declared fields of the conn
+        ;; record and so are always PRESENT, nil or not. `contains?` answered true for every
+        ;; conn ever built and stamped `:route nil` onto every response.
+        route (conn-route conn)
+        base (if (nil? route) base (assoc base :route route))
+        stream (conn-stream conn))
+    (if (nil? stream) base (assoc base :stream stream))))
 
 (defn stream-resp (conn stream-fn &optional (status 200))
   "Produce a chunked streaming response from `conn`. `stream-fn` is a one-argument function
@@ -268,12 +342,12 @@
       (hatch/web/conn/secure? {:headers {:x-forwarded-proto \"http\"}}) ;=> false
       (hatch/web/conn/secure? {:headers {} :scheme \"https\"}) ;=> true
       (hatch/web/conn/secure? {:headers {}}) ;=> false"
-  (let (headers (get conn :headers {})
+  (let (headers (or (conn-headers conn) {})
         forwarded (first (seq/filter (map *forwarded-proto-headers* (fn (h) (get headers h)))
                            (fn (v) (and (string? v) (not (= v ""))))))
         ;; a proxy chain may forward a list; the first hop is the client's
         proto (if forwarded (string/lower (string/trim (first (string/split forwarded ",")))) nil))
-    (if proto (= proto "https") (= (get conn :scheme) "https"))))
+    (if proto (= proto "https") (= (conn-scheme conn) "https"))))
 
 (defn html-resp (conn body)
   "200 OK HTML response (conn)."

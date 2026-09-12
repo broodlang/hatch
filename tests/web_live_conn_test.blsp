@@ -61,7 +61,8 @@
 
 ; The view under test: its render simply emits whatever token the connection carries, so a
 ; token in the rendered frame can only have come through *live-conn*.
-(deflive (mount (params) {:n 0})
+(deflive
+  (mount (params) {:n 0})
   (render (model)
     [:div {} [:span {} (str "token=" (or (csrf/live-token secret) "none"))]]))
 

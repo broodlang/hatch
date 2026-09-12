@@ -28,7 +28,7 @@
   as a literal — overwriting the conn's status. There was therefore NO way to render a
   Hiccup page under any other status, and an app that wanted a themed 404 had to choose
   between the page and the status code. Unset (the default) is still 200."
-  (send-resp conn (or (get conn :status) 200) (audit/warn-page! (html node))))
+  (send-resp conn (or (conn-status conn) 200) (audit/warn-page! (html node))))
 
 (defmacro defhtml (name args & body)
   "Define `name` as a function of `args` whose Hiccup body is compiled to HTML **at

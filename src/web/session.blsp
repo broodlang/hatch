@@ -16,7 +16,23 @@
 
   Then handlers use get/put-session and get/put-flash on the conn; the (possibly mutated)
   session is re-signed into a Set-Cookie before the response is sent — but only if it
-  changed, so plain GETs don't churn the cookie."
+  changed, so plain GETs don't churn the cookie.
+
+  ## Where a session lives — the `SessionStore` seam
+
+  The signed cookie is the default because it is the right first reach: no server-side state
+  to run, sweep, replicate or lose, so it survives a restart and costs nothing across
+  machines. It buys that with two real limits — the payload is readable by the client unless
+  you turn `:encrypt` on, and a cookie already issued cannot be revoked before its `__exp__`.
+
+  When those limits bite, the store is replaceable rather than the module. `fetch-session`
+  takes either a signing secret (meaning the built-in `cookie-store`) or any value
+  implementing `SessionStore`:
+
+      (through [(session/fetch-session (my-redis-store pool))] …)
+
+  A store is a value you pass, not a name resolved through configuration, so it carries its
+  own pool or connection as fields. See the `SessionStore` ability for the two ops."
   ; get-cookie, put-cookie, register-before-send — the conn plumbing this builds on
   (:use web/conn)
   ; dev? / prod? — the one place $HATCH_ENV is read
@@ -223,38 +239,110 @@
     (vector? v) (mapv v stringify-keys)
     else v))
 
+; ---- the SessionStore ability ----
+
+(defability SessionStore
+  "Where a session's data lives between requests.
+
+  Two ops, both handed the conn, because a store owns both halves of the round trip: how the
+  browser is told which session this is, and where the data behind it sits. For the cookie
+  store those are the same thing — the cookie IS the data. For a server-side store the cookie
+  carries an id and the data is a row somewhere.
+
+      (session-read  [store conn]      -> the session data, a string-keyed map)
+      (session-write [store conn data] -> the conn, carrying whatever the client needs)
+
+  `session-write` runs as a before-send callback and only when a handler actually changed the
+  session, so a plain GET writes nothing. An empty `data` means *end this session* — expire
+  the cookie, drop the row — not \"store an empty map\"; that distinction is what makes logout
+  work, and a store that re-writes `{}` instead leaves a live session behind.
+
+  A store is a VALUE, not a configured name, so a second one is passed rather than looked up:
+
+      (defrecord redis-store (pool secret))
+      (impl SessionStore my-app/redis-store
+        (session-read  [store conn] …)
+        (session-write [store conn data] …))
+
+      (through [(session/fetch-session (redis-store my-pool secret))]
+        (get \"/account\" account/show))
+
+  Hatch ships one implementation, `cookie-store`, and it is the default — see the module
+  docstring for why a stateless session is the right thing to reach for first."
+  (session-read [self conn] :-> map)
+  (session-write [self conn data] :-> map))
+
+(defn session-cookie-name (opts)
+  "The cookie a session is carried in — `:cookie` in `opts`, else `_hatch_session`."
+  (get opts :cookie *default-cookie*))
+
+(defrecord cookie-store (secret opts))
+
+;; The default store, and everything above this line: the session IS the cookie, signed (or
+;; sealed) with `secret`. No server-side state, so it survives a restart, needs no sweeping,
+;; and costs nothing to run across machines — which is why it is the default rather than
+;; merely one option.
+(impl SessionStore
+  web/session/cookie-store
+  (session-read [store conn]
+    (decode-session (cookie-store-secret store)
+      (get-cookie conn (session-cookie-name (cookie-store-opts store)))))
+  (session-write [store conn data]
+    (let (opts (cookie-store-opts store)
+          name (session-cookie-name opts))
+      ;; An empty session is EXPIRED (Max-Age=0), not re-signed as `{}` — otherwise a logout
+      ;; leaves the browser holding a valid cookie for an empty session, and the next request
+      ;; arrives with a session that exists.
+      (if (= (count data) 0)
+        (delete-cookie conn name (session-cookie-opts opts))
+        (put-cookie conn
+          name
+          (encode-session (cookie-store-secret store) (with-expiry data opts) opts)
+          (session-cookie-opts opts))))))
+
+(impl Display
+  web/session/cookie-store
+  (->string [store] (str "#<session cookie-store " (session-cookie-name (cookie-store-opts store)) ">")))
+
+(defn as-store (store-or-secret opts)
+  "The store `fetch-session` was given: a `SessionStore` value passed through, or a bare
+  signing secret wrapped in a `cookie-store` with `opts`.
+
+  The bare secret is the older spelling and by far the common one — `(fetch-session secret)`
+  is what every app, and this repo's own docs, already write. It keeps working, and it now
+  means exactly \"the cookie store, with this secret\"."
+  (if (string? store-or-secret)
+    (cookie-store store-or-secret opts)
+    store-or-secret))
+
 ; ---- the fetch-session plug ----
 
-(defn fetch-session (secret &optional (opts {}))
-  "A plug that loads the signed session cookie into `conn :session` and registers a
-  before-send callback to write it back (re-signed) — but only if a handler changed it.
-  `opts`: `:cookie` (name, default `_hatch_session`), `:max-age` (seconds), `:path`
-  (default \"/\"), `:same-site` (default \"Lax\"), `:http-only` (default true), `:secure`."
-  (fn (conn)
-    (let (cookie-name (get opts :cookie *default-cookie*)
-          data (decode-session secret (get-cookie conn cookie-name)))
+(defn fetch-session (store-or-secret &optional (opts {}))
+  "A plug that loads the session into `conn :session` and registers a before-send callback to
+  write it back — but only if a handler changed it.
+
+  Give it a signing secret for the default cookie store, or any `SessionStore` value:
+
+      (through [(session/fetch-session secret)] …)                 ; signed cookie
+      (through [(session/fetch-session (my-redis-store pool))] …)  ; someone else's store
+
+  `opts` (cookie store only): `:cookie` (name, default `_hatch_session`), `:max-age`
+  (seconds), `:path` (default \"/\"), `:same-site` (default \"Lax\"), `:http-only` (default
+  true), `:secure`. A store value carries its own configuration, so `opts` is ignored for one."
+  (let (store (as-store store-or-secret opts))
+    (fn (conn)
       (register-before-send (assoc conn
-                              :session data
-                              :session-config {:secret secret :opts opts :cookie cookie-name}
+                              :session (session-read store conn)
+                              :session-store store
                               :session-changed? false)
         write-session))))
 
 (defn write-session (conn)
-  "Before-send callback: if the session changed this request, write it back. An empty
-  session (e.g. after clear-session/logout, or once a one-shot flash is consumed) is
-  *expired* with a Max-Age=0 cookie rather than re-signed as `{}`, so the browser actually
-  drops it. Unchanged sessions leave the response untouched (no cookie churn on plain GETs)."
-  (if (get conn :session-changed? false)
-    (let (cfg (get conn :session-config {})
-          secret (get cfg :secret)
-          opts (get cfg :opts {})
-          sess (get conn :session {}))
-      (if (= (count sess) 0)
-        (delete-cookie conn (get cfg :cookie) (session-cookie-opts opts))
-        (put-cookie conn
-          (get cfg :cookie)
-          (encode-session secret (with-expiry sess opts) opts)
-          (session-cookie-opts opts))))
+  "Before-send callback: if the session changed this request, hand it to the store. Unchanged
+  sessions leave the response untouched (no cookie churn on plain GETs), and an empty one is
+  handed over as empty — the store's cue to end the session rather than persist a blank."
+  (if (conn-session-changed? conn)
+    (session-write (conn-session-store conn) conn (or (conn-session conn) {}))
     conn))
 
 (defn secure-cookie-default? ()
@@ -278,18 +366,18 @@
 
 (defn get-session (conn key &optional (default nil))
   "Read a session value by string `key`, or `default` if absent."
-  (get (get conn :session {}) key default))
+  (get (or (conn-session conn) {}) key default))
 
 (defn put-session (conn key value)
   "Set session `key` to `value` and mark the session dirty (so it's re-signed on send)."
   (assoc conn
-    :session (assoc (get conn :session {}) key value)
+    :session (assoc (or (conn-session conn) {}) key value)
     :session-changed? true))
 
 (defn delete-session (conn key)
   "Remove `key` from the session and mark it dirty."
   (assoc conn
-    :session (dissoc (get conn :session {}) key)
+    :session (dissoc (or (conn-session conn) {}) key)
     :session-changed? true))
 
 (defn clear-session (conn)
@@ -323,7 +411,7 @@
   flash stashed in the session into `conn :flash` for this request, then clears it from the
   session (marking it dirty). So a message put before a redirect shows on exactly the next
   request, then is gone."
-  (let (sess (get conn :session {})
+  (let (sess (or (conn-session conn) {})
         flash (get sess *flash-key* {}))
     (if (empty? flash)
       (assoc conn :flash {})
@@ -335,7 +423,7 @@
 (defn put-flash (conn key message)
   "Stash a flash `message` under string `key` (e.g. \"info\", \"error\") to show on the
   *next* request — set it just before a redirect (the POST→redirect→GET pattern)."
-  (let (sess (get conn :session {})
+  (let (sess (or (conn-session conn) {})
         flash (get sess *flash-key* {}))
     (assoc conn
       :session (assoc sess *flash-key* (assoc flash key message))
@@ -343,4 +431,4 @@
 
 (defn get-flash (conn key &optional (default nil))
   "Read a flash message by `key` for this request (placed there by fetch-flash)."
-  (get (get conn :flash {}) key default))
+  (get (or (conn-flash conn) {}) key default))

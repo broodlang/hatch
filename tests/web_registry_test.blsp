@@ -39,3 +39,72 @@
       (assert= (= p1 p2) true))))
 ; (Supervisor-driven restart-after-crash + vault recovery is proven end-to-end by the
 ;  live-route registry crash test in web_live_test; web/registry reuses supervisor.)
+
+;; The monitor bookkeeping web/pubsub and web/presence used to carry a copy of each. The
+;; leak these prevent — a ref taken per subscribe and never released — is invisible in a
+;; single test, so what is asserted here is the shape both callers depend on: idempotent
+;; on the way in, actually demonitoring on the way out.
+
+(describe "hold-monitor"
+  (test "monitors a pid it hasn't seen"
+    (let (pid (spawn (fn () (receive ([:stop] nil))))
+          monitors (hold-monitor {} pid))
+      (is (contains? monitors pid))
+      (send pid [:stop])))
+  (test "a second hold on the same pid keeps the first ref — no second monitor"
+    (let (pid (spawn (fn () (receive ([:stop] nil))))
+          once (hold-monitor {} pid)
+          twice (hold-monitor once pid))
+      (assert= (get twice pid) (get once pid))
+      (assert= (count twice) 1)
+      (send pid [:stop]))))
+
+(describe "release-monitor"
+  (test "drops the pid from the map"
+    (let (pid (spawn (fn () (receive ([:stop] nil))))
+          monitors (hold-monitor {} pid))
+      (assert= (contains? (release-monitor monitors pid) pid) false)
+      (send pid [:stop])))
+  ;; The reason the released ref matters: after releasing, that pid's death must NOT
+  ;; deliver a [:down] here. A registry that skipped the demonitor would still get one and
+  ;; run its dead-pid cleanup for a session it had already forgotten.
+  (test "the released pid's death delivers no [:down]"
+    (let (pid (spawn (fn () (receive ([:stop] nil))))
+          monitors (hold-monitor {} pid))
+      (release-monitor monitors pid)
+      (send pid [:stop])
+      (receive
+        ([:down _ ^pid _] (is false))
+        (after 100 (is true)))))
+  (test "is safe on a pid that was never monitored"
+    (assert= (release-monitor {} :never-monitored) {})))
+
+(describe "monitor-each"
+  (test "monitors every pid it is given"
+    (let (a (spawn (fn () (receive ([:stop] nil))))
+          b (spawn (fn () (receive ([:stop] nil))))
+          monitors (monitor-each (list a b)))
+      (assert= (count monitors) 2)
+      (is (contains? monitors a))
+      (is (contains? monitors b))
+      (send a [:stop])
+      (send b [:stop])))
+  (test "no pids, no monitors" (assert= (monitor-each (list)) {})))
+
+(describe "watch-vault"
+  (test "a ref for a live vault"
+    (do
+      (spawn :rtest-vault-watch (vault-loop {}))
+      (is (not (nil? (watch-vault :rtest-vault-watch))))))
+  (test "nil when the vault isn't up" (assert= (watch-vault :rtest-no-such-vault-2) nil)))
+
+(describe "rewatch-vault"
+  ;; The whole point: a vault that came back empty is repopulated from the registry's own
+  ;; state, so a registry restart after a vault restart doesn't recover an empty snapshot.
+  (test "re-mirrors the snapshot to the restarted vault and returns a fresh ref"
+    (let (state {"room:1" (list :a :b)})
+      (spawn :rtest-vault-rewatch (vault-loop {}))
+      (assert= (pull-snapshot :rtest-vault-rewatch :none) {})
+      (let (ref (rewatch-vault :rtest-vault-rewatch state))
+        (is (not (nil? ref)))
+        (assert= (pull-snapshot :rtest-vault-rewatch :none) state)))))

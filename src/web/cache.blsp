@@ -168,7 +168,7 @@
   `:vary` (an extra Vary token, default `Cookie`)."
   (let (headers (get resp :headers {})
         content-type (get headers :content-type)
-        method (string/upper (or (get conn :method) ""))
+        method (string/upper (or (conn-method conn) ""))
         cookie-name (get opts :cookie web/session/*default-cookie*))
     (if (get headers :cache-control)
       resp
@@ -199,7 +199,7 @@
   publishes that page to a shared cache. So an unparsed conn that mentions the name in its
   raw header counts as carrying it: this fails closed."
   (or (not (nil? (get-cookie conn name)))
-    (let (raw (get (get conn :headers {}) :cookie))
+    (let (raw (get (or (conn-headers conn) {}) :cookie))
       (and (string? raw) (includes? raw name)))))
 
 (defn merge-vary (existing token)

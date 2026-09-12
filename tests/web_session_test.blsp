@@ -63,6 +63,85 @@
           r (conn->response conn))
       (assert= (decode-session *secret* (session-cookie-value r)) {"user" "carol"}))))
 
+; ---- the SessionStore seam ------------------------------------------------------------
+;
+; A second store, server-side: the cookie carries only an id, the data is a row in a table.
+; It is here rather than in `src/` because a server-side session is per-node and hatch does
+; not ship one — but it is a REAL implementation of the ability, and writing it here is what
+; proves the seam is usable by someone outside this module.
+
+(def *rows* (table/new))
+
+(defrecord table-store (secret fresh-id))
+
+(impl SessionStore
+  web-session-test/table-store
+  (session-read [store conn]
+    (let (id (get-cookie conn "_sid"))
+      (if (nil? id) {} (table/get *rows* id {}))))
+  (session-write [store conn data]
+    ;; a fresh session with no cookie yet gets an id from the store's own field, so each
+    ;; test can own one (the suite runs concurrently over a shared `*rows*`)
+    (let (id (or (get-cookie conn "_sid") (table-store-fresh-id store)))
+      (if (= (count data) 0)
+        (do (table/put *rows* id {}) (delete-cookie conn "_sid"))
+        (do (table/put *rows* id data) (put-cookie conn "_sid" id))))))
+
+(defn conn-with-sid (id)
+  (build {:method "GET"
+          :path "/"
+          :query ""
+          :params {}
+          :headers (if (nil? id) {} {:cookie (str "_sid=" id)})
+          :body ""}))
+
+(describe "SessionStore: fetch-session takes a store, not only a secret"
+  (test "a bare secret still means the cookie store"
+    (let (plug (fetch-session *secret*)
+          conn (plug (conn-with nil)))
+      (is (record? (get conn :session-store)))
+      (assert= (->string (get conn :session-store)) "#<session cookie-store _hatch_session>")))
+
+  (test "reads through the store's own impl"
+    (do
+      (table/put *rows* "sid-read" {"user" "dora"})
+      (let (conn ((fetch-session (table-store *secret* "sid-read")) (conn-with-sid "sid-read")))
+        (assert= (get-session conn "user") "dora"))))
+
+  (test "writes through the store's own impl, and not into a cookie"
+    (let (store (table-store *secret* "sid-write")
+          conn (put-session ((fetch-session store) (conn-with-sid "sid-write")) "user" "erin")
+          r (conn->response conn))
+      ;; the data went to the row, and the cookie carries only the id
+      (assert= (table/get *rows* "sid-write") {"user" "erin"})
+      (assert= (session-cookie-value r) "sid-write")))
+
+  (test "a fresh session gets an id from the store, with no cookie to read"
+    (let (store (table-store *secret* "sid-fresh")
+          conn (put-session ((fetch-session store) (conn-with-sid nil)) "user" "fay"))
+      (conn->response conn)
+      (assert= (table/get *rows* "sid-fresh") {"user" "fay"})))
+
+  ;; The contract that makes logout work: an empty session is the store's cue to END the
+  ;; session, not to persist a blank one.
+  (test "clear-session hands the store an empty map"
+    (do
+      (table/put *rows* "sid-clear" {"user" "erin"})
+      (let (store (table-store *secret* "sid-clear")
+            conn (clear-session ((fetch-session store) (conn-with-sid "sid-clear"))))
+        (conn->response conn)
+        (assert= (table/get *rows* "sid-clear") {}))))
+
+  (test "an unchanged session is never handed to the store"
+    (do
+      (table/put *rows* "sid-quiet" {"user" "erin"})
+      (let (store (table-store *secret* "sid-quiet")
+            conn ((fetch-session store) (conn-with-sid "sid-quiet"))
+            r (conn->response conn))
+        ;; nothing written, so no Set-Cookie at all, and the row is untouched
+        (assert= (get (get r :headers) :set-cookie) nil)
+        (assert= (table/get *rows* "sid-quiet") {"user" "erin"})))))
+
 (describe "session accessors"
   (test "get-session default when absent"
     (assert= (get-session ((fetch-session *secret*) (conn-with nil)) "x" "def") "def"))

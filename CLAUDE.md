@@ -215,6 +215,15 @@ docs/
   and a runtime failure, not a compile error.
 - **Macro params shadow builtins** — avoid naming macro params `name`,
   `type`, `count`, etc.
+- **Hatch's macros hand-build their expansion with `list`/`cons`, not quasiquote —
+  deliberately.** Inside `` ` ``, Brood qualifies every resolvable symbol to the *defining*
+  module and auto-gensyms every binder, so `` `(defn render (model) …) `` in `web/live`
+  expands to `(def web/live/render (fn (model__41) …))`. Both are wrong for `deflive` /
+  `deflive-component` / `defrouter` / `defhtml` / `deftemplate`: they define `render` /
+  `mount` / `handle-event` into the *consuming* module, and `deflive`'s `on` / `tick` /
+  `handle-info` clause bodies are anaphoric (a user's body says `model` and `event-params`
+  by name). The escape hatch is `~'name` — `` `(defn ~'render (~'model) ~body) ``. Use
+  quasiquote only with that discipline, and check `macroexpand` before the tests.
 - **`tcp-listen` inside spawned process** — accept messages go to the
   calling process mailbox; always call inside the listener green process.
 - **Document a pure public function with a doctest** — a docstring line of the form

@@ -406,7 +406,7 @@
 
   `X-Forwarded-Host` first: behind a proxy the `Host` the app sees may be the proxy's own,
   and the one the visitor typed is the one that matters for canonicalisation."
-  (let (headers (get conn :headers {})
+  (let (headers (or (conn-headers conn) {})
         raw (or (get headers :x-forwarded-host) (get headers :host)))
     (if (or (nil? raw) (= raw "")) nil (host-of (first (string/split raw ","))))))
 
@@ -414,8 +414,8 @@
   "The path and query of `conn`, so a redirect preserves what was asked for. A canonical
   redirect that drops the path sends every deep link to the home page, which loses exactly
   the ranking the redirect was meant to consolidate."
-  (let (path (or (get conn :path) "/")
-        query (get conn :query))
+  (let (path (or (conn-path conn) "/")
+        query (conn-query conn))
     (if (and (string? query) (not (= query ""))) (str path "?" query) path)))
 
 (defn sitemap-date (ms)

@@ -108,9 +108,9 @@
     (str whole "." (if (and (= scale 100) (< frac 10)) (str "0" frac) (str frac)))))
 
 (defn bytes-human (n)
-  "A byte count at human scale — `33.7 MB`, not `35389440`.
+  "A byte count at human scale — `33.8 MB`, not `35389440`.
 
-  (hatch/web/dashboard/bytes-human 35389440) ;=> \"33.7 MB\""
+  (hatch/web/dashboard/bytes-human 35389440) ;=> \"33.8 MB\""
   (cond
     (< n 1024) (str n " B")
     (< n 1048576) (str (decimal n 1024 10) " KB")

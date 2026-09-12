@@ -77,7 +77,7 @@
 (defn accepts-gzip? (conn)
   "True if the request's `Accept-Encoding` offers gzip (a crude substring test — we only ever
   advertise gzip)."
-  (let (ae (get (get conn :headers) :accept-encoding))
+  (let (ae (get (conn-headers conn) :accept-encoding))
     (and (string? ae) (includes? ae "gzip"))))
 
 (defn- write-blocks (write data block-size offset)

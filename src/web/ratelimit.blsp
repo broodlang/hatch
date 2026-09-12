@@ -41,15 +41,20 @@
   a single row should not spend the same token, and an endpoint whose work scales with a
   parameter can charge for it.
 
-  **Where the buckets live** — `:store`, a map of one function:
+  **Where the buckets live** — `:store`, a value implementing the `BucketStore` ability:
 
-      {:take (fn (key cost cfg now) -> :ok | [:deny retry-ms])}
+      (defrecord redis-store (pool))
+      (impl BucketStore my-app/redis-store
+        (take-tokens [store key cost cfg now] …))   ; -> :ok | [:deny retry-ms]
 
-  `cfg` is `{:rate :per :burst}` as `bucket-config` resolves it, and `now` is epoch ms from
-  the caller — passed in rather than read inside, so an alternative store is testable at a
-  time of the test's choosing. `refill` and `spend` are public so a store can reuse the
+  A record, so the store carries its own connection instead of closing over one, and so a
+  store missing the op fails by name rather than as `nil is not callable`. `cfg` is
+  `{:rate :per :burst}` as `bucket-config` resolves it, and `now` is epoch ms from the
+  caller — passed in rather than read inside, so an alternative store is testable at a time
+  of the test's choosing. `refill` and `spend` are public so a store can reuse the
   token-bucket arithmetic rather than reimplement it; a Postgres- or Redis-backed store is
-  roughly those two functions around a row.
+  roughly those two functions around a row. A plain `{:take (fn (key cost cfg now) …)}` map
+  is still accepted for a store with nothing to carry.
 
   ## What this does not do, and will not pretend to
 
@@ -208,6 +213,26 @@
 
 ; ---- the store seam ----
 
+(defability BucketStore
+  "Where a rate limiter's token buckets live.
+
+  One op, and everything it needs is an argument: `now` is the caller's clock rather than
+  one read inside the store, so an implementation is testable at a time of the test's
+  choosing, and `cfg` is `{:rate :per :burst}` exactly as `bucket-config` resolves it, so a
+  store reads the plug's configuration instead of reinventing the defaults. `refill` and
+  `spend` are public for the same reason — a Postgres- or Redis-backed store is those two
+  functions around a row, not a second token-bucket implementation that drifts from this one.
+
+  Answer `:ok` to admit the request, or `[:deny retry-ms]` with the milliseconds until
+  `cost` tokens have accrued.
+
+      (defrecord redis-store (pool))
+      (impl BucketStore my-app/redis-store
+        (take-tokens [store key cost cfg now] …))
+
+      (rate-limit {:store (redis-store my-pool) :rate 100 :per 60000})"
+  (take-tokens [self key cost cfg now] :-> any))
+
 ;; The default bucket store: one supervised process per node, holding every key's bucket.
 ;;
 ;; **Per NODE.** Each machine runs its own, so a client round-robined across N machines gets
@@ -218,8 +243,33 @@
 ;; same trade for the same reason.
 ;;
 ;; So: divide your intended ceiling by the machine count, or swap in a shared `:store` when
-;; you need a ceiling you can prove. See the module docstring for the contract.
-(def in-memory-store {:take take-token})
+;; you need a ceiling you can prove.
+(defrecord node-local-store ())
+
+(impl BucketStore
+  web/ratelimit/node-local-store
+  (take-tokens [_store key cost cfg now] (take-token key cost cfg now)))
+
+;; So a misconfigured `:store` names itself in a log line or a REPL, rather than printing as
+;; the empty map the record is underneath.
+(impl Display web/ratelimit/node-local-store (->string [_s] "#<ratelimit node-local-store>"))
+
+(def in-memory-store
+  ;; The `:store` default, and the name it has always had. A VALUE implementing `BucketStore`
+  ;; rather than the `{:take fn}` map it used to be: a store is now something an app defines
+  ;; a record for and hangs its own connection off, and a store missing the op is a named
+  ;; error at the point of the call instead of `nil is not callable` one frame in.
+  (node-local-store))
+
+;; A `{:take (fn (key cost cfg now) …)}` map is still a store. That was the contract before
+;; the ability and it is a perfectly good one for a store with no state to carry — a closure
+;; over a connection is a record with extra steps. Both spellings reach the same call site.
+(impl BucketStore
+  :map (take-tokens [store key cost cfg now]
+    (let (take (get store :take))
+      (if (fn? take)
+        (take key cost cfg now)
+        (error "web/ratelimit: a map :store must carry a :take function, got: " store)))))
 
 ; ---- key selection ----
 
@@ -334,7 +384,7 @@
               ;; parameter can charge for it (a page size, a batch length) instead of
               ;; pretending every request costs the same.
               spent (if (fn? cost) (cost conn) cost))
-          (match ((get store :take) key spent cfg (os/now))
+          (match (take-tokens store key spent cfg (os/now))
             (:ok (do (bump :allowed) conn))
             ([:deny retry-ms] (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
                                 (bump :denied)
@@ -342,6 +392,6 @@
                                   {:retry_after retry-after}
                                   {:key key
                                    :cost spent
-                                   :method (get conn :method)
-                                   :path (get conn :path)})
+                                   :method (conn-method conn)
+                                   :path (conn-path conn)})
                                 (on-limit conn retry-after)))))))))

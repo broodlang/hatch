@@ -140,7 +140,7 @@
   request that did not come through one — a direct connection, a misconfigured route — and
   they are whatever the client typed, so an allow-list built on this must be the outer of
   two defences and never the only one."
-  (let (headers (get conn :headers {})
+  (let (headers (or (conn-headers conn) {})
         direct (first (seq/filter (map *client-ip-headers* (fn (h) (get headers h)))
                         (fn (v) (and (string? v) (not (= v ""))))))
         forwarded (get headers :x-forwarded-for))
