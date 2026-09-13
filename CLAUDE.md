@@ -11,14 +11,10 @@ See `docs/web-framework-design.md` for the full design rationale.
 
 Hatch is a **library package**: `src/` holds only the framework (`http/` +
 `web/`). The demo app lives in a separate sibling project, `../hatch-demo`,
-which normally depends on a **published** Hatch (`[hatch :version "^X.Y.0"]`) — so
-the demo is also our proof that Hatch installs and loads as a real package, from
-the registry, the way anyone else gets it.
-
-**Right now it does not.** 0.16.0 is tagged here but NOT on the registry (which
-still serves 0.15.1), so the demo is pinned to the release commit
-(`[hatch :git … :ref "83f22d1…"]`) and that proof is suspended. `nest publish`
-from this repo restores it; then flip the demo back to `:version "^0.16.0"`.
+which depends on a **published** Hatch (`[hatch :version "^0.16.1"]`) — so the
+demo is also our proof that Hatch installs and loads as a real package, from the
+registry, the way anyone else gets it. Keep it that way: a `:git` pin there buys
+nothing the registry does not, and quietly retires the only test of that path.
 
 **When you change hatch, the demo cannot see it until you release.** For local
 co-development swap the dep to `[hatch :path "../hatch"]` and re-run `nest
