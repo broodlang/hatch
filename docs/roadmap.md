@@ -339,6 +339,43 @@ layout, `brood_webmcp.js` missing from `static/`, and a hand-copy of `ls tests/`
 eighteen places. The copy is gone — a rule plus the suites that are not straight per-module
 ones — because a hand-maintained duplicate of a directory listing is what went stale.
 
+**0.17.0: the seventh stage, and the validator it was quietly breaking.** `web/endpoint`
+documents the six stages that go AROUND a router. Static assets are the one thing that has to
+go in FRONT of one, and both apps built on hatch wrote it themselves and disagreed: hive put
+`/static/*path` inside its router; hatch-demo wrote a `cond` on the conn's path with
+`(string/substring path 8 …)`, a literal 8 standing in for the length of `"/static/"` that
+nothing named and nothing checked. The reference app showed the worse of the two.
+
+`:static` is the stage. `true` mounts `./static` at `/static` and adds hatch's own bundled
+clients — `brood_live.js` and `brood_webmcp.js`, served out of the package, which is a route
+every live app was writing by hand; `{:at … :dir … :clients …}` overrides any of it. A
+request under the mount point is answered before the router runs and never reaches it, so an
+asset costs one prefix test rather than a walk through every route, and the router file stays
+the app's own routes. `static-subpath` derives the split from the mount point instead of a
+hardcoded width, because the two have to agree and a literal in one place cannot — it is a
+function precisely so it can be doctested.
+
+Putting it in the router was not only a style question, and this is the part worth keeping.
+Inside the router a static response reaches the compressor, and `web/static` has already
+negotiated its own coding and tagged its own bytes. `finish` compressed it anyway and left
+the ETag describing the UNCOMPRESSED body — so a client holding the gzip copy and
+revalidating with `Accept-Encoding: br` is answered 304 against the identity tag and renders
+gzip as br. `cache/conditional` had always declined to re-tag a response that arrived with an
+ETag, for exactly this reason; the compressor beside it did not decline to re-encode one, and
+half a rule is not one. **A response that arrives already tagged is now sent uncompressed.**
+This is live-visible: an app serving static through its router was shipping mislabelled
+representations, and hive was.
+
+`present?` — "is this value worth emitting as markup at all" — was a byte-identical private
+copy in `web/seo` and `web/mcp`, twenty call sites between them asking one question. It is
+`web/template/present?` now, beside `escape-html` and `script-safe`, for the same reason
+those moved: the decision is about what reaches the document, and that is this module's
+subject.
+
+Deliberately NOT done: the one-line `bump` over a counter table in `web/cache` and
+`web/ratelimit`. They are two tables on purpose, so sharing means a helper taking the table,
+which makes every call site longer to remove one duplicated line. Revisit if a third appears.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.

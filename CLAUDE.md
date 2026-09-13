@@ -85,7 +85,8 @@ src/
     server.blsp     — TCP listener/worker; WS upgrade detection
     websocket.blsp  — RFC 6455 handshake + frame codec
   web/
-    endpoint.blsp   — THE standard endpoint: request → task with a deadline → router →
+    endpoint.blsp   — THE standard endpoint: :static ahead of the router, then request →
+                      task with a deadline → router →
                       themed errors → freshness → ETag → compression → security headers,
                       in that order (web/endpoint/serve); assets prepared per environment
     errors.blsp     — error pages as a pipeline stage: a status table, an app-supplied

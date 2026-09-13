@@ -333,3 +333,82 @@
           resp ((adapter config) (secure-request {:if-none-match tag})))
       (assert= (get resp :status) 304)
       (assert= (get (get resp :headers) :strict-transport-security) "max-age=31536000"))))
+
+;; A handler that tagged its own body — `web/static` is the one in the tree that does, over
+;; the exact bytes it chose after its own Accept-Encoding negotiation.
+(defn- pre-tagged-router (conn)
+  (-> conn
+    (put-resp-header :content-type "text/css; charset=utf-8")
+    (put-resp-header :etag "\"identity-tag\"")
+    (send-resp 200 (string/repeat "body { color: red; } " 40))))
+
+(describe "a handler's own ETag is not compressed out from under it"
+  ;; The bug this pins: the body went out gzipped carrying a tag computed over the
+  ;; UNCOMPRESSED bytes. A client holding that copy and revalidating with `Accept-Encoding:
+  ;; br` is answered 304 against the identity tag, and renders gzip as br.
+  (test "a response that arrives tagged is sent uncompressed"
+    (let (resp ((adapter {:router pre-tagged-router}) (request {:accept-encoding "gzip, deflate, br"})))
+      (assert= (get (get resp :headers) :content-encoding) nil)
+      (assert= (get (get resp :headers) :etag) "\"identity-tag\"")
+      (assert= (string? (get resp :body)) true)))
+  ;; The rule is narrow on purpose — an untagged body is still compressed, and the tag the
+  ;; pipeline computes for it names the coding.
+  (test "an untagged body is still compressed, under a coding-aware tag"
+    (let (resp ((adapter {:router long-html-router}) (request {:accept-encoding "gzip"})))
+      (assert= (get (get resp :headers) :content-encoding) "gzip")
+      (is (not (nil? (get (get resp :headers) :etag)))))))
+
+(describe ":static serves ahead of the router"
+  ;; The router must never be reached for a static path — if it is, the asset costs a walk
+  ;; through every route and, worse, meets the compressor on the way out.
+  (defn- exploding-router (conn) (error "the router must not be reached for a static path"))
+
+  (test "hatch's bundled live client is served from the package, with no route for it"
+    (let (resp ((adapter {:router exploding-router :static true}) (request {}
+                                                                    "/static/brood_live.js")))
+      (assert= (get resp :status) 200)
+      (assert= (get (get resp :headers) :content-type) "text/javascript; charset=utf-8")
+      (is (includes? (or (get resp :body) "") "BroodLive"))))
+
+  (test "the WebMCP client too"
+    (let (resp ((adapter {:router exploding-router :static true}) (request {}
+                                                                    "/static/brood_webmcp.js")))
+      (assert= (get resp :status) 200)
+      (is (includes? (or (get resp :body) "") "registerTool"))))
+
+  (test "a miss under the mount point is a 404, and still never reaches the router"
+    (assert= (get ((adapter {:router exploding-router :static true}) (request {}
+                                                                       "/static/nothing-here.css"))
+               :status)
+      404))
+
+  (test "the baseline security headers are applied to a static response"
+    (let (resp ((adapter {:router exploding-router :static true}) (request {}
+                                                                    "/static/brood_live.js")))
+      (assert= (get (get resp :headers) :x-content-type-options) "nosniff")))
+
+  (test "a path outside the mount point falls through to the router"
+    (assert= (get ((adapter {:router html-router :static true}) (request {} "/")) :status) 200))
+
+  ;; The prefix is a real boundary, not a substring test: /staticky is not under /static.
+  (test "a path that merely starts with the mount point's letters is not static"
+    (assert= (get ((adapter {:router html-router :static true}) (request {} "/staticky")) :status)
+      200))
+
+  (test "omitting :static leaves every path to the router"
+    (assert= (get ((adapter {:router html-router}) (request {} "/static/brood_live.js")) :status)
+      200))
+
+  ;; `:dir "src"` because THIS repo's ./static really does hold brood_live.js — it is the
+  ;; package the clients ship in — so serving from there would pass for the wrong reason. A
+  ;; consuming app's ./static has no copy, which is the whole point of `:clients`.
+  (test ":clients false stops serving hatch's own clients"
+    (assert= (get ((adapter {:router exploding-router :static {:clients false :dir "src"}}) (request {}
+                                                                                              "/static/brood_live.js"))
+               :status)
+      404))
+
+  (test ":at remounts the whole stage"
+    (let (resp ((adapter {:router exploding-router :static {:at "/assets"}}) (request {}
+                                                                               "/assets/brood_live.js")))
+      (assert= (get resp :status) 200))))

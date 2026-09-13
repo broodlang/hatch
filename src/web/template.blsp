@@ -76,6 +76,25 @@
         "'" "&#39;")
       text)))
 
+(defn present? (value)
+  "True when `value` is a non-empty string — the test for whether an optional value is worth
+  emitting as markup at all.
+
+  It lives here because that is the decision it expresses, and it was written twice: `web/seo`
+  and `web/mcp` each had a byte-identical private copy, which is how one of them gets a rule
+  and the other does not. An absent description must produce no `<meta>` tag rather than an
+  empty one, and an absent tool name must fail the shape check rather than register a nameless
+  tool — the same question both times.
+
+  A non-string answers false rather than raising: the values tested come out of app-supplied
+  option maps, where a missing key is nil and that is not an error.
+
+  (hatch/web/template/present? \"hatch\") ;=> true
+  (hatch/web/template/present? \"\") ;=> false
+  (hatch/web/template/present? nil) ;=> false
+  (hatch/web/template/present? 7) ;=> false"
+  (and (string? value) (not (= value ""))))
+
 (defn script-safe (s)
   "Text made safe to sit inside a `<script>` element — JSON-LD, a WebMCP tool block, any data
   embedded as script content.

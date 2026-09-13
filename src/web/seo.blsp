@@ -53,11 +53,11 @@
         (get \"/widgets\"     widgets/index))"
   (:use web/conn)
   (:alias web/cache)
-  (:alias web/template))
+  (:alias web/template)
+  ; present? — one "is this worth emitting?" predicate, shared with web/mcp
+  (:use web/template :only [present?]))
 
 ;; ---- the head block ---------------------------------------------------------
-
-(defn- present? (s) (and (string? s) (not (= s ""))))
 
 (defn absolute-url (site path)
   "`path` as an absolute URL under the site's own origin. A path that is already absolute

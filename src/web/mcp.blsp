@@ -24,12 +24,12 @@
                          :required [\"q\"]}
           :endpoint {:method \"GET\" :url \"/api/v1/packages\" :query [\"q\"]}}])"
   (:alias web/template)
+  ; present? — one "is this worth emitting?" predicate, shared with web/seo
+  (:use web/template :only [present?])
   ; serve-body — the static cache pipeline (content ETag, 304, nosniff)
   (:alias web/static :as static))
 
 (def *block-id* "hatch-mcp-tools")
-
-(defn- present? (s) (and (string? s) (not (= s ""))))
 
 (defn tools-script (tools)
   "The Hiccup for `tools`: a JSON block of definitions plus the client that registers them.

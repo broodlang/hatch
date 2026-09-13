@@ -36,6 +36,10 @@
   (:alias http/server)
   (:alias web/conn)
   (:alias web/live)
+  ;; serve — the path-safe static handler behind the :static stage; client-js-handler on
+  ;; web/live and web/mcp serve hatch's own two browser clients out of the package
+  (:alias web/static)
+  (:alias web/mcp)
   (:alias web/errors)
   ;; chosen-encoding / encode-body — the coding choice and the encoder, one implementation
   ;; for every app rather than an `accepts-gzip?` per app that matches the literal "gzip"
@@ -172,14 +176,23 @@
   so a matching `If-None-Match` returns a bodyless 304 — which also skips the compression
   work for a body that is never sent. The coding is passed to the validator because a br
   entity and a gzip entity are different representations of the same page (RFC 9110 §8.8.3)
-  and must not share a tag."
+  and must not share a tag.
+
+  A response that arrives ALREADY carrying an ETag is left uncompressed, which is the other
+  half of that same rule. `web/static` tags its responses itself, over the exact bytes it
+  chose to send after its own `Accept-Encoding` negotiation. Compressing here would change
+  the representation and leave that tag describing bytes no longer going out — so a client
+  holding the gzip copy, revalidating with `Accept-Encoding: br`, would be answered 304 and
+  render gzip as br. `cache/conditional` already declines to re-tag such a response; until
+  now the compressor did not decline to re-encode it, and half a rule is not one."
   (let (compress-opts (get config :compress {})
         headers (get config :security-headers *default-security-headers*)
-        coding (compress/chosen-encoding conn))
+        coding (compress/chosen-encoding conn)
+        pre-tagged? (not (nil? (get (get resp :headers {}) :etag))))
     (match (cache/conditional conn resp coding)
       ([:not-modified not-modified] (secured conn not-modified config headers))
       ([:send validated] (secured conn
-                           (if compress-opts
+                           (if (and compress-opts (not pre-tagged?))
                              (compress-response conn validated compress-opts)
                              validated)
                            config
@@ -229,6 +242,76 @@
      :timeout_ms timeout-ms})
   (failure-response 504 config))
 
+;; ---- static assets ----------------------------------------------------------
+;;
+;; The seventh thing every app wrote. The six stages above are what sits AROUND a router;
+;; this is the one thing that has to sit in FRONT of it, and both apps built on hatch wrote
+;; it themselves and disagreed. hive put `/static/*path` inside its router; the demo wrote a
+;; `cond` on the conn's path with `(string/substring path 8 …)` — a literal 8 standing in for
+;; the length of "/static/", which nothing named and nothing checked.
+;;
+;; Neither is only a style question. Inside the router a static response meets the compressor
+;; (see `finish`), and `web/static` has already negotiated and tagged its own bytes. In front
+;; of it, the prefix arithmetic is the app's to get right.
+
+(def *default-static* {:at "/static" :dir "static" :clients true})
+
+(defn static-subpath (path at)
+  "The part of `path` sitting under the mount point `at`, or nil when it does not.
+
+  Derived from `at` rather than a hardcoded width, which is the whole reason this is a
+  function: the two must agree, and a literal in one place cannot.
+
+  (hatch/web/endpoint/static-subpath \"/static/app.css\" \"/static\") ;=> \"app.css\"
+  (hatch/web/endpoint/static-subpath \"/static/fonts/a.woff2\" \"/static\") ;=> \"fonts/a.woff2\"
+  (hatch/web/endpoint/static-subpath \"/staticky/app.css\" \"/static\") ;=> nil
+  (hatch/web/endpoint/static-subpath \"/static\" \"/static\") ;=> nil
+  (hatch/web/endpoint/static-subpath \"/\" \"/static\") ;=> nil"
+  (let (prefix (str at "/"))
+    (if (string/starts-with? path prefix)
+      (string/substring path (string/length prefix) (string/length path))
+      nil)))
+
+(defn- bundled-client (subpath)
+  "The handler for one of hatch's own browser clients, or nil when `subpath` names neither.
+
+  Both ship inside the package, so an app serves them without vendoring a copy that can
+  drift from the server half it talks to — and without writing the route itself, which is
+  what every live app was doing."
+  (cond
+    (= subpath "brood_live.js") (web/live/client-js-handler)
+    (= subpath "brood_webmcp.js") (web/mcp/client-js-handler)
+    else nil))
+
+(defn- static-options (config)
+  "The `:static` options as a full map, or nil when the app does not want this stage.
+  `true` means the defaults; a map overrides any of them."
+  (let (spec (get config :static))
+    (cond
+      (nil? spec) nil
+      (= spec false) nil
+      (= spec true) *default-static*
+      else (merge *default-static* spec))))
+
+(defn- static-answer (conn config options)
+  "A finished response for a static request, or nil so the caller falls through to the router.
+
+  Only the security headers are applied on top. A static response is already finished in
+  every other sense — `web/static` picked the coding, wrote the validator and answered the
+  conditional request — which is exactly why it must not be run through the compressor
+  again; see `finish`."
+  (let (subpath (static-subpath (web/conn/conn-path conn) (get options :at)))
+    (if (nil? subpath)
+      nil
+      (let (client (if (get options :clients) (bundled-client subpath) nil)
+            answered (if client
+                       (client conn)
+                       (web/static/serve conn (get options :dir) subpath)))
+        (secured conn
+          (web/conn/conn->response answered)
+          config
+          (get config :security-headers *default-security-headers*))))))
+
 ;; ---- the adapter ------------------------------------------------------------
 
 (defn- dispatch (conn config)
@@ -246,12 +329,18 @@
   task with a deadline, then theme, freshen, validate, compress and secure the result.
 
   `:router` (a `defrouter` function, taking a conn and answering one) is required. See `serve` for the rest of
-  the config; pass the same map to both."
+  the config; pass the same map to both.
+
+  With `:static`, a request under the mount point is answered before the router runs and
+  never reaches it — so a static asset costs one prefix test rather than a walk through
+  every route, and the router file stays the app's own routes."
   (when (nil? (get config :router))
     (error "web/endpoint/adapter: :router is required (a defrouter function)"))
-  (fn (request)
-    (let (conn (web/conn/build request))
-      (finish conn (freshen conn (dispatch conn config) config) config))))
+  (let (static (static-options config))
+    (fn (request)
+      (let (conn (web/conn/build request))
+        (or (if static (static-answer conn config static) nil)
+          (finish conn (freshen conn (dispatch conn config) config) config))))))
 
 ;; ---- assets + boot ----------------------------------------------------------
 
@@ -296,6 +385,11 @@
                            (default `max-age=31536000`, `false` for none). See
                            `hsts-header` for why `includeSubDomains` is not defaulted.
     `:compress`          — `{:min-bytes 256}`, or `false` to send bodies uncompressed.
+    `:static`            — serve files ahead of the router. `true` mounts `./static` at
+                           `/static` and adds hatch's own bundled clients
+                           (`brood_live.js`, `brood_webmcp.js`) from the package; a map
+                           overrides any of `{:at \"/static\" :dir \"static\" :clients true}`.
+                           Omitted: no static stage (the app routes it itself, or has none).
     `:assets`            — a `web/assets` config; dev watches it, prod fingerprints it.
     `:live`              — the WebSocket handler (default `(web/live/live-dispatcher)`);
                            `false` for an app with no live views.
