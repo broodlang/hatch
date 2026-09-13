@@ -650,6 +650,45 @@ it.
 
 **Part three: the rest of the browser-side list, and streams.**
 
+**What an adversarial review of the whole thing found**, none of it caught by a suite that
+stayed green throughout. Worth recording in full, because the shape repeats.
+
+Two remote denials of service. The ping arm of BOTH socket actors re-entered the loop with
+`buf` rather than `remainder` — and `recv-frame` answers from the buffer without touching the
+socket, so a client writing `[text][ping]` in one TCP segment left the loop re-parsing that
+ping forever, pinning a core and never reaching a `receive`, with `kick-watchdog` firing each
+time round to disarm the one thing that would have reaped it. And a 43-byte frame
+(`{"topic":7,"event":"join"}`) killed a channel socket outright: `parse-client-frame` hardened
+the envelope but passed `:topic` through, and `do-join` resolved the topic outside its guard,
+so `(string/starts-with? 7 "room:")` took the process down with no `terminate` and no
+telemetry — and the client reconnects and sends it again.
+
+Two things that failed open. `{:channels nil}` served `/channel/ws` with no connect guard,
+because nil is not `:default`, not `false` and not `true`, so it fell through to "anything else
+is the guard" — while `{:live nil}` two lines up correctly disables. And `channel-clause` kept
+the first of duplicate clauses where `deflive-clause` raises, so appending a stricter `(join …)`
+— the natural edit when tightening auth — compiled clean and changed nothing.
+
+Then a run of things that were simply broken: `data-on-submit` never called `preventDefault`,
+so it pushed its event and then let the browser reload the page out from under the session; an
+app's own pubsub payload that mentioned its own topic was mistaken for a channel broadcast and
+pushed as `{"event":null,"payload":null}`, its keys destroyed in transit; the channel client's
+rejoin gate was wrong in both directions, duplicating the join on every page load and skipping
+any channel whose join was in flight when the socket dropped; an upload refused for type or
+size still spent a slot within its own offer; `brood-loading` never cleared when a handler
+rendered identically, because it clears on a patch and there was no patch.
+
+And both audit rules added the commit before were structurally dead — `warn-page!` runs from
+the plain-page renderer, and `data-hook` and `data-update="stream"` are live-only markup, so
+the rules described something they could not see. They run from `warn-live-markup!` now, off
+the live render. One of them was wrong in both directions besides.
+
+The two test findings are the ones worth sitting with. A watchdog test that was not `:isolated`
+`def`d a global ping interval and reaped every other suite's sessions mid-test, so the failures
+landed in unrelated files and moved with scheduling. And a test named "past the ceiling a join
+is refused" asserted only that the constant was under 1024: the guard could be deleted entirely
+and it stayed green. A test can be green, well named, and about nothing.
+
 **`web/streams` — collections a live view renders without holding.** The model is the state of
 the page and the diff engine works by comparing renders, which is right for a form and wrong
 for a message feed: unbounded, held in full in every connected session, re-rendered for rows
