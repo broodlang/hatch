@@ -36,6 +36,9 @@
   (:alias http/server)
   (:alias web/conn)
   (:alias web/live)
+  ; channel-dispatcher / channel-table — the topic-socket half of the WebSocket layer,
+  ; routed beside live views by `ws-handler`
+  (:alias web/channel)
   ;; serve — the path-safe static handler behind the :static stage; client-js-handler on
   ;; web/live and web/mcp serve hatch's own two browser clients out of the package
   (:alias web/static)
@@ -300,6 +303,7 @@
   (cond
     (and (= subpath "brood_live.js") (web/live/client-js)) (web/live/client-js-handler)
     (and (= subpath "brood_webmcp.js") (web/mcp/client-js)) (web/mcp/client-js-handler)
+    (and (= subpath "brood_channel.js") (web/channel/client-js)) (web/channel/client-js-handler)
     else nil))
 
 (defn- static-options (config)
@@ -409,19 +413,64 @@
                            already names (default on; `false` to omit).
     `:static`            — serve files ahead of the router. `true` mounts `./static` at
                            `/static` and adds hatch's own bundled clients
-                           (`brood_live.js`, `brood_webmcp.js`) from the package; a map
+                           (`brood_live.js`, `brood_webmcp.js`, `brood_channel.js`) from the
+                           package; a map
                            overrides any of `{:at \"/static\" :dir \"static\" :clients true}`.
                            Omitted: no static stage (the app routes it itself, or has none).
     `:assets`            — a `web/assets` config; dev watches it, prod fingerprints it.
-    `:live`              — the WebSocket handler (default `(web/live/live-dispatcher)`);
-                           `false` for an app with no live views.
+    `:live`              — the WebSocket handler for live views (default
+                           `(web/live/live-dispatcher)`); `false` for an app with no live
+                           views.
+    `:channels`          — `true` to serve `web/channel` topic sockets at `/channel/ws`
+                           (default: on when the app's router registered any `(channel …)`
+                           clause, off otherwise), a `(fn (conn) …)` socket-wide connect
+                           guard, or `false` to refuse them outright.
     `:server`            — extra `http/server/start` config (`:spool-threshold`,
                            `:max-request-bytes`, `:tls`, …).
 
   Returns the listener supervisor pid."
   (prepare-assets (get config :assets))
-  (let (live (get config :live :default))
-    (http/server/start (get config :port (port))
-      (adapter config)
-      (if (= live :default) (web/live/live-dispatcher) (if live live nil))
-      (get config :server {}))))
+  (http/server/start (get config :port (port))
+    (adapter config)
+    (ws-handler config)
+    (get config :server {})))
+
+(defn ws-handler (config)
+  "The one ws-handler `http/server` takes, routing an upgrade by path to the live-view
+  dispatcher or the channel dispatcher.
+
+  `http/server` takes a single handler because at the point it runs there is no router yet —
+  the 101 is answered before any route table is consulted. Two socket protocols therefore
+  have to agree on one entry point, and the path is what tells them apart: `/live/ws<path>`
+  names a view, `/channel/ws` names the multiplexed topic socket. An upgrade matching neither
+  gets no handler at all, which closes the socket."
+  (let (live (get config :live :default)
+        live-fn (if (= live :default) (web/live/live-dispatcher) (if live live nil))
+        channels (get config :channels :default)
+        ;; Default on only if the app actually registered a channel. An app with no
+        ;; `(channel …)` clause should not be answering upgrades on a URL it has nothing
+        ;; behind — and one that has them should not have to remember a config line.
+        channels-fn (cond
+                      ;; `proc/whereis` first, and not merely as an optimisation: reading the
+                      ;; table through `channel-table` STARTS the registry supervisor, so the
+                      ;; default would stand up a pair of processes on every app that has
+                      ;; never heard of channels, purely to be told it has none. A registry
+                      ;; that was never started is proof that no `(channel …)` clause ran.
+                      (= channels :default)
+                        (if (or (nil? (proc/whereis :hatch-channels))
+                              (empty? (web/channel/channel-table)))
+                          nil
+                          (web/channel/channel-dispatcher))
+                      (= channels false) nil
+                      (= channels true) (web/channel/channel-dispatcher)
+                      ;; anything else is the connect guard itself
+                      else (web/channel/channel-dispatcher channels)))
+    (if (and (nil? live-fn) (nil? channels-fn))
+      nil
+      (fn (sock request)
+        (let (path (get request :path ""))
+          (cond
+            (and channels-fn (string/starts-with? path web/channel/*channel-ws-prefix*))
+              (channels-fn sock request)
+            live-fn (live-fn sock request)
+            else (tcp/close sock)))))))

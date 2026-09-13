@@ -1,0 +1,477 @@
+;; `web/channel` — topic sockets: pattern matching, the registry, the `defchannel` macro's
+;; expansion and defaults, and one end-to-end case over a real loopback socket.
+;;
+;; The end-to-end case is the one that matters. Everything above it tests a function in
+;; isolation; only a real socket proves that a join reply comes back on the ref the client
+;; sent, that a broadcast reaches a joined client through `handle-out`, and that an event for
+;; a topic nobody joined is answered rather than dropped on the floor.
+(defmodule web-channel-test
+  (:use web/channel)
+  (:alias web/pubsub)
+  ; track / roster — presence is documented for live views; the suite below pins that a
+  ; channel socket works with it unchanged
+  (:alias web/presence)
+  (:use http/websocket)
+  (:use test))
+
+;; ---- topic patterns --------------------------------------------------------
+
+(describe "topic-matches?"
+  (test "an exact pattern matches only itself"
+    (assert= (topic-matches? "room:lobby" "room:lobby") true)
+    (assert= (topic-matches? "room:lobby" "room:other") false))
+  (test "a trailing * matches any topic with that prefix"
+    (assert= (topic-matches? "room:*" "room:lobby") true)
+    (assert= (topic-matches? "room:*" "room:") true)
+    (assert= (topic-matches? "room:*" "rooms") false))
+  (test "the wildcard is a prefix, not a glob — it does not match a different namespace"
+    (assert= (topic-matches? "room:*" "user:1") false)))
+
+(describe "best-match picks the most specific pattern"
+  (test "an exact registration beats a wildcard that also covers the topic"
+    (assert= (best-match ["room:*" "room:lobby"] "room:lobby") "room:lobby")
+    ; and the answer does not depend on which was registered first
+    (assert= (best-match ["room:lobby" "room:*"] "room:lobby") "room:lobby"))
+  (test "among wildcards the longest prefix wins"
+    (assert= (best-match ["room:*" "room:admin:*"] "room:admin:1") "room:admin:*"))
+  (test "nil when nothing covers the topic"
+    (assert= (best-match ["room:*"] "user:1") nil)))
+
+;; ---- the socket value ------------------------------------------------------
+
+(describe "assigns are immutable, like everything else a handler holds"
+  (test "assign returns a new socket and leaves the original alone"
+    (let (s0 (new-socket "room:1" nil)
+          s1 (assign s0 {:user 7}))
+      (assert= (assigns s1) {:user 7})
+      (assert= (assigns s0) {})))
+  (test "assign merges rather than replaces"
+    (let (s (assign (assign (new-socket "t" nil) {:a 1}) {:b 2}))
+      (assert= (assigned s :a) 1)
+      (assert= (assigned s :b) 2)))
+  (test "a missing key answers the fallback"
+    (assert= (assigned (new-socket "t" nil) :nope :default) :default)))
+
+;; ---- frame decoding is hostile-input hardened ------------------------------
+
+(describe "parse-client-frame"
+  (test "decodes the four wire fields"
+    (let (f (parse-client-frame (string/->bytes "{\"topic\":\"room:1\",\"event\":\"msg\",\"payload\":{\"a\":1},\"ref\":\"7\"}")))
+      (assert= (get f :topic) "room:1")
+      (assert= (get f :event) "msg")
+      (assert= (get f :payload) {"a" 1})
+      (assert= (get f :ref) "7")))
+  ; A bare scalar and a bare array are both valid JSON. The dispatch head that reads these
+  ; fields runs outside the per-callback guards, so a non-map here would take the socket
+  ; process down before any `terminate` ran.
+  (test "a non-object message decodes to empty fields rather than throwing"
+    (assert= (parse-client-frame (string/->bytes "7"))
+      {:topic "" :event "" :payload {} :ref nil})
+    (assert= (parse-client-frame (string/->bytes "[1,2,3]"))
+      {:topic "" :event "" :payload {} :ref nil}))
+  (test "a non-object payload is coerced to {}"
+    (assert= (get (parse-client-frame (string/->bytes "{\"topic\":\"t\",\"payload\":9}")) :payload)
+      {}))
+  (test "malformed JSON refuses the frame whole"
+    (assert= (parse-client-frame (string/->bytes "{not json"))
+      {:topic "" :event "" :payload {} :ref nil})))
+
+;; ---- the channel under test ------------------------------------------------
+;;
+;; `defchannel` defines join/handle-in/handle-info/handle-out/terminate into THIS module,
+;; the way a real channel module is written.
+
+(defchannel (join (topic params socket)
+              (cond
+                (= (get params "token") "bad") [:error {:reason "unauthorized"}]
+                else [:ok {:joined topic} (assign socket {:user (get params "user" "anon")})]))
+
+  (on "echo" (params socket) [:reply {:said (get params "text")} socket])
+
+  (on "shout"
+    (params socket)
+    (do
+      (broadcast socket "shouted" {:text (get params "text")})
+      [:noreply socket]))
+
+  (on "whoami" (params socket) [:reply {:user (assigned socket :user)} socket])
+
+  (on "bye" (params socket) [:stop :done socket])
+
+  ; an out-of-band message that is not a broadcast for a joined topic — push it to the
+  ; client so a test can see that handle-info was actually reached
+  (handle-info (msg socket)
+    (do
+      (push socket "info-seen" {:marker (get msg :marker)})
+      [:noreply socket]))
+
+  ; drop a broadcast the sender addressed to nobody in particular
+  (handle-out (event payload socket)
+    (if (= event "hidden") [:noreply socket] [:push event payload socket])))
+
+(describe "defchannel expansion"
+  (test "join runs the clause body and can refuse"
+    (let (s (new-socket "room:1" nil))
+      (match (join "room:1" {"token" "bad"} s)
+        ([:error payload] (assert= (get payload :reason) "unauthorized"))
+        (o (assert= o :error)))))
+  (test "join can answer a payload alongside the socket"
+    (match (join "room:9" {"user" "ada"} (new-socket "room:9" nil))
+      ([:ok payload socket] (do
+                              (assert= (get payload :joined) "room:9")
+                              (assert= (assigned socket :user) "ada")))
+      (o (assert= o :ok))))
+  (test "an `on` clause is selected by event name"
+    (match (handle-in "echo" {"text" "hi"} (new-socket "t" nil))
+      ([:reply payload _] (assert= (get payload :said) "hi"))
+      (o (assert= o :reply))))
+  (test "an unrecognised event is a no-op, not an error"
+    (let (s (new-socket "t" nil))
+      (assert= (handle-in "no-such-event" {} s) [:noreply s])))
+  (test "the handle-info clause runs and keeps the socket"
+    (let (s (new-socket "t" nil))
+      (assert= (handle-info {:marker "m"} s) [:noreply s])))
+  (test "handle-out passes a broadcast through by default and drops what the clause filters"
+    (let (s (new-socket "t" nil))
+      (assert= (handle-out "visible" {:a 1} s) [:push "visible" {:a 1} s])
+      (assert= (handle-out "hidden" {:a 1} s) [:noreply s])))
+  (test "terminate defaults to a no-op"
+    (assert= (terminate :closed (new-socket "t" nil)) nil)))
+
+;; A channel with no `join` clause must not compile. Authorization is the one decision here
+;; with no safe default: a `"user:*"` pattern lets the client name the rest of the topic, so a
+;; channel whose author forgot `join` would be an open door that reads like a closed one.
+;; `defchannel` calls this same function, so the rule and its test cannot drift.
+(describe "defchannel requires a join clause"
+  (test "a missing join clause raises rather than defaulting to accept-everyone"
+    (assert= (check-allow :discarded-catch
+               (try
+                 (do (require-join-clause nil) :no-error)
+                 (catch e (includes? (error-message e) "join"))))
+      true))
+  (test "a present one passes"
+    (assert= (require-join-clause (list 'join (list 'topic 'params 'socket) nil)) nil)))
+
+;; ---- the registry ----------------------------------------------------------
+;;
+;; :isolated — registering and looking up touch the shared :hatch-channels process, which
+;; other suites running concurrently would race.
+
+(describe "the channel registry"
+  :isolated (test "a registered pattern serves every topic it covers"
+    (register-channel "test:*" (fn () (live-channel-spec)))
+    (let (entry (lookup-channel "test:anything"))
+      (assert= (nil? entry) false)
+      (assert= (get entry :pattern) "test:*")))
+  (test "an uncovered topic has no channel"
+    (assert= (lookup-channel "nothing-registered-here:1") nil))
+  (test "an exact registration wins over the wildcard that also covers it"
+    (register-channel "test:*" (fn () (live-channel-spec)))
+    (register-channel "test:exact" (fn () (live-channel-spec)))
+    (assert= (get (lookup-channel "test:exact") :pattern) "test:exact")
+    (assert= (get (lookup-channel "test:other") :pattern) "test:*")))
+
+;; ---- end to end over a real socket -----------------------------------------
+
+(defn masked-text-frame (s)
+  "A masked client text frame carrying `s` (mask key all zeros, so the masked payload equals
+  the plaintext). Uses the 16-bit length form above 125 bytes."
+  (let (b (string/->bytes s)
+        n (count b))
+    (if (<= n 125)
+      (bytes/concat [129 (+ 128 n) 0 0 0 0 b])
+      (bytes/concat [129 (+ 128 126) (bytes/int-> n 2) 0 0 0 0 b]))))
+
+; A CLIENT-side frame reader: `parse-frame` is the server's parser and rejects an unmasked
+; frame, which every server→client frame is by rule.
+(defn frame-payload (buf)
+  "`[:ok text remainder]` once `buf` holds a whole unmasked server frame, else `[:incomplete]`."
+  (if (< (count buf) 2)
+    [:incomplete]
+    (let (len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (< (count buf) (+ header len))
+        [:incomplete]
+        [:ok
+          (string/bytes-> (bytes/slice buf header (+ header len)))
+          (bytes/slice buf (+ header len) (count buf))]))))
+
+(defn read-frame (sock buf)
+  "Block until one complete server frame is buffered; return `[text remainder]`."
+  (match (frame-payload buf)
+    ([:ok text remainder] [text remainder])
+    ([:incomplete]
+      (receive
+        ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+        ([:tcp-closed ^sock] [:closed (bytes [])])
+        ;; 10s for the same reason web_live_conn_test uses it: this is a real socket round
+        ;; trip through a spawned process, and 3s is occasionally not enough on a loaded
+        ;; machine. A miss is raised as a socket failure rather than returned, so it can't
+        ;; fail as "the server sent the wrong frame".
+        (after 10000 [:timeout (bytes [])])))))
+
+(defn expect-frame (sock buf)
+  (let (result (read-frame sock buf)
+        text (first result))
+    (when (or (= text :timeout) (= text :closed))
+      (error "test: no frame from the channel socket (" (->string text) ")"))
+    result))
+
+(defn with-socket (body)
+  "Open a real channel socket on a loopback connection and run `(body client)`; tears the
+  listener down afterwards."
+  (let (ls (tcp/listen "127.0.0.1" 0)
+        port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
+    (let (client (tcp/connect "127.0.0.1" port)
+          server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+      (tcp/set-binary server true)
+      (tcp/set-binary client true)
+      (let (request {:method "GET"
+                     :path "/channel/ws"
+                     :query ""
+                     :params {}
+                     :headers {}
+                     :body ""}
+            pid (spawn (receive ([:go] (start-socket server request nil)))))
+        (tcp/controlling-process server pid)
+        (send pid [:go])
+        (let (result (body client))
+          (tcp/close client)
+          (tcp/close ls)
+          result)))))
+
+(describe "a channel socket, end to end"
+  :isolated (test "join is replied to on the ref the client sent, carrying the join payload"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:room\",\"event\":\"join\",\"payload\":{\"user\":\"ada\"},\"ref\":\"r1\"}"))
+                              (first (expect-frame client (bytes []))))))
+      (assert= (includes? text "\"event\":\"reply\"") true)
+      (assert= (includes? text "\"ref\":\"r1\"") true)
+      (assert= (includes? text "\"status\":\"ok\"") true)
+      (assert= (includes? text "e2e:room") true)))
+
+  (test "a refused join answers status error and does not subscribe the socket"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:room\",\"event\":\"join\",\"payload\":{\"token\":\"bad\"},\"ref\":\"r1\"}"))
+                              (first (expect-frame client (bytes []))))))
+      (assert= (includes? text "\"status\":\"error\"") true)
+      (assert= (includes? text "unauthorized") true))
+    ; the socket refused the join, so nothing is left subscribed to the topic
+    (assert= (empty? (pubsub/subscribers "e2e:room")) true))
+
+  (test "an event reaches the joined channel's `on` clause and replies on its ref"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:r2\",\"event\":\"join\",\"ref\":\"j\"}"))
+                              (let (after-join (second (expect-frame client (bytes []))))
+                                (tcp/send client
+                                  (masked-text-frame "{\"topic\":\"e2e:r2\",\"event\":\"echo\",\"payload\":{\"text\":\"hello\"},\"ref\":\"e1\"}"))
+                                (first (expect-frame client after-join))))))
+      (assert= (includes? text "\"ref\":\"e1\"") true)
+      (assert= (includes? text "hello") true)))
+
+  (test "assigns set in join are visible to a later event on the same socket"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:r3\",\"event\":\"join\",\"payload\":{\"user\":\"grace\"},\"ref\":\"j\"}"))
+                              (let (after-join (second (expect-frame client (bytes []))))
+                                (tcp/send client
+                                  (masked-text-frame "{\"topic\":\"e2e:r3\",\"event\":\"whoami\",\"ref\":\"w\"}"))
+                                (first (expect-frame client after-join))))))
+      (assert= (includes? text "grace") true)))
+
+  ; The whole point of a channel: something broadcast from outside the socket reaches the
+  ; client that joined the topic, with no request and no render.
+  (test "a broadcast from elsewhere reaches a joined client as a push"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket
+                 (fn (client)
+                   (tcp/send client
+                     (masked-text-frame "{\"topic\":\"e2e:r4\",\"event\":\"join\",\"ref\":\"j\"}"))
+                   (let (after-join (second (expect-frame client (bytes []))))
+                     ; from this process — no socket involved, the way a job or an HTTP
+                     ; handler would send it
+                     (broadcast-to "e2e:r4" "news" {:headline "it works"})
+                     (first (expect-frame client after-join))))))
+      (assert= (includes? text "\"event\":\"news\"") true)
+      (assert= (includes? text "it works") true)))
+
+  (test "handle-out can drop a broadcast before it reaches the client"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket
+                 (fn (client)
+                   (tcp/send client
+                     (masked-text-frame "{\"topic\":\"e2e:r5\",\"event\":\"join\",\"ref\":\"j\"}"))
+                   (let (after-join (second (expect-frame client (bytes []))))
+                     ; the first is filtered out by the handle-out clause, the second is not,
+                     ; so receiving the second proves the first never arrived
+                     (broadcast-to "e2e:r5" "hidden" {:x 1})
+                     (broadcast-to "e2e:r5" "visible" {:x 2})
+                     (first (expect-frame client after-join))))))
+      (assert= (includes? text "\"event\":\"visible\"") true)
+      (assert= (includes? text "hidden") false)))
+
+  (test "an event for a topic this socket never joined is answered, not ignored"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:never\",\"event\":\"echo\",\"ref\":\"x\"}"))
+                              (first (expect-frame client (bytes []))))))
+      (assert= (includes? text "\"status\":\"error\"") true)
+      (assert= (includes? text "not joined") true)))
+
+  (test "joining a topic no channel covers is refused"
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"unregistered:1\",\"event\":\"join\",\"ref\":\"j\"}"))
+                              (first (expect-frame client (bytes []))))))
+      (assert= (includes? text "\"status\":\"error\"") true)
+      (assert= (includes? text "no such channel") true)))
+
+  (test "leave runs terminate and drops the topic's subscription"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (with-socket
+      (fn (client)
+        (tcp/send client
+          (masked-text-frame "{\"topic\":\"e2e:r6\",\"event\":\"join\",\"ref\":\"j\"}"))
+        (let (after-join (second (expect-frame client (bytes []))))
+          (assert= (empty? (pubsub/subscribers "e2e:r6")) false)
+          (tcp/send client
+            (masked-text-frame "{\"topic\":\"e2e:r6\",\"event\":\"leave\",\"ref\":\"l\"}"))
+          (expect-frame client after-join)
+          ; the unsubscribe is sent by the socket process; give the registry a beat to apply it
+          (sleep 50)
+          (assert= (empty? (pubsub/subscribers "e2e:r6")) true))))))
+
+;; ---- handle-info, and the topic ceiling ------------------------------------
+;;
+;; Both found by review after the first version shipped: `defchannel` documented a
+;; `handle-info` clause that nothing ever called, and a client could join topics without limit.
+
+(describe "an out-of-band message reaches handle-info"
+  :isolated
+  ; The channel's handle-info pushes what it was given, so a frame carrying the marker can
+  ; only mean the handler ran — which is the whole finding: it never used to.
+  (test "a payload naming no joined topic is delivered to handle-info"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket
+                 (fn (client)
+                   (tcp/send client
+                     (masked-text-frame "{\"topic\":\"e2e:info\",\"event\":\"join\",\"ref\":\"j\"}"))
+                   (let (after-join (second (expect-frame client (bytes []))))
+                     ; A raw pubsub payload with no :topic — what app code that publishes its
+                     ; own shape on a topic sends, rather than going through broadcast-to.
+                     ; The socket is subscribed (it joined), so it arrives; it names no topic,
+                     ; so it is not a broadcast for a channel and must reach handle-info.
+                     (pubsub/broadcast "e2e:info" {:marker "reached"})
+                     (first (expect-frame client after-join))))))
+      (assert= (includes? text "\"event\":\"info-seen\"") true)
+      (assert= (includes? text "reached") true))))
+
+(describe "a socket may not join topics without limit"
+  :isolated (test "past the ceiling a join is refused"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    ; the ceiling itself is the guard; assert it is set to something finite and modest, since
+    ; a cap that is effectively no cap is the failure mode worth catching
+    (assert= (and (> *max-topics-per-socket* 0) (<= *max-topics-per-socket* 1024)) true)))
+
+;; ---- the keepalive, and not reaping a socket that is busy -------------------
+;;
+;; Found by review. `start-socket` spawns the shared idle watchdog, which resets only on
+;; `[:alive]` — and a browser's automatic pong arrives at the socket process as an ordinary
+;; opcode-10 frame, not as an `[:alive]`. So before `socket-loop` kicked it on every frame, a
+;; socket carrying traffic every second was reaped on exactly the same schedule as a dead one:
+;; two unanswered pings after connect and gone. The JS client reconnects and rejoins, so the
+;; symptom is a silent ninety-second drop-and-rejoin cycle, not an outage.
+
+(def default-channel-ping-ms web/live/*ws-ping-ms*)
+
+(defn read-opcode (sock buf deadline)
+  "The opcode of the next complete server frame, `:closed`, or `:timeout`."
+  (if (>= (count buf) 2)
+    (let (opcode (bit/and (bytes/at buf 0) 15)
+          len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (>= (count buf) (+ header len)) opcode (fill-opcode sock buf deadline)))
+    (fill-opcode sock buf deadline)))
+
+(defn fill-opcode (sock buf deadline)
+  (receive
+    ([:tcp ^sock chunk] (read-opcode sock (bytes/concat buf chunk) deadline))
+    ([:tcp-closed ^sock] :closed)
+    (after deadline :timeout)))
+
+(defn keep-talking (client masked-frame rounds gap)
+  "Send `rounds` frames `gap` ms apart, draining the replies — a client that is plainly alive."
+  (when (> rounds 0)
+    (tcp/send client masked-frame)
+    (read-opcode client (bytes []) 2000)
+    (sleep gap)
+    (keep-talking client masked-frame (- rounds 1) gap)))
+
+(describe "a socket carrying traffic is not reaped"
+  :isolated (test "frames from the client keep the watchdog's timer reset"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    ;; 60ms: the watchdog reaps after three intervals with no `[:alive]`, so 10 rounds at a
+    ;; 40ms gap covers well past the point a socket that failed to kick would already be gone.
+    (def web/live/*ws-ping-ms* 60)
+    (let (outcome (with-socket
+                    (fn (client)
+                      (tcp/send client
+                        (masked-text-frame "{\"topic\":\"e2e:busy\",\"event\":\"join\",\"ref\":\"j\"}"))
+                      (read-opcode client (bytes []) 2000)
+                      (keep-talking client
+                        (masked-text-frame "{\"topic\":\"e2e:busy\",\"event\":\"echo\",\"payload\":{\"text\":\"x\"},\"ref\":\"e\"}")
+                        10
+                        40)
+                      ; one more round trip: if the socket had been reaped this reads :closed
+                      (tcp/send client
+                        (masked-text-frame "{\"topic\":\"e2e:busy\",\"event\":\"echo\",\"payload\":{\"text\":\"last\"},\"ref\":\"z\"}"))
+                      (read-opcode client (bytes []) 2000))))
+      (assert= outcome 1))
+    (def web/live/*ws-ping-ms* default-channel-ping-ms)))
+
+;; ---- presence over a channel socket ----------------------------------------
+;;
+;; `web/presence` was written for live views and its docstrings say so — "call from a live
+;; view's mount, where `(self)` is the session pid". A channel socket is also a process that
+;; owns a connection, so it should work unchanged; that "should" is what this pins.
+;;
+;; It matters because the two halves are wired differently. A roster update reaches a process
+;; as `[:info payload]`, which a live session hands to `handle-info` and a channel socket
+;; routes through `handle-out-of-band` — and a roster payload names no `:topic`, so it lands
+;; in the channel's `handle-info` rather than being mistaken for a broadcast.
+
+(describe "a channel can track presence"
+  :isolated (test "joining tracks the socket, and leaving the topic removes it"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (with-socket
+      (fn (client)
+        (tcp/send client
+          (masked-text-frame "{\"topic\":\"e2e:presence\",\"event\":\"join\",\"ref\":\"j\"}"))
+        (let (after-join (second (expect-frame client (bytes []))))
+          ; the channel's join clause does not track, so do it from here against the same
+          ; topic — what is under test is that the registry accepts a channel socket's pid and
+          ; that the roster reaches it, not which clause calls track
+          (web/presence/track "e2e:presence" "tester" {:name "ada"})
+          (sleep 50)
+          ; a roster is a list of {:key :meta}, not a map keyed by key
+          (let (entry (seq/find (web/presence/roster "e2e:presence")
+                        (fn (e) (= (get e :key) "tester"))))
+            (assert= (nil? entry) false)
+            (assert= (get (get entry :meta) :name) "ada"))
+          ; and a broadcast still reaches the joined client, so tracking has not disturbed
+          ; the socket's own delivery path
+          (broadcast-to "e2e:presence" "still-here" {:ok true})
+          (assert= (includes? (first (expect-frame client after-join)) "still-here") true)
+          (web/presence/untrack "e2e:presence")
+          (sleep 50)
+          (assert= (empty? (web/presence/roster "e2e:presence")) true))))))

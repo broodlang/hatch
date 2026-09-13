@@ -290,7 +290,25 @@
           (assoc ctx :plugs (append (get ctx :plugs) (list (first (rest clause))))))
       ; leaves
       (= head 'live) (list (with-plugs (compile-live clause (get ctx :session)) ctx))
+      ; (channel pattern module): registration only — a channel has no HTTP route to guard,
+      ; so an enclosing `through` does not apply to it and `with-plugs` is deliberately not
+      ; called. A channel's own authorization is its `join` clause (and, socket-wide, the
+      ; endpoint's `:channels` connect guard); a plug pipeline can't stand in for either,
+      ; because neither runs on an HTTP request.
+      (= head 'channel) (list (compile-channel clause))
       else (list (with-plugs (compile-route clause) ctx)))))
+
+(defn compile-channel (clause)
+  "A `(channel pattern module)` clause → `:setup` that loads `module` and registers its
+  `live-channel-spec` for topics matching `pattern`. No route: channel sockets all arrive on
+  one URL (`/channel/ws`), served by the endpoint's ws-handler, and are addressed by the topic
+  named inside each frame rather than by path."
+  (let (pattern (first (rest clause))
+        module (first (rest (rest clause)))
+        spec (symbol (str (->string module) "/live-channel-spec")))
+    {:route nil
+     :setup (list (list 'require-one (list 'quote module))
+              (list 'web/channel/register-channel pattern spec))}))
 
 (defn compile-route (clause)
   "A plain `(method path handler)` clause → a `{:route :setup}` map (no :setup). The handler
@@ -371,6 +389,14 @@
   live-session group: a socket live-navigates only within its own group; crossing
   groups forces a full reload (the auth boundary — `(live \"/admin\" … :session :admin)`).
 
+  A `(channel pattern module)` clause wires a `web/channel` topic socket: it loads `module`
+  and registers its `live-channel-spec` for every topic matching `pattern` (an exact topic,
+  or a trailing-`*` prefix). It adds no route — channel sockets all arrive on `/channel/ws`
+  and name their topic in each frame — so it is registration only, and an enclosing `through`
+  does not cover it (a channel authorizes in its own `join`):
+    (channel \"room:*\"  app/channels/room)
+    (channel \"user:*\"  app/channels/user)
+
   A `(live-session name & clauses)` block tags every `live` clause inside it with
   `:session name`, grouping a set of views:
     (live-session \"admin\"
@@ -398,7 +424,11 @@
   Every admin route then runs behind the auth plug (HTTP side) and shares the `admin`
   live-session (socket side) — neither the mount nor live-navigation can skip auth."
   (let (compiled (compile-routes routes empty-route-ctx)
-        route-forms (map compiled (fn (clause) (get clause :route)))
+        ;; A clause may compile to setup with no route — `(channel …)` registers a topic
+        ;; socket and adds nothing to the route table — so drop the nils rather than
+        ;; indexing a table with a hole in it.
+        route-forms (seq/filter (map compiled (fn (clause) (get clause :route)))
+                      (fn (r) (not (nil? r))))
         setup-forms (apply append (map compiled (fn (clause) (or (get clause :setup) (list)))))
         ; Build the route table ONCE at load, not on every request. Previously the
         ; `(make-route …)` calls sat in the router body, so `parse-pattern` re-split and

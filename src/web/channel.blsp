@@ -1,0 +1,729 @@
+(defmodule web/channel
+  "Topic sockets — the non-live half of hatch's WebSocket layer.
+
+  A live view owns a URL: the socket is the view, the server holds the model, and what
+  crosses the wire is a diff of rendered markup. That is the right shape for a page, and the
+  wrong one for everything that is not a page. A mobile client, a game, a device feed and a
+  browser tab that wants a stream of JSON rather than a stream of HTML all want the same
+  thing instead: one connection, several named topics, messages in both directions, and no
+  rendering anywhere.
+
+  That is a channel. One socket at `/channel/ws` multiplexes any number of topics; a client
+  joins `\"room:lobby\"`, sends events to it, and receives pushes from it, while the same
+  socket also carries `\"user:42\"` and `\"metrics:cpu\"`. Each joined topic runs its own
+  channel module with its own assigns, and the socket process is the sole writer.
+
+  A channel module:
+
+      (defchannel
+        (join (topic params socket)
+          (if (valid-token? (get params \"token\"))
+            [:ok (assign socket {:user-id (get params \"user_id\")})]
+            [:error {:reason \"unauthorized\"}]))
+
+        (on \"new_msg\" (params socket)
+          (do
+            (broadcast socket \"new_msg\" {:body (get params \"body\")})
+            [:noreply socket]))
+
+        (on \"ping\" (params socket) [:reply {:pong true} socket])
+
+        (handle-info (msg socket) [:noreply socket])
+        (terminate (reason socket) nil))
+
+  and in the router:
+
+      (defrouter routes
+        (channel \"room:*\" app/channels/room))
+
+  **Topics are shared with `web/pubsub`, deliberately.** `broadcast` publishes on the topic
+  name itself, so a live view that `(pubsub/subscribe \"room:lobby\")`s in its `mount` receives
+  every channel broadcast at its `handle-info` as `{:topic :event :payload}`, and
+  `broadcast-to` sends from anywhere — a plain HTTP handler, a background job — to channel
+  clients and live views alike. One topic namespace across both halves of the socket layer
+  is what makes a channel worth having next to a live view rather than instead of one.
+
+  **Handler returns.** `join` answers `[:ok socket]`, `[:ok payload socket]` (a payload for
+  the client's join reply) or `[:error payload]`. `on` and `handle-info` answer
+  `[:noreply socket]`, `[:reply payload socket]` or `[:stop reason socket]`. `handle-out` —
+  the hook between a broadcast arriving and it reaching this client — answers
+  `[:push event payload socket]` (the default when the clause is absent) or `[:noreply socket]`
+  to drop it.
+
+  There is no `deflive`-style model here and nothing is rendered: `socket` carries the
+  topic, the connection's read-only Conn, and whatever `assign` has put in its assigns."
+  ; text-frame / pong-frame / recv-frame — the shared codec and socket reader (the same one
+  ; web/live's session actor runs; see http/websocket's `recv-frame`)
+  (:use http/websocket)
+  ; encode / json-decode — ONE wire codec for the whole WebSocket layer, so an app that
+  ; writes `(impl Encode app/money …)` has it apply to a channel push and a live diff alike.
+  ; idle-watchdog — the keepalive/reaper is the socket's, not the view's, so a channel
+  ; socket gets the same protection from a black-holed peer for free.
+  (:alias web/live)
+  (:alias web/pubsub)
+  (:alias web/registry)
+  ; bundled-source / bundled-js-handler — serve brood_channel.js straight from the package
+  (:alias web/static)
+  ; build — a read-only Conn from the upgrade request, so a connect guard can read cookies
+  (:use web/conn)
+  ; emit — a raising channel callback surfaces as [:hatch :channel :exception], matching
+  ; how web/live reports a raising view hook
+  (:alias telemetry))
+
+; ---- the values a channel handler sees ----
+
+;; `socket` is to a channel what `model` is to a live view: the one thing every callback
+;; takes and returns. It is a record rather than a map for the reason web/live's specs are —
+;; `(get socket :assigns)` mistyped is a silent nil, and a silent nil in the assigns is an
+;; authenticated channel quietly forgetting who it belongs to.
+(defrecord channel-socket (topic assigns conn))
+
+(impl Display
+  web/channel/channel-socket
+  (->string [s] (str "#<channel-socket " (channel-socket-topic s) ">")))
+
+;; What `defchannel` produces, by the same argument as `web/live/view-spec`.
+(defrecord channel-spec (join handle-in handle-info handle-out terminate))
+
+(impl Display web/channel/channel-spec (->string [_spec] "#<channel-spec>"))
+
+(defn new-socket (topic conn)
+  "A fresh socket for `topic` on the connection `conn`, with empty assigns. `join` is handed
+  one of these and returns the socket the channel then runs with."
+  (channel-socket topic {} conn))
+
+(defn assign (socket changes)
+  "`socket` with `changes` merged into its assigns — the channel's own per-connection state
+  (who this client is, what it has subscribed to, a cursor). Returns a new socket; nothing is
+  mutated, so a handler must return the socket it wants kept.
+
+  (hatch/web/channel/assigns (hatch/web/channel/assign (hatch/web/channel/new-socket \"room:1\" nil) {:user 7})) ;=> {:user 7}"
+  (channel-socket (channel-socket-topic socket)
+    (merge (or (channel-socket-assigns socket) {}) changes)
+    (channel-socket-conn socket)))
+
+(defn assigns (socket)
+  "This socket's assigns map."
+  (or (channel-socket-assigns socket) {}))
+
+(defn assigned (socket key &optional (fallback nil))
+  "One key out of `socket`'s assigns, or `fallback`.
+
+  (hatch/web/channel/assigned (hatch/web/channel/assign (hatch/web/channel/new-socket \"t\" nil) {:a 1}) :a) ;=> 1
+  (hatch/web/channel/assigned (hatch/web/channel/new-socket \"t\" nil) :missing :none) ;=> :none"
+  (get (assigns socket) key fallback))
+
+; ---- the wire ----
+;
+; A frame is a JSON object with four fields: `topic`, `event`, `payload` and `ref`. `ref` is
+; the client's correlation id — it comes back on the reply to that exact frame and on nothing
+; else, which is what lets a client await one `join` or one request while other pushes for
+; other topics stream past it on the same socket.
+;
+; Client → server:  {"topic":"room:lobby","event":"join","payload":{…},"ref":"1"}
+;                   {"topic":"room:lobby","event":"new_msg","payload":{…},"ref":"2"}
+;                   {"topic":"room:lobby","event":"leave","ref":"3"}
+; Server → client:  {"topic":"room:lobby","event":"reply","ref":"1","status":"ok","payload":{…}}
+;                   {"topic":"room:lobby","event":"new_msg","payload":{…}}
+;                   {"topic":"room:lobby","event":"close","payload":{"reason":…}}
+
+(defn message (topic event payload)
+  "The map a broadcast carries on a pubsub topic: `{:topic :event :payload}`. A live view
+  subscribed to the same topic receives exactly this at its `handle-info`, which is the point
+  — see the module docstring.
+
+  (hatch/web/channel/message \"room:1\" \"msg\" {:a 1}) ;=> {:topic \"room:1\" :event \"msg\" :payload {:a 1}}"
+  {:topic topic :event event :payload payload})
+
+(defn parse-client-frame (payload)
+  "Decode a client frame (`bytes` of UTF-8 JSON) into `{:topic :event :payload :ref}`.
+
+  Like web/live's namesake this hardens the decode rather than trusting it: a bare scalar or
+  array is valid JSON, and the dispatch head that reads these fields runs OUTSIDE the
+  per-callback guards, so a non-map message — or a non-map `payload` — would take the socket
+  process down with it before any cleanup ran. Both are coerced to `{}`.
+
+  (hatch/web/channel/parse-client-frame (string/->bytes \"7\")) ;=> {:topic \"\" :event \"\" :payload {} :ref nil}
+  (hatch/web/channel/parse-client-frame (string/->bytes \"{\\\"topic\\\":\\\"r\\\",\\\"event\\\":\\\"e\\\"}\")) ;=> {:topic \"r\" :event \"e\" :payload {} :ref nil}"
+  (let (decoded (check-allow :discarded-catch
+                  (try (web/live/json-decode (string/bytes-> payload)) (catch _ nil)))
+        msg (if (map? decoded) decoded {})
+        raw (get msg "payload" {}))
+    {:topic (get msg "topic" "")
+     :event (get msg "event" "")
+     :payload (if (map? raw) raw {})
+     :ref (get msg "ref" nil)}))
+
+(defn- send-frame (sock frame)
+  "Encode `frame` and write it as a text frame. False if the write failed — a peer that
+  vanished mid-write ends the socket cleanly rather than crashing the worker."
+  (check-allow :discarded-catch
+    (try (do (tcp/send sock (text-frame (web/live/encode frame))) true) (catch _ false))))
+
+(defn- reply-frame (topic ref status payload)
+  "A reply to the client frame that carried `ref`. A frame with no `ref` gets no reply — the
+  client did not ask for one and has nothing to match it against."
+  {:topic topic :event "reply" :ref ref :status status :payload payload})
+
+; ---- topic patterns ----
+
+(defn topic-matches? (pattern topic)
+  "Whether a registered channel `pattern` covers `topic`. A pattern is an exact topic, or a
+  trailing-`*` wildcard matching any topic with that prefix.
+
+  (hatch/web/channel/topic-matches? \"room:*\" \"room:lobby\") ;=> true
+  (hatch/web/channel/topic-matches? \"room:*\" \"rooms\") ;=> false
+  (hatch/web/channel/topic-matches? \"room:lobby\" \"room:lobby\") ;=> true
+  (hatch/web/channel/topic-matches? \"room:lobby\" \"room:other\") ;=> false"
+  (if (string/ends-with? pattern "*")
+    (string/starts-with? topic (string/substring pattern 0 (- (string/length pattern) 1)))
+    (= pattern topic)))
+
+(defn best-match (patterns topic)
+  "The pattern in `patterns` that should serve `topic`, or nil. An exact pattern always wins
+  over a wildcard, so `\"room:lobby\"` can be given its own channel alongside `\"room:*\"`
+  without the registration order deciding which one a client gets.
+
+  (hatch/web/channel/best-match [\"room:*\" \"room:lobby\"] \"room:lobby\") ;=> \"room:lobby\"
+  (hatch/web/channel/best-match [\"room:lobby\" \"room:*\"] \"room:x\") ;=> \"room:*\"
+  (hatch/web/channel/best-match [\"room:*\"] \"user:1\") ;=> nil"
+  (let (hits (seq/filterv patterns (fn (p) (topic-matches? p topic)))
+        exact (seq/filterv hits (fn (p) (= p topic))))
+    (cond
+      (not (empty? exact)) (first exact)
+      (empty? hits) nil
+      ;; Among wildcards the longest prefix is the most specific — "room:admin:*" beats
+      ;; "room:*" for "room:admin:1", which is the only ordering a reader would predict.
+      else (first (sort hits (fn (a b) (> (string/length a) (string/length b))))))))
+
+; ---- the channel registry: pattern → spec thunk ----
+;
+; Supervised and vault-backed on web/registry's scaffolding, for the reason web/live's route
+; table is: the table is written once at load by the router's `(channel …)` clauses, so a
+; registry crash would empty it until the next module load and every join would 404 — with
+; nothing in the logs saying the table, rather than the channel, was what went missing.
+
+(defn- channel-registry-loop (table)
+  (receive
+    ([:put pattern entry] (let (next (assoc table pattern entry))
+                            (registry/mirror :hatch-channels-vault next)
+                            (channel-registry-loop next)))
+    ; reply keyed by the caller's ref so a late reply from a timed-out lookup can't be
+    ; mismatched to a later one in the same process
+    ([:snapshot-for from r] (send from [:table r table]) (channel-registry-loop table))
+    ; the vault we monitor died: once the supervisor restarts it, re-mirror the whole table
+    ([:down _ _ _] (registry/rewatch-vault :hatch-channels-vault table)
+      (channel-registry-loop table))))
+
+(defn- channel-registry-boot ()
+  (let (table (registry/pull-snapshot :hatch-channels-vault {}))
+    (registry/watch-vault :hatch-channels-vault)
+    (channel-registry-loop table)))
+
+(defn- start-channel-registries ()
+  "Start the channel registry and its vault under one supervisor and block until they're up.
+  Idempotent via the supervisor's `:name`, so a hot reload converges on the one already
+  running. The vault starts first, so the registry's boot-time pull sees it."
+  (registry/ensure-supervised :hatch-channels-sup
+    [{:id :hatch-channels-vault
+      :name :hatch-channels-vault
+      :restart :permanent
+      :start (fn () (spawn (registry/vault-loop {})))}
+      {:id :hatch-channels
+       :name :hatch-channels
+       :restart :permanent
+       :start (fn () (spawn (channel-registry-boot)))}]
+    :hatch-channels))
+
+(defn channels ()
+  "The channel-registry pid, starting the supervised pair on first use."
+  (or (proc/whereis :hatch-channels) (start-channel-registries)))
+
+(defn register-channel (pattern spec-fn)
+  "Register channel `spec-fn` (a 0-arg spec thunk) for topics matching `pattern`. The
+  router's `(channel pattern module)` clause calls this at load; idempotent, so a hot reload
+  just re-puts. Returns nil."
+  (send (channels) [:put pattern {:spec spec-fn :pattern pattern}])
+  nil)
+
+(defn channel-table ()
+  "A snapshot of the `pattern → entry` table (mostly for tests and diagnostics)."
+  (let (r (ref))
+    (send (channels) [:snapshot-for (self) r])
+    (receive
+      ([:table ^r t] t)
+      (after 1000 {}))))
+
+(defn lookup-channel (topic)
+  "The registry entry `{:spec :pattern}` serving `topic`, or nil if no channel covers it."
+  (let (table (channel-table)
+        pattern (best-match (vec (keys table)) topic))
+    (if pattern (get table pattern) nil)))
+
+; ---- broadcasting ----
+
+(defn broadcast (socket event payload)
+  "From inside a channel handler, send `event`/`payload` to every client joined to this
+  socket's topic, this one included. Returns nil."
+  (pubsub/broadcast (channel-socket-topic socket)
+    (message (channel-socket-topic socket) event payload))
+  nil)
+
+(defn broadcast-from (socket event payload)
+  "Like `broadcast`, but skips the sending socket — for when this client has already applied
+  the change locally and only the others need telling. Returns nil."
+  (pubsub/broadcast-from (channel-socket-topic socket)
+    (message (channel-socket-topic socket) event payload))
+  nil)
+
+(defn broadcast-to (topic event payload)
+  "Broadcast to `topic` from anywhere — an HTTP handler, a background job, a `handle-info` in
+  some other process. The one channel entry point that takes no socket, because the caller
+  does not have one. Returns nil."
+  (pubsub/broadcast topic (message topic event payload))
+  nil)
+
+(defn push (socket event payload)
+  "From inside a channel handler, send `event`/`payload` to THIS client only — the private
+  sibling of `broadcast`, for a reply that isn't a reply to anything (a cursor update, a
+  server-initiated nudge).
+
+  It posts to `(self)`, which is the socket process, because handlers run there and the
+  socket process is the connection's sole writer; the loop flushes the queue before it blocks
+  for the next frame. Returns nil."
+  (send (self) [:ch-push (message (channel-socket-topic socket) event payload)])
+  nil)
+
+; ---- the socket actor ----
+
+(defn- channel-error (phase topic e fallback)
+  "A channel callback (`phase` = \"join\"/\"in\"/\"info\"/\"out\"/\"terminate\") raised. Emit
+  `[:hatch :channel :exception]` — the seam web/live uses for a raising view hook — so the
+  failure is logged or traced by whatever is attached rather than vanishing, and answer
+  `fallback` so the socket survives one bad callback."
+  (telemetry/emit [:hatch :channel :exception]
+    {:count 1}
+    {:phase phase :topic topic :error (error-message e)})
+  fallback)
+
+(defn- flush-pushes (sock)
+  "Drain every `[:ch-push frame]` a just-run handler queued (via `push`) and write each.
+  Non-blocking, so it pulls only pushes and leaves frames, broadcasts and control messages
+  where they are — the same shape as web/live's `flush-effects`, and run at the same point:
+  right after a handler returns, before the loop blocks for the next client frame."
+  (receive
+    ([:ch-push frame] (do (send-frame sock frame) (flush-pushes sock)))
+    (after 0 nil)))
+
+(defn- leave-topic (topic joined reason)
+  "Run `topic`'s `terminate`, drop its pubsub subscription, and return `joined` without it."
+  (let (entry (get joined topic))
+    (when entry
+      (check-allow :discarded-catch
+        (try
+          ((channel-spec-terminate (get entry :spec)) reason (get entry :socket))
+          (catch e (channel-error "terminate" topic e nil))))
+      (pubsub/unsubscribe topic))
+    (dissoc joined topic)))
+
+;; `joined` declared `any`: it is a map, but `assoc` answers `vector | map` untyped and that
+;; width reaches every call site here — the same narrowing web/registry's helpers carry.
+(sig leave-topic (string any any -> any))
+
+(defn- shutdown (sock joined reason)
+  "End the socket: terminate every joined channel, then close. The pubsub unsubscribes are
+  belt-and-braces — the registry monitors its subscribers and reaps this pid anyway — but
+  `terminate` is the channel's own cleanup hook and only this path can run it."
+  (fold (vec (keys joined)) joined (fn (acc topic) (leave-topic topic acc reason)))
+  (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
+  nil)
+
+(defn- apply-result (sock topic ref result joined)
+  "Fold one handler result into the joined table, sending whatever reply it asked for.
+  `[:reply payload socket]` answers the client's `ref`; `[:noreply socket]` keeps the socket;
+  `[:stop reason socket]` leaves the topic (running its `terminate`) and tells the client.
+  Anything else is treated as `[:noreply socket]` with the socket unchanged — a handler that
+  returns a bare socket, or nil, must not take the connection down."
+  (match result
+    ([:reply payload socket] (do
+                               (when ref (send-frame sock (reply-frame topic ref "ok" payload)))
+                               (assoc joined topic (assoc (get joined topic) :socket socket))))
+    ([:noreply socket] (do
+                         (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                         (assoc joined topic (assoc (get joined topic) :socket socket))))
+    ([:stop reason socket] (do
+                             (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                             (send-frame sock
+                               {:topic topic :event "close" :payload {:reason reason}})
+                             (leave-topic topic
+                               (assoc joined topic (assoc (get joined topic) :socket socket))
+                               reason)))
+    (_ (do (when ref (send-frame sock (reply-frame topic ref "ok" {}))) joined))))
+
+;; How many topics one connection may hold at once. A client chooses its own topics, and each
+;; join costs a map entry plus a pubsub subscription on every node — so without a ceiling one
+;; socket can make the registry grow without bound, which is a cheap way to hurt a server from
+;; a single connection. High enough that no honest client meets it; low enough to matter.
+(def *max-topics-per-socket* 64)
+
+(defn- do-join (sock conn joined topic ref params)
+  "Handle a `join` frame for `topic`."
+  (cond
+    (contains? joined topic)
+      (do
+        (when ref
+          (send-frame sock (reply-frame topic ref "error" {:reason "already joined"})))
+        joined)
+    (>= (count joined) *max-topics-per-socket*)
+      (do
+        (when ref
+          (send-frame sock (reply-frame topic ref "error" {:reason "too many topics"})))
+        joined)
+    else
+      (let (entry (lookup-channel topic))
+        (if (nil? entry)
+          (do
+            (when ref
+              (send-frame sock (reply-frame topic ref "error" {:reason "no such channel"})))
+            joined)
+          (let (spec ((get entry :spec))
+                socket (new-socket topic conn)
+                result (try
+                         ((channel-spec-join spec) topic params socket)
+                         (catch e
+                           (channel-error "join" topic e [:error {:reason "join failed"}]))))
+            (match result
+              ; `[:ok socket]` / `[:ok payload socket]` — joined. Subscribe AFTER the channel
+              ; has agreed to the join, so a refused join leaves no subscription behind.
+              ([:ok socket2] (do
+                               (pubsub/subscribe topic)
+                               (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                               (assoc joined topic {:spec spec :socket socket2})))
+              ([:ok payload socket2] (do
+                                       (pubsub/subscribe topic)
+                                       (when ref
+                                         (send-frame sock (reply-frame topic ref "ok" payload)))
+                                       (assoc joined topic {:spec spec :socket socket2})))
+              ([:error payload] (do
+                                  (when ref
+                                    (send-frame sock (reply-frame topic ref "error" payload)))
+                                  joined))
+              ;; A join that answers something else has not said yes, and the safe reading of
+              ;; "not yes" on an authorization decision is no.
+              (_ (do
+                   (when ref
+                     (send-frame sock (reply-frame topic ref "error" {:reason "join refused"})))
+                   joined))))))))
+
+(defn- socket-dispatch (sock conn joined buf payload watchdog)
+  "Decode one client frame and route it: `join`/`leave` are the socket's own vocabulary,
+  anything else is an event for that topic's `handle-in`."
+  (let (frame (parse-client-frame payload)
+        topic (get frame :topic)
+        event (get frame :event)
+        ref (get frame :ref)
+        params (get frame :payload))
+    (match event
+      ("join" (socket-loop sock conn (do-join sock conn joined topic ref params) buf watchdog))
+      ("leave" (do
+                 (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                 (socket-loop sock conn (leave-topic topic joined :left) buf watchdog)))
+      (_
+        (let (entry (get joined topic))
+          (if (nil? entry)
+            ; an event for a topic this socket never joined. Answer the ref so a client
+            ; awaiting it isn't left hanging, and carry on — a stale frame arriving just
+            ; after a leave is ordinary, not hostile.
+            (do
+              (when ref
+                (send-frame sock (reply-frame topic ref "error" {:reason "not joined"})))
+              (socket-loop sock conn joined buf watchdog))
+            (let (socket (get entry :socket)
+                  result (try
+                           ((channel-spec-handle-in (get entry :spec)) event params socket)
+                           (catch e (channel-error "in" topic e [:noreply socket]))))
+              (socket-loop sock conn (apply-result sock topic ref result joined) buf watchdog))))))))
+
+(defn- handle-out-of-band (sock joined msg)
+  "Route one `[:info payload]` message. A payload carrying a `:topic` this socket has joined
+  is a broadcast for that channel and goes through `handle-broadcast`; anything else is
+  delivered to every joined channel's `handle-info`.
+
+  Every, rather than one, because a multiplexed socket has no other honest answer: the
+  message reached the PROCESS, and the process is several channels. A sender that means one
+  of them says so by using its topic, which is what `broadcast-to` does. A socket with no
+  joined topics drops it, since there is nothing to hand it to."
+  (if (and (map? msg) (contains? joined (get msg :topic)))
+    (handle-broadcast sock joined msg)
+    (fold (vec (keys joined)) joined (fn (acc topic) (handle-channel-info sock acc topic msg)))))
+
+(defn- handle-channel-info (sock joined topic msg)
+  "Run one channel's `handle-info` over `msg`. Results go through `apply-result` with no ref,
+  so `[:noreply socket]` and `[:stop reason socket]` behave as they do for an event; a
+  `[:reply …]` has nothing to reply to and is treated as the `[:noreply …]` it effectively is."
+  (let (entry (get joined topic))
+    (if (nil? entry)
+      joined
+      (let (socket (get entry :socket)
+            result (try
+                     ((channel-spec-handle-info (get entry :spec)) msg socket)
+                     (catch e (channel-error "info" topic e [:noreply socket]))))
+        (apply-result sock topic nil result joined)))))
+
+(defn- handle-broadcast (sock joined msg)
+  "A pubsub broadcast reached this socket. Deliver it to the joined topic it names, through
+  that channel's `handle-out` — the hook that decides whether this client sees it.
+
+  A message for a topic this socket isn't joined to is dropped: the app may be using the same
+  topic for its own `pubsub/subscribe` traffic, and a channel socket must not forward every
+  message that happens to share a process with it."
+  (let (topic (if (map? msg) (get msg :topic) nil)
+        entry (if topic (get joined topic) nil))
+    (if (nil? entry)
+      joined
+      (let (socket (get entry :socket)
+            result (try
+                     ((channel-spec-handle-out (get entry :spec)) (get msg :event)
+                       (get msg :payload)
+                       socket)
+                     (catch e (channel-error "out" topic e [:noreply socket]))))
+        (match result
+          ([:push event payload socket2] (do
+                                           (send-frame sock (message topic event payload))
+                                           (assoc joined topic (assoc entry :socket socket2))))
+          ([:noreply socket2] (assoc joined topic (assoc entry :socket socket2)))
+          (_ joined))))))
+
+(defn- socket-control (sock conn joined buf msg watchdog)
+  "One non-socket message delivered to the socket process. An unrecognised one is dropped
+  rather than left in the mailbox — see the same note on web/live's `session-control`."
+  (match msg
+    ; the idle watchdog asks us — the sole writer — to emit a keepalive ping
+    ([:ws-send _ frame] (if (check-allow :discarded-catch
+                              (try (do (tcp/send sock frame) true) (catch _ false)))
+                          (socket-loop sock conn joined buf watchdog)
+                          (shutdown sock joined :closed)))
+    ; An out-of-band message, delivered by `web/live/send-info` — which is what web/pubsub
+    ; broadcasts arrive as, and what a timer or any other process holding this pid should
+    ; use. A payload naming a topic this socket has joined is a broadcast for that channel;
+    ; anything else goes to `handle-info`.
+    ([:info payload] (socket-loop sock conn (handle-out-of-band sock joined payload) buf watchdog))
+    ; the watchdog reaped a silent peer
+    ([:reap] (shutdown sock joined :reaped))
+    (_ (socket-loop sock conn joined buf watchdog))))
+
+(defn- kick (watchdog)
+  "Tell the idle watchdog that a client frame arrived, resetting its ping/idle timer. A no-op
+  without one, so the loop can be driven directly in a test."
+  (when watchdog (send watchdog [:alive]))
+  nil)
+
+(defn- socket-loop (sock conn joined buf watchdog)
+  "The per-connection event loop: flush queued pushes, block for the next message, route it.
+
+  **Every frame from the client kicks the watchdog alive**, and that is not housekeeping. The
+  watchdog resets only on `[:alive]`, and a browser's automatic pong arrives here as an
+  ordinary opcode-10 frame — so without this a socket carrying traffic every second is reaped
+  on exactly the same schedule as a dead one: two unanswered pings after connect and gone. The
+  JS client reconnects and rejoins, so the symptom is a silent drop-and-rejoin cycle every
+  ninety seconds rather than an outage, which is the harder thing to notice. `web/live` does
+  the same through `kick-watchdog`."
+  (flush-pushes sock)
+  (match (recv-frame sock buf)
+    ([:ok 8 _ _] (shutdown sock joined :closed))
+    ([:ok 9 payload _] (kick watchdog)
+      (if (check-allow :discarded-catch
+            (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
+        (socket-loop sock conn joined buf watchdog)
+        (shutdown sock joined :closed)))
+    ([:ok 1 payload remainder] (kick watchdog)
+      (socket-dispatch sock conn joined remainder payload watchdog))
+    ; any other opcode (a pong, a binary frame) — channels are a JSON protocol, so this is
+    ; liveness and nothing more, which is exactly what the watchdog needs to hear
+    ([:ok _ _ remainder] (kick watchdog) (socket-loop sock conn joined remainder watchdog))
+    ([:other msg buf2] (socket-control sock conn joined buf2 msg watchdog))
+    ([:closed] (shutdown sock joined :closed))
+    ([:error _] (shutdown sock joined :protocol-error))))
+
+(defn start-socket (sock request &optional (connect nil))
+  "Run a channel socket on a freshly-upgraded connection. `connect`, if given, is a
+  `(fn (conn) …)` run once before any topic is joined — return a falsy value to accept the
+  connection, or anything else to refuse it (the socket is closed without a frame). It is the
+  socket-wide authentication hook, the counterpart of a live view's `on-mount-guard`: a
+  per-topic decision belongs in that channel's `join`.
+
+  The Conn is built from the upgrade request, so its cookies and headers are the ones the
+  browser sent when it connected, and it is carried unchanged on every socket for the life of
+  the connection — read-only, since a WebSocket has no response to attach a `Set-Cookie` to."
+  (let (conn (build request)
+        ; a throwing guard has no sensible way to fail open on an auth decision, so it fails
+        ; closed — matching how start-session treats a throwing on-mount-guard
+        refused (if connect
+                  (try (connect conn) (catch _ :hatch/connect-error))
+                  nil))
+    (if refused
+      (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
+      ;; `(self)` here and not inside the spawn — see web/live/start-watchdog for why that
+      ;; distinction is the whole difference between a watchdog and a decoration.
+      (let (socket-pid (self)
+            watchdog (web/live/start-watchdog socket-pid sock))
+        (socket-loop sock conn {} (bytes []) watchdog)))))
+
+(def *channel-ws-prefix* "/channel/ws")
+
+(defn channel-dispatcher (&optional (connect nil))
+  "The ws-handler for channel sockets, for `web/endpoint`'s `:channels` config (or a direct
+  `http/server/start`). Every channel connection lands on one URL — `/channel/ws` — because a
+  channel socket is not addressed by path the way a live view is: the topics it carries are
+  named in its frames, and one connection carries many.
+
+  The CSWSH origin check runs a layer up, in `http/server` before the 101 (see
+  `http/websocket/origin-allowed?`), so this dispatcher doesn't repeat it."
+  (fn (sock request) (start-socket sock request connect)))
+
+; ---- the defchannel macro ----
+;
+; Hand-built with `list`/`cons` rather than quasiquote, for the reason every macro in hatch
+; is: this defines `join` / `handle-in` / `terminate` into the CONSUMING module, and the `on`
+; clause bodies are anaphoric — a user's body says `socket` and the params name by hand. Inside
+; a backtick Brood would qualify both to `web/channel` and gensym every binder. See CLAUDE.md.
+
+(defn- channel-clause (tag clauses)
+  "The single clause headed by symbol `tag`, or nil."
+  (let (hits (seq/filter clauses (fn (c) (and (pair? c) (= (first c) tag)))))
+    (if (empty? hits) nil (first hits))))
+
+(defn- channel-clauses (tag clauses)
+  "Every clause headed by symbol `tag`, in source order (the repeatable `on`)."
+  (seq/filter clauses (fn (c) (and (pair? c) (= (first c) tag)))))
+
+(defn require-join-clause (join-clause)
+  "Raise unless `defchannel` was given a `join` clause. Returns nil when it was.
+
+  A function rather than an inline `when` in the macro so the rule is reachable by a test:
+  the macro's other clauses all have defaults and this one deliberately does not, which is a
+  decision worth pinning rather than trusting to review. See `defchannel` for why."
+  (when (nil? join-clause)
+    (error "defchannel: a (join (topic params socket) …) clause is required — "
+      "a channel with no join decision accepts every client that can open a socket"))
+  nil)
+
+(defn- channel-handle-in-body (on-clauses)
+  "The macro-time `handle-in` body: one `match` arm per `(on \"name\" (params socket) …)`,
+  keyed by the client's event name, falling through to `[:noreply in-socket]` — an
+  unrecognised event is a no-op rather than an error, matching `deflive`'s `on`."
+  (cons 'match
+    (cons 'in-event
+      (append (map on-clauses
+                (fn (c)
+                  (let (ev-name (first (rest c))
+                        args (first (rest (rest c)))
+                        body (rest (rest (rest c))))
+                    (list ev-name
+                      (list 'let
+                        (list (first args) 'in-params (first (rest args)) 'in-socket)
+                        (cons 'do body))))))
+        (list (list '_ (vector :noreply 'in-socket)))))))
+
+(defmacro defchannel (& clauses)
+  "Define a channel module — the topic-socket counterpart of `deflive`.
+
+  Clauses:
+
+      (join (topic params socket) …)       ; REQUIRED — the authorization decision
+      (on \"event\" (params socket) …)       ; zero or more — one per client event
+      (handle-info (msg socket) …)         ; optional — a message sent to the socket process
+      (handle-out (event payload socket) …) ; optional — a broadcast on its way to this client
+      (terminate (reason socket) …)        ; optional — cleanup on leave/disconnect
+
+  `join` answers `[:ok socket]`, `[:ok payload socket]` or `[:error payload]`; `on` and
+  `handle-info` answer `[:noreply socket]`, `[:reply payload socket]` or `[:stop reason socket]`;
+  `handle-out` answers `[:push event payload socket]` or `[:noreply socket]`.
+
+  **`join` is required, and that is deliberate.** Every other clause here has a sensible
+  default, and so would this one — `[:ok socket]`, accept everybody. But a channel is reachable
+  by any client that can open a socket, and a topic pattern like `\"user:*\"` is one a client
+  chooses the rest of for itself; a channel whose author forgot to write `join` would then be
+  an open door that looks exactly like a closed one. A missing clause is an error at expansion
+  rather than a permissive default at runtime.
+
+  Expands to `join` / `handle-in` / `handle-info` / `handle-out` / `terminate` plus a
+  `live-channel-spec` thunk, which `(channel pattern module)` in a router registers."
+  (let (join-clause (channel-clause 'join clauses)
+        on-clauses (channel-clauses 'on clauses)
+        info-clause (channel-clause 'handle-info clauses)
+        out-clause (channel-clause 'handle-out clauses)
+        terminate-clause (channel-clause 'terminate clauses)
+        _ (require-join-clause join-clause)
+        join-defn (list 'defn 'join (first (rest join-clause)) (cons 'do (rest (rest join-clause))))
+        handle-in-defn (list 'defn
+                         'handle-in
+                         (list 'in-event 'in-params 'in-socket)
+                         (channel-handle-in-body on-clauses))
+        ; Absent → keep the socket and do nothing, so a channel that doesn't opt in simply
+        ; ignores whatever reaches its process.
+        handle-info-defn (if info-clause
+                           (list 'defn
+                             'handle-info
+                             (first (rest info-clause))
+                             (cons 'do (rest (rest info-clause))))
+                           (list 'defn
+                             'handle-info
+                             (list 'info-msg 'info-socket)
+                             (vector :noreply 'info-socket)))
+        ; Absent → push the broadcast through unchanged, which is what a client joining a
+        ; topic asked for. The clause exists to filter or rewrite (drop your own message,
+        ; redact a field for this viewer) — Phoenix's handle_out.
+        handle-out-defn (if out-clause
+                          (list 'defn
+                            'handle-out
+                            (first (rest out-clause))
+                            (cons 'do (rest (rest out-clause))))
+                          (list 'defn
+                            'handle-out
+                            (list 'out-event 'out-payload 'out-socket)
+                            (vector :push 'out-event 'out-payload 'out-socket)))
+        terminate-defn (if terminate-clause
+                         (list 'defn
+                           'terminate
+                           (first (rest terminate-clause))
+                           (cons 'do (rest (rest terminate-clause))))
+                         (list 'defn 'terminate (list 'term-reason 'term-socket) nil)))
+    (list 'do
+      join-defn
+      handle-in-defn
+      handle-info-defn
+      handle-out-defn
+      terminate-defn
+      ;; Positional, in `channel-spec`'s declared field order — change one and change the
+      ;; other. A 0-arg thunk, so a hot reload is picked up by re-resolving the names.
+      (list 'defn
+        'live-channel-spec
+        (list)
+        (list 'web/channel/channel-spec 'join 'handle-in 'handle-info 'handle-out 'terminate)))))
+
+; ---- the browser client ----
+;
+; Served out of the package, like brood_live.js and brood_webmcp.js, so an app never vendors
+; a copy that can drift from the server half it talks to. `web/endpoint`'s `:static` stage
+; picks it up automatically; see `web/static/bundled-js-handler` for what a released binary
+; (which carries no package `static/`) does instead.
+
+(def *client-file* "brood_channel.js")
+
+;; Read once at load, and nil in a released binary — see the same note on web/live's copy.
+(def *client-source* (web/static/bundled-source *client-file*))
+
+(defn client-js ()
+  "The framework's brood_channel.js source, or nil if it could not be located at load."
+  *client-source*)
+
+(defn client-js-handler ()
+  "A conn handler serving hatch's brood_channel.js with the right content-type:
+    (get \"/static/brood_channel.js\" (channel/client-js-handler))"
+  (web/static/bundled-js-handler *client-file* *client-source*))
+
+(defn client-script (&optional (src "/static/brood_channel.js"))
+  "The `<script>` tag for the channel client, as Hiccup — for a layout that serves pages
+  using channels."
+  [:script {:src src :defer true}])

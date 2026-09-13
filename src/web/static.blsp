@@ -576,9 +576,9 @@
 
 ; ---- hatch's own bundled assets ----
 
-; Hatch ships two browser clients in its package `static/` dir — brood_live.js and
-; brood_webmcp.js — and serves them from there so an app never vendors a copy that can
-; drift from the server half it talks to. `web/live` and `web/mcp` each had their own
+; Hatch ships three browser clients in its package `static/` dir — brood_live.js,
+; brood_webmcp.js and brood_channel.js — and serves them from there so an app never vendors
+; a copy that can drift from the server half it talks to. `web/live` and `web/mcp` each had their own
 ; root-finding constant and their own three-function wrapper around it, identical but for
 ; the filename. The root is found by stripping this file's own known suffix off its path,
 ; and `string/replace` answers the subject unchanged when the pattern is absent — so if the
