@@ -118,8 +118,9 @@ src/
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
                       page-chrome
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
-    component.blsp  — LiveComponents: deflive-component macro, render-slot (its own
-                      static/dynamic split, so a component diffs independently), send-update
+    component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
+                      render-slot (its own static/dynamic split, so a component diffs
+                      independently), send-update, apply-tick
     form.blsp       — validate/rules → [:ok params]/[:error {field message}]; built-in
                       validators (required?/email?/min-length?/max-length?/matches-pattern?);
                       error-for/field-class template helpers

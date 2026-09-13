@@ -131,3 +131,80 @@
           json (web/live/encode (web/parts/slot-diff before (slot-for t "c9"))))
       (assert= (includes? json "\"__kdiff__\":{") true)
       (assert= (includes? json "\"cid\":\"c9\"") true))))
+
+;; A component inside an `(if …)` used to be part of its enclosing opaque dynamic and
+;; re-shipped whole on any change. The runtime could always carry it — `slot-diff` falls
+;; through to the whole value when a slot "just became" a component, and `slot->html` renders
+;; any slot kind — so the limit was only ever what `compile-parts` chose to emit: the generic
+;; else branch wraps the form in `render`, which forces a string and discards the structure.
+(describe "a component inside a conditional keeps its own split"
+  (defn- compiled (form) (web/parts/compile-parts form))
+
+  (test "the conditional becomes one dynamic, as before"
+    (assert= (count (get (compiled '[:div {} (if flag (component some-mod {"id" "c1"}) "")])
+                      :dynamics))
+      1))
+
+  ;; The shape of the emitted form is the whole change: an `if` whose branches evaluate to
+  ;; slot values, rather than a `render` call wrapping the lot.
+  (test "and it compiles to an `if` over slot values, not to a render of the whole form"
+    (let (dyn (first (get (compiled '[:div {} (if flag (component some-mod {"id" "c1"}) "")])
+                       :dynamics)))
+      (assert= (first dyn) 'if)
+      ;; the taken branch is the component's slot call, not a string render
+      (assert= (first (nth (apply vector dyn) 2)) 'web/component/render-slot)))
+
+  ;; A missing else must still occupy the slot with a string. It goes through `render` like
+  ;; any other non-component branch — which is the point: a literal branch stays escaped
+  ;; rather than being passed through raw because it happens to sit opposite a component.
+  (test "a missing else branch renders to an empty string, not to nil"
+    (let (dyn (first (get (compiled '[:div {} (if flag (component some-mod {"id" "c1"}))])
+                       :dynamics))
+          else-branch (nth (apply vector dyn) 3))
+      (assert= (first else-branch) 'web/template/render)
+      (assert= (reflect/eval else-branch) "")))
+
+  (test "`when` is handled too"
+    (let (dyn (first (get (compiled '[:div {} (when flag (component some-mod {"id" "c1"}))])
+                       :dynamics)))
+      (assert= (first dyn) 'if)
+      (assert= (first (nth (apply vector dyn) 2)) 'web/component/render-slot)))
+
+  ;; Narrow on purpose: a conditional with no component in it has nothing to preserve and
+  ;; must keep compiling exactly as it did.
+  (test "a conditional with no component is left as one opaque render"
+    (let (dyn (first (get (compiled '[:div {} (if flag "yes" "no")]) :dynamics)))
+      (assert= (first dyn) 'web/template/render)))
+
+  ;; The change-tracking rule comes along for free, and it has to: a component's own state
+  ;; changes without any model key changing, so its slot must always count as dirty.
+  (test "the slot is :all-dependent, so a component's own state change still reaches it"
+    (let (dyn (first (get (compiled '[:div {} (if flag (component some-mod {"id" "c1"}) "")])
+                       :dynamics)))
+      (assert= (web/parts/deps-of dyn 'model) :all))))
+
+;; The runtime half, on real slot values: the same component across two renders diffs per
+;; inner slot, and a branch flip ships the whole new value rather than splicing.
+(describe "a conditional slot diffs like any other component slot"
+  (test "same component, one inner slot changed — only that slot ships"
+    (let (t (table/new)
+          before (slot-for t "c1")
+          _ (apply-update t "c1" {:n 7})
+          after (slot-for t "c1")
+          d (web/parts/slot-diff before after))
+      (assert= (get d :cid) "c1")
+      ;; one inner hole changed (the count), not both
+      (assert= (count (keys (get d :__kdiff__))) 1)))
+
+  (test "component replaced by a plain string — the whole new value ships"
+    (let (t (table/new))
+      (assert= (web/parts/slot-diff (slot-for t "c1") "") "")))
+
+  (test "a different component in the same hole ships whole, never a spliced kdiff"
+    (let (t (table/new)
+          a (slot-for t "c1")
+          b (slot-for t "c2")
+          d (web/parts/slot-diff a b))
+      (assert= (web/parts/kslot? d) true)
+      (assert= (get d :cid) "c2")
+      (assert= (contains? d :__kdiff__) false))))

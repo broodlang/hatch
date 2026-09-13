@@ -8,7 +8,8 @@
   (:use web/live)
   (:use web/test))
 
-(deflive (mount (params) {:count 0})
+(deflive
+  (mount (params) {:count 0})
   (on "inc" (params model) (update model :count inc))
   (render (model)
     [:div

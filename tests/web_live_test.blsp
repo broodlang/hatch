@@ -376,7 +376,8 @@
 ;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
 ;; socket stays open. Each of those reads is now a name.
 
-(deflive (mount (params) {:n 0})
+(deflive
+  (mount (params) {:n 0})
   (render (model) [:p {} (str (get model :n))])
   (tick 1000 (model) (assoc model :n (inc (get model :n)))))
 
@@ -427,3 +428,35 @@
       (is (not (= (record-id view) (record-id (live-spec)))))
       ;; reaching a spec function goes through the spec, so nothing can shadow it
       (is (fn? (view-spec-mount (session-view-spec view)))))))
+
+;; Q10, answered: head updates are an EFFECT, not a diffable region of the layout.
+;;
+;; A `<head>` slot would mean the live template covering the whole document, and `<head>` is
+;; the one place DOM morphing behaves badly — re-touching a stylesheet link can re-fetch and
+;; re-apply it, a re-inserted script re-executes. The title is the only part of the head a
+;; live view realistically changes, and it has a single native setter.
+(describe "push-title"
+  (test "queues a title effect on the same channel push-event and push-navigate use"
+    (do
+      (web/live/push-title "Counter · 7")
+      (receive
+        ([:push-effect msg] (do
+                              (assert= (get msg :event) "title")
+                              (assert= (get msg :title) "Counter · 7")))
+        (after 500 (is false)))))
+
+  (test "it answers nil, so a handler's last expression is still its model"
+    ;; The effect is a side channel; the handler still returns a model, and a `push-title`
+    ;; accidentally left as the last form must not become the model.
+    (let (result (web/live/push-title "x"))
+      (assert= result nil)
+      ;; drain the queued effect so it does not leak into the next test
+      (receive ([:push-effect _] nil) (after 500 nil))))
+
+  (test "the effect encodes with the key the client branches on"
+    (web/live/push-title "Tab")
+    (receive
+      ([:push-effect msg] (let (json (web/live/encode msg))
+                            (is (includes? json "\"event\":\"title\""))
+                            (is (includes? json "\"title\":\"Tab\""))))
+      (after 500 (is false)))))

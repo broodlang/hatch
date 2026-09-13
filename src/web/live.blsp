@@ -181,8 +181,17 @@
 ;; swap fails the suite rather than shipping a view whose ticks run its event handler.
 (defrecord view-spec
   (mount render
-    render-static render-dynamic render-slots slot-deps handle-event handle-tick handle-info unmount
-    mount-guard handle-params ticks))
+    render-static
+    render-dynamic
+    render-slots
+    slot-deps
+    handle-event
+    handle-tick
+    handle-info
+    unmount
+    mount-guard
+    handle-params
+    ticks))
 
 (impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
 
@@ -298,6 +307,7 @@
                                          cid
                                          changes
                                          (bytes/concat buf (reverse pieces))])
+      ([:tick-component cid ms] [:tick-component cid ms (bytes/concat buf (reverse pieces))])
       ([:reload] [:reload (bytes/concat buf (reverse pieces))])
       ([:reload-css] [:reload-css (bytes/concat buf (reverse pieces))])
       ; the idle watchdog decided this peer is dead — reap the session (it owns the socket)
@@ -490,6 +500,32 @@
   (`detail = {name, payload}`). App JS listens for it — the escape hatch for client effects a
   re-render can't express (focus a field, start an animation, call into a JS lib)."
   (send (self) [:push-effect {:event "push" :name name :payload payload}])
+  nil)
+
+(defn push-title (title)
+  "From inside a live handler, set the browser tab's title.
+
+  **This is the answer to Q10** — head updates are an effect, not a diffable region of the
+  layout, and the reasoning is worth keeping because the other option looks tidier.
+
+  A `<head>` slot would mean the live template covering the whole document rather than the
+  view's own markup, and `<head>` is the one place DOM morphing behaves badly: re-touching a
+  `<link rel=stylesheet>` can re-fetch and re-apply it (a flash of unstyled content on a
+  title change), and a re-inserted `<script>` re-executes. The title is also the only part of
+  the head a live view realistically changes — a count in the tab, the name of the thing being
+  viewed — and it is a single string with a single native setter.
+
+  So: an effect, on the channel `push-event` and `push-navigate` already use, flushed right
+  after the handler's model diff so the tab and the body change in one visual step.
+
+      (on \"select\" (params model)
+        (let (chosen (get params \"name\"))
+          (live/push-title (str chosen \" · hatch\"))
+          (assoc model :chosen chosen)))
+
+  A live-navigate to another view sets the new view's title from its own mount page, so this
+  is for a title that changes *within* a view."
+  (send (self) [:push-effect {:event "title" :title title}])
   nil)
 
 (defn push-navigate (path)
@@ -709,6 +745,7 @@
   (receive
     ([:info _] (drain-oob))
     ([:update-component _ _] (drain-oob))
+    ([:tick-component _ _] (drain-oob))
     (after 0 nil)))
 
 (defn session-recv (sock view buf)
@@ -781,6 +818,29 @@
                                                 "diff"
                                                 (session-view-model view)))
                                             (session-recv sock view buf2)))
+    ; A component's own beat (web/component's `tick` clause): run that component's handle-tick
+    ; over its stored state and re-render. Structurally `:update-component`, with the component
+    ; computing its own changes rather than being handed them — and like it, the parent's model
+    ; is untouched, so what reaches the wire is the component's own inner-slot diff.
+    ;
+    ; NOT generation-stamped, unlike a view's `[:tick ms gen]`. A view's tickers are killed and
+    ; restarted across live-navigate, so a stale beat must be recognised and dropped; the
+    ; components table is session-wide and survives navigation by design, so a component's beat
+    ; is still meant for it. A beat for an id that is no longer mounted is a no-op in
+    ; `apply-tick`.
+    ([:tick-component cid ms buf2] (if (session-view-mounted? view)
+                                     (do
+                                       (try
+                                         (web/component/apply-tick (session-view-components view)
+                                           cid ms)
+                                         (catch e
+                                           (live-handler-error "tick-component" cid e nil)))
+                                       (push-update sock
+                                         view
+                                         buf2
+                                         "diff"
+                                         (session-view-model view)))
+                                     (session-recv sock view buf2)))
     ([:reload buf2]
       (if (session-view-mounted? view)
         (let (spec (check-allow :discarded-catch

@@ -141,6 +141,12 @@ const BroodLive = (() => {
         document.dispatchEvent(new CustomEvent("brood:event", {
           detail: { name: msg.name, payload: msg.payload },
         }));
+      } else if (msg.event === "title") {
+        // Server-initiated title change (push-title). The head is deliberately NOT a
+        // diffable region — morphing it can re-fetch a stylesheet (a flash of unstyled
+        // content on a title change) and re-execute a script — and the title is the one
+        // part of it a live view actually changes, with a native setter for exactly this.
+        document.title = msg.title;
       } else if (msg.event === "reload-css") {
         // A stylesheet rebuilt (asset watcher) — hot-swap every <link> in place,
         // preserving live state. No full reload, no flash: we re-stamp the href with

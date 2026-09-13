@@ -1,8 +1,8 @@
 (defmodule web/component
   "LiveComponents: scoped, independently-testable UI pieces embedded in a live view's
   template via `(component module assigns)`. A component has its own `mount`/`render`/`on`
-  lifecycle — the same vocabulary as `deflive` — but no ticks, handle-info, unmount, or
-  on-mount-guard: those stay parent concerns.
+  lifecycle — the same vocabulary as `deflive` — plus its own `tick`. handle-info, unmount and
+  on-mount-guard stay parent concerns.
 
   State lives in the session's per-connection component table (a `table` — Brood's ETS —
   created once at connect time and carried across live-navigate, alongside the session's
@@ -18,10 +18,17 @@
   change ships only that component's changed inner slots, and a parent re-render that leaves
   the component alone ships nothing for it at all.
 
-  Two things stay coarse, deliberately: a component nested inside an `(if …)`/`(for …)` is part
-  of its enclosing opaque dynamic and re-sends whole (the same carve-out that applies to
-  anything in a conditional), and there is still no component-level `tick` — a parent's tick can
-  `send-update` if a component needs periodic refresh."
+  A component also gets **its own `tick`**: `(tick ms (state) …)` beats on its own interval,
+  started at mount, without the parent having to own a timer and `send-update` into it. See
+  `start-component-ticks` for the one thing to know — a beat outlives the component leaving
+  the screen, and is bounded by the session.
+
+  Granularity, precisely. A component that is a *direct* hole, or the branch of an
+  `(if …)`/`(when …)`, diffs per inner slot. Inside a `(for …)` it diffs per ITEM: the
+  comprehension slot ships only the row whose HTML changed, with the component's markup inside
+  that row — one step coarser than per-inner-slot, and the step down to it would make
+  comprehension items heterogeneous (strings or slot values) and need brood_live.js to weave
+  them, for a row's worth of bytes. Not taken."
   ; deflive-render-expr / deflive-handle-event-body — the macro-expansion deflive
   ; already built for inline-vs-template render resolution and event-arm dispatch;
   ; deflive-component reuses both (called fully-qualified below) rather than
@@ -41,7 +48,9 @@
   (:use web/template)
   ; compile-parts / component-slot / slot->html — the component's own static/dynamic split
   ; and the tagged slot value the parent diffs it as
-  (:alias web/parts))
+  (:alias web/parts)
+  ; send-interval — a component's own tick, started at mount (see start-component-ticks)
+  (:alias timer))
 
 ; ---- the component spec ----
 ;
@@ -52,7 +61,8 @@
 ;; drops the component back to shipping its whole HTML on every change.
 ;;
 ;; The accessors read a plain map as happily as a record, so a hand-built spec still works.
-(defrecord component-spec (mount render render-static render-dynamic handle-event))
+(defrecord component-spec
+  (mount render render-static render-dynamic handle-event handle-tick ticks))
 
 (impl Display web/component/component-spec (->string [_spec] "#<live component-spec>"))
 
@@ -63,14 +73,16 @@
   client events, scoped independently of the parent view."
   (mount [id assigns])
   (render [state])
-  (handle-event [name params state]))
+  (handle-event [name params state])
+  (handle-tick [ms state]))
 
 ; ---- deflive-component macro ----
 
 (defmacro deflive-component (& clauses)
   "Define a live component in the current module.
 
-  Expands to `mount`, `render`, `handle-event`, and the `live-component-spec` thunk.
+  Expands to `mount`, `render`, `handle-event`, `handle-tick`, `live-component-ticks` and the
+  `live-component-spec` thunk.
   Embed it in a parent live view's template with `(component this-module assigns)` —
   `assigns` must carry a string `\"id\"`, the component's identity within the session.
 
@@ -78,7 +90,8 @@
     (deflive-component
       (mount (id assigns) initial-state)
       (render (state) hiccup-template)      ; — or —  (template \"component.bml\")
-      (on \"event-name\" (params state) updated-state))
+      (on \"event-name\" (params state) updated-state)
+      (tick 1000 (state) updated-state))    ; optional: its own beat (repeatable)
 
   `mount` runs once, the first time this id is seen in the session — a parent re-render
   that keeps the same id does *not* re-mount; push new data in with `web/component/send-update`
@@ -88,6 +101,17 @@
         render-clause (live/deflive-clause 'render clauses)
         template-clause (live/deflive-clause 'template clauses)
         on-clauses (live/deflive-clauses 'on clauses)
+        tick-clauses (live/deflive-clauses 'tick clauses)
+        ;; One match arm per `(tick ms (state) …)`, keyed by its interval — the same shape
+        ;; deflive builds for a view, so a component's beat reads identically to a view's.
+        tick-arms (map tick-clauses
+                    (fn (c)
+                      (let (ms (first (rest c))
+                            state-sym (first (first (rest (rest c))))
+                            body (rest (rest (rest c))))
+                        (list ms (list 'let (list state-sym 'tick-state) (cons 'do body))))))
+        handle-tick-body (cons 'match
+                           (cons 'tick-ms (append tick-arms (list (list '_ 'tick-state)))))
         mount-args (first (rest mount-clause))
         mount-body (rest (rest mount-clause))
         render-args (first (rest render-clause))
@@ -122,6 +146,11 @@
         'handle-event
         (list 'event-name 'event-params 'event-model)
         handle-body)
+      (list 'defn 'handle-tick (list 'tick-ms 'tick-state) handle-tick-body)
+      ;; The intervals this component beats on. Read at mount, when the session starts one
+      ;; timer per interval for this id; empty for a component with no `tick` clause, which
+      ;; is the overwhelming majority and costs nothing.
+      (list 'def 'live-component-ticks (apply vector (map tick-clauses (fn (c) (first (rest c))))))
       ; A 0-arg thunk, mirroring deflive's live-spec — re-resolves the component's
       ; functions by name each call, so hot-reloaded code is picked up.
       ;; Positional, in `component-spec`'s declared field order.
@@ -129,7 +158,8 @@
         'live-component-spec
         (list)
         (list 'web/component/component-spec
-          'mount 'render 'render-static 'render-dynamic 'handle-event)))))
+          'mount 'render 'render-static 'render-dynamic 'handle-event 'handle-tick
+          'live-component-ticks)))))
 
 ; ---- the components table: {id -> {:module 'mod :spec-thunk spec-thunk :state state}} ----
 ; Storing the spec-thunk alongside state (not just state) is what lets an event or an
@@ -163,7 +193,28 @@
       (get entry :state)
       (let (initial ((component-spec-mount (spec-thunk)) id assigns))
         (table/put components-table id (component-entry module spec-thunk initial))
+        (start-component-ticks id (spec-thunk))
         initial))))
+
+(defn- start-component-ticks (id spec)
+  "Start one interval timer per `(tick ms …)` this component declares, posting
+  `[:tick-component id ms]` to the session on each beat.
+
+  At MOUNT, because that is the one moment a component is known to be new: `render-slot` runs
+  inside the session process on every re-render, and starting a timer there would add one per
+  render. `timer/send-interval` monitors its target, so these die with the session and cannot
+  outlive it.
+
+  What they CAN outlive is the component being on screen. A component whose `(if …)` turns
+  false keeps its state and its beat, and each beat then produces a diff for a slot nobody is
+  rendering — wasted work, not wrong output, and bounded by the session's own lifetime. That
+  is the same shape as `send-update` to a component that is no longer rendered, which has
+  always been a no-op rather than an error, and it is why this is a tick and not a general
+  scheduler: a component that needs to stop beating should stop being rendered AND the session
+  should end, or the parent should own the timer."
+  (dolist (ms (or (component-spec-ticks spec) []))
+    (timer/send-interval ms (self) [:tick-component id ms]))
+  nil)
 
 (defn wrapper-statics (id statics)
   "`statics` with the component's `[:div {:data-cid id} …]` wrapper folded into its first and
@@ -268,3 +319,25 @@
   it. Sending to an already-dead session is swallowed — see `web/live/send-safely`, which
   `send-info` also builds on."
   (live/send-safely session [:update-component cid changes]))
+
+(defn apply-tick (components-table cid ms)
+  "Run component `cid`'s own `handle-tick` for interval `ms` over its stored state and store
+  the result — the session-side handler for a `[:tick-component cid ms]` beat.
+
+  A no-op if `cid` names no mounted component (its beat outlived the thing that started it,
+  which `start-component-ticks` explains), or if the component's spec declares no `handle-tick`
+  — a component written before ticks existed has none, and a missing hook must not be a
+  crashing session. Mirrors `apply-update`: the parent's own model is untouched, and the
+  session re-renders afterwards so the component's fresh state reaches the wire as its own
+  inner-slot diff."
+  (let (entry (table/get components-table cid))
+    (when entry
+      (let (spec ((get entry :spec-thunk))
+            tick (component-spec-handle-tick spec))
+        (when tick
+          (table/put components-table
+            cid
+            (component-entry (get entry :module)
+              (get entry :spec-thunk)
+              (tick ms (get entry :state))))))))
+  nil)

@@ -96,6 +96,66 @@
   generic opaque-dynamic case (walk's else branch)."
   (and (pair? node) (= (first node) 'component)))
 
+(defn conditional-form? (node)
+  "True for an `(if …)` or `(when …)` — the forms whose branches are chosen at runtime, and
+  so cannot contribute statics."
+  (and (pair? node) (or (= (first node) 'if) (= (first node) 'when))))
+
+(defn conditional-branches (node)
+  "The two branch forms of a conditional, as `[then else]`, or nil when it is a shape this
+  does not model.
+
+  A missing `else` is `\"\"` rather than nil: an absent branch still occupies its slot, and
+  `weave` joins slot values into a string — nil there would be joined as the word \"nil\" or
+  raise, depending on the runtime's mood. `when` with several body forms is left alone; it
+  is rare in a template and `do` has no single value to diff."
+  (let (head (first node)
+        args (rest node)
+        n (count args))
+    (cond
+      (and (= head 'if) (= n 3)) [(nth (apply vector args) 1) (nth (apply vector args) 2)]
+      (and (= head 'if) (= n 2)) [(nth (apply vector args) 1) ""]
+      (and (= head 'when) (= n 2)) [(nth (apply vector args) 1) ""]
+      else nil)))
+
+(defn branch-slot-form (form)
+  "One branch of a conditional as a SLOT VALUE rather than a string: a component form
+  compiles to its own component slot, anything else renders to HTML as before."
+  (if (component-form? form)
+    (component-slot-form form)
+    (list 'web/template/render (rewrite-components form))))
+
+(defn conditional-slot-form (node)
+  "An `(if …)`/`(when …)` holding a component, compiled so the branch actually taken
+  evaluates to that component's SLOT VALUE instead of to its flattened HTML.
+
+  This is what lets a component inside a conditional diff per inner slot like any other. The
+  runtime already allowed it — `slot-diff` falls through to sending the whole new value when a
+  slot 'just became' a component, and `slot->html` renders any slot kind — so the limitation
+  was only ever here, in what the compiler chose to emit: the generic `else` branch of `walk`
+  wraps the whole form in `render`, which forces a string and throws the structure away.
+
+  Flipping branches is handled by the machinery that was already there. A slot that was
+  component A and is now component B has a different `cid`, so `slot-diff` ships the whole new
+  component rather than splicing B's inner slots onto A's; a slot that was a component and is
+  now a string ships the string. Only an unchanged cid takes the per-inner-slot path, which is
+  exactly the condition under which that path is sound."
+  (let (branches (conditional-branches node))
+    (if (nil? branches)
+      nil
+      (list 'if
+        (first (rest node))
+        (branch-slot-form (nth branches 0))
+        (branch-slot-form (nth branches 1))))))
+
+(defn conditional-with-component? (node)
+  "True for a conditional whose taken branch could be a component — the case worth compiling
+  to a slot rather than to one opaque string."
+  (and (conditional-form? node)
+    (let (branches (conditional-branches node))
+      (and (not (nil? branches))
+        (or (component-form? (nth branches 0)) (component-form? (nth branches 1)))))))
+
 (defn component-slot-form-html (node)
   "`component-slot-form`'s HTML-returning twin, for `rewrite-components` — the paths that need
   a string rather than a diffable slot value (a view's plain `render`, and any component nested
@@ -227,6 +287,9 @@
     (elem? node) (walk-element st node)
     (for-form? node) (emit-dynamic st (comp-form node))
     (component-form? node) (emit-dynamic st (component-slot-form node))
+    ;; A conditional whose branch is a component keeps that component's own split, instead of
+    ;; being flattened into one opaque string by the `else` below. See conditional-slot-form.
+    (conditional-with-component? node) (emit-dynamic st (conditional-slot-form node))
     (list-form? node) (fold (rest node) st walk)
     else (emit-dynamic st (list 'web/template/render (rewrite-components node)))))
 

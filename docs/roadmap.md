@@ -448,6 +448,55 @@ other test that compresses something, and failed about two runs in three once th
 It asserts the shape of the keys now: an untagged response could only key itself on a nil
 tag, and that no such key exists is true regardless of what else is running.
 
+**0.19.0 closes the backlog, and three of the four items were smaller than their entries.**
+
+**A component can beat on its own.** `(tick ms (state) …)` in a `deflive-component`, started at
+mount, dispatched by the session as `[:tick-component cid ms]` and applied by `apply-tick` —
+structurally `[:update-component]`, with the component computing its own changes instead of
+being handed them. The parent's model is untouched, so what reaches the wire is the
+component's own inner-slot diff. Unlike a view's beat it is not generation-stamped: a view's
+tickers are killed and restarted across live-navigate so a stale beat must be dropped, while
+the components table is session-wide and survives navigation by design.
+
+The lifecycle question that kept this a carve-out is answered rather than solved.
+`timer/send-interval` monitors its target, so a component's beat dies with the session; what it
+can outlive is the component leaving the SCREEN, and a beat then produces a diff for a slot
+nobody renders — wasted work, not wrong output, bounded by the session. That is the same shape
+as `send-update` to an unrendered component, which has always been a no-op, and it is why this
+is a tick and not a scheduler.
+
+**A component in a conditional was never a runtime limitation.** `slot-diff` already fell
+through to the whole new value when a slot "just became" a component, and `slot->html` already
+rendered any slot kind — the coarseness lived entirely in what `compile-parts` emitted, which
+wrapped the whole `(if …)` in `render` and threw the structure away. `conditional-slot-form`
+emits an `if` over slot VALUES instead, so the branch actually taken keeps the component's own
+split. Flipping branches needs nothing new: a different cid ships whole, a component replaced
+by a string ships the string, and only an unchanged cid takes the per-inner-slot path — which
+is exactly the condition under which that path is sound.
+
+**The `(for …)` half of that entry was simply wrong**, and is corrected rather than fixed. A
+comprehension is a comprehension *slot*, not an opaque dynamic: a component inside one has
+always diffed per ITEM, shipping only the row whose HTML changed. The step down to
+per-inner-slot would make comprehension items heterogeneous — strings or slot values — and
+need `brood_live.js` to weave them, for a row's worth of bytes. Declined, and written down so
+the entry does not grow back.
+
+**Q10 is answered: head updates are an effect.** `web/live/push-title` rides the channel
+`push-event` and `push-navigate` already use, flushed right after the handler's model diff so
+the tab and the body move in one step. A `<head>` slot is the more general-looking option and
+the wrong one: it would put the whole document inside the live template, and `<head>` is the
+one region where morphing misbehaves — re-touching a stylesheet link can re-fetch and re-apply
+it, giving a flash of unstyled content caused by a title change, and a re-inserted script
+re-executes. The title is the only part of the head a live view realistically changes, and it
+has a single native setter.
+
+**Q1 and Q8 were answered by shipped code and nobody told the table.** Q1 went the
+static-analysis way (`web/parts/deps-of`, over-approximating to `:all` so the failure direction
+is a needless re-render rather than a stale one); Q8 went the clause way (`on-mount-guard`,
+because a convention in `mount` cannot refuse a mount — it can only return a model and hope the
+render notices). Both are recorded now, which is the actual fix: a decision log that is never
+checked against the tree stops being a record and becomes a list of open questions that are not.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
@@ -456,27 +505,33 @@ several of which document non-obvious Brood behaviour.
 
 ## Still open
 
-With Phases 1–11 done, this is the actual backlog. Nothing here blocks anything else; pick by
-appetite.
+**Nothing.** Phases 1–11 are done and the backlog that survived them is now closed too; what
+follows is the record of how, since three of the four turned out to be smaller than their
+entries claimed.
 
 - **The three body drains stay hand-rolled, on purpose** — the leftover of the framed-read
   adoption (the head reader took it; see *What shipped*). `tcp/read-n` reads to a length and
   returns the bytes, with no per-chunk hook, and each body reader needs one: `spool-drain`
   appends each chunk to disk (buffering the whole body in memory is the exact thing spooling
   exists to avoid), `buffered-drain` emits upload-progress telemetry per read, and
-  `chunked-drain` decodes incrementally with no declared length at all. So this is closed as
-  "not applicable", not "not yet done".
-- **No component-level `tick`** — the remaining half of the Phase 8 carve-out (the wire-diff
-  half shipped 2026-08-13). A parent's own tick can `send-update` if a component needs periodic
-  refresh, which covers most of it.
-- **Components nested in `(if …)`/`(for …)` still diff coarsely** — such a component is part of
-  its enclosing opaque dynamic and re-sends whole. The same carve-out that applies to anything
-  inside a conditional; a *direct* component hole now diffs per inner slot.
-- **Q10, still undecided** — head updates: a `[:set-title]` effect, or a `<head>` slot in the
-  layout? (See *Open design questions*.)
-
----
-
+  `chunked-drain` decodes incrementally with no declared length at all. Closed as "not
+  applicable", not "not yet done".
+- ✅ **Component-level `tick`** — shipped in 0.19.0. `(tick ms (state) …)` in a
+  `deflive-component`, started at mount, dispatched by the session as `[:tick-component cid ms]`
+  through `apply-tick`. The one thing to know is in `start-component-ticks`: a beat outlives
+  the component leaving the screen and is bounded by the session, which is the same shape as
+  `send-update` to an unrendered component and the reason this is a tick and not a scheduler.
+- ✅ **Components in a conditional diff per inner slot** — shipped in 0.19.0, and it was never
+  a runtime limitation. `slot-diff` already fell through to the whole value when a slot "just
+  became" a component, and `slot->html` already rendered any slot kind; the coarseness was
+  entirely in what `compile-parts` emitted, which wrapped the conditional in `render` and threw
+  the structure away. `conditional-slot-form` emits an `if` over slot values instead.
+- ✏️ **The `(for …)` half of that entry was wrong** and is corrected rather than fixed. A
+  comprehension is a *comprehension slot*, not an opaque dynamic: a component inside one has
+  always diffed per ITEM, shipping only the row whose HTML changed. Going from per-item to
+  per-inner-slot would make comprehension items heterogeneous (strings or slot values) and
+  need `brood_live.js` to weave them, for a row's worth of bytes. Not taken, deliberately.
+- ✅ **Q10 answered** — head updates are an effect: `web/live/push-title`. See below.
 ## Known issues
 
 None open. The three stale `bytes` type-signature warnings recorded here (`count`/`fold`
@@ -612,11 +667,25 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
 
 ## Open design questions
 
-| # | Question | Decision needed |
-|---|----------|-----------------|
-| Q1 | Slot annotation: explicit `(slot :key expr)` or static analysis of `(get model :key)`? | Phase 6 |
-| Q8 | Auth: `on-mount-guard` clause in `deflive`, or convention in `mount`? | Phase 7 |
-| Q10 | Head updates: `[:set-title]` effect, or a `<head>` slot in the layout? | Phase 8 |
+**None.** All five are answered, and two of them had been answered by shipped code for some
+time while the table went on asking — which is its own small lesson about a decision log that
+is not checked against the tree.
+
+| # | Question | Answer |
+|---|----------|--------|
+| Q1 | Slot annotation: explicit `(slot :key expr)` or static analysis of `(get model :key)`? | **Static analysis** — `web/parts/deps-of`. It over-approximates on purpose: any opaque use of the model yields `:all`, so the failure direction is a needless re-render rather than a stale one. No annotation to forget. |
+| Q5 | Session storage: fixed cookie, or pluggable? | **Pluggable, through the `SessionStore` ability** (0.14.0). See below. |
+| Q8 | Auth: `on-mount-guard` clause in `deflive`, or convention in `mount`? | **The clause.** A convention in `mount` cannot refuse a mount — it can only return a model and hope the render notices — whereas the clause redirects before the view exists. hatch-demo's `/dashboard` is the worked example. |
+| Q10 | Head updates: a `[:set-title]` effect, or a `<head>` slot in the layout? | **The effect** — `web/live/push-title` (0.19.0). See below. |
+
+**Q10, in full.** A `<head>` slot looks like the more general answer and is the wrong one.
+It would mean the live template covering the whole document rather than the view's own
+markup, and `<head>` is the one region where DOM morphing misbehaves: re-touching a
+`<link rel=stylesheet>` can re-fetch and re-apply it — a flash of unstyled content, caused by
+a title change — and a re-inserted `<script>` re-executes. Against that, the title is the only
+part of the head a live view realistically changes, it is a single string, and it has a single
+native setter. So it rides the effect channel `push-event` and `push-navigate` already use,
+flushed straight after the handler's model diff so the tab and the body move together.
 
 **Q5 is answered (0.14.0): pluggable, through an ability.** `fetch-session` takes a value
 implementing `SessionStore` — `(cookie-store secret {})` for the built-in one — whose two ops

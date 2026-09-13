@@ -1,0 +1,79 @@
+;; Component-level `tick` — the remaining half of the Phase 8 carve-out. A component can now
+;; beat on its own interval instead of relying on its parent's tick to `send-update` into it.
+;;
+;; Its own file because `deflive-component` defines `mount`/`render`/`handle-tick` into the
+;; enclosing module, so only one component can live per test module (the same reason
+;; web_component_diff_test and the integration test each have their own).
+(defmodule web-component-tick-test
+  (:use web/component)
+  (:alias web/parts)
+  (:use test))
+
+(deflive-component (mount (id assigns) {:n 0 :label "start"})
+  (render (state)
+    [:div {} [:span {} (get state :label)] [:b {} (str (get state :n))]])
+  (on "reset" (params state) (assoc state :n 0))
+  ;; Two intervals, so the dispatch has to key on which one fired rather than assuming one.
+  (tick 1000 (state) (assoc state :n (inc (get state :n))))
+  (tick 5000 (state) (assoc state :label "slow")))
+
+(defn- entry-state (t id) (get (table/get t id) :state))
+
+(describe "a component declares its own intervals"
+  (test "the spec carries them, in declaration order"
+    (assert= (web/component/component-spec-ticks (live-component-spec)) [1000 5000]))
+  (test "and a handle-tick that dispatches on the interval"
+    (is (fn? (web/component/component-spec-handle-tick (live-component-spec))))))
+
+(describe "a beat runs the matching clause over the component's own state"
+  (test "the 1000ms clause increments"
+    (let (t (table/new)
+          _ (render-slot 'web-component-tick-test live-component-spec {"id" "c1"} t))
+      (apply-tick t "c1" 1000)
+      (assert= (get (entry-state t "c1") :n) 1)
+      (apply-tick t "c1" 1000)
+      (assert= (get (entry-state t "c1") :n) 2)
+      ;; the other clause's field is untouched
+      (assert= (get (entry-state t "c1") :label) "start")))
+
+  (test "the 5000ms clause is a different arm"
+    (let (t (table/new)
+          _ (render-slot 'web-component-tick-test live-component-spec {"id" "c2"} t))
+      (apply-tick t "c2" 5000)
+      (assert= (get (entry-state t "c2") :label) "slow")
+      (assert= (get (entry-state t "c2") :n) 0)))
+
+  ;; The fall-through arm. An interval the component never declared must leave it alone
+  ;; rather than raise — a stale beat is a real thing (see start-component-ticks).
+  (test "an undeclared interval leaves the state exactly as it was"
+    (let (t (table/new)
+          _ (render-slot 'web-component-tick-test live-component-spec {"id" "c3"} t)
+          before (entry-state t "c3"))
+      (apply-tick t "c3" 777)
+      (assert= (entry-state t "c3") before)))
+
+  ;; A beat can outlive the thing that started it: the component's `(if …)` went false, or the
+  ;; view navigated away. It must be a no-op, not a crashing session.
+  (test "a beat for an id that is not mounted does nothing"
+    (let (t (table/new))
+      (apply-tick t "never-mounted" 1000)
+      (assert= (table/get t "never-mounted") nil))))
+
+(describe "a beat reaches the wire as the component's own inner-slot diff"
+  (test "only the slot the tick changed is shipped"
+    (let (t (table/new)
+          before (render-slot 'web-component-tick-test live-component-spec {"id" "c4"} t)
+          _ (apply-tick t "c4" 1000)
+          after (render-slot 'web-component-tick-test live-component-spec {"id" "c4"} t)
+          d (web/parts/slot-diff before after))
+      (assert= (get d :cid) "c4")
+      ;; the count moved; the label did not, and is absent from the diff entirely
+      (assert= (count (keys (get d :__kdiff__))) 1)
+      (assert= (get (get d :__kdiff__) 1) "1")))
+
+  (test "a beat that changes nothing ships nothing"
+    (let (t (table/new)
+          before (render-slot 'web-component-tick-test live-component-spec {"id" "c5"} t)
+          _ (apply-tick t "c5" 777)
+          after (render-slot 'web-component-tick-test live-component-spec {"id" "c5"} t))
+      (assert= (web/parts/diff-dynamics [before] [after]) {}))))
