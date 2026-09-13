@@ -165,7 +165,9 @@ const BroodLive = (() => {
     //                             or further components.
     //   anything else             already an HTML string; null/undefined render empty.
     _slotHtml(v) {
-      if (v && v.__comp__) return v.__comp__.join("");
+      // Items are usually HTML strings, but a `(for …)` over bare components makes each item
+      // that component's own slot — so each is rendered before joining, not concatenated raw.
+      if (v && v.__comp__) return v.__comp__.map((item) => this._slotHtml(item)).join("");
       if (v && v.__kslot__) return this._weave(v.s || [], v.d || []);
       return v == null ? "" : v;
     }
@@ -192,7 +194,11 @@ const BroodLive = (() => {
       if (val && val.__cdiff__ !== undefined) {
         const items = (prev && prev.__comp__) ? prev.__comp__.slice() : [];
         const changed = val.__cdiff__ || {};
-        for (const j in changed) items[j] = changed[j];
+        // Folded, not assigned: an item that is a component ships a {__kdiff__} patch of its
+        // own inner slots rather than its whole self, and that has to be applied against the
+        // previous item the same way a top-level slot is. A string item takes _applySlot's
+        // final branch and simply replaces, exactly as before.
+        for (const j in changed) items[j] = this._applySlot(items[j], changed[j]);
         items.length = val.n; // grow (new items are all in `changed`) or shrink
         return { __comp__: items };
       }

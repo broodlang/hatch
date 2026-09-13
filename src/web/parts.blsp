@@ -74,8 +74,20 @@
     ; compiled to its render-slot call — without this it stays literal `(component …)` and
     ; raises "unbound component" at render (a list of stateful components is a mainstream
     ; pattern), and its change-tracking deps would be empty (never re-rendering).
-    (list 'web/parts/comp-slot
-      (list 'for spec (list 'web/template/render (rewrite-components body))))))
+    ;
+    ; When the body IS a bare component, the item is that component's SLOT rather than its
+    ; flattened HTML, so a row whose component changed ships only that component's changed
+    ; inner slots instead of the row's whole markup. `branch-slot-form` is the same choice
+    ; `conditional-slot-form` makes, for the same reason.
+    ;
+    ; Only a BARE component — `(for (x xs) (component m {…}))`. A body that wraps one, like
+    ; `[:li {} (component m {…})]`, stays a string item: giving every comprehension item its
+    ; own statics/dynamics split would be the general answer, and it founders on identity.
+    ; A kslot diff is gated on the cid matching; a comp item has only its index, and indices
+    ; shift on insert and delete, so patching item 3's inner slots after a row was removed
+    ; would splice two unrelated rows together. Per-item string diffing has no such hazard,
+    ; which is exactly why it is what the wrapped case keeps.
+    (list 'web/parts/comp-slot (list 'for spec (branch-slot-form body)))))
 
 ;; The name of the extra parameter `deflive` binds on its generated `render`/`render-dynamic`
 ;; and that a component slot references as a free variable: the session's live component
@@ -386,7 +398,9 @@
   weaves its own statics and dynamics (recursively — a component's inner slots may themselves
   be comprehensions or nested components), and a scalar slot is already its HTML string."
   (cond
-    (comp? v) (string/join (comp-items v) "")
+    ;; Items may be slot values now, not only strings — a `(for …)` over bare components
+    ;; makes each item that component's own slot — so each is rendered before joining.
+    (comp? v) (string/join (map (comp-items v) slot->html) "")
     (kslot? v) (weave (get v :s) (get v :d))
     else v))
 
@@ -475,4 +489,7 @@
       n
       (if (and (< i (count old)) (= (nth old i) (nth new i)))
         acc
-        (assoc acc i (nth new i))))))
+        ;; Through `slot-diff`, so an item that is the same component across two renders
+        ;; ships a per-inner-slot patch rather than its whole re-rendered self. A new item
+        ;; (past the old length) has no previous value, and slot-diff answers it whole.
+        (assoc acc i (slot-diff (if (< i (count old)) (nth old i) nil) (nth new i)))))))

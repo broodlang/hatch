@@ -23,12 +23,16 @@
   `start-component-ticks` for the one thing to know — a beat outlives the component leaving
   the screen, and is bounded by the session.
 
-  Granularity, precisely. A component that is a *direct* hole, or the branch of an
-  `(if …)`/`(when …)`, diffs per inner slot. Inside a `(for …)` it diffs per ITEM: the
-  comprehension slot ships only the row whose HTML changed, with the component's markup inside
-  that row — one step coarser than per-inner-slot, and the step down to it would make
-  comprehension items heterogeneous (strings or slot values) and need brood_live.js to weave
-  them, for a row's worth of bytes. Not taken."
+  Granularity, precisely. A component diffs per inner slot when it is a *direct* hole, the
+  branch of an `(if …)`/`(when …)`, or the whole body of a `(for …)`. Wrapped inside a
+  comprehension body — `[:li {} (component …)]` — the row diffs per ITEM instead: the
+  comprehension ships only the row whose HTML changed, with the component's markup inside it.
+
+  That last case is a real boundary, not an oversight. Giving every comprehension item its own
+  statics/dynamics split would be the general answer and it founders on IDENTITY: a component
+  patch is gated on a matching cid, a comp item has only its index, and indices shift on insert
+  and delete — so patching item 3 after a row was removed would splice two unrelated rows
+  together. Per-item string diffing has no such hazard, which is why the wrapped case keeps it."
   ; deflive-render-expr / deflive-handle-event-body — the macro-expansion deflive
   ; already built for inline-vs-template render resolution and event-arm dispatch;
   ; deflive-component reuses both (called fully-qualified below) rather than

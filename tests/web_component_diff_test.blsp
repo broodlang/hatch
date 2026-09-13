@@ -208,3 +208,63 @@
       (assert= (web/parts/kslot? d) true)
       (assert= (get d :cid) "c2")
       (assert= (contains? d :__kdiff__) false))))
+
+;; A `(for …)` over BARE components makes each item that component's own slot, so a row whose
+;; component changed ships only that component's changed inner slots — not the row's markup.
+;;
+;; Deliberately only the bare case. A body that wraps one (`[:li {} (component …)]`) keeps
+;; string items: giving every comprehension item its own split founders on identity, since a
+;; kslot patch is gated on a matching cid and a comp item has only its index — and indices
+;; shift on insert and delete.
+(describe "a (for …) over components diffs per component, not per row"
+  (defn- compiled (form) (web/parts/compile-parts form))
+
+  (test "a bare component body compiles to slot items, not rendered strings"
+    (let (dyn (first (get (compiled '[:ul {} (for (x xs) (component some-mod {"id" x}))]) :dynamics)))
+      (assert= (first dyn) 'web/parts/comp-slot)
+      ;; the `for` body is the component's slot call
+      (let (for-form (nth (apply vector dyn) 1))
+        (assert= (first (nth (apply vector for-form) 2)) 'web/component/render-slot))))
+
+  (test "a WRAPPED component keeps string items — the case that founders on identity"
+    (let (dyn (first (get (compiled '[:ul {} (for (x xs) [:li {} (component some-mod {"id" x})])])
+                       :dynamics))
+          for-form (nth (apply vector dyn) 1))
+      (assert= (first (nth (apply vector for-form) 2)) 'web/template/render)))
+
+  (test "slot->html renders each component item rather than concatenating raw values"
+    (let (t (table/new)
+          items (web/parts/comp-slot [(slot-for t "r1") (slot-for t "r2")]))
+      (assert= (web/parts/slot->html items)
+        (str (web/parts/slot->html (slot-for t "r1"))
+          (web/parts/slot->html (slot-for t "r2"))))
+      ;; and it is real markup, not a stringified map
+      (is (includes? (web/parts/slot->html items) "data-cid=\"r1\""))))
+
+  (test "one row's component changing ships that row's inner-slot patch, and nothing else"
+    (let (t (table/new)
+          before (web/parts/comp-slot [(slot-for t "r1") (slot-for t "r2")])
+          _ (dispatch-event t "r2" "bump" {})
+          after (web/parts/comp-slot [(slot-for t "r1") (slot-for t "r2")])
+          d (web/parts/slot-diff before after)
+          changed (get d :__cdiff__))
+      ;; only row 1 is in the diff — row 0 did not change
+      (assert= (apply vector (keys changed)) [1])
+      ;; and row 1 ships a per-inner-slot patch, not its whole component
+      (assert= (get (get changed 1) :cid) "r2")
+      (assert= (count (keys (get (get changed 1) :__kdiff__))) 1)))
+
+  (test "a new row past the old length ships whole — it has no previous self to patch"
+    (let (t (table/new)
+          before (web/parts/comp-slot [(slot-for t "r1")])
+          after (web/parts/comp-slot [(slot-for t "r1") (slot-for t "r3")])
+          changed (get (web/parts/slot-diff before after) :__cdiff__))
+      (assert= (apply vector (keys changed)) [1])
+      (assert= (web/parts/kslot? (get changed 1)) true)
+      (assert= (contains? (get changed 1) :__kdiff__) false)))
+
+  (test "string items are unaffected — they still diff and ship as strings"
+    (let (before (web/parts/comp-slot ["<li>a</li>" "<li>b</li>"])
+          after (web/parts/comp-slot ["<li>a</li>" "<li>B</li>"])
+          changed (get (web/parts/slot-diff before after) :__cdiff__))
+      (assert= changed {1 "<li>B</li>"}))))

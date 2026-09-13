@@ -497,6 +497,34 @@ because a convention in `mount` cannot refuse a mount — it can only return a m
 render notices). Both are recorded now, which is the actual fix: a decision log that is never
 checked against the tree stops being a record and becomes a list of open questions that are not.
 
+**0.20.0: the last carve-out, and the reason the previous entry was too pessimistic.** 0.19.0
+declined per-inner-slot diffing inside a `(for …)` on the grounds that it needed the wire
+format to carry slot values inside comprehension items and `brood_live.js` to weave them.
+Both are true; neither is expensive. The change is three lines of server and two of client.
+
+A `(for …)` whose body IS a component now makes each item that component's own slot: a row
+whose component changed ships that component's changed inner slots rather than the row's
+markup. `slot->html` renders each item before joining instead of concatenating raw, and
+`comp-diff-at` routes a changed item through `slot-diff` — so an item that is the same
+component across two renders produces a `__kdiff__` for that row alone. The client folds a
+per-item value through `_applySlot` rather than assigning it, which is the same recursion it
+already ran for a top-level slot.
+
+**A wrapped body keeps per-item string diffing, and that is a boundary rather than an
+omission.** `[:li {} (component …)]` would need every comprehension item to carry its own
+statics/dynamics split, and that founders on IDENTITY: a component patch is gated on a
+matching `cid`, a comp item has only its index, and indices shift on insert and delete — so
+patching item 3 after a row was removed would splice two unrelated rows together. Per-item
+string diffing has no such hazard. The boundary is now written where someone will hit it, in
+`web/component`'s "Granularity, precisely" note and in `comp-form` itself.
+
+The client half was verified by loading `brood_live.js` under Node against a stub DOM and
+exercising `_slotHtml` and `_applySlot` directly — plain-string comprehensions unchanged,
+component items rendered rather than stringified, a per-item `__kdiff__` folded onto the
+previous row, grow and shrink intact, and a patch against a missing previous row refusing to
+fabricate one. The harness is not committed: hatch is pure Brood with no npm, and a Node
+dependency in the suite would cost more than the check is worth as a permanent fixture.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
@@ -526,11 +554,14 @@ entries claimed.
   became" a component, and `slot->html` already rendered any slot kind; the coarseness was
   entirely in what `compile-parts` emitted, which wrapped the conditional in `render` and threw
   the structure away. `conditional-slot-form` emits an `if` over slot values instead.
-- ✏️ **The `(for …)` half of that entry was wrong** and is corrected rather than fixed. A
-  comprehension is a *comprehension slot*, not an opaque dynamic: a component inside one has
-  always diffed per ITEM, shipping only the row whose HTML changed. Going from per-item to
-  per-inner-slot would make comprehension items heterogeneous (strings or slot values) and
-  need `brood_live.js` to weave them, for a row's worth of bytes. Not taken, deliberately.
+- ✅ **Components in a `(for …)` diff per inner slot too** — shipped in 0.20.0, for the bare
+  case `(for (x xs) (component m {…}))`. The entry this replaces claimed a comprehension was
+  an opaque dynamic; it never was — it is a comprehension SLOT, and a component inside one
+  has always diffed per ITEM. What 0.20.0 adds is the step below that: each item is the
+  component's own slot, so a changed row ships its inner-slot patch rather than its markup.
+  Wrapped bodies (`[:li {} (component …)]`) keep per-item string diffing, and that is a
+  boundary rather than an omission — see the note in `web/component`: item identity is an
+  index, and indices shift on insert and delete.
 - ✅ **Q10 answered** — head updates are an effect: `web/live/push-title`. See below.
 ## Known issues
 
