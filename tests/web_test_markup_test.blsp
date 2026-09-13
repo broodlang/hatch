@@ -1,0 +1,400 @@
+;; `web/test`'s markup-driven drivers — the half of the harness that goes through the view's
+;; own rendering rather than calling its handlers directly.
+;;
+;; The case that matters most is the last one in this file: a view whose button is wired to an
+;; event no handler implements. `live-event` passes on it, because it fires the handler the
+;; test names. `live-click` cannot, because it fires the event the MARKUP names. That is the
+;; whole reason these exist — README's counter shipped exactly that bug and had a green suite.
+(defmodule web-test-markup-test
+  (:use web/test)
+  (:use web/live)
+  (:use test))
+
+;; ---- selector parsing ------------------------------------------------------
+
+(describe "parse-selector"
+  (test "a bare tag"
+    (let (s (first (parse-selector "button")))
+      (assert= (get s :tag) "button")
+      (assert= (get s :id) nil)))
+  (test "id and classes on a tag"
+    (let (s (first (parse-selector "button#save.primary.large")))
+      (assert= (get s :tag) "button")
+      (assert= (get s :id) "save")
+      (assert= (vec (get s :classes)) ["primary" "large"])))
+  (test "a bare id, with no tag"
+    (let (s (first (parse-selector "#count")))
+      (assert= (get s :tag) nil)
+      (assert= (get s :id) "count")))
+  (test "an attribute clause with a value"
+    (let (s (first (parse-selector "[data-event=save]")))
+      (assert= (vec (get s :attrs)) [[:data-event "save"]])))
+  (test "a quoted attribute value has its quotes stripped"
+    (assert= (vec (get (first (parse-selector "[data-event=\"save\"]")) :attrs))
+      [[:data-event "save"]]))
+  (test "an attribute clause with no value matches on presence"
+    (assert= (vec (get (first (parse-selector "[disabled]")) :attrs)) [[:disabled nil]]))
+  ; the brackets are taken off before the `#`/`.` split, so a value containing either survives
+  (test "a dot inside an attribute value is not read as a class"
+    (let (s (first (parse-selector "input[data-params=a.b]")))
+      (assert= (get s :tag) "input")
+      (assert= (empty? (get s :classes)) true)
+      (assert= (vec (get s :attrs)) [[:data-params "a.b"]])))
+  (test "a descendant chain is one compound selector per space"
+    (assert= (count (parse-selector "form ul li.item")) 3)))
+
+;; ---- a view to drive -------------------------------------------------------
+
+(deflive (mount (params) {:count 0 :name "" :errors {} :saved nil})
+
+  (render (model)
+    [:div
+      {:class "page"}
+      [:h1 {:id "title"} "Counter"]
+      [:span {:id "count"} (str (get model :count))]
+      [:button {:id "increment" :data-event "increment"} "+"]
+      [:button {:id "add-five" :data-event "add" :data-params "{\"by\":5}"} "+5"]
+      [:button {:id "plain"} "not wired"]
+      [:ul
+        {:id "items"}
+        [:li {:class "item"} "one"]
+        [:li {:class "item selected"} "two"]]
+      [:form
+        {:id "signup" :data-event "save"}
+        [:input {:type "text" :name "name" :value (get model :name) :data-event "validate"}]
+        [:input {:type "hidden" :name "csrf" :value "tok-123"}]
+        [:input {:type "checkbox" :name "terms" :value "yes" :checked (get model :agreed?)}]
+        [:input {:type "submit" :name "commit" :value "Save"}]
+        [:input {:type "file" :name "photo"}]
+        [:textarea {:name "bio"} "about me"]
+        [:select
+          {:name "plan"}
+          [:option {:value "free"} "Free"]
+          [:option {:value "pro" :selected true} "Pro"]]
+        [:select {:name "tier"} [:option {:value "a"} "A"] [:option {:value "b"} "B"]]]
+      (if (get model :saved) [:p {:class "flash"} (str "saved " (get model :saved))] nil)])
+
+  (on "increment" (params model) (assoc model :count (+ 1 (get model :count))))
+  (on "add" (params model) (assoc model :count (+ (get model :count) (get params "by" 0))))
+  (on "validate" (params model) (assoc model :name (get params "value")))
+  (on "save" (params model) (assoc model :saved (get params "name") :submitted params)))
+
+(defn view () (live-open (live-spec) {}))
+
+;; ---- finding and reading ---------------------------------------------------
+
+(describe "live-has? and live-find"
+  (test "by id"
+    (assert= (live-has? (view) "#increment") true)
+    (assert= (live-has? (view) "#nonexistent") false))
+  (test "by tag"
+    (assert= (live-has? (view) "h1") true)
+    (assert= (live-has? (view) "table") false))
+  (test "by class"
+    (assert= (live-has? (view) ".item") true)
+    (assert= (live-has? (view) ".missing") false))
+  (test "by several classes at once — all must be present"
+    (assert= (live-has? (view) ".item.selected") true)
+    (assert= (live-has? (view) ".item.absent") false))
+  (test "by attribute"
+    (assert= (live-has? (view) "[data-event=increment]") true)
+    (assert= (live-has? (view) "[data-event=nope]") false))
+  (test "by a descendant chain"
+    (assert= (live-has? (view) "ul li.selected") true)
+    (assert= (live-has? (view) "form li.selected") false))
+  (test "a chain need not name every level in between"
+    (assert= (live-has? (view) "div li") true))
+  (test "live-find answers the element as Hiccup, and nil for a miss"
+    (assert= (first (live-find (view) "#title")) :h1)
+    (assert= (live-find (view) "#nope") nil))
+  (test "live-count counts the matches"
+    (assert= (live-count (view) ".item") 2)
+    (assert= (live-count (view) "#count") 1)
+    (assert= (live-count (view) ".none") 0)))
+
+(describe "live-text and live-attr"
+  (test "text of an element"
+    (assert= (live-text (view) "#title") "Counter"))
+  (test "text descends into children"
+    (assert= (live-text (view) "#items") "onetwo"))
+  ; an assertion against "" would pass for an element that isn't rendered at all
+  (test "text raises rather than answering empty for a missing element"
+    (assert= (check-allow :discarded-catch
+               (try (do (live-text (view) "#nope") :no-error) (catch _ :raised)))
+      :raised))
+  (test "attributes come back off the element"
+    (assert= (live-attr (view) "#increment" :data-event) "increment")
+    (assert= (live-attr (view) "#increment" :missing) nil)))
+
+;; ---- clicking --------------------------------------------------------------
+
+(describe "live-click fires the event the markup names"
+  (test "a click runs the handler and the view re-renders"
+    (let (v (live-click (view) "#increment"))
+      (assert= (live-text v "#count") "1")
+      (assert= (get (live-model v) :count) 1)))
+  (test "views thread, so a sequence of clicks reads as one"
+    (let (v (live-click (live-click (live-click (view) "#increment") "#increment") "#increment"))
+      (assert= (live-text v "#count") "3")))
+  (test "data-params reach the handler, decoded"
+    (assert= (live-text (live-click (view) "#add-five") "#count") "5"))
+  (test "a selector matching nothing raises"
+    (assert= (check-allow :discarded-catch
+               (try (do (live-click (view) "#nope") :no-error) (catch _ :raised)))
+      :raised))
+  ; the error is the feature: it says what the view DOES have, because a miss is nearly always
+  ; one id or one event name out
+  (test "the miss names the view's wired elements"
+    (let (message (check-allow :discarded-catch
+                    (try (do (live-click (view) "#nope") "") (catch e (error-message e)))))
+      (assert= (includes? message "#nope") true)
+      (assert= (includes? message "data-event=increment") true)))
+  (test "an element wired to nothing raises rather than doing nothing"
+    (let (message (check-allow :discarded-catch
+                    (try (do (live-click (view) "#plain") "") (catch e (error-message e)))))
+      ; the message names every spelling it looked for, so a reader knows what to add
+      (assert= (includes? message "data-event") true)
+      (assert= (includes? message "data-on-click") true))))
+
+;; ---- typing ----------------------------------------------------------------
+
+(describe "live-change sends what a keystroke sends"
+  (test "the value reaches the handler under \"value\", as the client sends it"
+    (let (v (live-change (view) "input[name=name]" "ada"))
+      (assert= (get (live-model v) :name) "ada")))
+  (test "the re-render shows it"
+    (let (v (live-change (view) "input[name=name]" "ada"))
+      (assert= (live-attr v "input[name=name]" :value) "ada"))))
+
+;; ---- submitting ------------------------------------------------------------
+
+(describe "live-submit collects the form the way the browser does"
+  (test "named fields are collected from the markup"
+    (let (v (live-change (view) "input[name=name]" "grace")
+          submitted (live-submit v "#signup"))
+      (assert= (get (live-model submitted) :saved) "grace")))
+  (test "params passed in are merged over the markup's values"
+    (let (v (live-submit (view) "#signup" {"name" "ada"}))
+      (assert= (get (live-model v) :saved) "ada")))
+  (test "a keyword param key is accepted and sent as a string, as a form post delivers it"
+    (let (v (live-submit (view) "#signup" {:name "hopper"}))
+      (assert= (get (live-model v) :saved) "hopper"))))
+
+;; What a browser leaves OUT of a FormData is as much a part of the contract as what it puts
+;; in — a test that submits a file input's value is testing something that cannot happen.
+(describe "live-submit omits what a FormData omits"
+  (defn submitted (v) (get (live-model (live-submit v "#signup" {})) :submitted))
+  (test "a hidden field is included, as the browser includes it"
+    (assert= (get (submitted (view)) "csrf") "tok-123"))
+  (test "a textarea contributes its text"
+    (assert= (get (submitted (view)) "bio") "about me"))
+  (test "an unchecked checkbox contributes nothing"
+    ; :checked is false here, so `terms` must be absent — which is why a checkbox form needs
+    ; a hidden companion field, in a test exactly as in a browser
+    (assert= (contains? (submitted (view)) "terms") false))
+  (test "the submit button is not a field"
+    (assert= (contains? (submitted (view)) "commit") false))
+  (test "a file input is not a field — its bytes go up their own channel (web/upload)"
+    (assert= (contains? (submitted (view)) "photo") false))
+  ; found by review: a select carries no value of its own, so reading :value off it submitted
+  ; "" for every dropdown in a form — a wrong answer a test would have encoded as correct
+  (test "a select submits its selected option"
+    (assert= (get (submitted (view)) "plan") "pro"))
+  (test "a select with nothing marked submits its first option, as a browser does"
+    (assert= (get (submitted (view)) "tier") "a"))
+  (test "the submit button, the file input and the checkbox are all in the markup"
+    ; they are present to be excluded — if they vanish, the exclusion tests prove nothing
+    (assert= (live-has? (view) "input[type=submit]") true)
+    (assert= (live-has? (view) "input[type=file]") true)
+    (assert= (live-has? (view) "input[type=checkbox]") true)))
+
+;; ---- conditional markup ----------------------------------------------------
+
+(describe "an element that isn't rendered yet"
+  (test "is absent before, and present after the state that shows it"
+    (assert= (live-has? (view) ".flash") false)
+    (let (v (live-submit (view) "#signup" {"name" "ada"}))
+      (assert= (live-has? v ".flash") true)
+      (assert= (live-text v ".flash") "saved ada"))))
+
+;; ---- live-apply ------------------------------------------------------------
+
+(describe "live-apply bridges to the spec-level drivers"
+  (test "a tick threads through a view like a click does"
+    (let (v (live-apply (view) (fn (m) (assoc m :count 41)))
+          v2 (live-click v "#increment"))
+      (assert= (live-text v2 "#count") "42"))))
+
+;; ---- the bug this harness exists for ---------------------------------------
+;;
+;; This view's button says "inc". Its handler answers to "increment". It compiles, it renders,
+;; and the button does nothing — `deflive` selects `on` clauses by name and ignores the rest,
+;; so nothing anywhere raises. README's counter example shipped in exactly this state.
+
+(defmodule web-test-markup-broken-test
+  (:use web/test)
+  (:use web/live)
+  (:use test))
+
+(deflive (mount (params) {:count 0})
+  (render (model)
+    [:div
+      {}
+      [:span {:id "count"} (str (get model :count))]
+      [:button {:id "inc" :data-event "inc"} "+"]])
+  (on "increment" (params model) (assoc model :count (+ 1 (get model :count)))))
+
+(describe "a view whose button is wired to an event no handler implements"
+  ; The old-style test: it names the handler itself, so it passes — and would go on passing if
+  ; the button were deleted outright.
+  (test "passes when the test names the handler directly"
+    (let (spec (live-spec)
+          model (live-event spec "increment" {} (live-mount spec {})))
+      (assert= (get model :count) 1)))
+  ; The markup-driven test fires what the BUTTON says, which is the event that goes nowhere.
+  (test "fails when the test goes through the button, which is the truth"
+    (let (v (live-click (live-open (live-spec) {}) "#inc"))
+      (assert= (live-text v "#count") "0"))))
+
+;; ---- a rendered component is opaque, not debug output -----------------------
+;;
+;; Found by review. A LiveComponent reaches the parent's tree as a `web/template/raw` — markup
+;; this harness deliberately does not descend into. Without an arm for it, `text-of` fell to
+;; `(->string node)`, which has a Display impl, so `live-text` answered
+;; `"Title#<raw \"<div data-cid=…\">"` — an assertion failing against a value that explains
+;; nothing about the page.
+
+(defmodule web-test-markup-raw-test
+  (:use web/test)
+  (:use web/live)
+  (:alias web/template)
+  (:use test))
+
+(deflive (mount (params) {:n 1})
+  (render (model)
+    [:div
+      {:id "panel"}
+      [:span {} "Title"]
+      (web/template/raw "<div data-cid=\"like-1\"><b>Like</b></div>")]))
+
+(describe "live-text over a section containing a rendered component"
+  (test "reads the view's own text and treats the component as opaque"
+    (let (v (live-open (live-spec) {}))
+      (assert= (live-text v "#panel") "Title")))
+  (test "the raw markup is still in the rendered HTML — it is only invisible to selectors"
+    (let (v (live-open (live-spec) {}))
+      (assert= (includes? (live-markup v) "data-cid=\"like-1\"") true)
+      (assert= (live-has? v "b") false))))
+
+;; ---- the data-on-* bindings are drivable too ---------------------------------
+;;
+;; Found by review. The client learned `data-on-<event>` but the harness only ever looked at
+;; `data-event` — so a view written with the newer bindings was undrivable, and failed with
+;; "has no data-event" against markup that is perfectly well wired. That is the opposite of
+;; the error this harness exists to give.
+
+(defmodule web-test-markup-on-test
+  (:use web/test)
+  (:use web/live)
+  (:use test))
+
+(deflive (mount (params) {:n 0 :text "" :saved nil})
+  (render (model)
+    [:div
+      {}
+      [:span {:id "n"} (str (get model :n))]
+      [:button {:id "bump" :data-on-click "bump"} "+"]
+      [:input {:id "typed" :data-on-input "typed" :value (get model :text)}]
+      [:input {:id "changed" :data-on-change "typed"}]
+      [:form {:id "f" :data-on-submit "save"} [:input {:name "who" :value "ada"}]]
+      [:div {:id "inert"} "no binding"]])
+  (on "bump" (params model) (update model :n inc))
+  (on "typed" (params model) (assoc model :text (get params "value")))
+  (on "save" (params model) (assoc model :saved (get params "who"))))
+
+(describe "live-click fires data-on-click"
+  (test "a button wired with the explicit binding is clickable"
+    (let (v (live-click (live-open (live-spec) {}) "#bump"))
+      (assert= (live-text v "#n") "1"))))
+
+(describe "live-change accepts either input or change"
+  (test "data-on-input"
+    (assert= (get (live-model (live-change (live-open (live-spec) {}) "#typed" "ada")) :text)
+      "ada"))
+  (test "data-on-change — the client binds a field's value to both, so the harness accepts both"
+    (assert= (get (live-model (live-change (live-open (live-spec) {}) "#changed" "grace")) :text)
+      "grace")))
+
+(describe "live-submit fires data-on-submit"
+  (test "a form wired with the explicit binding submits"
+    (assert= (get (live-model (live-submit (live-open (live-spec) {}) "#f")) :saved) "ada")))
+
+(describe "an element with no binding at all still fails loudly"
+  (test "and the message names the spellings it looked for"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do (live-click (live-open (live-spec) {}) "#inert") "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message "data-event") true)
+      (assert= (includes? message "data-on-click") true)))
+  (test "a miss names the wired elements, explicit bindings included"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do (live-click (live-open (live-spec) {}) "#nope") "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message "data-on-click=bump") true))))
+
+;; ---- live-fire: the bindings the named drivers do not cover -------------------
+;;
+;; The client's binding family is open — `data-on-<anything>` works — so a harness with a
+;; driver per event would go stale the first time someone binds one it had not heard of.
+;; `live-fire` takes the attribute instead, and still reads the handler name off the markup.
+
+(defmodule web-test-markup-fire-test
+  (:use web/test)
+  (:use web/live)
+  (:use test))
+
+(deflive (mount (params) {:last nil :key nil})
+  (render (model)
+    [:div
+      {}
+      [:span {:id "last"} (str (get model :last))]
+      [:input {:id "search" :data-on-keydown "search" :data-keys "Enter"}]
+      [:div {:id "menu" :data-on-click-away "close"} "menu"]
+      [:div {:id "params" :data-on-focus "focused" :data-params "{\"source\":\"markup\"}"}]
+      [:div {:id "bare"} "nothing"]])
+  (on "search" (params model) (assoc model :last "search" :key (get params "key")))
+  (on "close" (params model) (assoc model :last "close"))
+  (on "focused" (params model) (assoc model :last (get params "source"))))
+
+(describe "live-fire drives any binding"
+  (test "a keydown, with the params a keystroke carries"
+    (let (v (live-fire (live-open (live-spec) {}) "#search" :data-on-keydown {"key" "Enter"}))
+      (assert= (live-text v "#last") "search")
+      (assert= (get (live-model v) :key) "Enter")))
+  (test "a click-away, which has no value and no params"
+    (assert= (live-text (live-fire (live-open (live-spec) {}) "#menu" :data-on-click-away) "#last")
+      "close"))
+  (test "data-params on the element still reach the handler"
+    (assert= (live-text (live-fire (live-open (live-spec) {}) "#params" :data-on-focus) "#last")
+      "markup"))
+  (test "passed params merge over the markup's"
+    (assert= (live-text (live-fire (live-open (live-spec) {})
+                          "#params"
+                          :data-on-focus {"source" "the test"})
+               "#last")
+      "the test"))
+  ; it still cannot fire what the markup does not declare — the whole point of the harness
+  (test "an element without that binding raises"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do (live-fire (live-open (live-spec) {}) "#bare" :data-on-keydown) "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message "data-on-keydown") true)))
+  (test "a selector matching nothing raises too"
+    (assert= (check-allow :discarded-catch
+               (try
+                 (do (live-fire (live-open (live-spec) {}) "#nope" :data-on-keydown) :no-error)
+                 (catch _ :raised)))
+      :raised)))

@@ -377,3 +377,85 @@
                (bit/xor (bytes/at buf (+ data-start i))
                  (case (bit/and i 3) 0 k0 1 k1 2 k2 k3)))))))
 (sig unmask (bytes int int -> bytes))
+
+; ---- reading a message off a socket ----
+;
+; The receive half of the protocol. `parse-frame` above answers from a buffer; this blocks on
+; the socket until that buffer holds a whole message, gathering reads as it goes.
+;
+; It handles exactly two things — bytes arriving and the peer closing — and hands EVERYTHING
+; else back to the caller untouched. That split is the point. Both socket actors hatch runs
+; (web/live's live session, web/channel's topic socket) are parked in this loop almost all the
+; time, and both are woken by messages that have nothing to do with WebSocket framing: a
+; ticker beat, a pubsub broadcast, a hot-reload signal, a watchdog ping request. Those differ
+; per actor; the framing does not. Interpreting them here would mean this function knowing
+; every protocol layered over it, which is how web/live came to carry two copies of its own
+; receive arms with a "keep the two in sync" comment between them.
+
+(defn frame-shortfall (buf)
+  "How many more bytes would complete the first frame in the `bytes` `buf` — or **nil when
+  that number cannot be acted on**, which is two distinct situations deliberately given one
+  answer:
+
+  - the length header has not fully arrived, so the frame is not sized yet; and
+  - the first frame is already complete. That sounds like 'nothing needed', and for a single
+    frame it is — but `parse-frame` asks for a whole MESSAGE, and a complete non-FIN frame is
+    the head of a fragmented one whose continuations have not arrived.
+
+  Both mean the same thing to the only caller: go back to the socket, because re-parsing what
+  you hold cannot make progress. Collapsing them here rather than at the call site is the
+  point — the version that answered a bare `0` for the second case had the reader read it as
+  'we have enough', re-parse the identical buffer, get `[:incomplete]` again, and never reach
+  a `receive`. A worker pinned at 100% CPU and a wedged connection, from a message shape
+  RFC 6455 §5.4 explicitly allows and a browser may produce for a large binary send.
+
+  (hatch/http/websocket/frame-shortfall (bytes [])) ;=> nil
+  (hatch/http/websocket/frame-shortfall (bytes [1 131 0 0 0 0 97 98 99])) ;=> nil
+  (hatch/http/websocket/frame-shortfall (bytes [1 131 0 0 0 0 97])) ;=> 2"
+  (let (sz (frame-size buf))
+    (if (nil? sz)
+      nil
+      (let (short (- sz (count buf)))
+        (if (> short 0) short nil)))))
+
+(defn recv-frame (sock buf)
+  "Block until a complete WebSocket message has arrived on `sock`, starting from the `bytes`
+  already in `buf`. Returns one of:
+
+    `[:ok opcode payload remainder]` — a whole message; `payload`/`remainder` are `bytes`
+    `[:closed]`                      — the peer closed the TCP connection
+    `[:error msg]`                   — a framing/protocol violation; the caller should close
+    `[:other msg buf2]`              — some other message reached the mailbox. `msg` is that
+                                       message verbatim and `buf2` the bytes read so far, so
+                                       the caller acts on it and re-enters here with `buf2`.
+
+  A caller resuming from `[:other]` re-parses `buf2`, which costs one header read of an
+  incomplete frame and keeps the resume path identical to a cold start."
+  (match (parse-frame buf)
+    ([:ok opcode payload remainder] [:ok opcode payload remainder])
+    ([:incomplete] (recv-frame-fill sock buf (list) 0 (frame-shortfall buf)))
+    ([:error msg] [:error msg])))
+
+(defn- recv-frame-fill (sock buf pieces got need)
+  "Gather socket reads (`bytes` `pieces`, newest-first; `got` bytes so far) until the current
+  frame's `need` more bytes are in hand, then `bytes/concat` once and re-enter `recv-frame`.
+  `need` nil means re-parsing what we hold cannot make progress — the header is still arriving,
+  or the first frame is complete but its message is not (see `frame-shortfall`) — so append one
+  read and re-derive rather than looping on it.
+
+  Gathering into a list and joining once is what keeps this O(n): re-`bytes/concat`ing the
+  whole buffer on every read was O(n²) up to the message-size cap."
+  (if (and (not (nil? need)) (>= got need))
+    (recv-frame sock (bytes/concat buf (reverse pieces)))
+    (receive
+      ; Binary-mode socket (see http/server's pre-101 tcp/set-binary): `chunk` is a
+      ; first-class `bytes` value — the parser reads it directly, with no carrier hop.
+      ([:tcp ^sock chunk] (if (nil? need)
+                            (recv-frame sock (bytes/concat buf chunk))
+                            (recv-frame-fill sock
+                              buf
+                              (cons chunk pieces)
+                              (+ got (count chunk))
+                              need)))
+      ([:tcp-closed ^sock] [:closed])
+      (other [:other other (bytes/concat buf (reverse pieces))]))))

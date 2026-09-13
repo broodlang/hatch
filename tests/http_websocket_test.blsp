@@ -270,3 +270,50 @@
   (test "an application-range close code (3000) is accepted"
     ; 3000 = 0x0B 0xB8
     (assert= (first (parse-frame (bytes [136 130 0 0 0 0 11 184]))) :ok)))
+
+;; ---- a fragmented message must not spin the reader -------------------------
+;;
+;; `frame-shortfall` sizes the FIRST FRAME, so a buffer holding one complete non-FIN frame
+;; answers 0 while `parse-frame` still says `[:incomplete]` — the message needs continuations.
+;; Reading that 0 as "we have enough" re-parses the identical buffer, gets `[:incomplete]`
+;; again, and never reaches a `receive`: a worker pinned at 100% CPU and a wedged connection,
+;; from a message shape RFC 6455 §5.4 explicitly allows and a browser may produce for a large
+;; binary send — which the 32 KB live-upload chunks made routine.
+
+(defn frag-head ()
+  "A complete masked non-FIN text frame carrying \"abc\" (mask key all zeros)."
+  (bytes [1 131 0 0 0 0 97 98 99]))
+
+(defn frag-tail ()
+  "The FIN continuation carrying \"def\"."
+  (bytes [128 131 0 0 0 0 100 101 102]))
+
+(describe "recv-frame on a fragmented message"
+  ; The exact pair of facts the spin came from, pinned so neither can drift silently: the
+  ; first frame is complete, and the MESSAGE is not.
+  (test "a complete first frame answers no shortfall, while parse still says incomplete"
+    (assert= (frame-shortfall (frag-head)) nil)
+    (assert= (parse-frame (frag-head)) [:incomplete]))
+
+  (test "an unsized buffer also answers nil — both mean 'go back to the socket'"
+    (assert= (frame-shortfall (bytes [])) nil)
+    (assert= (frame-shortfall (bytes [1])) nil))
+
+  (test "a genuinely short frame answers how many bytes are missing"
+    ; the head above with its last two payload bytes cut off
+    (assert= (frame-shortfall (bytes [1 131 0 0 0 0 97])) 2))
+
+  (test "the reader blocks for the continuation rather than spinning, and reassembles"
+    ; A spinning reader never reaches its `receive`, so the continuation posted below would
+    ; sit unread and no reply would come — which is what this asserts, from the outside.
+    (let (parent (self)
+          child (spawn (send parent [:done (recv-frame :sock (frag-head))])))
+      (sleep 100)
+      (send child [:tcp :sock (frag-tail)])
+      (receive
+        ([:done result] (match result
+                          ([:ok opcode payload _] (do
+                                                    (assert= opcode 1)
+                                                    (assert= (string/bytes-> payload) "abcdef")))
+                          (other (assert= other :ok))))
+        (after 3000 (assert= "the reader never answered — it is spinning" false))))))

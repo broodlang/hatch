@@ -418,3 +418,76 @@
       ;; attributes (a map's order is not a contract)
       (is (or (includes? html " toolautosubmit ") (includes? html " toolautosubmit>")))
       (refute (includes? html "toolautosubmit=")))))
+
+;; ---- hooks without an identity ---------------------------------------------
+;;
+;; A hook wraps a library that holds state the server has never heard of, and the client keeps
+;; that instance against the DOM element. The morph recognises an element by data-key or id —
+;; with neither, an unrelated update can rebuild it and the hook is torn down mid-use. Nothing
+;; raises; the symptom is a chart resetting when some other part of the page changes.
+
+(describe "anonymous-hooks"
+  (test "a hook with no id and no data-key is reported, with the hook's name"
+    (let (findings (web/audit/anonymous-hooks "<div data-hook=\"Chart\"></div>"))
+      (assert= (count findings) 1)
+      (assert= (get (first findings) :hook) "Chart")
+      (assert= (includes? (get (first findings) :snippet) "data-hook") true)))
+
+  (test "an id satisfies it"
+    (assert= (empty? (web/audit/anonymous-hooks "<div id=\"sales\" data-hook=\"Chart\"></div>"))
+      true))
+
+  (test "a data-key satisfies it too — either is enough for the morph to recognise the node"
+    (assert= (empty? (web/audit/anonymous-hooks "<li data-key=\"7\" data-hook=\"Row\"></li>"))
+      true))
+
+  ; the id may be written either side of the hook attribute; backing up to the tag's `<` is
+  ; what makes the rule independent of attribute order
+  (test "the id is found whichever side of data-hook it is written"
+    (assert= (empty? (web/audit/anonymous-hooks "<div data-hook=\"Chart\" id=\"sales\"></div>"))
+      true))
+
+  (test "several hooks on a page are each judged on their own"
+    (let (findings (web/audit/anonymous-hooks (str "<div id=\"ok\" data-hook=\"A\"></div>"
+                                                "<div data-hook=\"B\"></div>"
+                                                "<span data-hook=\"C\"></span>")))
+      (assert= (count findings) 2)
+      (assert= (map findings (fn (f) (get f :hook))) (list "B" "C"))))
+
+  (test "a page with no hooks reports nothing"
+    (assert= (empty? (web/audit/anonymous-hooks "<div id=\"x\">plain</div>")) true))
+
+  (test "warn-anonymous-hooks! returns the document unchanged, like every audit"
+    (let (document "<div data-hook=\"Chart\"></div>")
+      (assert= (web/audit/warn-anonymous-hooks! document) document))))
+
+;; ---- a stream row the merge cannot recognise --------------------------------
+;;
+;; A stream container merges what it is sent into what is on screen, and recognises a row it
+;; already holds by id or data-key. A row with neither is never recognised, so every re-render
+;; appends another copy — a list that grows on its own, with nothing raised anywhere.
+
+(describe "unkeyed-stream-rows"
+  (test "a row with no identity inside a stream container is reported"
+    (let (findings (web/audit/unkeyed-stream-rows "<ul data-update=\"stream\"><li>x</li></ul>"))
+      (assert= (count findings) 1)
+      (assert= (includes? (get (first findings) :snippet) "<li") true)))
+  (test "an id satisfies it"
+    (assert= (empty? (web/audit/unkeyed-stream-rows "<ul data-update=\"stream\"><li id=\"a\">x</li></ul>"))
+      true))
+  (test "a data-key satisfies it"
+    (assert= (empty? (web/audit/unkeyed-stream-rows "<ul data-update=\"stream\"><li data-key=\"a\">x</li></ul>"))
+      true))
+  (test "the reset mode is a stream container too"
+    (assert= (count (web/audit/unkeyed-stream-rows "<ul data-update=\"stream-reset\"><li>x</li></ul>"))
+      1))
+  ; the rule is about stream containers only — an ordinary list is reconciled, not merged,
+  ; so an unkeyed row there is the framework's normal index-matching path and not a bug
+  (test "an ordinary container is not judged"
+    (assert= (empty? (web/audit/unkeyed-stream-rows "<ul><li>x</li></ul>")) true))
+  (test "the container's id is named, so the warning says where"
+    (let (findings (web/audit/unkeyed-stream-rows "<ul id=\"feed\" data-update=\"stream\"><li>x</li></ul>"))
+      (assert= (get (first findings) :container) "feed")))
+  (test "warn-unkeyed-stream-rows! returns the document unchanged, like every audit"
+    (let (document "<ul data-update=\"stream\"><li>x</li></ul>")
+      (assert= (web/audit/warn-unkeyed-stream-rows! document) document))))

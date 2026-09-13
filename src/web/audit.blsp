@@ -545,6 +545,132 @@
                   "match the document and keep the size as a class."))))
   document)
 
+;; ---- hooks without an identity ----------------------------------------------
+
+(defn anonymous-hooks (document)
+  "Every `data-hook` element in `document` that carries neither an `id` nor a `data-key`, as
+  a list of `{:hook :snippet}`.
+
+  A hook is the escape hatch to imperative JS — a chart, an editor, a map — and its instance
+  has to survive a patch, because the library it wraps holds state the server has never heard
+  of. The client keeps that instance against the DOM element, and the morph reuses an element
+  only when it can recognise it: `data-key`, else `id`. With neither, an unrelated update can
+  rebuild the element, and the hook is destroyed and re-mounted underneath a library that is
+  mid-use.
+
+  Nothing raises when that happens, which is why it is worth a rule. The symptom is a chart
+  that resets or an editor that loses its buffer on some *other* part of the page changing,
+  and nothing about the markup looks wrong.
+
+  (count (hatch/web/audit/anonymous-hooks \"<div data-hook=\\\"Chart\\\"></div>\")) ;=> 1
+  (get (first (hatch/web/audit/anonymous-hooks \"<div data-hook=\\\"Chart\\\"></div>\")) :hook) ;=> \"Chart\"
+  (count (hatch/web/audit/anonymous-hooks \"<div id=\\\"c\\\" data-hook=\\\"Chart\\\"></div>\")) ;=> 0
+  (count (hatch/web/audit/anonymous-hooks \"<div data-key=\\\"k\\\" data-hook=\\\"Chart\\\"></div>\")) ;=> 0"
+  (let (scan (fn (from found)
+               (let (at (index-of document "data-hook=\"" from))
+                 (if (< at 0)
+                   (reverse found)
+                   ;; back up to the tag this attribute sits in, so `id` and `data-key` on the
+                   ;; same element are visible however they are ordered
+                   (let (open (last-index-before document "<" at)
+                         tag (if (< open 0) "" (tag-text document open))
+                         hook (attr-value tag "data-hook")
+                         named? (or (attr-value tag "id") (attr-value tag "data-key")))
+                     (scan (+ at 11)
+                       (if named? found (cons {:hook hook :snippet tag} found))))))))
+    (scan 0 nil)))
+
+(defn- last-index-before (document needle position)
+  "The index of the last `needle` at or before `position`, or -1. Used to find the opening
+  `<` of the tag an attribute belongs to."
+  (let (walk (fn (from best)
+               (let (at (index-of document needle from))
+                 (cond
+                   (< at 0) best
+                   (> at position) best
+                   else (walk (+ at 1) at)))))
+    (walk 0 -1)))
+
+(defn unkeyed-stream-rows (document)
+  "Every `data-update=\"stream\"` container in `document` holding a row with neither an `id`
+  nor a `data-key`, as a list of `{:container :snippet}`.
+
+  A stream container MERGES what the server sends into what is already on screen, because the
+  server is not holding the collection (see `web/streams`). The merge recognises a row it
+  already has by `id` or `data-key` — so a row without one is never recognised, and every
+  re-render appends another copy of it. The list grows on its own and nothing raises.
+
+  `web/streams/item-attrs` always emits the id, and `insert` refuses an item without one, so
+  this fires only for a container written by hand — which the client docs describe, so it is a
+  reachable mistake rather than a theoretical one.
+
+  (count (hatch/web/audit/unkeyed-stream-rows \"<ul data-update=\\\"stream\\\"><li>x</li></ul>\")) ;=> 1
+  (count (hatch/web/audit/unkeyed-stream-rows \"<ul data-update=\\\"stream\\\"><li id=\\\"a\\\">x</li></ul>\")) ;=> 0
+  (count (hatch/web/audit/unkeyed-stream-rows \"<ul><li>x</li></ul>\")) ;=> 0"
+  (let (scan (fn (from found)
+               (let (at (index-of document "data-update=\"stream" from))
+                 (if (< at 0)
+                   (reverse found)
+                   (let (open (last-index-before document "<" at)
+                         container-tag (if (< open 0) "" (tag-text document open))
+                         ;; The container's own content, up to its first closing tag — enough
+                         ;; to see its immediate rows without a full parse, which this module
+                         ;; deliberately does not attempt.
+                         body-start (index-of document ">" at)
+                         close-at (if (< body-start 0) -1 (index-of document "</" body-start))
+                         body (if (or (< body-start 0) (< close-at 0))
+                                ""
+                                (string/substring document (+ body-start 1) close-at))
+                         bad (unkeyed-rows-in body))
+                     (scan (+ at 19)
+                       (if (empty? bad)
+                         found
+                         (cons {:container (attr-value container-tag "id") :snippet (first bad)}
+                           found))))))))
+    (scan 0 nil)))
+(defn- unkeyed-rows-in (body)
+  "Every opening tag in `body` carrying neither `id` nor `data-key`, as source text."
+  (let (scan (fn (from found)
+               (let (at (index-of body "<" from))
+                 (if (< at 0)
+                   (reverse found)
+                   (let (tag (tag-text body at))
+                     (scan (+ at 1)
+                       (if (or (string/starts-with? tag "</")
+                             (attr-value tag "id")
+                             (attr-value tag "data-key"))
+                         found
+                         (cons tag found))))))))
+    (scan 0 nil)))
+
+(defn warn-unkeyed-stream-rows! (document)
+  "Log a dev warning for every stream row the merge cannot recognise. A no-op outside dev and
+  on a clean page. Returns `document` unchanged."
+  (when (dev?)
+    (doseq (finding (unkeyed-stream-rows document))
+      (log/warn (str "[audit] stream row with no identity: "
+                  (get finding :snippet)
+                  " inside the stream container "
+                  (->string (or (get finding :container) "(unnamed)"))
+                  " — a stream container MERGES what it is sent, and recognises a row it "
+                  "already has by id or data-key. Without one, every re-render appends "
+                  "another copy. web/streams/item-attrs emits it for you."))))
+  document)
+
+(defn warn-anonymous-hooks! (document)
+  "Log a dev warning for every `data-hook` element with no stable identity. A no-op outside
+  dev and a no-op on a clean page. Returns `document` unchanged."
+  (when (dev?)
+    (doseq (finding (anonymous-hooks document))
+      (log/warn (str "[audit] hook without an identity: "
+                  (get finding :snippet)
+                  " — data-hook=\""
+                  (->string (get finding :hook))
+                  "\" with no id or data-key. The morph recognises an element by one of those, "
+                  "so an unrelated update can rebuild this one and tear the hook down "
+                  "mid-use. Give it an id."))))
+  document)
+
 ;; ---- the icon ---------------------------------------------------------------
 
 (defn declares-icon? (head)
@@ -577,7 +703,8 @@
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
   Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]],
-  [[warn-tool-coverage!]], [[warn-headings!]] and [[warn-favicon!]].
+  [[warn-tool-coverage!]], [[warn-headings!]], [[warn-anonymous-hooks!]],
+  [[warn-unkeyed-stream-rows!]] and [[warn-favicon!]].
 
   A thread rather than the six-deep nest of calls this was: every audit takes the document
   and answers it unchanged, which is a pipeline, and written inside-out it read backwards
@@ -594,5 +721,7 @@
       (warn-canvas-flash!)
       (warn-tool-coverage!)
       (warn-headings!)
+      (warn-anonymous-hooks!)
+      (warn-unkeyed-stream-rows!)
       (warn-favicon!))
     document))

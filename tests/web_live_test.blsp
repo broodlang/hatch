@@ -1,5 +1,5 @@
 ;; Reaches into web/live internals (ADR-146 `--` names: live--register/unregister,
-;; live--ws-path, recv-frame--loop) to test them directly — hence (:use-internals web/live).
+;; live--ws-path, recv-frame) to test them directly — hence (:use-internals web/live).
 (defmodule web-live-test
   (:use web/live)
   (:use-internals web/live)
@@ -107,7 +107,7 @@
   (test "root live path" (assert= (web/live/live-ws-path "/live/ws/") "/"))
   (test "passes non-ws paths through" (assert= (web/live/live-ws-path "/counter") "/counter")))
 
-; recv-frame--loop must reassemble a WebSocket message that arrives split across many TCP reads,
+; recv-frame must reassemble a WebSocket message that arrives split across many TCP reads,
 ; in O(n): once the length header is in, `frame-size` sizes the frame and the reader gathers the
 ; remaining reads into a list, joining once (no O(n²) re-`str`ing of the whole buffer per read).
 ; A 300-byte masked frame (16-bit length, non-zero key) is delivered here in small chunks.
@@ -129,13 +129,13 @@
         (send (self)
           [:tcp sock (bytes/slice frame (* k chunk) (math/min flen (* (+ k 1) chunk)))])))))
 
-(describe "recv-frame--loop: a large frame gathered across many reads"
+(describe "recv-frame: a large frame gathered across many reads"
   (test "reassembles a 300-byte masked text frame split into 50-byte reads"
     (let (payload (into [] (map (range 300) (fn (i) (math/mod i 100))))
           frame (ws-masked-frame 1 payload [17 34 51 68])
           sock :sock
           _ (feed-tcp sock frame 50))
-      (match (web/live/recv-frame-loop sock (bytes []))
+      (match (http/websocket/recv-frame sock (bytes []))
         ([:ok opcode payload-out math/rem] (do
                                              (assert= opcode 1)
                                              (assert= (count math/rem) 0)
@@ -146,7 +146,7 @@
           frame (ws-masked-frame 1 payload [9 88 200 3])
           sock :sock
           _ (feed-tcp sock frame 1))
-      (match (web/live/recv-frame-loop sock (bytes []))
+      (match (http/websocket/recv-frame sock (bytes []))
         ([:ok _opcode payload-out math/rem] (do
                                               (assert= (count math/rem) 0)
                                               (assert= (into [] (seq payload-out)) payload)))
@@ -307,34 +307,59 @@
       (after 200 (assert= "no redirect effect received" false)))))
 
 (describe "parse-client-frame: a non-object frame can't crash the session actor"
-  ; the frame carries every dispatch field (:event/:params/:name/:cid/:path); absent ones default
+  ; the frame carries every dispatch field (:event/:params/:name/:cid/:path/:sfp, plus the
+  ; upload frames' :files/:ref); absent ones default
   (test "a bare scalar decodes to an empty event (no throw)"
     (assert= (parse-client-frame (string/->bytes "5"))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "a bare bool decodes to an empty event"
     (assert= (parse-client-frame (string/->bytes "true"))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "a bare string decodes to an empty event"
     (assert= (parse-client-frame (string/->bytes "\"x\""))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "a JSON array decodes to an empty event"
     (assert= (parse-client-frame (string/->bytes "[1,2,3]"))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "unparseable garbage decodes to an empty event"
     (assert= (parse-client-frame (string/->bytes "}{not json"))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "a well-formed object keeps its event and params"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"tick\",\"params\":{\"n\":1}}"))
-      {:event "tick" :params {"n" 1} :name "" :cid nil :path "" :sfp nil}))
+      {:event "tick"
+       :params {"n" 1}
+       :name ""
+       :cid nil
+       :path ""
+       :sfp nil
+       :files nil
+       :ref nil
+       :offer nil}))
   (test "a non-object params is coerced to an empty map"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"go\",\"params\":5}"))
-      {:event "go" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "go" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
   (test "a component-targeted event carries its name, cid, and params"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"event\",\"name\":\"click\",\"cid\":\"3\",\"params\":{\"x\":1}}"))
-      {:event "event" :params {"x" 1} :name "click" :cid "3" :path "" :sfp nil}))
+      {:event "event"
+       :params {"x" 1}
+       :name "click"
+       :cid "3"
+       :path ""
+       :sfp nil
+       :files nil
+       :ref nil
+       :offer nil}))
   (test "a navigate frame carries its path"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"navigate\",\"path\":\"/next\"}"))
-      {:event "navigate" :params {} :name "" :cid nil :path "/next" :sfp nil})))
+      {:event "navigate"
+       :params {}
+       :name ""
+       :cid nil
+       :path "/next"
+       :sfp nil
+       :files nil
+       :ref nil
+       :offer nil})))
 
 ;; What a live socket must never do with a crafted frame: act on the half of it that parsed.
 ;;
@@ -361,7 +386,7 @@
   ;; reaches the actor as an empty event, never as a half-filled one.
   (test "the session sees an empty event, not a hole in a real one"
     (assert= (parse-client-frame (string/->bytes "{\"event\":\"pay\",\"params\":{\"n\":1.2.3}}"))
-      {:event "" :params {} :name "" :cid nil :path "" :sfp nil}))
+      {:event "" :params {} :name "" :cid nil :path "" :sfp nil :files nil :ref nil :offer nil}))
 
   (test "valid numbers are untouched"
     (assert= {"n" 42} (json-decode "{\"n\": 42}"))
@@ -376,8 +401,7 @@
 ;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
 ;; socket stays open. Each of those reads is now a name.
 
-(deflive
-  (mount (params) {:n 0})
+(deflive (mount (params) {:n 0})
   (render (model) [:p {} (str (get model :n))])
   (tick 1000 (model) (assoc model :n (inc (get model :n)))))
 

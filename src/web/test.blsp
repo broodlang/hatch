@@ -167,3 +167,514 @@
 (defn component-event (spec event-name params state)
   "The state after event `event-name` (with `params`) fires on component `spec` at `state`."
   ((web/component/component-spec-handle-event spec) event-name params state))
+
+; ---- driving a live view through its markup ---------------------------------
+;
+; The drivers above call a spec's functions directly, which is the right way to unit-test a
+; handler and the wrong way to test a view. `(live-event spec "save" {} model)` passes whether
+; or not anything in the rendered markup would ever send "save" — so a view whose button is
+; wired to "sve", or which lost the button in a refactor, has a green test suite and a dead
+; page. README's own counter example shipped that way for months: a `handle-event` clause no
+; markup could reach, compiling and rendering and doing nothing.
+;
+; These functions close that gap by going through the markup. `live-click` finds the element,
+; reads the event off it, and fires THAT — so a test can only trigger what a user could, and
+; a missing or misnamed control fails the test where it should.
+;
+; They match against the Hiccup tree rather than parsed HTML, because the Hiccup IS the
+; markup: `web/template/render` lowers it one-to-one, and matching the tree means no second
+; HTML parser to keep correct. The one thing that is opaque is a LiveComponent's own markup —
+; it reaches the parent's tree as a rendered string (`web/template/raw-node`), so selectors do
+; not descend into it. Drive a component with `component-event` and its own spec.
+;
+; What `live-click` / `live-change` / `live-submit` send is deliberately what brood_live.js
+; sends, field for field: click sends `data-event` with `data-params`; change and input send
+; those plus `value`; submit sends the form's fields the way `new FormData(form)` collects
+; them. If that correspondence ever drifts, these tests stop telling the truth about the
+; browser — so it is pinned by tests of its own in web_test_test.
+
+;; A live view under test: its spec and its current model. A plain value, threaded like
+;; everything else — `(live-click v "#inc")` returns the next view, and `(live-model v)` gets
+;; the model out for an ordinary assertion. There is no process and no socket, so nothing here
+;; needs tearing down.
+(defrecord live-view (spec model))
+
+(impl Display web/test/live-view (->string [_v] "#<live-view>"))
+
+(defn live-open (spec params)
+  "Mount `spec` with `params` and return a view to drive. The starting point for every
+  function below:
+
+      (let (v (live-open (counter/live-spec) {})
+            v (live-click v \"#increment\")
+            v (live-click v \"#increment\"))
+        (assert= (live-text v \"#count\") \"2\"))"
+  (live-view spec (live-mount spec params)))
+
+(defn live-model (v)
+  "The view's current model — for assertions the markup cannot make."
+  (live-view-model v))
+
+(defn live-tree (v)
+  "The Hiccup the view currently renders."
+  ((web/live/view-spec-render (live-view-spec v)) (live-view-model v)))
+
+(defn live-markup (v)
+  "The view's current markup as an HTML string."
+  (web/template/render (live-tree v)))
+
+(defn live-apply (v f)
+  "The view with `f` applied to its model — the bridge back to the spec-level drivers, for
+  anything that has no element behind it:
+
+      (live-apply v (fn (m) (live-tick (live-view-spec v) 1000 m)))
+      (live-apply v (fn (m) (live-info (live-view-spec v) {:from :pubsub} m)))"
+  (live-view (live-view-spec v) (f (live-view-model v))))
+
+; ---- the Hiccup tree --------------------------------------------------------
+
+(defn- element? (node)
+  "True for a Hiccup element — a vector whose first item is a keyword tag. A plain data
+  vector in a template (`[1 2 3]`) is not one, which is why the keyword test is here."
+  (and (vector? node) (> (count node) 0) (keyword? (first node))))
+
+(defn- element-attrs (node)
+  "An element's attribute map — `{}` when it was written without one, which Hiccup allows."
+  (if (and (> (count node) 1) (map? (nth node 1))) (nth node 1) {}))
+
+(defn- element-children (node)
+  (if (and (> (count node) 1) (map? (nth node 1)))
+    (rest (rest node))
+    (rest node)))
+
+(defn- walk-nodes (node ancestors)
+  "Every `[element ancestors]` pair inside `node`, in document order, `ancestors` outermost
+  first. Strings, nil and `raw-node` records yield nothing — the last of those is a rendered
+  LiveComponent, which is markup this tree cannot see into."
+  (cond
+    (element? node)
+      (let (inner (append ancestors (list node))
+            kids (element-children node))
+        (cons [node ancestors]
+          (if (empty? kids) (list) (apply append (map kids (fn (c) (walk-nodes c inner)))))))
+    ;; a `(for …)` or `(map …)` in a template produces a list or vector of nodes
+    (or (list? node) (vector? node))
+      (if (empty? node) (list) (apply append (map node (fn (c) (walk-nodes c ancestors)))))
+    else (list)))
+
+(defn- text-of (node)
+  "The concatenated text of `node` and its descendants, with no separator — what a reader
+  sees, ignoring markup."
+  (cond
+    (string? node) node
+    (element? node) (string/join (map (element-children node) text-of) "")
+    ;; A rendered LiveComponent, or any `web/template/raw`. It carries HTML this harness
+    ;; deliberately does not descend into (see the note at the top), and it has a `Display`
+    ;; impl — so without this arm the `else` below stringifies it and `live-text` on a section
+    ;; containing a component answers `"Title#<raw \"<div data-cid=…\">"`. An assertion on
+    ;; visible text then fails against a value that explains nothing.
+    (web/template/raw? node) ""
+    ;; nil and the empty list are the same value in Brood, so the list arm covers both
+    (or (list? node) (vector? node)) (string/join (map node text-of) "")
+    else (->string node)))
+
+; ---- selectors --------------------------------------------------------------
+;
+; A small, deliberate subset of CSS: tag, `#id`, `.class`, `[attr]` / `[attr=value]`, and the
+; descendant combinator (a space). No `>`, `+`, `:nth-child` or commas. That is enough to name
+; any control a test wants to click, and each one it leaves out is a thing a test could depend
+; on that has nothing to do with what the view means.
+
+(defn- strip-quotes (s)
+  (if (and (>= (string/length s) 2)
+        (or (and (string/starts-with? s "\"") (string/ends-with? s "\""))
+          (and (string/starts-with? s "'") (string/ends-with? s "'"))))
+    (string/substring s 1 (- (string/length s) 1))
+    s))
+
+(defn- take-attr-parts (s acc)
+  "Pull every `[…]` off `s`, returning `[remainder parts]`. Done before splitting on `#`/`.`
+  so an attribute VALUE containing either — `[data-event=save.now]` — is not torn apart."
+  (let (open (index-of s "[")
+        close (index-of s "]"))
+    (if (or (= open -1) (= close -1) (< close open))
+      [s (reverse acc)]
+      (take-attr-parts (str (string/substring s 0 open)
+                         (string/substring s (+ close 1) (string/length s)))
+        (cons (string/substring s (+ open 1) close) acc)))))
+
+(defn- parse-attr-part (part)
+  "`\"data-event=save\"` → `[:data-event \"save\"]`; `\"disabled\"` → `[:disabled nil]`, which
+  matches on presence alone."
+  (let (i (index-of part "="))
+    (if (= i -1)
+      [(keyword (string/trim part)) nil]
+      [(keyword (string/trim (string/substring part 0 i)))
+        (strip-quotes (string/trim (string/substring part (+ i 1) (string/length part))))])))
+
+(defn- explode (s delimiter)
+  "Split `s` on `delimiter` and re-join with a space before each occurrence, so the pieces can
+  then be split on whitespace with the delimiter still attached to the piece it introduced.
+  `(explode \"button#save\" \"#\")` is `\"button #save\"`."
+  (string/join (string/split s delimiter) (str " " delimiter)))
+
+(defn- parse-simple (s)
+  "One compound selector — `\"button#save.primary[data-event=save]\"` — as
+  `{:tag :id :classes :attrs}`, each part nil or empty when absent."
+  (let ([bare attr-parts] (take-attr-parts s (list))
+        tokens (seq/filter (string/split (explode (explode bare "#") ".") " ")
+                 (fn (t) (not (string/blank? t))))
+        ;; Strip the leading marker inside the `map`, where the token is a string by
+        ;; construction, rather than off `(first …)` after an `empty?` guard the checker
+        ;; cannot carry through into the branch.
+        ids (map (seq/filter tokens (fn (t) (string/starts-with? t "#"))) drop-marker)
+        classes (map (seq/filter tokens (fn (t) (string/starts-with? t "."))) drop-marker)
+        tags (seq/filter tokens
+               (fn (t) (not (or (string/starts-with? t "#") (string/starts-with? t "."))))))
+    {:tag (if (empty? tags) nil (first tags))
+     :id (if (empty? ids) nil (first ids))
+     :classes classes
+     :attrs (map attr-parts parse-attr-part)}))
+
+(defn- drop-marker (token)
+  "A `#id` or `.class` token without its leading marker."
+  (string/substring token 1 (string/length token)))
+
+(defn parse-selector (selector)
+  "A selector string as a list of compound selectors, outermost first. Public so the
+  supported syntax has somewhere to be tested directly."
+  (map (seq/filter (string/split (string/trim selector) " ") (fn (p) (not (string/blank? p))))
+    parse-simple))
+
+(defn- class-list (attrs)
+  "An element's classes. The `:class` attribute may be a string or a vector — `web/template`
+  joins a vector with spaces — so both are read here, as the renderer does."
+  (let (raw (get attrs :class))
+    (cond
+      (nil? raw) (list)
+      (vector? raw) (map raw ->string)
+      else (seq/filter (string/split (->string raw) " ") (fn (c) (not (string/blank? c)))))))
+
+(defn- matches-simple? (node simple)
+  (let (attrs (element-attrs node)
+        tag (get simple :tag))
+    (and (or (nil? tag) (= tag (->string (first node))))
+      (or (nil? (get simple :id)) (= (get simple :id) (->string (get attrs :id ""))))
+      (let (classes (class-list attrs))
+        (not (any? (get simple :classes) (fn (c) (not (includes? classes c))))))
+      ;; "every listed attribute matches", said as "none fails to" — there is no `every?` in
+      ;; the prelude, only `any?`.
+      (not (any? (get simple :attrs) (fn (kv) (not (attr-matches? attrs kv))))))))
+
+(defn- attr-matches? (attrs kv)
+  "Whether one `[key wanted]` selector clause matches this element's attributes. A clause with
+  no value — `[disabled]` — asks only that the attribute is present and not switched off: an
+  attribute set to `false` or nil is one `web/template` does not emit at all, so matching it
+  would find elements the browser never sees."
+  (let ([k want] kv
+        have (get attrs k))
+    (if (nil? want)
+      (and (not (nil? have)) (not (= have false)))
+      (= want (->string have)))))
+
+(defn- ancestors-match? (ancestors parts)
+  "Whether `parts` (outermost first) matches a subsequence of `ancestors`, in order — the
+  descendant combinator."
+  (cond
+    (empty? parts) true
+    (empty? ancestors) false
+    (matches-simple? (first ancestors) (first parts))
+      (ancestors-match? (rest ancestors) (rest parts))
+    else (ancestors-match? (rest ancestors) parts)))
+
+(defn- matching (v selector)
+  "Every `[element ancestors]` in the view's tree matching `selector`, in document order."
+  (let (parts (parse-selector selector))
+    (if (empty? parts)
+      (list)
+      (let (reversed (reverse parts)
+            target (first reversed)
+            outer (reverse (rest reversed)))
+        (seq/filter (walk-nodes (live-tree v) (list))
+          (fn (pair)
+            (let ([node ancestors] pair)
+              (and (matches-simple? node target) (ancestors-match? ancestors outer)))))))))
+
+; ---- reading the markup -----------------------------------------------------
+
+(defn live-find (v selector)
+  "The first element matching `selector`, as Hiccup — or nil. Use `live-has?` for a presence
+  assertion; this is for looking at an element's attributes."
+  (let (hits (matching v selector))
+    (if (empty? hits) nil (first (first hits)))))
+
+(defn live-has? (v selector)
+  "Whether the view renders an element matching `selector`.
+
+      (assert= (live-has? v \"#save\") true)
+      (assert= (live-has? v \".error\") false)"
+  (not (empty? (matching v selector))))
+
+(defn live-count (v selector)
+  "How many elements match `selector` — for asserting on a list without naming each item."
+  (count (matching v selector)))
+
+(defn live-text (v selector)
+  "The text of the first element matching `selector`, with its markup stripped and its
+  surrounding whitespace trimmed. Raises if nothing matches, because an assertion against the
+  empty string would pass for an element that is not there at all."
+  (let (node (live-find v selector))
+    (when (nil? node) (error "live-text: no element matches " (pr-str selector)))
+    (string/trim (text-of node))))
+
+(defn live-attr (v selector attr)
+  "One attribute of the first element matching `selector`, or nil. Raises if nothing matches."
+  (let (node (live-find v selector))
+    (when (nil? node) (error "live-attr: no element matches " (pr-str selector)))
+    (get (element-attrs node) attr)))
+
+; ---- firing what the markup is wired to -------------------------------------
+
+;; Every attribute that wires an element to a handler, in any of the spellings the client
+;; binds. Used to describe an element and to list what a view offers when a selector misses.
+(def- *binding-attrs*
+  [:data-event
+    :data-on-click :data-on-change :data-on-input :data-on-submit :data-on-keydown :data-on-keyup
+    :data-on-focus :data-on-blur :data-on-click-away])
+
+(defn- wired? (node)
+  "Whether this element is wired to a handler by any of the binding attributes."
+  (let (attrs (element-attrs node))
+    (any? *binding-attrs* (fn (a) (not (nil? (get attrs a)))))))
+
+(defn- describe-node (node)
+  "An element as a short selector-ish string, for an error message that can say what IS there.
+  Names whichever binding attribute it actually carries, so the message matches the markup a
+  reader is looking at rather than always saying `data-event`."
+  (let (attrs (element-attrs node)
+        id (get attrs :id)
+        bound (seq/filter *binding-attrs* (fn (a) (not (nil? (get attrs a))))))
+    (str "<"
+      (->string (first node))
+      (if id (str " #" (->string id)) "")
+      (if (empty? bound)
+        ""
+        (str " " (->string (first bound)) "=" (->string (get attrs (first bound)))))
+      ">")))
+
+(defn- wired-elements (v)
+  "Every element in the view wired to a handler, described — the useful half of a
+  'no such element' message, since it says what the test COULD have clicked."
+  (map (seq/filter (walk-nodes (live-tree v) (list)) (fn (pair) (wired? (first pair))))
+    (fn (pair) (describe-node (first pair)))))
+
+(defn- require-match (v selector caller)
+  "The `[node ancestors]` for `selector`, raising with what the view does contain if there is
+  none. The message names the wired elements rather than dumping the markup: a test that
+  misses is almost always one event name or one id out, and seeing the real ones answers it."
+  (let (hits (matching v selector))
+    (when (empty? hits)
+      (let (available (wired-elements v))
+        (error caller
+          ": no element matches "
+          (pr-str selector)
+          " — "
+          (if (empty? available)
+            "this view renders no element wired to a handler at all"
+            (str "the view's wired elements are " (string/join available " "))))))
+    (first hits)))
+
+(defn- element-params (node)
+  "The `data-params` of an element, decoded — the same JSON the client parses out of the same
+  attribute. A missing or malformed value is `{}`, matching the client's own guard."
+  (let (raw (get (element-attrs node) :data-params))
+    (if (nil? raw)
+      {}
+      (let (decoded (check-allow :discarded-catch
+                      (try (web/live/json-decode (->string raw)) (catch _ nil))))
+        (if (map? decoded) decoded {})))))
+
+;; Which attributes a driver will fire, in the order the client would find them. `data-event`
+;; is the inferred binding (click on a control, input/change on a field, submit on a form);
+;; `data-on-<event>` is the explicit one. A driver names the explicit spellings that mean the
+;; same gesture it does — `live-change` accepts both `input` and `change`, because the client
+;; binds a field's value to both and a view may say either.
+;;
+;; Without this the harness would only ever see `data-event`, so a view written with the newer
+;; bindings would be undrivable — and would fail with "has no data-event" against markup that
+;; is perfectly well wired, which is the opposite of the error this harness exists to give.
+(defn- binding-attrs (kind)
+  (case kind
+    :click [:data-event :data-on-click]
+    :change [:data-event :data-on-change :data-on-input]
+    :submit [:data-event :data-on-submit]
+    [:data-event]))
+
+(defn- event-on (node kind)
+  "The handler name this element is wired to for `kind`, or nil."
+  (let (attrs (element-attrs node)
+        found (seq/filter (binding-attrs kind) (fn (a) (not (nil? (get attrs a))))))
+    (if (empty? found) nil (->string (get attrs (first found))))))
+
+(defn- require-event (node kind caller)
+  (let (event (event-on node kind))
+    (when (nil? event)
+      (error caller
+        ": "
+        (describe-node node)
+        " carries none of "
+        (string/join (map (binding-attrs kind) ->string) ", ")
+        ", so this gesture would do nothing in a browser either"))
+    event))
+
+(defn- refuse-component (ancestors node caller)
+  "A control inside a rendered LiveComponent is dispatched by the client to that component,
+  not to this view — `brood_live.js` routes on the nearest ancestor `data-cid`. Firing it
+  against the view's own handler here would test a path the browser never takes.
+
+  In practice a component's markup reaches the parent tree as an opaque rendered string, so
+  this fires only for a hand-written `data-cid` wrapper; it is here so that case says what is
+  wrong instead of silently testing the wrong handler."
+  (let (wrapper (seq/filter (append ancestors (list node))
+                  (fn (a) (not (nil? (get (element-attrs a) :data-cid))))))
+    (when (not (empty? wrapper))
+      (error caller
+        ": "
+        (describe-node node)
+        " is inside a data-cid wrapper, so the client "
+        "would route this event to that component — drive it with component-event and the "
+        "component's own spec"))))
+
+(defn live-click (v selector)
+  "Click the element matching `selector` and return the resulting view.
+
+  Fires the event named by that element's `data-event`, with its `data-params` — exactly what
+  a click does in the browser. Raises if nothing matches, or if the element carries no
+  `data-event`, which is the whole point: a test cannot fire an event the markup does not."
+  (let ([node ancestors] (require-match v selector "live-click")
+        _ (refuse-component ancestors node "live-click")
+        event (require-event node :click "live-click"))
+    (live-apply v (fn (model) (live-event (live-view-spec v) event (element-params node) model)))))
+
+(defn live-fire (v selector attr &optional (params {}))
+  "Fire the binding `attr` on the element matching `selector`, with `params` merged over its
+  `data-params`, and return the resulting view.
+
+  The general driver, for every binding `live-click` / `live-change` / `live-submit` do not
+  name — a keystroke, a focus, a click-away:
+
+      (live-fire v \"#search\" :data-on-keydown {\"key\" \"Enter\"})
+      (live-fire v \"#menu\" :data-on-click-away)
+
+  One function taking the attribute rather than a driver per event, because the client's
+  binding family is open — `data-on-<anything>` works — and a harness with a fixed list would
+  go stale the first time someone binds an event it had not heard of. It still reads the
+  handler name off the MARKUP, so it cannot fire an event the view does not declare."
+  (let ([node ancestors] (require-match v selector "live-fire")
+        _ (refuse-component ancestors node "live-fire")
+        handler (get (element-attrs node) attr))
+    (when (nil? handler)
+      (error "live-fire: "
+        (describe-node node)
+        " has no "
+        (->string attr)
+        " — it is not wired to that binding"))
+    (live-apply v
+      (fn (model)
+        (live-event (live-view-spec v)
+          (->string handler)
+          (merge (element-params node) (stringify-param-keys params))
+          model)))))
+
+(defn live-change (v selector value)
+  "Type `value` into the element matching `selector` and return the resulting view.
+
+  Sends `{\"value\" value}` merged with the element's `data-params`, which is what
+  brood_live.js sends on `input` and `change` — so this drives as-you-type validation the way
+  a keystroke does."
+  (let ([node ancestors] (require-match v selector "live-change")
+        _ (refuse-component ancestors node "live-change")
+        event (require-event node :change "live-change")
+        params (merge {"value" (->string value)} (element-params node)))
+    (live-apply v (fn (model) (live-event (live-view-spec v) event params model)))))
+
+;; Controls whose value a browser does NOT put in a FormData: the submit/reset buttons (only a
+;; submitter's value is included, and hatch's client does not send one), and a file input,
+;; whose bytes go up their own channel (see web/upload).
+(def- *unsubmitted-input-types* #{"submit" "button" "reset" "file" "image"})
+
+(defn- field-value (node)
+  "The value one named control contributes to a form submission, or nil when it contributes
+  none — mirroring what `new FormData(form)` collects."
+  (let (attrs (element-attrs node)
+        tag (->string (first node))
+        input-type (string/lower (->string (get attrs :type "text"))))
+    (cond
+      (and (= tag "input") (contains? *unsubmitted-input-types* input-type)) nil
+      ;; an unchecked box or radio is simply absent from the submission, which is why a
+      ;; checkbox form needs a hidden companion field — the same rule here as in the browser
+      (and (= tag "input") (or (= input-type "checkbox") (= input-type "radio")))
+        (if (get attrs :checked) (->string (get attrs :value "on")) nil)
+      (= tag "textarea") (->string (get attrs :value (text-of node)))
+      ;; A `<select>` carries no value of its own — the browser submits the selected option's.
+      ;; Reading `:value` off the select would quietly submit "" for every dropdown in a form,
+      ;; which is the kind of wrong answer a test would encode as correct.
+      (= tag "select") (selected-option-value node)
+      else (->string (get attrs :value "")))))
+
+(defn- selected-option-value (node)
+  "What a `<select>` submits: the value of its `[selected]` option, or — as in a browser with
+  nothing marked — its first option's. Nil when it has no options at all."
+  (let (options (seq/filter (map (walk-nodes node (list)) first)
+                  (fn (o) (= (->string (first o)) "option")))
+        marked (seq/filter options (fn (o) (get (element-attrs o) :selected))))
+    (cond
+      (not (empty? marked)) (option-value (first marked))
+      (not (empty? options)) (option-value (first options))
+      else nil)))
+
+(defn- option-value (option)
+  "An `<option>`'s submitted value — its `value` attribute, or its text when it has none, as
+  HTML specifies."
+  (let (attrs (element-attrs option))
+    (if (contains? attrs :value) (->string (get attrs :value)) (text-of option))))
+
+(defn- form-params (form)
+  "The form's fields as a string-keyed map, collected the way the browser does: every named
+  `input`/`select`/`textarea` inside it, minus the controls a FormData leaves out."
+  (fold (walk-nodes form (list))
+    {}
+    (fn (acc pair)
+      (let (node (first pair)
+            attrs (element-attrs node)
+            tag (->string (first node))
+            field (get attrs :name))
+        (if (or (nil? field) (not (includes? ["input" "select" "textarea"] tag)))
+          acc
+          (let (value (field-value node))
+            (if (nil? value) acc (assoc acc (->string field) value))))))))
+
+(defn live-submit (v selector &optional (params {}))
+  "Submit the form matching `selector` and return the resulting view.
+
+  The form's own fields are collected from the markup the way `new FormData(form)` collects
+  them — every named control, minus the submit buttons and file inputs a browser leaves out,
+  minus any unchecked box. `params` is merged OVER them, which is how a test types into the
+  form: the markup supplies the shape, the test supplies the values it cares about.
+
+      (live-submit v \"form#signup\" {\"email\" \"ada@example.com\"})
+
+  That the shape comes from the markup is the point. A test that passes its params wholesale
+  still passes when the form loses a field; this one submits what the form has."
+  (let ([node ancestors] (require-match v selector "live-submit")
+        _ (refuse-component ancestors node "live-submit")
+        event (require-event node :submit "live-submit")
+        merged (merge (form-params node) (stringify-param-keys params)))
+    (live-apply v (fn (model) (live-event (live-view-spec v) event merged model)))))
+
+(defn- stringify-param-keys (params)
+  "Params with string keys, so a test may write `{:email \"…\"}` and still match what a form
+  post delivers. Values are left alone."
+  (fold (%map-pairs params)
+    {}
+    (fn (acc kv) (let ([k value] kv) (assoc acc (->string k) value)))))

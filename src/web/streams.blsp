@@ -1,0 +1,232 @@
+(defmodule web/streams
+  "Collections a live view renders without holding.
+
+  A live view's model is the state of the page, and the diff engine works by comparing the
+  model it just rendered with the one before it. That is exactly right for a form, a counter,
+  a dashboard — and wrong for a message feed, an activity log, a table of search results.
+  Those are unbounded, and holding one in the model costs its whole weight in every connected
+  session, forever, so the page can re-render rows nobody is looking at.
+
+  A stream is the exception. The model holds only what has changed since the last render; the
+  view renders that; the client merges it into what is already on screen; and the server
+  forgets. Fifty thousand rows cost the server the handful it was handed most recently.
+
+      (deflive
+        (mount (params) {:messages (streams/new :messages)})
+
+        (render (model)
+          [:ul (streams/container (get model :messages) {:class \"feed\"})
+            (for (m (streams/items (get model :messages)))
+              [:li (streams/item-attrs m) (get m :body)])])
+
+        (handle-info (msg model)
+          (update model :messages (fn (s) (streams/insert s (message-item msg))))))
+
+  An item is any map carrying `:id`. Nothing else about it is this module's business — it is
+  handed straight back to the render.
+
+  ## What you give up
+
+  **The server cannot see the collection**, because that is the point. There is no
+  `(streams/all …)`, and a handler that needs to know what is on screen wants an ordinary
+  model key instead. `delete` takes an id rather than a predicate for the same reason.
+
+  **A reconnect starts over.** The socket drops, `mount` runs again, and the stream is empty —
+  so a view whose feed must survive a reconnect seeds it in `mount` from wherever the items
+  really live (`(streams/reset (streams/new :messages) (recent-messages)))`. That is not a
+  workaround; it is the honest consequence of the server not being the one holding them.
+
+  ## How it reaches the browser
+
+  No new wire protocol. The container carries `data-update=\"stream\"`, which tells
+  brood_live.js to MERGE the children it is sent rather than reconcile against them — so the
+  ordinary render/diff path carries a stream with no special case in `web/parts`, `web/live`
+  or the frame format. `reset` renders `data-update=\"stream-reset\"` for one patch, which
+  empties the container first. A delete cannot be expressed by rendering what is left (the
+  server does not know what is left), so it rides the effect channel `push-event` uses.
+
+  Items are keyed by their `:id`, which is also the DOM id, so the client morphs a re-rendered
+  row in place and leaves its position alone."
+  ;; encode — the effect frame a delete travels on. Referenced fully qualified rather than
+  ;; aliased: web/live is the layer above this one and aliasing it here would tie the two
+  ;; together for one call.
+  (:alias web/template))
+
+;; A stream in the model. Only `pending` and `deleted` hold anything, and the session empties
+;; both after every render — so the memory a stream costs is the items handed to it since the
+;; last patch, not the collection.
+(defrecord stream (name pending deleted reset?))
+
+(impl Display
+  web/streams/stream
+  (->string [s] (str "#<stream " (->string (stream-name s)) ">")))
+
+;; Identity, not shape — the same argument web/upload/spec makes. A stream is found in the
+;; app's own model, and a map that happens to have a `:name` and a `:pending` must not be
+;; mistaken for one.
+(def- stream-id (record-id (stream nil (list) (list) false)))
+
+(defn stream? (v)
+  "True for a stream made by `new`."
+  (and (record? v) (= (record-id v) stream-id)))
+
+(defn new (stream-name &optional (items (list)))
+  "A stream named `stream-name`, optionally seeded with `items`. The name becomes the
+  container's DOM id, so it must be unique on the page.
+
+  Seed it in `mount` when the feed must be there on first paint and after a reconnect — a
+  reconnect re-runs `mount`, and that is the only thing that can put the items back.
+
+  **Put it at a TOP-LEVEL key of the model**, which must be a map. The session empties every
+  stream after each frame by scanning the model's own keys, and it does not descend — so a
+  stream nested under `{:panel {:feed …}}` is never flushed. It then keeps every item it has
+  ever been handed, which is the one cost this module exists to avoid, and re-sends them on
+  every render, which the client merges into duplicates. Nothing raises. A deep walk of every
+  model on every frame is what nesting would cost everyone, and a stream has no reason to be
+  anywhere but a key of its own."
+  (stream stream-name (vec items) (list) false))
+
+(defn items (s)
+  "The items to render this pass — what has been inserted since the last patch, which on the
+  first render is whatever `new` was seeded with. Answers an empty list for nil, so a template
+  need not guard a model key that is not set yet."
+  (if (nil? s) (list) (or (stream-pending s) (list))))
+
+;; `s` declared `any`: the docstring promises an answer for nil, so narrowing it to a stream
+;; would make every tolerant caller — a template reading a model key that is not set yet —
+;; look like a mistake.
+(sig items (any -> any))
+
+(defn- with-parts (s pending deleted reset?)
+  (stream (stream-name s) pending deleted reset?))
+
+(defn insert (s item)
+  "Append `item` to the stream. It must be a map carrying `:id`; everything else about it is
+  the view's business."
+  (require-id item "insert")
+  (with-parts s (append (items s) [(assoc item :hatch/at -1)]) (stream-deleted s) (stream-reset? s)))
+
+(defn prepend (s item)
+  "Put `item` at the top of the stream — a feed where the newest is first."
+  (require-id item "prepend")
+  (with-parts s (append (items s) [(assoc item :hatch/at 0)]) (stream-deleted s) (stream-reset? s)))
+
+(defn insert-at (s item index)
+  "Put `item` before the `index`th row currently on screen. A negative index appends.
+
+  The index is a POSITION IN THE BROWSER, not in any list the server holds — there is no such
+  list. It is here for the case where the view knows where a row goes (a sorted insert whose
+  position it computed); reach for `insert` or `prepend` otherwise."
+  (require-id item "insert-at")
+  (with-parts s
+    (append (items s) [(assoc item :hatch/at index)])
+    (stream-deleted s)
+    (stream-reset? s)))
+
+;; `item` declared `any` on all three: `require-id` exists precisely to accept whatever it is
+;; handed and refuse what is not a map with an `:id`. Narrowing the parameter would move that
+;; check to the type checker for callers it can see through, and leave it unstated for the
+;; ones it cannot — which is the opposite of what a runtime guard is for.
+(sig insert (any any -> any))
+(sig prepend (any any -> any))
+(sig insert-at (any any any -> any))
+
+(defn delete (s id)
+  "Remove the row with this id from the browser. Returns the updated stream.
+
+  A delete cannot be expressed by rendering what is left, because the server does not know
+  what is left — so it is sent as an instruction on the same effect channel `push-event` uses,
+  flushed with the patch. Deleting an id that is not on screen is a no-op there."
+  (with-parts s (items s) (append (stream-deleted s) [(->string id)]) (stream-reset? s)))
+
+(defn reset (s &optional (new-items (list)))
+  "Replace everything on screen with `new-items` — a filter changed, a different page of
+  results, a fresh sort. The container is emptied before the new rows are merged in.
+
+  This is the one operation that says something about the whole collection, and it says it by
+  replacing it rather than by reading it."
+  (dolist (item new-items) (require-id item "reset"))
+  (stream (stream-name s)
+    (mapv new-items (fn (item) (assoc item :hatch/at -1)))
+    (list)
+    true))
+
+(defn- require-id (item op)
+  "Raise unless `item` carries an `:id`.
+
+  A stream item's id is its identity in the browser: it is the DOM id the client morphs
+  against and the handle `delete` names. An item without one renders a row that can never be
+  updated and can never be removed — it would simply accumulate — so this is an error at the
+  call rather than a surprise on the page."
+  (when (not (map? item))
+    (error "web/streams/" op ": an item must be a map carrying :id, got " (->string item)))
+  (when (nil? (get item :id))
+    (error "web/streams/"
+      op ": an item must carry :id — it is the row's identity in the "
+      "browser, both for morphing it and for deleting it"))
+  nil)
+
+; ---- what the view renders -------------------------------------------------
+
+(defn container (s &optional (attrs {}))
+  "The attributes for a stream's container element: its id, and the `data-update` mode that
+  tells the client to merge rather than reconcile. `attrs` is merged over them, so a class or
+  an aria role goes on as usual.
+
+      [:ul (streams/container (get model :messages) {:class \"feed\"}) …]
+
+  The mode is `stream-reset` for exactly the render that follows a `reset` and `stream`
+  otherwise, which is why this is computed rather than written by hand."
+  (merge {:id (->string (stream-name s))
+          :data-update (if (stream-reset? s) "stream-reset" "stream")}
+    attrs))
+
+(defn item-attrs (item &optional (attrs {}))
+  "The attributes for one rendered row: its `id`, and where it goes. `attrs` is merged over.
+
+      (for (m (streams/items (get model :messages)))
+        [:li (streams/item-attrs m {:class \"message\"}) (get m :body)])
+
+  (get (hatch/web/streams/item-attrs {:id \"m-1\"}) :id) ;=> \"m-1\"
+  (get (hatch/web/streams/item-attrs {:id \"m-1\" :hatch/at 0}) :data-stream-at) ;=> \"0\""
+  (let (at (get item :hatch/at -1))
+    (merge
+      {:id (->string (get item :id))
+       ;; -1 appends, which is the default on the client too — but emitting it keeps the
+       ;; markup explicit about a position rather than silent about one.
+       :data-stream-at (->string at)}
+      attrs)))
+
+; ---- the session's half ----------------------------------------------------
+
+(defn pending-deletes (model)
+  "Every id any stream in `model` has been told to delete, across all of them. Called by the
+  live session after a render; app code has no reason to."
+  (if (not (map? model))
+    (list)
+    (apply append
+      (map (%map-pairs model)
+        (fn (kv)
+          (let ([_k v] kv) (if (stream? v) (or (stream-deleted v) (list)) (list))))))))
+
+(defn flush (model)
+  "Empty every stream in `model` — what has just been rendered has been sent, and holding it
+  is the cost this module exists to avoid. Returns the updated model.
+
+  Called by the live session immediately after it pushes a frame, which is the only moment at
+  which 'already on screen' becomes true. It also clears the reset flag, so the container
+  renders `data-update=\"stream\"` again on the next patch and a second render does not empty
+  the list the first one just filled."
+  (if (not (map? model))
+    model
+    (fold (%map-pairs model)
+      model
+      (fn (acc kv)
+        (let ([k v] kv)
+          (if (stream? v) (assoc acc k (stream (stream-name v) (list) (list) false)) acc))))))
+
+(defn holds-streams? (model)
+  "Whether `model` holds any stream at all — the cheap test the session makes before doing any
+  of the work above, so a view without streams pays one `map?` and a scan of its own keys."
+  (and (map? model)
+    (any? (%map-pairs model) (fn (kv) (let ([_k v] kv) (stream? v))))))

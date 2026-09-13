@@ -1,49 +1,554 @@
 (defmodule web/upload
-  "Live upload progress — a progress bar for a large file upload, driven from the server as
-  the bytes actually land.
+  "Getting a file from a browser onto this server, and telling the user how it is going.
 
-  An upload is an ordinary HTTP POST, on a different connection from the live view's
-  WebSocket, so the two have to be introduced. The introduction is a **token**: the view mints
-  one, subscribes to it, and puts it in the form's action URL; `http/server` reads it off the
-  query string (the head is parsed before any body byte arrives, so a query param is the only
-  part of the request visible in time) and emits a `[:hatch :upload :progress]` telemetry
-  event as the body streams in. `attach-progress` — started once, like the access log — turns
-  those events into `web/pubsub` broadcasts, which reach the subscribed session at its
-  `handle-info` as `{:upload {…}}`.
+  Two mechanisms, because there are two genuinely different situations.
 
-  In a view:
+  **Over the live socket (`allow` and friends) — the default.** A live view declares an
+  upload in its `mount`; the browser reads the chosen files and streams them to the open
+  WebSocket in binary frames; the session spools each to disk, updating the model as bytes
+  land, so the progress bar is an ordinary re-render of an ordinary model key. When the user
+  submits, a handler calls `consume` and is handed the finished files.
 
-    (deflive
-      (mount (params) (let (tok (upload/watch)) {:token tok :percent 0}))
-      (handle-info (msg model)
-        (let (up (get msg :upload))
-          (if up (assoc model :percent (get up :percent)) model)))
-      (render (model)
-        [:form {:method \"post\"
-                :enctype \"multipart/form-data\"
-                :action (upload/action \"/upload\" (get model :token))}
-          [:input {:type \"file\" :name \"file\"}]
-          [:progress {:value (get model :percent) :max 100}]]))
+  **Over a plain form POST (`watch` and friends).** The upload is an ordinary multipart
+  request on a *different* connection from the socket, introduced to the view by a token in
+  its action URL. It needs no JavaScript beyond the live client itself and it is what to
+  reach for when the form must work as a form. See the second half of this module.
 
-  and once at startup, alongside the other telemetry consumers:
+  ## The socket upload
 
-    (web/application/start {:upload-progress true :children [(fn () (serve))]})
+      (deflive
+        (mount (params)
+          {:avatar (upload/allow :avatar {:accept [\".png\" \".jpg\"] :max-entries 2})
+           :saved (list)})
 
-  Progress is entirely opt-in: a request with no token emits nothing, so ordinary traffic
-  pays only a `get` on the parsed query map. Events are throttled server-side (see
-  `:progress-interval-ms`), and the final event is always sent unthrottled, so a bar reliably
-  lands on 100%.
+        (render (model)
+          [:form {:data-event \"save\"}
+            (upload/file-input (get model :avatar))
+            [:ul {}
+              (for (e (upload/entries (get model :avatar)))
+                [:li {}
+                  [:span {} (upload/entry-client-name e)]
+                  [:progress {:value (upload/entry-percent e) :max 100}]
+                  (upload/entry-error e)])]
+            [:button {} \"Save\"]])
 
-  Only Content-Length bodies report — a `Transfer-Encoding: chunked` upload has no declared
-  total to be a fraction of. Progress is reported for *both* the in-memory and the spool-to-
-  disk body paths, but a large upload is exactly what `:spool-threshold` is for, so a view
-  showing a progress bar usually wants spooling configured too."
-  ; subscribe / broadcast — delivery to the session's handle-info
+        (on \"save\" (params model)
+          (let ([saved model2] (upload/consume model :avatar (fn (e) (keep-it e))))
+            (assoc model2 :saved (append (get model2 :saved) saved)))))
+
+  **An upload lives at a model key, and that is the whole design.** Phoenix keeps uploads in
+  a namespace beside the assigns (`@uploads.avatar`) because its change tracking cannot see
+  into them otherwise. Hatch does not need the exception: `web/parts/deps-of` reads
+  `(get model :avatar)` in the render and works out that this slot — the progress list, and
+  nothing else on the page — is the one to re-render when the upload changes. A chunk landing
+  therefore repaints one `<progress>` and leaves the rest of the document alone, with no
+  special case anywhere in the renderer.
+
+  That is also why the reading functions take **the upload** (`(entries (get model :avatar))`)
+  while the updating ones take **the model** (`(consume model :avatar f)`). It is not an
+  inconsistency: going through `(get model :avatar)` in the render is exactly what lets the
+  diff narrow, and a reader written as `(entries model :avatar)` would use the model
+  opaquely, mark the slot `:all`, and quietly re-render the whole view on every chunk.
+
+  ## Entries
+
+  Each chosen file is an `entry` record: `entry-ref` (the server-issued id, and the capability
+  the client needs to send bytes for it), `entry-client-name`, `entry-size`,
+  `entry-content-type`, `entry-received`, `entry-percent`, `entry-done?`, `entry-path` (its
+  spool file — nil for an entry that was refused or failed) and `entry-error` (nil, or why).
+
+  A refused entry — wrong extension, too large, over `:max-entries` — is kept in the list with
+  its `entry-error` set rather than dropped, so the view can say why. It is given no spool
+  file and no ref the client can write to, so a client that ignores the refusal has nothing to
+  write to. A refusal does not use up a slot either: one bad pick must not exhaust the single
+  slot a default upload has and leave the user's corrected choice refused as \"too many files\".
+
+  **`entry-client-name` is the browser's string and nothing has sanitised it.** It is here to
+  show the user which file is which, and it may contain `/`, `..`, a NUL or 4 KB of anything —
+  so never build a path out of it. The spool path hatch writes to is server-generated and
+  random for exactly this reason; a consumer keeping the file should generate its own name
+  too, and store the client's as data.
+
+  `consume` runs a function over every *completed* entry, deletes the spool files, and returns
+  `[results model']`. A still-uploading entry is left alone. If the function raises, the model
+  is not updated and the files are not deleted — the upload stays where it was and can be
+  retried, which is the useful behaviour when a save fails. Anything still spooled when the
+  session ends is swept by `cleanup`.
+
+  ## Limits
+
+  `:max-file-size` (default 8 MB) is enforced on the way in, against bytes actually received,
+  not against the size the browser declared — a client that lies about the size, or simply
+  keeps sending, has its entry failed and its spool deleted at the moment it goes over. With
+  `:max-entries` that bounds what one session can put on disk.
+
+  The entry LIST is bounded separately, at `:max-entries` + `*max-refusals*`: refusals cost no
+  slot and no disk, but they are entries whose number a client would otherwise choose. See
+  `offer` for how both halves of that bound work."
+  ; subscribe / broadcast — delivery to the session's handle-info (the form-POST half)
   (:alias web/pubsub)
   ; upload-token-param — the query-param name http/server reads, so the two can't drift
   (:alias http/server)
   (:alias telemetry))
 
+;; ============================================================================
+;; Socket uploads: a file streamed over the live view's own WebSocket.
+;; ============================================================================
+
+;; An upload as declared by `allow` and carried in the model. A record, not a map, for the
+;; reason every other spec in hatch is one: `(get upload :entries)` mistyped is a silent nil,
+;; and a silent nil here renders an empty progress list for an upload that is running fine.
+(defrecord spec (name accept max-entries max-file-size dir entries))
+
+(impl Display
+  web/upload/spec
+  (->string [s] (str "#<upload " (->string (spec-name s)) ">")))
+
+;; Identity, not shape — the same argument `web/cache/ttl-entry` and `web/template/raw-node`
+;; make. `find-upload` scans a model's top-level values looking for uploads, and the model is
+;; the app's own map: a shape test ("has a :name and an :entries") would be satisfied by
+;; accident by some app's unrelated value, and the accident is a stranger's map being fed
+;; chunks of an uploaded file. The record id cannot be hit by coincidence. It is taken from a
+;; throwaway instance because the id differs between hatch loaded standalone and as a package.
+(def- spec-id (record-id (spec nil (list) 1 1 "/tmp" (list))))
+
+(defn spec? (v)
+  "True for an upload declared by `allow` — used to find uploads in a model."
+  (and (record? v) (= (record-id v) spec-id)))
+
+;; One chosen file. `received` is bytes actually written, which is what `entry-percent`
+;; reports against — `size` is the browser's claim and is used only to show a total.
+(defrecord entry (ref client-name size content-type path received done? error))
+
+(impl Display
+  web/upload/entry
+  (->string [e] (str "#<upload-entry " (entry-client-name e) ">")))
+
+(def *default-max-file-size* 8388608)
+
+(def *default-spool-dir* "/tmp")
+
+;; How many refused entries one offer may leave behind for the view to explain. A refusal
+;; costs no slot and no disk, but it is still an entry in a list a client controls the length
+;; of, so it needs a ceiling somewhere; past this many the user is not reading them anyway.
+(def *max-refusals* 20)
+
+(defn allow (upload-name &optional (opts {}))
+  "Declare an upload named `upload-name`, for a live view's `mount` to put at a model key.
+  `opts`:
+    :accept         — a list of extensions (`\".png\"`) and/or media types (`\"image/png\"`,
+                      `\"image/*\"`). Absent or empty accepts anything.
+    :max-entries    — how many files at once (default 1)
+    :max-file-size  — bytes per file (default 8 MB)
+    :dir            — where spool files are written (default \"/tmp\")
+
+  The accept list is advisory on the client (it becomes the `<input accept>` attribute, which
+  a browser uses to filter the file picker) and enforced on the server, which is where it
+  matters — a file picker is a convenience and not a control.
+
+  **Put it at a TOP-LEVEL key of the model**, which must be a map. The session finds an upload
+  by scanning the model's own keys — that is how a frame naming `\"avatar\"` reaches this
+  value — and it does not descend, so an upload nested under `{:form {:avatar …}}` is never
+  found: its entries never fill, its progress never moves, and nothing raises to say why. A
+  deep walk of every model on every frame is the cost that buys the nesting, and it is not
+  worth it for a declaration that has no reason to be anywhere else."
+  (spec upload-name
+    (get opts :accept (list))
+    (get opts :max-entries 1)
+    (get opts :max-file-size *default-max-file-size*)
+    (get opts :dir *default-spool-dir*)
+    (list)))
+
+(defn entries (upload)
+  "The entries of `upload`, newest last — what a render iterates to draw progress. Answers an
+  empty list for nil, so a template need not guard a model key that is not set yet."
+  (if (nil? upload) (list) (or (spec-entries upload) (list))))
+
+(defn entry-percent (e)
+  "Bytes received as a whole percent of the size the browser declared, clamped to 0–100. Zero
+  when the size is unknown, rather than dividing by it."
+  (percent (or (entry-received e) 0) (entry-size e)))
+
+(defn done-entries (upload)
+  "The entries of `upload` that finished uploading without error — what `consume` runs over."
+  (seq/filter (entries upload) (fn (e) (and (entry-done? e) (nil? (entry-error e))))))
+
+(defn errored-entries (upload)
+  "The entries of `upload` that were refused, with `entry-error` saying why."
+  (seq/filter (entries upload) (fn (e) (not (nil? (entry-error e))))))
+
+; ---- accept matching -------------------------------------------------------
+
+(defn extension-of (client-name)
+  "The lowercased extension of `client-name`, including the dot, or \"\" if it has none.
+
+  (hatch/web/upload/extension-of \"Holiday.JPG\") ;=> \".jpg\"
+  (hatch/web/upload/extension-of \"archive.tar.gz\") ;=> \".gz\"
+  (hatch/web/upload/extension-of \"README\") ;=> \"\""
+  (let (lowered (string/lower (or client-name ""))
+        i (string/last-index-of lowered "."))
+    (if (= i -1) "" (string/substring lowered i (string/length lowered)))))
+
+(defn accept-matches? (rule client-name content-type)
+  "Whether one `:accept` rule admits this file. A rule starting with `.` is an extension; a
+  rule containing `/` is a media type, with a trailing `*` matching a whole family.
+
+  (hatch/web/upload/accept-matches? \".png\" \"a.PNG\" nil) ;=> true
+  (hatch/web/upload/accept-matches? \"image/*\" \"a.bin\" \"image/gif\") ;=> true
+  (hatch/web/upload/accept-matches? \"image/png\" \"a.bin\" \"image/gif\") ;=> false"
+  (let (kind (string/lower (or content-type "")))
+    (cond
+      (string/starts-with? rule ".") (= (string/lower rule) (extension-of client-name))
+      (string/ends-with? rule "/*")
+        (string/starts-with? kind (string/substring rule 0 (- (string/length rule) 1)))
+      else (= (string/lower rule) kind))))
+
+(defn accepted? (accept client-name content-type)
+  "Whether `accept` (a list of rules) admits this file. An empty or absent list admits
+  everything — the same meaning `<input accept>` has when omitted.
+
+  (hatch/web/upload/accepted? (list) \"x.exe\" nil) ;=> true
+  (hatch/web/upload/accepted? [\".png\" \".jpg\"] \"x.jpg\" nil) ;=> true
+  (hatch/web/upload/accepted? [\".png\"] \"x.jpg\" nil) ;=> false"
+  (or (empty? accept)
+    (any? accept (fn (rule) (accept-matches? rule client-name content-type)))))
+
+; ---- finding an upload in the model ----------------------------------------
+;
+; The session knows a NAME (from an `upload-init` frame) or a REF (from a binary chunk), and
+; has to find the upload it belongs to. Both scan the model's top-level values for `spec`
+; records, which is why an upload must be at a top-level key of a map model — stated in
+; `allow`'s docstring and pinned by a test.
+
+(defn same-name? (a b)
+  "Whether two upload names refer to the same upload, comparing by text.
+
+  The wire can only carry a string: the client reads the name off `data-upload` in the markup
+  and sends it back on every frame. An app writes `(allow :avatar …)` and reads
+  `(cancel model :avatar ref)`, both keywords. Comparing the two directly would make the
+  keyword spelling work everywhere except over the socket — which is to say, everywhere except
+  where it matters — so the comparison is on text and both spellings work throughout.
+
+  (hatch/web/upload/same-name? :avatar \"avatar\") ;=> true
+  (hatch/web/upload/same-name? :avatar :avatar) ;=> true
+  (hatch/web/upload/same-name? :avatar \"banner\") ;=> false"
+  (= (->string a) (->string b)))
+
+(defn find-upload (model upload-name)
+  "The `[key upload]` of the upload named `upload-name` in `model`, or nil."
+  (if (not (map? model))
+    nil
+    (let (hits (seq/filter (%map-pairs model)
+                 (fn (kv)
+                   (let ([_k v] kv) (and (spec? v) (same-name? (spec-name v) upload-name))))))
+      (if (empty? hits) nil (first hits)))))
+
+(defn find-by-ref (model ref)
+  "The `[key upload]` of the upload holding entry `ref`, or nil. A ref is unguessable and
+  server-issued, so finding one is also the authorization check: a client can only address an
+  entry this session created for it."
+  (if (not (map? model))
+    nil
+    (let (hits (seq/filter (%map-pairs model)
+                 (fn (kv)
+                   (let ([_k v] kv)
+                     (and (spec? v) (any? (entries v) (fn (e) (= (entry-ref e) ref))))))))
+      (if (empty? hits) nil (first hits)))))
+
+(defn- put-upload (model key upload)
+  (assoc model key upload))
+
+(defn- with-entries (upload new-entries)
+  (spec (spec-name upload)
+    (spec-accept upload)
+    (spec-max-entries upload)
+    (spec-max-file-size upload)
+    (spec-dir upload)
+    new-entries))
+
+(defn- replace-entry (upload ref f)
+  "`upload` with entry `ref` replaced by `(f entry)`; unchanged if no such entry. `f`
+  answering nil REMOVES the entry, which is how cancel and consume drop one.
+
+  A nil `ref` matches nothing, rather than matching every refused entry — those carry no ref,
+  so `(= nil nil)` would make `(cancel model :avatar nil)` from a handler reading an absent
+  param silently delete all of them at once."
+  (if (nil? ref)
+    upload
+    (with-entries upload
+      (seq/filter (map (entries upload) (fn (e) (if (= (entry-ref e) ref) (f e) e)))
+        (fn (e) (not (nil? e)))))))
+
+; ---- the client's three frames ---------------------------------------------
+
+(defn spool-path (upload)
+  "A fresh unique spool path for one entry, under the upload's `:dir`."
+  (str (spec-dir upload) "/hatch-live-upload-" (rand/token 16)))
+
+(defn- refusal (client-name size content-type reason)
+  "An entry that will never receive bytes: no ref a client can write to, no spool file, and
+  `entry-error` saying why. Kept in the list so the view can show the reason."
+  (entry nil client-name size content-type nil 0 false reason))
+
+(defn- admit (upload client-name size content-type)
+  "Validate one offered file against `upload`, returning an entry — accepted (with a ref and a
+  spool path) or refused (with an error and neither)."
+  (cond
+    (not (accepted? (spec-accept upload) client-name content-type))
+      (refusal client-name size content-type "this file type is not accepted")
+    (and (int? size) (> size (spec-max-file-size upload)))
+      (refusal client-name size content-type "this file is too large")
+    else (entry (rand/token 16) client-name size content-type (spool-path upload) 0 false nil)))
+
+(defn offer (model upload-name files)
+  "The client has chosen `files` (a list of `{\"name\" \"size\" \"type\"}` maps) for upload
+  `upload-name`. Validate each, add them as entries, and return `[model' refs]` — `refs` being
+  the refs the client may now send bytes for, in the order the files were offered, with nil
+  where a file was refused.
+
+  Over `:max-entries` the surplus files are refused rather than the earlier ones dropped: the
+  user chose these, and silently discarding a selection is worse than saying why it did not
+  fit."
+  (let (found (find-upload model upload-name))
+    (if (nil? found)
+      [model (list)]
+      (let ([key upload] found
+            ;; Only entries that were ACCEPTED take up a slot. A refused one stays in the list
+            ;; so the view can show why, and counting it here would mean one bad pick — a .txt
+            ;; where a .png was wanted — permanently using up the single slot a default upload
+            ;; has, so the user's correct second choice is refused as "too many files".
+            kept (seq/filter (entries upload) (fn (e) (nil? (entry-error e))))
+            room (- (spec-max-entries upload) (count kept))
+            ;; Bound the work AND the list: only this many files of an offer are looked at, so
+            ;; a frame claiming a hundred thousand files costs a hundred thousand times
+            ;; nothing. The other half of the bound is `kept` below — the refusals carried
+            ;; forward are only this offer's, since the earlier ones describe picks the user
+            ;; has already replaced. Without that, a refusal not costing a slot (which is
+            ;; right) would let a client grow the list one rejected offer at a time.
+            considered (vec (take files (+ (spec-max-entries upload) *max-refusals*)))
+            offered (map (range (count considered))
+                      (fn (i)
+                        (let (f (nth considered i)
+                              client-name (get f "name" "")
+                              size (get f "size" 0)
+                              content-type (get f "type" nil))
+                          (if (>= i room)
+                            (refusal client-name size content-type "too many files")
+                            (admit upload client-name size content-type))))))
+        [(put-upload model key (with-entries upload (append kept offered)))
+          (map offered entry-ref)]))))
+
+(defn receive-chunk (model ref chunk)
+  "Append `chunk` (bytes) to entry `ref`'s spool file and return the updated model. Unknown
+  refs are ignored — the entry may have been cancelled or consumed while bytes were in flight,
+  and a client cannot name an entry this session never issued.
+
+  The size limit is enforced HERE, against bytes actually written, because the only number
+  known before this point is the one the browser sent. An entry that goes over has its spool
+  deleted and its error set, so the bytes stop costing anything the moment the limit is hit."
+  (let (found (find-by-ref model ref))
+    (if (nil? found)
+      model
+      (let ([key upload] found
+            limit (spec-max-file-size upload))
+        (put-upload model
+          key
+          (replace-entry upload
+            ref
+            (fn (e)
+              (cond
+                (not (nil? (entry-error e))) e
+                ;; A chunk for an entry that has already finished. The size cap still bounds
+                ;; it, so this is not a disk concern — it is that the bytes would be appended
+                ;; to a file a handler may be about to consume, turning a complete upload into
+                ;; a corrupt one on a frame the client had no business sending.
+                (entry-done? e) e
+                (> (+ (entry-received e) (count chunk)) limit)
+                  (do
+                    (delete-spool (entry-path e))
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      nil
+                      (entry-received e)
+                      false
+                      "this file is too large"))
+                else
+                  (if (append-spool (entry-path e) chunk)
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      (entry-path e)
+                      (+ (entry-received e) (count chunk))
+                      false
+                      nil)
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      nil
+                      (entry-received e)
+                      false
+                      "could not be written to disk"))))))))))
+
+(defn finish (model ref)
+  "Mark entry `ref` complete — the client has sent its last chunk. Returns the updated model.
+
+  An entry that received fewer bytes than the browser declared is failed rather than accepted:
+  a truncated file that reports itself as finished is the one case where believing the client
+  produces a corrupt result that looks like a successful one.
+
+  A genuinely empty file is the exception, and it needs a line of its own: no chunk ever
+  arrives for it, so nothing has created its spool file, and `entry-path` would name something
+  that is not there. Touching it here means a consumer can read every completed entry's path
+  without asking whether the file happened to have any bytes in it."
+  (let (found (find-by-ref model ref))
+    (if (nil? found)
+      model
+      (let ([key upload] found)
+        (put-upload model
+          key
+          (replace-entry upload
+            ref
+            (fn (e)
+              (cond
+                (not (nil? (entry-error e))) e
+                (and (int? (entry-size e)) (< (entry-received e) (entry-size e)))
+                  (do
+                    (delete-spool (entry-path e))
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      nil
+                      (entry-received e)
+                      false
+                      "the upload did not finish"))
+                ;; The empty file: no chunk ever arrived, so nothing created its spool file and
+                ;; `entry-path` would name something that is not there. Touching it is what
+                ;; lets a consumer read every completed entry's path without first asking
+                ;; whether the file happened to have bytes in it — and the write is CHECKED,
+                ;; like every other one here, because a missing `:dir` or a full disk would
+                ;; otherwise mark the entry done behind a path with nothing at the end of it.
+                (= (entry-received e) 0)
+                  (if (append-spool (entry-path e) (bytes []))
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      (entry-path e)
+                      0
+                      true
+                      nil)
+                    (entry (entry-ref e)
+                      (entry-client-name e)
+                      (entry-size e)
+                      (entry-content-type e)
+                      nil
+                      0
+                      false
+                      "could not be written to disk"))
+                else
+                  (entry (entry-ref e)
+                    (entry-client-name e)
+                    (entry-size e)
+                    (entry-content-type e)
+                    (entry-path e)
+                    (entry-received e)
+                    true
+                    nil)))))))))
+
+(defn cancel (model upload-name ref)
+  "Drop entry `ref` from upload `upload-name` and delete its spool file. Returns the updated
+  model — wire it to a per-entry button:
+
+      (on \"cancel\" (params model) (upload/cancel model :avatar (get params \"ref\")))"
+  (let (found (find-upload model upload-name))
+    (if (nil? found)
+      model
+      (let ([key upload] found)
+        ;; Tell the browser to abort this transfer, on the effect channel `web/live/push-event`
+        ;; and friends use — a handler runs in the session process, so posting to `(self)` is
+        ;; how any of them reach the client. Dropping the entry is already safe without it
+        ;; (chunks for an unknown ref are ignored by `receive-chunk`); this stops the bytes
+        ;; being sent at all, and stops the client's own progress UI running on past the
+        ;; cancel. Outside a session it is a message to a mailbox nobody reads.
+        (send (self) [:push-effect {:event "upload-cancel" :ref ref}])
+        (put-upload model
+          key
+          (replace-entry upload ref (fn (e) (do (delete-spool (entry-path e)) nil))))))))
+
+(defn consume (model upload-name f)
+  "Run `f` over every completed entry of upload `upload-name`, delete their spool files, and
+  return `[results model']` — the results in entry order, and the model with those entries
+  gone. Entries still uploading, and refused ones, are left in place.
+
+  `f` is an ordinary function of one entry, returning anything:
+
+      (let ([saved model2] (upload/consume model :avatar
+                             (fn (e) (store (upload/entry-path e) (upload/entry-client-name e)))))
+        (assoc model2 :saved saved))
+
+  There is no `{:ok …}`/`{:postpone …}` return contract to remember. If `f` raises, the whole
+  call raises: the model is not updated and nothing is deleted, so the finished upload is
+  still there to try again — which is what a failed save should leave behind. Anything never
+  consumed is swept by `cleanup` when the session ends."
+  (let (found (find-upload model upload-name))
+    (if (nil? found)
+      [(list) model]
+      (let ([key upload] found
+            ready (done-entries upload)
+            ;; `f` runs BEFORE anything is deleted, so a raise leaves the spools intact.
+            results (map ready f)
+            remaining (seq/filter (entries upload)
+                        (fn (e) (not (and (entry-done? e) (nil? (entry-error e)))))))
+        (dolist (e ready) (delete-spool (entry-path e)))
+        [results (put-upload model key (with-entries upload remaining))]))))
+
+(defn cleanup (model)
+  "Delete every spool file still referenced by any upload in `model`. Called by the live
+  session when the connection ends, so an upload the user abandoned — navigated away from,
+  closed the tab on — does not leave a file behind. Returns nil."
+  (when (map? model)
+    (dolist (kv (%map-pairs model))
+      (let ([_k v] kv)
+        (when (spec? v) (dolist (e (entries v)) (delete-spool (entry-path e)))))))
+  nil)
+
+(defn- append-spool (path chunk)
+  "Append `chunk` to the spool file, answering false on a write error (a full disk, a spool
+  dir that does not exist) rather than raising into the session loop."
+  (if (nil? path)
+    false
+    (check-allow :discarded-catch
+      (try (do (file/spit-bytes-append path chunk) true) (catch _ false)))))
+
+(defn- delete-spool (path)
+  "Delete a spool file, ignoring 'already gone' — a consumer may have moved it."
+  (when path (check-allow :discarded-catch (try (file/rm path) (catch _ nil))))
+  nil)
+
+; ---- the markup ------------------------------------------------------------
+
+(defn file-input (upload &optional (attrs {}))
+  "The `<input type=\"file\">` for `upload`, as Hiccup. `data-upload` names the upload, which
+  is what brood_live.js reads to know where to send the bytes; `attrs` is merged over the
+  defaults, so a class or an id goes on as usual.
+
+  `multiple` is emitted only when `:max-entries` is above 1 — never as `multiple=\"false\"`,
+  which an HTML boolean attribute reads as *true*."
+  (let (accept (spec-accept upload)
+        base {:type "file"
+              :data-upload (->string (spec-name upload))
+              :accept (if (empty? accept) nil (string/join accept ","))
+              :multiple (> (spec-max-entries upload) 1)})
+    [:input (merge base attrs)]))
+
+;; ============================================================================
+;; Form-POST uploads: an ordinary multipart request, with progress over the socket.
+;; ============================================================================
 (defn topic (token)
   "The pubsub topic carrying one upload's progress.
 

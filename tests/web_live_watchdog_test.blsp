@@ -1,0 +1,98 @@
+;; The idle watchdog, end to end: a connected client that says nothing must receive a
+;; WebSocket ping, and a client that never answers one must have its session reaped.
+;;
+;; This exists because neither happened. `session-loop` spawned the watchdog as
+;; `(spawn (idle-watchdog (self) sock 0))`, which reads exactly right and is exactly wrong:
+;; `spawn` evaluates its expression in the CHILD, so `(self)` there is the watchdog, and it
+;; spent its life monitoring itself and posting its ping and its reap into its own mailbox —
+;; where its `receive` has no arm for either, so selective receive simply left them. Nothing
+;; raised. The observable symptom is the absence of something, which is why it needed a test
+;; that watches for the ping on the wire rather than one that inspects the wiring.
+(defmodule web-live-watchdog-test
+  (:use web/live)
+  (:use http/websocket)
+  (:use test))
+
+;; The watchdog's interval is an ambient global, so a test can shorten it — and must run
+;; :isolated, since every other suite's sessions read the same one.
+(def default-ping-ms web/live/*ws-ping-ms*)
+
+(deflive (mount (params) {:n 0})
+  (render (model) [:div {} (str (get model :n))]))
+
+(defn masked-text-frame (s)
+  (let (b (string/->bytes s))
+    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+
+(defn read-opcode (sock buf deadline)
+  "The opcode of the next complete server frame, or `:timeout`. Server frames are unmasked, so
+  the header is two bytes plus an optional 16-bit length — `parse-frame` is the server's
+  parser and rejects an unmasked frame by rule, so it cannot be used from this side."
+  (if (>= (count buf) 2)
+    (let (opcode (bit/and (bytes/at buf 0) 15)
+          len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (>= (count buf) (+ header len))
+        opcode
+        (fill-frame sock buf deadline)))
+    (fill-frame sock buf deadline)))
+
+(defn fill-frame (sock buf deadline)
+  (receive
+    ([:tcp ^sock chunk] (read-opcode sock (bytes/concat buf chunk) deadline))
+    ([:tcp-closed ^sock] :closed)
+    (after deadline :timeout)))
+
+(defn open-session ()
+  "A real live session on a loopback socket; returns `[client listener]`."
+  (let (ls (tcp/listen "127.0.0.1" 0)
+        port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
+    (let (client (tcp/connect "127.0.0.1" port)
+          server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+      (tcp/set-binary server true)
+      (tcp/set-binary client true)
+      (let (request {:method "GET" :path "/live/ws/w" :query "" :params {} :headers {} :body ""}
+            entry {:spec (fn () (live-spec)) :session nil}
+            pid (spawn (receive ([:go] (start-session server request entry)))))
+        (tcp/controlling-process server pid)
+        (send pid [:go])
+        [client ls]))))
+
+(describe "start-watchdog hands the watchdog the SESSION's pid"
+  :isolated (test "an idle client is sent a WebSocket ping frame"
+    ;; 120ms rather than the 30s default: the whole test is waiting for one interval to pass.
+    (def web/live/*ws-ping-ms* 120)
+    (let ([client ls] (open-session))
+      ; join first, so the session is past its mount and simply sitting in the recv loop —
+      ; the state a real idle tab is in
+      (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+      ; the join render, then silence until the watchdog fires
+      (let (render-opcode (read-opcode client (bytes []) 5000))
+        (assert= render-opcode 1)
+        ; opcode 0x9 is a ping. Before the fix this timed out: the watchdog was posting the
+        ; ping to itself, so nothing ever reached the socket.
+        (assert= (read-opcode client (bytes []) 5000) 9))
+      (tcp/close client)
+      (tcp/close ls))
+    (def web/live/*ws-ping-ms* default-ping-ms))
+
+  (test "a peer that never answers a ping has its session reaped and the socket closed"
+    (def web/live/*ws-ping-ms* 80)
+    (let ([client ls] (open-session))
+      (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+      (assert= (read-opcode client (bytes []) 5000) 1)
+      ;; Never pong. Two unanswered pings later the watchdog asks the session to reap, and the
+      ;; session — which owns the socket — closes it. Reading until the socket closes is the
+      ;; assertion: `:closed` can only come from the server hanging up.
+      (assert= (drain-until-closed client (bytes []) 5000) :closed)
+      (tcp/close client)
+      (tcp/close ls))
+    (def web/live/*ws-ping-ms* default-ping-ms)))
+
+(defn drain-until-closed (sock buf deadline)
+  "Read frames, ignoring them, until the peer closes — or `:timeout`."
+  (receive
+    ([:tcp ^sock _chunk] (drain-until-closed sock buf deadline))
+    ([:tcp-closed ^sock] :closed)
+    (after deadline :timeout)))

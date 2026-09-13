@@ -1,0 +1,492 @@
+;; `web/upload`'s socket half — a file streamed over the live view's own WebSocket.
+;;
+;; Almost all of it is pure functions over a model, which is the design working: an upload is
+;; a value at a model key, so validating, chunking, finishing and consuming one are all
+;; testable with no socket, no browser and no session. The end-to-end case at the bottom is
+;; the one thing that cannot be: that a binary frame arriving on a real connection reaches
+;; `receive-chunk` and comes back as a re-render.
+(defmodule web-live-upload-test
+  (:alias web/upload :as upload)
+  (:use web/live)
+  (:alias web/template)
+  (:use http/websocket)
+  (:use test))
+
+(def spool-dir "/tmp/hatch-live-upload-test")
+
+(defn fresh-dir ()
+  (check-allow :discarded-catch (try (file/mkdir spool-dir) (catch _ nil)))
+  spool-dir)
+
+(defn avatar (&optional (opts {}))
+  "A model holding one upload named :avatar, spooling into the test directory."
+  {:avatar (upload/allow :avatar (merge {:dir (fresh-dir)} opts))
+   :saved (list)})
+
+(defn offer-one (model client-name size &optional (content-type nil))
+  "Offer a single file and return `[model' ref]`."
+  (let ([next refs] (upload/offer model
+                      :avatar (list {"name" client-name "size" size "type" content-type})))
+    [next (first refs)]))
+
+;; ---- declaring an upload ---------------------------------------------------
+
+(describe "allow"
+  (test "defaults to one file of at most 8 MB, accepting anything"
+    (let (u (upload/allow :avatar))
+      (assert= (upload/spec-max-entries u) 1)
+      (assert= (upload/spec-max-file-size u) 8388608)
+      (assert= (empty? (upload/spec-accept u)) true)
+      (assert= (empty? (upload/entries u)) true)))
+  (test "an upload is recognisable by identity, not by shape"
+    (assert= (upload/spec? (upload/allow :avatar)) true)
+    ; the trap this guards: find-upload scans the app's own model, so a map that happens to
+    ; carry the same keys must not be mistaken for an upload and fed somebody's file
+    (assert= (upload/spec? {:name :avatar :entries (list)}) false))
+  (test "entries answers an empty list for a model key that isn't set yet"
+    (assert= (upload/entries nil) (list))))
+
+(describe "find-upload matches a keyword name against the string the wire carries"
+  (test "keyword declaration, string from the client"
+    (assert= (nil? (upload/find-upload (avatar) "avatar")) false))
+  (test "keyword declaration, keyword from app code"
+    (assert= (nil? (upload/find-upload (avatar) :avatar)) false))
+  (test "a different name finds nothing"
+    (assert= (upload/find-upload (avatar) "banner") nil))
+  (test "a model that is not a map finds nothing rather than raising"
+    (assert= (upload/find-upload (list 1 2 3) :avatar) nil)))
+
+;; ---- offering files --------------------------------------------------------
+
+(describe "offer validates each file and issues a ref for the ones it accepts"
+  (test "an accepted file gets a ref, a spool path and no error"
+    (let ([model ref] (offer-one (avatar) "photo.png" 100))
+      (assert= (nil? ref) false)
+      (let (e (first (upload/entries (get model :avatar))))
+        (assert= (upload/entry-client-name e) "photo.png")
+        (assert= (upload/entry-error e) nil)
+        (assert= (nil? (upload/entry-path e)) false)
+        (assert= (upload/entry-done? e) false))))
+
+  (test "a file the accept list refuses is kept with its reason, and given no ref"
+    (let (model (avatar {:accept [".png"]})
+          [next ref] (offer-one model "notes.txt" 10))
+      (assert= ref nil)
+      (let (e (first (upload/entries (get next :avatar))))
+        (assert= (includes? (upload/entry-error e) "not accepted") true)
+        ; no ref and no spool path: a client that ignores the refusal has nothing to write to
+        (assert= (upload/entry-ref e) nil)
+        (assert= (upload/entry-path e) nil))))
+
+  (test "a file over max-file-size is refused up front"
+    (let (model (avatar {:max-file-size 50})
+          [next ref] (offer-one model "big.bin" 500))
+      (assert= ref nil)
+      (assert= (includes? (upload/entry-error (first (upload/entries (get next :avatar))))
+                 "too large")
+        true)))
+
+  ; The user chose these files. Dropping the surplus silently is worse than saying why.
+  (test "past max-entries the surplus files are refused, not discarded"
+    (let (model (avatar {:max-entries 2})
+          [next refs] (upload/offer model
+                        :avatar (list {"name" "a.png" "size" 1}
+                          {"name" "b.png" "size" 1}
+                          {"name" "c.png" "size" 1})))
+      (assert= (count (upload/entries (get next :avatar))) 3)
+      (assert= (nil? (nth (vec refs) 0)) false)
+      (assert= (nil? (nth (vec refs) 1)) false)
+      (assert= (nth (vec refs) 2) nil)
+      (assert= (includes? (upload/entry-error (nth (vec (upload/entries (get next :avatar))) 2))
+                 "too many")
+        true)))
+
+  ; found by review: a refusal used to take up a slot, so with the default max-entries of 1
+  ; one wrong pick permanently refused the user's corrected choice as "too many files"
+  (test "a refused file does not use up a slot"
+    (let (model (avatar {:accept [".png"] :max-entries 1})
+          [m1 refused] (offer-one model "notes.txt" 10)
+          [m2 accepted] (offer-one m1 "photo.png" 10))
+      (assert= refused nil)
+      (assert= (nil? accepted) false)
+      ; and the stale refusal is gone: it described a pick the user has now replaced, and
+      ; keeping it is both noise on the page and an entry a client could accumulate
+      (assert= (count (upload/entries (get m2 :avatar))) 1)
+      (assert= (upload/entry-error (first (upload/entries (get m2 :avatar)))) nil)))
+
+  (test "a rejected offer cannot grow the entry list without bound"
+    (let (model (avatar {:accept [".png"]})
+          after (fold (range 50) model (fn (m _i) (first (offer-one m "notes.txt" 10)))))
+      ; fifty rejected offers, one refusal to show for them
+      (assert= (count (upload/entries (get after :avatar))) 1)))
+
+  (test "an offer claiming a huge number of files is truncated, not walked"
+    (let (model (avatar {:max-entries 2})
+          many (map (range 5000) (fn (i) {"name" (str "f" i ".bin") "size" 1}))
+          [next _refs] (upload/offer model :avatar many))
+      (assert= (count (upload/entries (get next :avatar)))
+        (+ (upload/spec-max-entries (get model :avatar)) upload/*max-refusals*))))
+
+  (test "accepted files still fill the slots"
+    (let (model (avatar {:max-entries 1})
+          [m1 first-ref] (offer-one model "a.png" 1)
+          [m2 second-ref] (offer-one m1 "b.png" 1))
+      (assert= (nil? first-ref) false)
+      (assert= second-ref nil)
+      (assert= (includes? (upload/entry-error (nth (vec (upload/entries (get m2 :avatar))) 1))
+                 "too many")
+        true)))
+
+  (test "a media-type accept rule matches the browser's declared type"
+    (let (model (avatar {:accept ["image/*"]})
+          [_next ref] (offer-one model "blob" 10 "image/gif"))
+      (assert= (nil? ref) false)))
+
+  (test "offering into a model with no such upload changes nothing"
+    (let ([next refs] (upload/offer {:other 1} :avatar (list {"name" "a" "size" 1})))
+      (assert= next {:other 1})
+      (assert= (empty? refs) true))))
+
+;; ---- receiving bytes -------------------------------------------------------
+
+(describe "receive-chunk"
+  (test "appends to the spool file and tracks what actually landed"
+    (let ([model ref] (offer-one (avatar) "a.bin" 6)
+          m1 (upload/receive-chunk model ref (bytes [1 2 3]))
+          m2 (upload/receive-chunk m1 ref (bytes [4 5 6]))
+          e (first (upload/entries (get m2 :avatar))))
+      (assert= (upload/entry-received e) 6)
+      (assert= (upload/entry-percent e) 100)
+      (assert= (count (file/slurp-bytes (upload/entry-path e))) 6)))
+
+  (test "percent reports what the server has, against what the browser claimed"
+    (let ([model ref] (offer-one (avatar) "a.bin" 10)
+          m1 (upload/receive-chunk model ref (bytes [1 2 3 4 5]))
+          e (first (upload/entries (get m1 :avatar))))
+      (assert= (upload/entry-percent e) 50)))
+
+  ; The declared size is the only number available before bytes arrive, and it is the
+  ; client's. The cap that matters is the one applied to bytes actually written.
+  (test "a client that lied about the size is stopped at the limit, not at its claim"
+    (let (model (avatar {:max-file-size 4})
+          [m0 ref] (offer-one model "small.bin" 2)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3 4 5 6 7 8]))
+          e (first (upload/entries (get m1 :avatar))))
+      (assert= (includes? (upload/entry-error e) "too large") true)
+      (assert= (upload/entry-path e) nil)))
+
+  (test "a chunk for a ref this session never issued is ignored"
+    (let (model (avatar))
+      (assert= (upload/receive-chunk model "not-a-real-ref" (bytes [1 2 3])) model)))
+
+  (test "a chunk for an entry that already failed is ignored rather than reviving it"
+    (let (model (avatar {:max-file-size 2})
+          [m0 ref] (offer-one model "x.bin" 1)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          m2 (upload/receive-chunk m1 ref (bytes [4]))
+          e (first (upload/entries (get m2 :avatar))))
+      (assert= (upload/entry-done? e) false)
+      (assert= (includes? (upload/entry-error e) "too large") true))))
+
+;; ---- finishing -------------------------------------------------------------
+
+(describe "finish"
+  (test "a complete upload is marked done and keeps its spool file"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 3)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          m2 (upload/finish m1 ref)
+          e (first (upload/entries (get m2 :avatar))))
+      (assert= (upload/entry-done? e) true)
+      (assert= (file/exists? (upload/entry-path e)) true)))
+
+  ; A truncated file that reports itself finished is the one case where trusting the client
+  ; produces a corrupt result indistinguishable from a good one.
+  (test "an upload that stopped short is failed, not accepted"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 10)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          path (upload/entry-path (first (upload/entries (get m1 :avatar))))
+          m2 (upload/finish m1 ref)
+          e (first (upload/entries (get m2 :avatar))))
+      (assert= (upload/entry-done? e) false)
+      (assert= (includes? (upload/entry-error e) "did not finish") true)
+      (assert= (file/exists? path) false)))
+
+  (test "an empty file still has a real file at its path"
+    (let ([m0 ref] (offer-one (avatar) "empty.txt" 0)
+          m1 (upload/finish m0 ref)
+          e (first (upload/entries (get m1 :avatar))))
+      (assert= (upload/entry-done? e) true)
+      (assert= (file/exists? (upload/entry-path e)) true)
+      (assert= (count (file/slurp-bytes (upload/entry-path e))) 0)))
+
+  (test "finishing an unknown ref changes nothing"
+    (let (model (avatar))
+      (assert= (upload/finish model "nope") model))))
+
+;; ---- consuming -------------------------------------------------------------
+
+(defn completed (client-name payload)
+  "A model with one finished upload of `payload` bytes."
+  (let ([m0 ref] (offer-one (avatar {:max-entries 3}) client-name (count payload)))
+    (upload/finish (upload/receive-chunk m0 ref payload) ref)))
+
+(describe "consume"
+  (test "runs the function over each finished entry and hands back its results"
+    (let (model (completed "a.bin" (bytes [1 2 3]))
+          [results next] (upload/consume model
+                           :avatar (fn (e) (count (file/slurp-bytes (upload/entry-path e))))))
+      (assert= (vec results) [3])
+      (assert= (empty? (upload/entries (get next :avatar))) true)))
+
+  (test "the spool files are gone once consumed"
+    (let (model (completed "a.bin" (bytes [1 2 3]))
+          path (upload/entry-path (first (upload/entries (get model :avatar))))
+          [_results _next] (upload/consume model :avatar (fn (_e) :kept)))
+      (assert= (file/exists? path) false)))
+
+  (test "an entry still uploading is left alone"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 100)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          [results next] (upload/consume m1 :avatar (fn (_e) :taken)))
+      (assert= (empty? results) true)
+      (assert= (count (upload/entries (get next :avatar))) 1)))
+
+  (test "a refused entry is not consumed"
+    (let (model (avatar {:accept [".png"]})
+          [m1 _ref] (offer-one model "notes.txt" 4)
+          [results _next] (upload/consume m1 :avatar (fn (_e) :taken)))
+      (assert= (empty? results) true)))
+
+  ; A failed save should leave the upload in place to try again, which means the files must
+  ; still be there and the model must not have moved.
+  (test "a raising function leaves the upload and its file untouched"
+    (let (model (completed "a.bin" (bytes [1 2 3]))
+          path (upload/entry-path (first (upload/entries (get model :avatar))))
+          outcome (check-allow :discarded-catch
+                    (try
+                      (do (upload/consume model :avatar (fn (_e) (error "store failed"))) :no-error)
+                      (catch _ :raised))))
+      (assert= outcome :raised)
+      (assert= (file/exists? path) true)
+      (assert= (count (upload/entries (get model :avatar))) 1)))
+
+  (test "consuming an upload that isn't there answers empty rather than raising"
+    (let ([results next] (upload/consume {:other 1} :avatar (fn (_e) :x)))
+      (assert= (empty? results) true)
+      (assert= next {:other 1}))))
+
+;; ---- cancelling and sweeping -----------------------------------------------
+
+(describe "cancel"
+  (test "drops the entry and deletes its spool file"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 3)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          path (upload/entry-path (first (upload/entries (get m1 :avatar))))
+          m2 (upload/cancel m1 :avatar ref))
+      (assert= (empty? (upload/entries (get m2 :avatar))) true)
+      (assert= (file/exists? path) false)))
+  (test "cancelling tells the client to stop sending, on the effect channel"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 3))
+      (upload/cancel m0 :avatar ref)
+      (receive
+        ([:push-effect m] (do (assert= (get m :event) "upload-cancel") (assert= (get m :ref) ref)))
+        (after 200 (assert= "no upload-cancel effect received" false)))))
+  (test "cancelling an unknown ref leaves the other entries alone"
+    (let ([m0 _ref] (offer-one (avatar) "a.bin" 3)
+          m1 (upload/cancel m0 :avatar "nope"))
+      (assert= (count (upload/entries (get m1 :avatar))) 1))))
+
+;; A user who picks a 40MB file and closes the tab must not leave it on disk.
+(describe "cleanup sweeps what a session abandoned"
+  (test "every spool file still referenced by the model is deleted"
+    (let (model (completed "a.bin" (bytes [1 2 3]))
+          path (upload/entry-path (first (upload/entries (get model :avatar)))))
+      (assert= (file/exists? path) true)
+      (upload/cleanup model)
+      (assert= (file/exists? path) false)))
+  (test "a model with no uploads is a no-op"
+    (assert= (upload/cleanup {:a 1 :b "two"}) nil))
+  (test "a model that is not a map is a no-op"
+    (assert= (upload/cleanup 5) nil)))
+
+;; ---- the markup ------------------------------------------------------------
+
+(describe "file-input"
+  (test "names the upload so the client knows where to send the bytes"
+    (let (html (web/template/render (upload/file-input (upload/allow :avatar))))
+      (assert= (includes? html "data-upload=\"avatar\"") true)
+      (assert= (includes? html "type=\"file\"") true)))
+  ; `multiple="false"` is TRUE in HTML — a boolean attribute is on if present at all.
+  (test "multiple is omitted for a single-file upload, not emitted as false"
+    (let (html (web/template/render (upload/file-input (upload/allow :avatar))))
+      (assert= (includes? html "multiple") false)))
+  (test "multiple is present when more than one file is allowed"
+    (let (html (web/template/render (upload/file-input (upload/allow :avatar {:max-entries 3}))))
+      (assert= (includes? html "multiple") true)))
+  (test "the accept list reaches the picker"
+    (let (html (web/template/render (upload/file-input (upload/allow :avatar
+                                                         {:accept [".png" ".jpg"]}))))
+      (assert= (includes? html "accept=\".png,.jpg\"") true)))
+  (test "caller attributes are merged over the defaults"
+    (let (html (web/template/render (upload/file-input (upload/allow :avatar) {:class "picker"})))
+      (assert= (includes? html "class=\"picker\"") true))))
+
+;; ---- the binary frame ------------------------------------------------------
+
+(describe "parse-chunk-frame"
+  (test "splits the length-prefixed ref off the payload"
+    (let (parsed (parse-chunk-frame (bytes/concat [3 97 98 99 7 8])))
+      (assert= (first parsed) "abc")
+      (assert= (vec (seq (first (rest parsed)))) [7 8])))
+  (test "an empty frame is refused"
+    (assert= (parse-chunk-frame (bytes [])) nil))
+  ; the length is read before it is trusted — a declared ref longer than the frame must not
+  ; slice past the end of the buffer
+  (test "a ref length beyond the end of the frame is refused"
+    (assert= (parse-chunk-frame (bytes [9 97 98])) nil))
+  (test "a zero-length ref is refused"
+    (assert= (parse-chunk-frame (bytes [0 1 2])) nil))
+  (test "a ref with no payload parses as an empty chunk"
+    (let (parsed (parse-chunk-frame (bytes [2 97 98])))
+      (assert= (first parsed) "ab")
+      (assert= (count (first (rest parsed))) 0))))
+
+;; ---- end to end: a real session, a real binary frame -----------------------
+
+(deflive (mount (params) {:avatar (upload/allow :avatar {:dir "/tmp/hatch-live-upload-test"})})
+  (render (model)
+    [:div
+      {}
+      (for (e (upload/entries (get model :avatar)))
+        [:span
+          {}
+          (str (upload/entry-client-name e)
+            "@"
+            (upload/entry-percent e)
+            (if (upload/entry-done? e) "!" ""))])]))
+
+(defn masked-frame (opcode payload)
+  "A masked client frame (mask key all zeros, so the masked payload equals the plaintext)."
+  (let (n (count payload))
+    (if (<= n 125)
+      (bytes/concat [(+ 128 opcode) (+ 128 n) 0 0 0 0 payload])
+      (bytes/concat [(+ 128 opcode) (+ 128 126) (bytes/int-> n 2) 0 0 0 0 payload]))))
+
+(defn frame-payload (buf)
+  (if (< (count buf) 2)
+    [:incomplete]
+    (let (len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (< (count buf) (+ header len))
+        [:incomplete]
+        [:ok
+          (string/bytes-> (bytes/slice buf header (+ header len)))
+          (bytes/slice buf (+ header len) (count buf))]))))
+
+(defn read-frame (sock buf)
+  (match (frame-payload buf)
+    ([:ok text remainder] [text remainder])
+    ([:incomplete] (receive
+                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+                     ([:tcp-closed ^sock] [:closed (bytes [])])
+                     (after 10000 [:timeout (bytes [])])))))
+
+(defn expect-frame (sock buf)
+  (let (result (read-frame sock buf))
+    (when (or (= (first result) :timeout) (= (first result) :closed))
+      (error "test: no frame from the live session (" (->string (first result)) ")"))
+    result))
+
+(describe "an upload over a real live session"
+  :isolated
+  ; Everything above this line is a function over a model. This is the part that isn't: a
+  ; binary frame arriving on a socket, reaching receive-chunk, and coming back as a diff.
+  (test "init, one binary chunk and done produce a 100% entry in the rendered view"
+    (fresh-dir)
+    (let (ls (tcp/listen "127.0.0.1" 0)
+          port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
+      (let (client (tcp/connect "127.0.0.1" port)
+            server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp/set-binary server true)
+        (tcp/set-binary client true)
+        (let (request {:method "GET" :path "/live/ws/up" :query "" :params {} :headers {} :body ""}
+              entry {:spec (fn () (live-spec)) :session nil}
+              pid (spawn (receive ([:go] (start-session server request entry)))))
+          (tcp/controlling-process server pid)
+          (send pid [:go])
+          ; join → the initial render
+          (tcp/send client (masked-frame 1 (string/->bytes "{\"event\":\"join\",\"params\":{}}")))
+          (let (rest1 (second (expect-frame client (bytes [])))
+                ; offer one 3-byte file; the session answers with a diff and then the refs
+                _ (tcp/send client
+                    (masked-frame 1
+                      (string/->bytes (str "{\"event\":\"upload-init\",\"name\":\"avatar\","
+                                        "\"files\":[{\"name\":\"a.bin\",\"size\":3,\"type\":\"application/octet-stream\"}]}"))))
+                after-diff (expect-frame client rest1)
+                ready (expect-frame client (second after-diff))
+                ready-text (first ready))
+            ; the refs frame names the upload and carries one ref
+            (assert= (includes? ready-text "\"event\":\"upload-ready\"") true)
+            (assert= (includes? ready-text "\"name\":\"avatar\"") true)
+            (let (decoded (web/live/json-decode ready-text)
+                  refs (if (map? decoded) (get decoded "refs") (list))
+                  ref (first refs)
+                  ref-bytes (string/->bytes ref)
+                  ; the binary channel: [refLength][ref][bytes]
+                  chunk (bytes/concat [(count ref-bytes) ref-bytes (bytes [7 8 9])])
+                  _ (tcp/send client (masked-frame 2 chunk))
+                  chunk-diff (expect-frame client (second ready))
+                  _2 (tcp/send client
+                       (masked-frame 1
+                         (string/->bytes (str "{\"event\":\"upload-done\",\"ref\":\"" ref "\"}"))))
+                  done-diff (first (expect-frame client (second chunk-diff))))
+              ; the chunk landed and the view re-rendered showing the file at 100%, and the
+              ; `done` frame flips the marker — which is also why the view renders `done?` at
+              ; all: a diff carrying no change is correctly not sent, so a test that asserted
+              ; on an unchanged render would wait for a frame the server is right to withhold
+              (assert= (includes? (first chunk-diff) "a.bin@100") true)
+              (assert= (includes? (first chunk-diff) "a.bin@100!") false)
+              (assert= (includes? done-diff "a.bin@100!") true))
+            (tcp/close client)
+            (tcp/close ls)))))))
+
+;; ---- findings from the review pass -----------------------------------------
+
+(describe "a chunk arriving after the upload finished is refused"
+  ; The size cap bounds it either way, so this is not about disk — it is that the bytes would
+  ; land in a file a handler may be about to consume, turning a complete upload into a corrupt
+  ; one on a frame the client had no business sending.
+  (test "the file keeps the bytes it had when it finished"
+    (let ([m0 ref] (offer-one (avatar) "a.bin" 3)
+          m1 (upload/receive-chunk m0 ref (bytes [1 2 3]))
+          m2 (upload/finish m1 ref)
+          m3 (upload/receive-chunk m2 ref (bytes [9 9 9]))
+          e (first (upload/entries (get m3 :avatar))))
+      (assert= (upload/entry-received e) 3)
+      (assert= (upload/entry-done? e) true)
+      (assert= (count (file/slurp-bytes (upload/entry-path e))) 3))))
+
+(describe "cancelling with a nil ref"
+  ; A refused entry carries no ref, so `(= nil nil)` would have matched every one of them —
+  ; a handler reading an absent param would delete the lot in one call.
+  (test "matches nothing rather than every refused entry"
+    (let (model (avatar {:accept [".png"] :max-entries 3})
+          [m1 _r] (offer-one model "a.txt" 1)
+          m2 (upload/cancel m1 :avatar nil))
+      (assert= (count (upload/entries (get m2 :avatar))) 1))))
+
+(describe "an empty file whose spool cannot be written is failed, not marked done"
+  ; Every other write path checks `append-spool`; the zero-byte touch did not, so a missing
+  ; :dir or a full disk marked the entry done behind a path with no file at the end of it —
+  ; defeating the one guarantee `consume` makes about a completed entry.
+  (test "an unwritable spool dir fails the entry rather than reporting success"
+    (let (model {:avatar (upload/allow :avatar {:dir "/nonexistent-hatch-dir/deeper"})}
+          [m0 ref] (let ([next refs] (upload/offer model
+                                       :avatar (list {"name" "empty.txt" "size" 0})))
+                     [next (first refs)])
+          m1 (upload/finish m0 ref)
+          e (first (upload/entries (get m1 :avatar))))
+      (assert= (upload/entry-done? e) false)
+      (assert= (includes? (upload/entry-error e) "could not be written") true)
+      (assert= (upload/entry-path e) nil))))

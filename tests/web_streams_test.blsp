@@ -1,0 +1,242 @@
+;; `web/streams` — collections a live view renders without holding.
+;;
+;; The property under test throughout is an absence: after a render, the server is NOT holding
+;; the items. Most of this file is pure functions over a model; the end-to-end case at the
+;; bottom is the one that can only be shown with a real session, because "the model was emptied
+;; after the frame went out" is a fact about the session loop and not about any one function.
+(defmodule web-streams-test
+  (:alias web/streams :as streams)
+  (:use web/live)
+  (:alias web/template)
+  (:use http/websocket)
+  (:use test))
+
+(defn msg (id body) {:id id :body body})
+
+;; ---- the value -------------------------------------------------------------
+
+(describe "new"
+  (test "starts empty"
+    (assert= (empty? (streams/items (streams/new :messages))) true))
+  (test "can be seeded, which is what a reconnect needs"
+    ; a reconnect re-runs mount and the stream starts over, so mount is the only place that
+    ; can put the items back
+    (let (s (streams/new :messages [(msg "m-1" "one") (msg "m-2" "two")]))
+      (assert= (count (streams/items s)) 2)))
+  (test "a stream is recognised by identity, not shape"
+    (assert= (streams/stream? (streams/new :messages)) true)
+    (assert= (streams/stream? {:name :messages :pending (list)}) false))
+  (test "items answers empty for nil, so a template need not guard an unset key"
+    (assert= (streams/items nil) (list))))
+
+(describe "insert, prepend and insert-at"
+  (test "insert appends, marked to append in the browser too"
+    (let (s (streams/insert (streams/new :m) (msg "a" "A")))
+      (assert= (count (streams/items s)) 1)
+      (assert= (get (first (streams/items s)) :hatch/at) -1)))
+  (test "prepend marks the item for the top"
+    (let (s (streams/prepend (streams/new :m) (msg "a" "A")))
+      (assert= (get (first (streams/items s)) :hatch/at) 0)))
+  (test "insert-at carries the position through"
+    (let (s (streams/insert-at (streams/new :m) (msg "a" "A") 3))
+      (assert= (get (first (streams/items s)) :hatch/at) 3)))
+  (test "several inserts accumulate until the next render"
+    (let (s (streams/insert (streams/insert (streams/new :m) (msg "a" "A")) (msg "b" "B")))
+      (assert= (mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"]))))
+
+;; An id is the row's identity in the browser — the DOM id the client morphs against and the
+;; handle `delete` names. Without one the row can never be updated and never removed; it would
+;; simply accumulate, and nothing would say why.
+(describe "an item must carry an id"
+  (defn raises? (thunk)
+    (check-allow :discarded-catch (try (do (thunk) false) (catch _ true))))
+  (test "insert refuses an item with no :id"
+    (assert= (raises? (fn () (streams/insert (streams/new :m) {:body "no id"}))) true))
+  (test "insert refuses a non-map item"
+    (assert= (raises? (fn () (streams/insert (streams/new :m) "just a string"))) true))
+  (test "prepend and insert-at refuse it too"
+    (assert= (raises? (fn () (streams/prepend (streams/new :m) {:body "x"}))) true)
+    (assert= (raises? (fn () (streams/insert-at (streams/new :m) {:body "x"} 0))) true))
+  (test "reset refuses a bad item in the middle of the list"
+    (assert= (raises? (fn () (streams/reset (streams/new :m) [(msg "a" "A") {:body "x"}])))
+      true))
+  (test "the message says what is missing and why it matters"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do (streams/insert (streams/new :m) {:body "x"}) "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message ":id") true))))
+
+(describe "delete"
+  (test "records the id rather than touching the items"
+    (let (s (streams/delete (streams/insert (streams/new :m) (msg "a" "A")) "a"))
+      ; the insert is still pending — a delete says something about the BROWSER, not about
+      ; what this render is sending
+      (assert= (count (streams/items s)) 1)
+      (assert= (vec (streams/pending-deletes {:m s})) ["a"])))
+  (test "an id is stringified, so a keyword or a number works"
+    (assert= (vec (streams/pending-deletes {:m (streams/delete (streams/new :m) 42)})) ["42"])))
+
+(describe "reset"
+  (test "replaces the pending items and raises the reset flag"
+    (let (s (streams/reset (streams/insert (streams/new :m) (msg "old" "O"))
+              [(msg "a" "A") (msg "b" "B")]))
+      (assert= (mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"])
+      (assert= (get (streams/container s) :data-update) "stream-reset")))
+  (test "an empty reset clears the browser"
+    (let (s (streams/reset (streams/new :m)))
+      (assert= (empty? (streams/items s)) true)
+      (assert= (get (streams/container s) :data-update) "stream-reset"))))
+
+;; ---- what the view renders -------------------------------------------------
+
+(describe "container"
+  (test "names the element and asks the client to merge rather than reconcile"
+    (let (attrs (streams/container (streams/new :messages)))
+      (assert= (get attrs :id) "messages")
+      (assert= (get attrs :data-update) "stream")))
+  (test "caller attributes merge over the defaults"
+    (assert= (get (streams/container (streams/new :m) {:class "feed"}) :class) "feed"))
+  (test "the reset mode is for exactly one render"
+    ; flush clears the flag, so the patch after a reset merges instead of emptying again —
+    ; without which a second render would wipe the list the first one just filled
+    (let (model {:m (streams/reset (streams/new :m) [(msg "a" "A")])}
+          flushed (streams/flush model))
+      (assert= (get (streams/container (get model :m)) :data-update) "stream-reset")
+      (assert= (get (streams/container (get flushed :m)) :data-update) "stream"))))
+
+(describe "item-attrs"
+  (test "the id is the row's DOM id"
+    (assert= (get (streams/item-attrs (msg "m-1" "x")) :id) "m-1"))
+  (test "the position rides along"
+    (assert= (get (streams/item-attrs {:id "a" :hatch/at 0}) :data-stream-at) "0")
+    (assert= (get (streams/item-attrs {:id "a"}) :data-stream-at) "-1"))
+  (test "caller attributes merge over"
+    (assert= (get (streams/item-attrs (msg "a" "A") {:class "row"}) :class) "row")))
+
+;; ---- the session's half ----------------------------------------------------
+
+(describe "flush is what makes a stream cost nothing"
+  (test "empties the pending items and the deletions"
+    (let (model {:m (streams/delete (streams/insert (streams/new :m) (msg "a" "A")) "b")
+                 :other 1}
+          flushed (streams/flush model))
+      (assert= (empty? (streams/items (get flushed :m))) true)
+      (assert= (empty? (streams/pending-deletes flushed)) true)))
+  (test "leaves everything else in the model alone"
+    (assert= (get (streams/flush {:m (streams/new :m) :count 7}) :count) 7))
+  (test "a model with no streams is returned unchanged"
+    (assert= (streams/flush {:a 1 :b "two"}) {:a 1 :b "two"}))
+  (test "a model that is not a map is returned unchanged"
+    (assert= (streams/flush 5) 5)))
+
+(describe "holds-streams? is the cheap guard the session checks first"
+  (test "true only when a stream is actually there"
+    (assert= (streams/holds-streams? {:m (streams/new :m)}) true)
+    (assert= (streams/holds-streams? {:a 1}) false)
+    (assert= (streams/holds-streams? "not a map") false)))
+
+(describe "pending-deletes gathers across every stream in the model"
+  (test "two streams, both with deletions"
+    (let (model {:a (streams/delete (streams/new :a) "x")
+                 :b (streams/delete (streams/delete (streams/new :b) "y") "z")})
+      (assert= (count (streams/pending-deletes model)) 3)))
+  (test "nothing to delete answers empty"
+    (assert= (empty? (streams/pending-deletes {:a (streams/new :a)})) true)))
+
+;; ---- end to end: the server really does forget ------------------------------
+
+(deflive (mount (params) {:feed (streams/new :feed [(msg "m-1" "first")])})
+  (render (model)
+    [:ul
+      (streams/container (get model :feed))
+      (for (m (streams/items (get model :feed)))
+        [:li (streams/item-attrs m) (get m :body)])])
+  (on "add"
+    (params model)
+    (update model :feed (fn (s) (streams/insert s (msg (get params "id") (get params "body"))))))
+  (on "drop"
+    (params model)
+    (update model :feed (fn (s) (streams/delete s (get params "id"))))))
+
+(defn masked-text-frame (s)
+  (let (b (string/->bytes s))
+    (if (<= (count b) 125)
+      (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])
+      (bytes/concat [129 (+ 128 126) (bytes/int-> (count b) 2) 0 0 0 0 b]))))
+
+(defn frame-payload (buf)
+  (if (< (count buf) 2)
+    [:incomplete]
+    (let (len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (< (count buf) (+ header len))
+        [:incomplete]
+        [:ok
+          (string/bytes-> (bytes/slice buf header (+ header len)))
+          (bytes/slice buf (+ header len) (count buf))]))))
+
+(defn read-frame (sock buf)
+  (match (frame-payload buf)
+    ([:ok text remainder] [text remainder])
+    ([:incomplete] (receive
+                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+                     ([:tcp-closed ^sock] [:closed (bytes [])])
+                     (after 10000 [:timeout (bytes [])])))))
+
+(defn expect-frame (sock buf)
+  (let (result (read-frame sock buf))
+    (when (or (= (first result) :timeout) (= (first result) :closed))
+      (error "test: no frame from the live session (" (->string (first result)) ")"))
+    result))
+
+(describe "a stream over a real live session"
+  :isolated
+  ; The whole point, and the only thing a unit test cannot show: after the frame carrying a
+  ; row goes out, the server is no longer holding that row. A second event re-renders and the
+  ; first row is simply not in the markup — the browser still has it.
+  (test "each render carries only what was added since the last one"
+    (let (ls (tcp/listen "127.0.0.1" 0)
+          port (or (tcp/local-port ls) (error "test: the listener reported no local port")))
+      (let (client (tcp/connect "127.0.0.1" port)
+            server (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp/set-binary server true)
+        (tcp/set-binary client true)
+        (let (request {:method "GET"
+                       :path "/live/ws/feed"
+                       :query ""
+                       :params {}
+                       :headers {}
+                       :body ""}
+              entry {:spec (fn () (live-spec)) :session nil}
+              pid (spawn (receive ([:go] (start-session server request entry)))))
+          (tcp/controlling-process server pid)
+          (send pid [:go])
+          (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+          (let (join (expect-frame client (bytes [])))
+            ; the seeded row is in the join, and the container asks the client to merge
+            (assert= (includes? (first join) "first") true)
+            (assert= (includes? (first join) "stream") true)
+            (tcp/send client
+              (masked-text-frame "{\"event\":\"event\",\"name\":\"add\",\"params\":{\"id\":\"m-2\",\"body\":\"second\"}}"))
+            (let (diff (expect-frame client (second join)))
+              (assert= (includes? (first diff) "second") true)
+              ;; and the seeded row is GONE from the wire — the server forgot it the moment
+              ;; the join went out. The browser still has it; the session does not.
+              (assert= (includes? (first diff) "first") false)
+              (tcp/send client
+                (masked-text-frame "{\"event\":\"event\",\"name\":\"drop\",\"params\":{\"id\":\"m-2\"}}"))
+              ;; a delete cannot be rendered — the server does not know what is left — so it
+              ;; arrives as an instruction naming the id
+              (let (after-drop (expect-frame client (second diff))
+                    text (first after-drop)
+                    ;; the drop produces no markup change, so the delete effect may be the very
+                    ;; next frame or may follow an empty diff; read one more if needed
+                    effect (if (includes? text "stream-delete")
+                             text
+                             (first (expect-frame client (second after-drop)))))
+                (assert= (includes? effect "stream-delete") true)
+                (assert= (includes? effect "m-2") true))))
+          (tcp/close client)
+          (tcp/close ls))))))
