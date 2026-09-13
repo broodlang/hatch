@@ -146,17 +146,16 @@
 
 ;; ---- end to end: the server really does forget ------------------------------
 
-(deflive (mount (params) {:feed (streams/new :feed [(msg "m-1" "first")])})
+(deflive
+  (mount (params) {:feed (streams/new :feed [(msg "m-1" "first")])})
   (render (model)
     [:ul
       (streams/container (get model :feed))
       (for (m (streams/items (get model :feed)))
         [:li (streams/item-attrs m) (get m :body)])])
-  (on "add"
-    (params model)
+  (on "add" (params model)
     (update model :feed (fn (s) (streams/insert s (msg (get params "id") (get params "body"))))))
-  (on "drop"
-    (params model)
+  (on "drop" (params model)
     (update model :feed (fn (s) (streams/delete s (get params "id"))))))
 
 (defn masked-text-frame (s)

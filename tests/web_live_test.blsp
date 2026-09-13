@@ -401,7 +401,8 @@
 ;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
 ;; socket stays open. Each of those reads is now a name.
 
-(deflive (mount (params) {:n 0})
+(deflive
+  (mount (params) {:n 0})
   (render (model) [:p {} (str (get model :n))])
   (tick 1000 (model) (assoc model :n (inc (get model :n)))))
 
