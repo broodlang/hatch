@@ -52,6 +52,8 @@
   (:alias web/cluster)
   (:use set)
   (:alias web/session)
+  ; new-counters / bump-counter / counter-value / rate-percent — the shared tally vocabulary
+  (:alias web/metrics)
   (:alias table))
 
 ;; ---- validators -------------------------------------------------------------
@@ -206,14 +208,43 @@
     (let (raw (get (or (conn-headers conn) {}) :cookie))
       (and (string? raw) (includes? raw name)))))
 
-(defn merge-vary (existing token)
-  "`existing` with `token` added, case-insensitively, or just `token` when there is none."
+(defn- merge-token (existing token)
+  "`existing` comma-separated list with `token` added once, case-insensitively."
   (if (or (nil? existing) (= existing ""))
     token
     (if (any? (map (string/split existing ",") (fn (t) (string/lower (trim-if-needed t))))
           (fn (t) (= t (string/lower token))))
       existing
       (str existing ", " token))))
+
+(defn merge-vary (existing token)
+  "`existing` with `token` added, case-insensitively, or just `token` when there is none."
+  (merge-token existing token))
+
+(defn forbid-transform (resp)
+  "Add the `no-transform` cache directive to `resp` when it carries a validator.
+
+  An `ETag` names one exact sequence of bytes (RFC 9110 §8.8.3). An intermediary that
+  re-encodes the body — a CDN or edge proxy gzipping an identity response is the ordinary
+  case — changes those bytes while forwarding the tag that described the old ones. The client
+  then holds a gzip body under an identity tag, and its next `If-None-Match` can be answered
+  304 for a representation it does not actually have.
+
+  `no-transform` is the directive that exists to forbid precisely this (RFC 9111 §5.2.2.6):
+  it tells every intermediary not to alter the payload. hatch does its own content
+  negotiation and compression, with tags that name the coding, so there is nothing an
+  intermediary can add by re-encoding — only a validator it can invalidate.
+
+  Observed rather than theorised: `brood.fly.dev` served an identity stylesheet that Fly's
+  edge then gzipped, keeping hive's identity ETag. Merged rather than set, so a handler's own
+  `Cache-Control` (`no-cache`, `immutable`, a max-age) survives alongside it."
+  (let (headers (get resp :headers {}))
+    (if (nil? (get headers :etag))
+      resp
+      (assoc resp
+        :headers
+          (assoc headers
+            :cache-control (merge-token (get headers :cache-control) "no-transform"))))))
 
 (defn put-cache-control (resp value)
   "Set `Cache-Control` on a response map, without clobbering one a handler already chose."
@@ -368,14 +399,13 @@
 ;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
 ;; unknowable: a cache that never hits and a cache that is never asked look identical from
 ;; the outside, and both look like a cache that is working.
-(def- *counters* (table/new))
+(def- *counters* (web/metrics/new-counters))
 
-(defn- bump (k)
-  (table/put *counters* k (+ 1 (table/get *counters* k 0))))
+(defn- bump (k) (web/metrics/bump-counter *counters* k))
 
 (defn counter (k)
   "One cache counter (`:hits`, `:misses`), or 0."
-  (table/get *counters* k 0))
+  (web/metrics/counter-value *counters* k))
 
 (defn stats ()
   "A snapshot of what the cache is holding and doing, for a dashboard or a probe.
@@ -390,7 +420,7 @@
      :max-compressed *max-compressed*
      :hits hits
      :misses misses
-     :hit-rate (if (= asked 0) nil (math/round-to (/ (* 100.0 hits) asked) 1))
+     :hit-rate (web/metrics/rate-percent hits asked)
      :node (check-allow :discarded-catch (try (node/name) (catch _e :nonode)))
      :peers (into [] (web/cluster/remote-nodes))
      :listening? (not (nil? (check-allow :discarded-catch

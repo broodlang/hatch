@@ -184,10 +184,17 @@
                                     {:cookie "_hatch_session=abc"})
                                :headers)
                           :cache-control))
-      (assert= cache-control "private, no-cache")))
+      (assert= cache-control "private, no-cache, no-transform")))
 
-  (test "no :freshness leaves Cache-Control to the handler"
-    (assert= (get (get (respond {:router html-router}) :headers) :cache-control) nil)))
+  ;; `no-transform` is not a freshness decision — it forbids an intermediary re-encoding
+  ;; bytes the ETag names, and says nothing about whether or how long the response may be
+  ;; reused. So the handler still owns freshness here; it simply is not the only directive.
+  (test "no :freshness leaves the freshness policy to the handler"
+    (assert= (get (get (respond {:router html-router}) :headers) :cache-control) "no-transform"))
+
+  (test ":no-transform false omits the directive entirely"
+    (assert= (get (get (respond {:router html-router :no-transform false}) :headers) :cache-control)
+      nil)))
 
 (describe "port"
   (test "an unset HATCH_PORT falls back"
@@ -240,12 +247,19 @@
 
   (test "no etag still compresses, and caches nothing"
     ;; A response with no validator has nothing to key on, and must still go out compressed.
-    (let (before (count (keys (web/cache/compressed-entries)))
-          out (compress-response (conn-accepting "br")
+    ;;
+    ;; Asserted by the SHAPE of the keys, not by a before/after count. The compressed store
+    ;; is one table shared by the whole process, and this suite runs concurrently — so any
+    ;; absolute count races every other test that compresses something, which made this fail
+    ;; about two runs in three. An untagged response, if it cached at all, could only key
+    ;; itself on a nil tag; that no such key exists is the actual claim, and it is true
+    ;; regardless of what else is running.
+    (let (out (compress-response (conn-accepting "br")
                 {:status 200 :headers {} :body long-body}
                 {}))
       (assert= (get (get out :headers) :content-encoding) "br")
-      (assert= (count (keys (web/cache/compressed-entries))) before))))
+      (assert= (any? (keys (web/cache/compressed-entries)) (fn (key) (nil? (first key))))
+        false))))
 
 ;; A tag earned under one coding must not satisfy a request for another: a client holding a
 ;; br entity, told 304 over a gzip connection, would decode the wrong bytes.
@@ -270,7 +284,8 @@
     (let (config {:router html-router :freshness {:max-age 60 :stale-for 600}}
           tag (get (get (respond config) :headers) :etag)
           headers (get (respond config {:if-none-match tag}) :headers))
-      (assert= (get headers :cache-control) "public, max-age=60, stale-while-revalidate=600")
+      (assert= (get headers :cache-control)
+        "public, max-age=60, stale-while-revalidate=600, no-transform")
       (assert= (includes? (get headers :vary) "Cookie") true)))
 
   (test "a signed-in client's 304 stays private"
@@ -278,13 +293,13 @@
           tag (get (get (respond config {:cookie "_hatch_session=abc"}) :headers) :etag)
           headers (get (respond config {:cookie "_hatch_session=abc" :if-none-match tag})
                     :headers))
-      (assert= (get headers :cache-control) "private, no-cache")))
+      (assert= (get headers :cache-control) "private, no-cache, no-transform")))
 
   (test "a response that sets a cookie is never public — sign-in is a 200 with a Set-Cookie"
     (let (login (fn (conn)
                   (send-resp (put-resp-header conn :set-cookie "_hatch_session=x") 200 "<p>in</p>"))
           headers (get (respond {:router login :freshness {:max-age 60 :stale-for 600}}) :headers))
-      (assert= (get headers :cache-control) "private, no-cache"))))
+      (assert= (get headers :cache-control) "private, no-cache, no-transform"))))
 
 ;; ---- HSTS -------------------------------------------------------------------
 ;;
@@ -412,3 +427,40 @@
     (let (resp ((adapter {:router exploding-router :static {:at "/assets"}}) (request {}
                                                                                "/assets/brood_live.js")))
       (assert= (get resp :status) 200))))
+
+;; An ETag names one exact sequence of bytes. An intermediary that re-encodes the body while
+;; forwarding the tag hands a client a representation the tag does not describe, and its next
+;; If-None-Match can then be answered 304 for bytes it does not hold.
+;;
+;; Observed, not theorised: brood.fly.dev served an identity stylesheet that Fly's edge
+;; gzipped on the way out, keeping hive's identity ETag. `no-transform` (RFC 9111 §5.2.2.6)
+;; is the directive that forbids exactly that.
+(describe "no-transform protects a validator from an intermediary"
+  (defn- exploding-router (conn) (error "the router must not be reached for a static path"))
+
+  (test "a static response carries it, alongside the cache policy web/static chose"
+    (let (cache-control (get (get ((adapter {:router exploding-router :static true}) (request {}
+                                                                                       "/static/brood_live.js"))
+                               :headers)
+                          :cache-control))
+      (is (includes? cache-control "no-transform"))
+      ;; web/static's own directive survives — merged, not replaced
+      (is (includes? cache-control "no-cache"))))
+
+  (test "a 304 carries it too — that response is where a client refreshes its metadata"
+    (let (config {:router html-router}
+          tag (get (get (respond config) :headers) :etag)
+          resp (respond config {:if-none-match tag}))
+      (assert= (get resp :status) 304)
+      (is (includes? (get (get resp :headers) :cache-control) "no-transform"))))
+
+  ;; Narrow on purpose: with no validator there is nothing for a transformation to
+  ;; invalidate, so there is nothing to forbid.
+  (test "a response with no validator is left alone"
+    (assert= (get (web/cache/forbid-transform {:status 200 :headers {} :body "x"}) :headers)
+      {}))
+
+  (test "and the directive is never added twice"
+    (let (once (web/cache/forbid-transform {:status 200 :headers {:etag "\"t\""} :body "x"})
+          twice (web/cache/forbid-transform once))
+      (assert= (get (get twice :headers) :cache-control) "no-transform"))))

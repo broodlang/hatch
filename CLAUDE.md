@@ -148,7 +148,9 @@ src/
                       last a BucketStore ability); network-key buckets IPv6 by /64
     logger.blsp     — HTTP access log: the [:hatch :request :stop] telemetry http/server
                       already emits, as one structured line each (attach-access-log)
-    metrics.blsp    — per-route latency histogram + status classes
+    metrics.blsp    — per-route latency histogram + status classes; also the shared counter
+                      vocabulary (new-counters/bump-counter/rate-percent) cache and
+                      ratelimit tally with
     dashboard.blsp  — the diagnostics page rendering metrics/cache/ratelimit/cluster counters
     stream.blsp     — Server-Sent Events over chunked streaming responses
     job.blsp        — background work PACED so it cannot starve request serving on a

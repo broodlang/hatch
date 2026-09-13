@@ -93,7 +93,9 @@
   (:alias web/auth)
   ; emit — a rejection is worth seeing; web/metrics and a dashboard read this
   (:alias telemetry)
-  ; the counters behind `stats`
+  ; new-counters / bump-counter / counter-value / rate-percent — shared with web/cache, so
+  ; the "a rate over no traffic is nil, not zero" rule has one implementation
+  (:alias web/metrics)
   (:alias table))
 
 ; ---- the bucket process: key -> {:tokens float :ts ms-epoch} ----
@@ -169,10 +171,9 @@
 ;; both look like one that is working. Kept here rather than derived from telemetry so the
 ;; numbers exist whether or not an app attached a listener.
 
-(def- *counters* (table/new))
+(def- *counters* (web/metrics/new-counters))
 
-(defn- bump (k)
-  (table/put *counters* k (+ 1 (table/get *counters* k 0))))
+(defn- bump (k) (web/metrics/bump-counter *counters* k))
 
 (defn bucket-count ()
   "How many keys the in-memory store currently holds, or nil if it does not answer promptly.
@@ -197,19 +198,17 @@
 
   `:buckets` is nil when the limiter does not answer promptly — it fails open, so a reader
   that cannot reach it should say so rather than print a confident zero."
-  (let (allowed (table/get *counters* :allowed 0)
-        denied (table/get *counters* :denied 0)
+  (let (allowed (web/metrics/counter-value *counters* :allowed)
+        denied (web/metrics/counter-value *counters* :denied)
         total (+ allowed denied))
     {:allowed allowed
      :denied denied
-     :deny-rate (if (= total 0) nil (math/round-to (* 100.0 (/ denied (* 1.0 total))) 1))
+     :deny-rate (web/metrics/rate-percent denied total)
      :buckets (bucket-count)}))
 
 (defn reset-stats ()
   "Zero the counters (tests, and a dashboard that wants a fresh window)."
-  (table/put *counters* :allowed 0)
-  (table/put *counters* :denied 0)
-  nil)
+  (web/metrics/reset-counters *counters* [:allowed :denied]))
 
 ; ---- the store seam ----
 

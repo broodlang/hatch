@@ -119,8 +119,18 @@
 
 (defn- secured (conn resp config headers)
   "The baseline headers, plus HSTS — which depends on the transport and so cannot live in
-  the flat default map."
-  (hsts-header conn (security-headers resp headers) (get config :hsts *default-hsts*)))
+  the flat default map — plus `no-transform` on anything carrying a validator.
+
+  `no-transform` rides here because this is the last step every response passes through, so
+  the directive describes the bytes actually going out. See `web/cache/forbid-transform`:
+  hatch has already negotiated and tagged the representation, so an intermediary re-encoding
+  it can only invalidate the tag. `:no-transform false` opts out."
+  (let (secured-resp (hsts-header conn
+                       (security-headers resp headers)
+                       (get config :hsts *default-hsts*)))
+    (if (= (get config :no-transform) false)
+      secured-resp
+      (cache/forbid-transform secured-resp))))
 
 (defn security-headers (resp headers)
   "Merge baseline security `headers` into `resp`, without clobbering any a handler already
@@ -394,6 +404,9 @@
                            (default `max-age=31536000`, `false` for none). See
                            `hsts-header` for why `includeSubDomains` is not defaulted.
     `:compress`          — `{:min-bytes 256}`, or `false` to send bodies uncompressed.
+    `:no-transform`      — add the `no-transform` cache directive to any response carrying a
+                           validator, so an intermediary cannot re-encode bytes an ETag
+                           already names (default on; `false` to omit).
     `:static`            — serve files ahead of the router. `true` mounts `./static` at
                            `/static` and adds hatch's own bundled clients
                            (`brood_live.js`, `brood_webmcp.js`) from the package; a map

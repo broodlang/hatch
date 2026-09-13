@@ -407,6 +407,47 @@ that would have surfaced this years earlier:
 Verified in an actual release binary, run from a directory with no source tree: 404 without
 the copy, and 200 with the real 24,955 bytes once it is there.
 
+**0.18.0: `no-transform`, and one counter vocabulary.** Two loose ends from the 0.17 work,
+both closed.
+
+An `ETag` names one exact sequence of bytes (RFC 9110 §8.8.3), and hatch went to some trouble
+in 0.17.0 to stop its own pipeline re-encoding a response that already carried one. An
+intermediary does the same thing from outside: `brood.fly.dev` served an identity stylesheet
+that Fly's edge gzipped on the way out, forwarding hive's identity ETag with it — so a client
+holds a gzip body under a tag describing the uncompressed one, and its next `If-None-Match`
+can be answered 304 for a representation it does not have. The origin was correct; the hop
+after it was not.
+
+HTTP has the directive for this. `Cache-Control: no-transform` (RFC 9111 §5.2.2.6) forbids an
+intermediary altering the payload, and `web/cache/forbid-transform` adds it to any response
+carrying a validator — merged, so a handler's own `no-cache`, `immutable` or `max-age`
+survives beside it. It rides in `secured`, the last step every response passes through, so the
+directive describes the bytes actually going out; `:no-transform false` opts out. There is
+nothing an intermediary can add by re-encoding a hatch response — the content negotiation and
+the compression already happened here, under tags that name the coding — only a validator it
+can invalidate.
+
+**The counters.** 0.17.0 recorded a decision not to share `web/cache`'s and
+`web/ratelimit`'s one-line `bump`, on the grounds that a helper taking the table would
+lengthen every call site to remove one duplicated line. That was the wrong boundary to look
+at. The duplication worth removing was never the increment — it was the RATE, and the rule
+behind it: a rate over no traffic is **nil, not zero**, because a cache nobody asked and a
+cache that never hits both read as 0%, as do a limiter nobody reached and one that never
+denies. Each module had written that rule out in its own prose and computed it with its own
+arithmetic — `(/ (* 100.0 hits) asked)` against `(* 100.0 (/ denied (* 1.0 total)))`. Two
+spellings of one rule is how one of them gets a fix and the other does not.
+
+So `web/metrics` — the module whose subject is counting what happened — now owns
+`new-counters` / `bump-counter` / `counter-value` / `reset-counters` and, the point of the
+exercise, `rate-percent`, with the rule stated once and four doctests pinning it. Each module
+still keeps its own table: they are separate namespaces, not one shared tally.
+
+A flaky test went with it. `web_endpoint_test`'s "no etag caches nothing" compared an
+absolute count of the process-wide compressed store before and after — which races every
+other test that compresses something, and failed about two runs in three once the suite grew.
+It asserts the shape of the keys now: an untagged response could only key itself on a nil
+tag, and that no such key exists is true regardless of what else is running.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
