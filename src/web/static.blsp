@@ -592,15 +592,42 @@
   (str *hatch-root* "/static/" file))
 
 (defn bundled-source (file)
-  "The bundled asset's source text, or nil if it can't be located — a missing client should
-  degrade to a page without it, not take the request down."
+  "The bundled asset's source text read from disk, or nil if it can't be located.
+
+  Correct only where hatch's own source tree exists — which is dev, and the build. At
+  RUNTIME in a released app it is neither: prefer `embed-bundled`, which is the macro that
+  makes that distinction go away."
   (check-allow :discarded-catch (try (file/slurp (bundled-path file)) (catch _ nil))))
 
-(defn bundled-js-handler (file)
-  "A conn handler serving one of hatch's bundled JavaScript clients through the static cache
-  pipeline: a content ETag (so the browser gets a bodyless 304 once it holds the file),
-  `nosniff`, and `no-cache`. These are served at fixed, non-fingerprinted paths, so they
-  always revalidate — cheap, and never stale (a stale copy fetched under the old codepoint
-  Content-Length bug is what broke live parsing until the cache was cleared)."
+;; WHY A PACKAGE ASSET CAN BE ABSENT, which is not obvious and cost a production bug.
+;;
+;; `nest release` bundles the manifest and every `src/**/*.blsp` — sources, and only sources.
+;; hatch's `static/` is data, so it does not travel. Inside that bundle
+;; `reflect/current-file` answers a virtual `<bundle>/hatch/web/static.blsp`, which has no
+;; `/src/` in it, so the suffix-strip above misses and `string/replace` hands back the whole
+;; path unchanged — `*hatch-root*` becomes the file's own name and every bundled path below
+;; it is nonsense. Neither a load-time `def` nor a macro escapes this: a bundle macroexpands
+;; at BOOT, inside itself, where the files have never existed.
+;;
+;; So in a released app these reads answer nil, and that is a fact to design around rather
+;; than defeat. `web/endpoint`'s `:static` stage falls through to the app's own static
+;; directory when the package copy is missing, so a release that puts the clients there —
+;; one `cp` in the image build — serves them; and `bundled-js-handler` answers 404 rather
+;; than an empty 200, so an app that has not done so finds out.
+
+(defn bundled-js-handler (file source)
+  "A conn handler serving hatch's bundled JavaScript `source` as `file`, through the static
+  cache pipeline: a content ETag (so the browser gets a bodyless 304 once it holds the file),
+  `nosniff`, and `no-cache`. These sit at fixed, non-fingerprinted paths, so they always
+  revalidate — cheap, and never stale (a stale copy fetched under the old codepoint
+  Content-Length bug is what broke live parsing until the cache was cleared).
+
+  `source` is passed in rather than read here, so it is the caller's load-time `def` — see
+  `bundled-source`. A nil `source` answers **404**, not an empty 200. The empty 200 is what
+  hid this in production for as long as it did: it has a status that says yes, a content-type
+  that says JavaScript, and an ETag over the emptiness, so every log line and every probe
+  reports a served file. A 404 is a thing someone notices."
   (fn (conn)
-    (serve-body conn "text/javascript; charset=utf-8" (or (bundled-source file) "") file)))
+    (if (nil? source)
+      (not-found-resp conn)
+      (serve-body conn "text/javascript; charset=utf-8" source file))))

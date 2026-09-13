@@ -1,0 +1,8 @@
+(defmodule zz-probe2-test (:use test) (:alias web/static) (:alias web/live))
+(describe "probe"
+  (test "what does a missing bundled file answer?"
+    (io/puts (str "  missing -> " (->string (web/static/bundled-source "no-such-file.js"))))
+    (io/puts (str "  hatch-root -> " (->string web/static/*hatch-root*)))
+    (io/puts (str "  live source length -> "
+               (->string (string/length (or web/live/*client-source* "")))))
+    (io/puts (str "  current-file -> " (->string (reflect/current-file))))))

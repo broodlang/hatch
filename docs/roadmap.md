@@ -376,6 +376,37 @@ Deliberately NOT done: the one-line `bump` over a counter table in `web/cache` a
 `web/ratelimit`. They are two tables on purpose, so sharing means a helper taking the table,
 which makes every call site longer to remove one duplicated line. Revisit if a third appears.
 
+**0.17.1: hatch's own browser clients were served EMPTY by every released app.** Found by
+curling production before a deploy: `https://brood.fly.dev/static/brood_webmcp.js` answered
+`200` with `content-length: 0` and an ETag over the empty body. hive declares its WebMCP
+tools on every page and points an agent at that script, so the capability had been dead in
+production for as long as it had existed — with a status that says yes, a JavaScript
+content-type, and a served-file line in every log.
+
+The cause is `nest release`, and it defeats the two obvious fixes. A release bundles the
+manifest and every `src/**/*.blsp` — sources, and only sources — so hatch's `static/` is data
+and does not travel. Inside the bundle `reflect/current-file` answers a virtual
+`<bundle>/hatch/web/static.blsp`, which contains no `/src/`, so `*hatch-root*`'s suffix-strip
+misses and `string/replace` hands the whole path back unchanged: exactly the silent
+degradation 0.16.1 predicted, reached by a route nobody had thought of. Reading once into a
+load-time `def` does not help, because the bundle evaluates its top level at boot, inside
+itself. Nor does a macro: a bundle MACROEXPANDS at boot too — the attempt is what proved it,
+by failing the release's own boot check with the path above.
+
+So absence is a fact to design around, not defeat. Two changes, and the second is the one
+that would have surfaced this years earlier:
+
+  - `web/endpoint`'s `:static` stage now FALLS THROUGH to the app's own static directory when
+    the package copy is unreadable. A released app then needs one `cp` of the clients into
+    its static dir during the image build and serves them correctly, with nothing else
+    changed.
+  - `web/static/bundled-js-handler` answers **404** where it used to answer a 200 with an
+    empty body. An empty 200 is indistinguishable from success from the outside, which is the
+    whole reason this ran in production unnoticed.
+
+Verified in an actual release binary, run from a directory with no source tree: 404 without
+the copy, and 200 with the real 24,955 bytes once it is there.
+
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.

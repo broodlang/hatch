@@ -144,17 +144,22 @@
 
 (def *client-file* "brood_webmcp.js")
 
+;; Read once at load, and nil in a released binary (`nest release` bundles only .blsp). That
+;; is how hive served this as an empty 200 in production while every page pointed an agent at
+;; it; the :static stage now falls through to the app's own static dir instead.
+(def *client-source* (static/bundled-source *client-file*))
+
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_webmcp.js`."
   (static/bundled-path *client-file*))
 
 (defn client-js ()
-  "The bundled client's source, or nil if it can't be located."
-  (static/bundled-source *client-file*))
+  "The bundled client's source, or nil if it could not be located at load."
+  *client-source*)
 
 (defn client-js-handler ()
   "A conn handler serving the bundled client, so an app can wire it straight from the
   package:
 
       (get \"/static/brood_webmcp.js\" (mcp/client-js-handler))"
-  (static/bundled-js-handler *client-file*))
+  (static/bundled-js-handler *client-file* *client-source*))

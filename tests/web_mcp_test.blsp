@@ -76,9 +76,23 @@
     (is (not (valid-name? nil)))))
 
 (describe "the bundled client"
+  ;; No nil check here on purpose: the source is a load-time `def` now, so the CHECKER proves
+  ;; it is present and reports the nil test as unreachable. That is a stronger guarantee than
+  ;; this test was giving — but it holds for the build, and what the build has to carry is
+  ;; the content, so that is what is asserted.
   (test "is found in the package, so an app need not vendor it"
-    (is (not (nil? (client-js))))
     (is (includes? (or (client-js) "") "registerTool")))
+
+  ;; The regression this exists for: served EMPTY. In a `nest release` binary the old
+  ;; per-request read found no source tree and answered nil, and the handler served that as a
+  ;; 200 with a zero-length body — a status that says yes, a JavaScript content-type, and an
+  ;; ETag over the emptiness. hive ran that way in production, every page pointing an agent
+  ;; at a script that was nothing.
+  (test "the handler serves the actual client, not an empty 200"
+    (let (resp (call (client-js-handler) (conn-for "GET" "/static/brood_webmcp.js")))
+      (assert= 200 (status resp))
+      (is (> (string/length (or (get resp :resp-body) "")) 0))
+      (is (includes? (or (get resp :resp-body) "") "registerTool"))))
 
   ;; The API has moved between `navigator` and `document`, and shipped first on navigator.
   (test "probes both spellings, and is inert where neither exists"

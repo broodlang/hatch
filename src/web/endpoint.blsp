@@ -273,14 +273,23 @@
       nil)))
 
 (defn- bundled-client (subpath)
-  "The handler for one of hatch's own browser clients, or nil when `subpath` names neither.
+  "The handler for one of hatch's own browser clients, or nil when `subpath` names neither —
+  **or when the package copy is not readable**, in which case the caller falls through to the
+  app's own static directory.
 
-  Both ship inside the package, so an app serves them without vendoring a copy that can
-  drift from the server half it talks to — and without writing the route itself, which is
-  what every live app was doing."
+  Both ship inside the package, so an app serves them without vendoring a copy that can drift
+  from the server half it talks to, and without writing the route itself — which is what
+  every live app was doing.
+
+  The fall-through is the part that had to be learnt. `nest release` bundles sources and only
+  sources, so a released app has no package `static/` to read and these answer nil; the
+  practical fix at that point is one `cp` into the app's own static dir during the image
+  build, and falling through is what makes that work with nothing else changed. Before it,
+  the missing copy was served as a 200 with an empty body — hive shipped its WebMCP client
+  that way, every page pointing an agent at a script that was nothing."
   (cond
-    (= subpath "brood_live.js") (web/live/client-js-handler)
-    (= subpath "brood_webmcp.js") (web/mcp/client-js-handler)
+    (and (= subpath "brood_live.js") (web/live/client-js)) (web/live/client-js-handler)
+    (and (= subpath "brood_webmcp.js") (web/mcp/client-js)) (web/mcp/client-js-handler)
     else nil))
 
 (defn- static-options (config)
