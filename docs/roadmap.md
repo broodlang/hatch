@@ -29,7 +29,9 @@ Rust — TLS is handled by a reverse proxy.*
 
 Phases 1–11 are all complete as of **0.4.1** (2026-08-11); **0.4.2** added `web/upload`
 (live upload progress) and **0.4.3** the live-view Conn, per-component wire diffs, reconnect
-statics-caching, and the framed-read adoption described below. **0.4.3 requires brood ≥ 0.3.11.** The per-phase record — what each one built, and the scope calls and
+statics-caching, and the framed-read adoption described below. (Every brood version named in
+this file is the one that shipped the change at the time; the CURRENT floor is whatever
+`project.blsp` says — `>= 0.23.0` as of 0.16.0 — not any of them.) The per-phase record — what each one built, and the scope calls and
 trade-offs behind them — is archived in
 [`_archive/shipped-phases.md`](_archive/shipped-phases.md).
 
@@ -301,6 +303,41 @@ thing: there is no endpoint to duplicate and no second code path to keep in step
 `web/audit`'s coverage rule learned both halves — an annotated form is covered by itself, and
 an annotated form is *itself* a declaration, so a page using only the declarative API is
 audited rather than opting out of the check entirely.
+
+**0.16.1: three layers asked one question and gave two answers.** `web/compress/accepts?`
+honoured an `Accept-Encoding: gzip;q=0` refusal. `web/static/accepts?` and
+`web/stream/accepts-gzip?` were separate crude substring tests that read that refusal as a
+yes — measured, not inferred: one conn, three predicates, `false true true`. A client that
+spells out `q=0` is usually one that cannot decode gzip, and `web/static` is the worst place
+to get it wrong, because there the predicate gates serving the *precompressed* `.gz`/`.br`
+sibling — so that client was handed a body it could not read, not merely a missed
+optimisation. This is the `client-ip`/`allow-ips` shape again (0.16.0): the duplicate was the
+symptom and the disagreement was the bug. One predicate now, `http/util/accepts-encoding?`,
+one layer below all three because all three take a header and not a conn; a test pins the
+three answering alike so they cannot drift apart again.
+
+`web/live` and `web/mcp` each carried the same four definitions for serving hatch's own
+bundled client — `*hatch-root*`, `asset-path`, `client-js`, `client-js-handler` — identical
+but for the filename, and mcp's comment said as much ("the same trick web/live uses"). The
+root is found by stripping the file's own known suffix off its path, and `string/replace`
+answers the subject unchanged when the pattern is absent, so moving either file would have
+turned the root into the whole path and 404'd the client with nothing raised. That trap
+existed twice. It is `web/static/bundled-path` / `bundled-source` / `bundled-js-handler` now,
+beside `serve-body`, which both were already calling; the public names in both modules stay
+as delegates. `web_live_test` also asserts the served *body* is the client rather than only a
+200 — an unlocatable client degrades to an empty 200, which the old test passed.
+
+**The README's only example did not work.** It used `(handle-event ("inc" _ model) …)` and
+`:phx-click` — Phoenix's spellings, neither of which hatch has. `deflive` selects clauses by
+name and ignores the rest, so that example compiled, rendered, and produced a button that did
+nothing, with nothing raised anywhere; a reader following the front page got a dead counter
+and no clue why. `tests/readme_example_test.blsp` now runs the example, so the front page
+cannot drift from the macro again.
+
+CLAUDE.md had drifted in the same direction and worse: nine modules missing from the source
+layout, `brood_webmcp.js` missing from `static/`, and a hand-copy of `ls tests/` stale in
+eighteen places. The copy is gone — a rule plus the suites that are not straight per-module
+ones — because a hand-maintained duplicate of a directory listing is what went stale.
 
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,

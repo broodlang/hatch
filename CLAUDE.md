@@ -11,9 +11,14 @@ See `docs/web-framework-design.md` for the full design rationale.
 
 Hatch is a **library package**: `src/` holds only the framework (`http/` +
 `web/`). The demo app lives in a separate sibling project, `../hatch-demo`,
-which depends on a **published** Hatch (`[hatch :version "^0.15.0"]`) — so the
-demo is also our proof that Hatch installs and loads as a real package, from
+which normally depends on a **published** Hatch (`[hatch :version "^X.Y.0"]`) — so
+the demo is also our proof that Hatch installs and loads as a real package, from
 the registry, the way anyone else gets it.
+
+**Right now it does not.** 0.16.0 is tagged here but NOT on the registry (which
+still serves 0.15.1), so the demo is pinned to the release commit
+(`[hatch :git … :ref "83f22d1…"]`) and that proof is suspended. `nest publish`
+from this repo restores it; then flip the demo back to `:version "^0.16.0"`.
 
 **When you change hatch, the demo cannot see it until you release.** For local
 co-development swap the dep to `[hatch :path "../hatch"]` and re-run `nest
@@ -79,6 +84,7 @@ src/
     util.blsp       — URL decode, query parse, status codes
     base64.blsp     — base64 encode (RFC 4648)
     request.blsp    — HTTP/1.1 parser (pipelining-safe)
+    multipart.blsp  — multipart/form-data parser (in-memory + spooled-to-disk uploads)
     response.blsp   — response serializer + helpers
     server.blsp     — TCP listener/worker; WS upgrade detection
     websocket.blsp  — RFC 6455 handshake + frame codec
@@ -138,48 +144,44 @@ src/
     seo.blsp        — head-tags, robots.txt, llms.txt, and a sitemap derived from the
                       router's own route table
     test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
+    compress.blsp   — response compression (brotli over gzip), as a before-send plug
+    cache.blsp      — fragment + whole-page caching: fetch (no expiry) / fetch-ttl (bounded
+                      staleness); cluster-aware invalidation via web/cluster
+    ratelimit.blsp  — token-bucket plug with four seams (:key-fn/:skip?/:cost/:store, the
+                      last a BucketStore ability); network-key buckets IPv6 by /64
+    logger.blsp     — HTTP access log: the [:hatch :request :stop] telemetry http/server
+                      already emits, as one structured line each (attach-access-log)
+    metrics.blsp    — per-route latency histogram + status classes
+    dashboard.blsp  — the diagnostics page rendering metrics/cache/ratelimit/cluster counters
+    stream.blsp     — Server-Sent Events over chunked streaming responses
+    job.blsp        — background work PACED so it cannot starve request serving on a
+                      single shared vCPU (the reason a bare spawn is not safe)
 static/
-  brood_live.js     — vanilla JS client for live views; apps can serve it straight
-                      from hatch via (web/live/client-js-handler) — no vendored copy
+  brood_live.js     — vanilla JS client for live views
+  brood_webmcp.js   — the WebMCP client that registers a page's tools
+                      Both are served straight from the package — (web/live/client-js-handler)
+                      and (web/mcp/client-js-handler), no vendored copy. web/static locates
+                      and serves them (bundled-path / bundled-source / bundled-js-handler).
 tests/
-  http_util_test.blsp
-  http_request_test.blsp
-  http_response_test.blsp
-  http_base64_test.blsp
-  http_websocket_test.blsp
-  http_server_test.blsp
-  protocol_test.blsp
-  web_template_test.blsp
-  web_bml_test.blsp
-  web_conn_test.blsp
-  web_page_test.blsp
-  web_csrf_test.blsp
-  web_auth_test.blsp
-  web_endpoint_test.blsp
-  web_errors_test.blsp
-  web_env_test.blsp
-  web_cluster_test.blsp
-  web_audit_test.blsp
-  web_mcp_test.blsp
-  web_seo_test.blsp
-  web_router_test.blsp
-  web_session_test.blsp
-  web_static_test.blsp
-  web_live_test.blsp
-  web_live_conn_test.blsp
-  web_parts_test.blsp
-  web_component_test.blsp
-  web_component_diff_test.blsp
-  web_component_template_test.blsp
-  web_live_component_integration_test.blsp
-  web_form_test.blsp
-  web_registry_test.blsp
-  web_pubsub_test.blsp
-  web_presence_test.blsp
-  web_assets_test.blsp
-  web_upload_test.blsp
-  web_test_test.blsp
-  web_application_test.blsp
+  One <module>_test.blsp per src/ module (`ls tests/` is the list — it is not repeated
+  here, because a copy of it went stale in eighteen places before this note replaced it).
+  The ones that are NOT a straight per-module suite, and what each is for:
+    ability_test.blsp                    — the SessionStore/BucketStore/Encode abilities
+    http_request_bytes_test.blsp         — differential fuzz: the bytes parser vs the carrier
+                                           parser (kept solely as the oracle) must agree on a
+                                           smuggling/framing corpus and every truncation of it
+    http_spool_test.blsp                 — spooled-to-disk request bodies
+    http_upload_test.blsp                — multipart uploads end to end over a real socket
+    http_stream_test.blsp                — chunked streaming responses on the wire
+    web_change_tracking_test.blsp        — which model keys dirty which slots
+    web_component_diff_test.blsp         — per-component wire diffs
+    web_component_template_test.blsp     — a component rendered from a .bml file
+    web_live_component_integration_test.blsp — components embedded in a live view
+    web_live_conn_test.blsp              — the per-session read-only Conn
+    web_parts_for_test.blsp              — per-item :for diffing
+    web_static_binary_test.blsp          — byte-faithful binary assets (no carrier round-trip)
+    readme_example_test.blsp             — README.md's counter, run, so the front page cannot
+                                           drift from the macro again (it had: see the file)
 docs/
   roadmap.md              — what's LIVE: shipped summary, open backlog, upstream blockers
   _archive/               — closed history. Do NOT read by default; the roadmap links to

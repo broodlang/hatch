@@ -1,0 +1,26 @@
+;; The counter in README.md, run. The README shipped a `(handle-event ("inc" _ model) …)`
+;; clause and a `:phx-click` binding — Phoenix's spellings, neither of which hatch has.
+;; `deflive` selects its clauses by name and ignores the rest, so that example compiled,
+;; rendered, and produced a button that did nothing, with nothing raised anywhere. A reader
+;; following the front page got a dead counter and no clue. This keeps the README honest.
+(defmodule readme-example-test
+  (:use test)
+  (:use web/live)
+  (:use web/test))
+
+(deflive (mount (params) {:count 0})
+  (on "inc" (params model) (update model :count inc))
+  (render (model)
+    [:div
+      [:button {:data-event "inc"} "+"]
+      [:span (get model :count)]]))
+
+(describe "the README counter example"
+  (test "mounts at zero and binds the event the client actually listens for"
+    (let (html (live-html (live-spec) {}))
+      (is (includes? html "data-event=\"inc\""))
+      (is (includes? html ">0<"))))
+  (test "the inc event increments the model"
+    (let (spec (live-spec)
+          model (live-mount spec {}))
+      (assert= (get (live-event spec "inc" {} model) :count) 1))))

@@ -169,6 +169,53 @@
     (string/substring v 1 (- (string/length v) 1))
     v))
 
+;; ---- content coding ----
+
+; Accept-Encoding negotiation lives here, one layer below every module that asks, because
+; three of them do — `web/compress` (compress this response?), `web/static` (serve the
+; precompressed `.gz`/`.br` sibling?) and `web/stream` (gzip this event stream?). They had a
+; predicate each, and only compress's honoured `q=0`: the same request therefore got
+; "not acceptable" from one layer and a `Content-Encoding: gzip` body from the other two.
+; A client that spells out `gzip;q=0` is usually one that cannot decode gzip, so the
+; disagreement was not a missed optimisation but a body it could not read.
+
+(defn- coding-refused? (accept-encoding coding)
+  "True when `accept-encoding` lists `coding` with an explicit `q=0` weight — an RFC 9110
+  §12.5.3 refusal (`gzip;q=0`, `br;q=0.0`, with optional whitespace). A *positive* weight,
+  however small (`q=0.001`), is not a refusal and is not matched.
+
+  A client that goes to the trouble of saying `q=0` means it, and it is usually saying so
+  for a reason — a proxy that mangles a coding, or a debugging session.
+
+  Almost nobody does. `Accept-Encoding: gzip, deflate, br` is what browsers send, and the scan
+  below rewrites and lowercases every entry of the header to find something that is not there
+  — on every response. Every refusal this looks for (`=0`, `=0.0`, `=0.00`, `=0.000`) contains
+  the character `0`, so a header with no `0` anywhere cannot hold one, and `includes?` settles
+  that in 0.7us against ~9us for the scan. Deliberately looser than the thing being tested
+  for: a header carrying any digit zero (`q=0.9`, say) falls through to the full pass."
+  (and (includes? accept-encoding "0")
+    (any? (string/split accept-encoding ",")
+      (fn (entry)
+        (let (bare (string/lower (string/replace entry " " "")))
+          (any? ["=0" "=0.0" "=0.00" "=0.000"]
+            (fn (zero) (= bare (str coding ";q" zero)))))))))
+
+(defn accepts-encoding? (accept-encoding coding)
+  "True if the `Accept-Encoding` header value offers `coding` and does not refuse it with an
+  explicit `q=0` weight. A missing header (nil) means no compression.
+
+  The `q=0` check is what separates this from a substring test. A client sending
+  `gzip;q=0` is asking NOT to be gzipped, and a substring test reads that as a yes — which
+  inverts the client's request rather than merely missing an optimisation.
+
+  (http/util/accepts-encoding? \"gzip, deflate, br\" \"gzip\") ;=> true
+  (http/util/accepts-encoding? \"gzip;q=0\" \"gzip\") ;=> false
+  (http/util/accepts-encoding? \"gzip;q=0.001\" \"gzip\") ;=> true
+  (http/util/accepts-encoding? nil \"gzip\") ;=> false"
+  (and (string? accept-encoding)
+    (includes? accept-encoding coding)
+    (not (coding-refused? accept-encoding coding))))
+
 (defn parse-body-params (headers body)
   "Parse a request `body` into a string→value params map based on its Content-Type:
   `application/x-www-form-urlencoded` is parsed like a query string, `application/json`

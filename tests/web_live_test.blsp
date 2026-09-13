@@ -93,7 +93,10 @@
   (test "serves the client as JS"
     (let (resp ((client-js-handler) (client-js-conn)))
       (assert= (get resp :status) 200)
-      (assert= (get (get resp :resp-headers) :content-type) "text/javascript; charset=utf-8")))
+      (assert= (get (get resp :resp-headers) :content-type) "text/javascript; charset=utf-8")
+      ; Not just a 200: an unlocatable client degrades to an empty body rather than an error
+      ; (`(or (bundled-source …) "")`), so a broken package root serves 200 OK and nothing.
+      (is (includes? (or (get resp :resp-body) "") "BroodLive"))))
   (test "revalidates (no stale cached client)"
     (let (resp ((client-js-handler) (client-js-conn)))
       (assert= (get (get resp :resp-headers) :cache-control) "no-cache"))))

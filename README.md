@@ -19,16 +19,17 @@ nest new myapp --template hatch     # full Postgres-backed app
 nest new myapp --template web-api   # minimal JSON API, no live layer
 ```
 
-A live view is a `deflive` module — `mount` builds the model, `handle-info`
-folds server messages into it, and `render` returns the markup:
+A live view is a `deflive` module — `mount` builds the model, `on` folds an
+event into it, and `render` returns the markup. A control binds to an `on`
+clause with `:data-event`:
 
 ```brood
 (deflive
   (mount (params) {:count 0})
-  (handle-event ("inc" _ model) (update model :count inc))
+  (on "inc" (params model) (update model :count inc))
   (render (model)
     [:div
-      [:button {:phx-click "inc"} "+"]
+      [:button {:data-event "inc"} "+"]
       [:span (get model :count)]]))
 ```
 

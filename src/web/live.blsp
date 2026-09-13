@@ -1479,30 +1479,22 @@
 ; connection-status CSS, and the status pill. These helpers return that markup as
 ; Hiccup so a layout composes them instead of re-typing them.
 
-(def *hatch-root*
-  ; This file is <hatch>/src/web/live.blsp; strip the known suffix to find <hatch>,
-  ; so we can serve the bundled brood_live.js without the app vendoring a copy.
-  (string/replace (or (reflect/current-file) "") "/src/web/live.blsp" ""))
+(def *client-file* "brood_live.js")
 
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_live.js`."
-  (str *hatch-root* "/static/brood_live.js"))
+  (static/bundled-path *client-file*))
 
 (defn client-js ()
   "The framework's brood_live.js source, or nil if it can't be located."
-  (check-allow :discarded-catch (try (file/slurp (asset-path)) (catch _ nil))))
+  (static/bundled-source *client-file*))
 
 (defn client-js-handler ()
   "A conn handler that serves hatch's brood_live.js with the right content-type, so an
   app can serve the client straight from the package:
     (get \"/static/brood_live.js\" (live/client-js-handler))
   instead of copying the file into its own static/ dir."
-  (fn (conn)
-    ; Reuse the static cache pipeline: a content ETag (→ a bodyless 304 once the browser
-    ; holds it), nosniff, and `no-cache`. brood_live.js is served at a fixed, non-fingerprinted
-    ; path, so it always revalidates — cheap, and never stale (a stale copy fetched under the
-    ; old codepoint Content-Length bug is what broke parsing until the cache was cleared).
-    (static/serve-body conn "text/javascript; charset=utf-8" (or (client-js) "") "brood_live.js")))
+  (static/bundled-js-handler *client-file*))
 
 (def *status-css*
   (str ".brood-status{position:fixed;top:.75rem;right:.75rem;z-index:9999;"

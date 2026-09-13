@@ -139,28 +139,22 @@
     (map? (get schema :properties))))
 
 ;; ---- serving the bundled client ---------------------------------------------
+;; The package's own static/ dir is located and served by web/static (bundled-path /
+;; bundled-source / bundled-js-handler) — the same three it serves brood_live.js through.
 
-(def *hatch-root*
-  ; This file is <hatch>/src/web/mcp.blsp; strip the known suffix to find <hatch>, so the
-  ; client is served from the package rather than vendored into every app — the same trick
-  ; web/live uses for brood_live.js.
-  (string/replace (or (reflect/current-file) "") "/src/web/mcp.blsp" ""))
+(def *client-file* "brood_webmcp.js")
 
 (defn asset-path ()
   "Absolute path to hatch's bundled `static/brood_webmcp.js`."
-  (str *hatch-root* "/static/brood_webmcp.js"))
+  (static/bundled-path *client-file*))
 
 (defn client-js ()
   "The bundled client's source, or nil if it can't be located."
-  (check-allow :discarded-catch (try (file/slurp (asset-path)) (catch _ nil))))
+  (static/bundled-source *client-file*))
 
 (defn client-js-handler ()
   "A conn handler serving the bundled client, so an app can wire it straight from the
   package:
 
       (get \"/static/brood_webmcp.js\" (mcp/client-js-handler))"
-  (fn (conn)
-    (static/serve-body conn
-      "text/javascript; charset=utf-8"
-      (or (client-js) "")
-      "brood_webmcp.js")))
+  (static/bundled-js-handler *client-file*))

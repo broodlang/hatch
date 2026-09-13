@@ -373,10 +373,14 @@
           nil)))))
 
 (defn accepts? (conn coding)
-  "True if the request's `Accept-Encoding` offers `coding`. A crude substring test is enough —
-  a `coding;q=0` opt-out is the only false positive and is vanishingly rare in practice."
-  (let (accept-encoding (get (conn-headers conn) :accept-encoding))
-    (and (string? accept-encoding) (includes? accept-encoding coding))))
+  "True if the request's `Accept-Encoding` offers `coding` and does not refuse it with an
+  explicit `q=0` weight.
+
+  A refusal matters more here than anywhere else in hatch: this gates serving a
+  *precompressed* `.gz`/`.br` sibling, so reading `gzip;q=0` as a yes hands a client that
+  said it cannot decode gzip a body it cannot read. The predicate is
+  `http/util/accepts-encoding?`, shared with `web/compress` and `web/stream`."
+  (http/util/accepts-encoding? (get (conn-headers conn) :accept-encoding) coding))
 
 (defn accepts-gzip? (conn)
   "True if the request's `Accept-Encoding` offers gzip."
@@ -569,3 +573,34 @@
   name and get the right caching in both environments."
   (let (name (if (prod?) (get (load-manifest dir) logical logical) logical))
     (str "/" dir "/" name)))
+
+; ---- hatch's own bundled assets ----
+
+; Hatch ships two browser clients in its package `static/` dir — brood_live.js and
+; brood_webmcp.js — and serves them from there so an app never vendors a copy that can
+; drift from the server half it talks to. `web/live` and `web/mcp` each had their own
+; root-finding constant and their own three-function wrapper around it, identical but for
+; the filename. The root is found by stripping this file's own known suffix off its path,
+; and `string/replace` answers the subject unchanged when the pattern is absent — so if the
+; file is ever moved, the root silently becomes the whole path and the asset 404s with
+; nothing raised. That is a trap worth having once rather than twice.
+(def *hatch-root*
+  (string/replace (or (reflect/current-file) "") "/src/web/static.blsp" ""))
+
+(defn bundled-path (file)
+  "Absolute path to `file` in hatch's own bundled `static/` directory."
+  (str *hatch-root* "/static/" file))
+
+(defn bundled-source (file)
+  "The bundled asset's source text, or nil if it can't be located — a missing client should
+  degrade to a page without it, not take the request down."
+  (check-allow :discarded-catch (try (file/slurp (bundled-path file)) (catch _ nil))))
+
+(defn bundled-js-handler (file)
+  "A conn handler serving one of hatch's bundled JavaScript clients through the static cache
+  pipeline: a content ETag (so the browser gets a bodyless 304 once it holds the file),
+  `nosniff`, and `no-cache`. These are served at fixed, non-fingerprinted paths, so they
+  always revalidate — cheap, and never stale (a stale copy fetched under the old codepoint
+  Content-Length bug is what broke live parsing until the cache was cleared)."
+  (fn (conn)
+    (serve-body conn "text/javascript; charset=utf-8" (or (bundled-source file) "") file)))

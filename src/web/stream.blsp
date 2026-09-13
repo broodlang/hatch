@@ -28,7 +28,9 @@
   onto the socket in fixed-size blocks so the framework never builds one giant response value,
   with optional `Content-Encoding: gzip`."
   ; stream-resp / put-resp-header — build the chunked streaming conn
-  (:use web/conn))
+  (:use web/conn)
+  ; accepts-encoding? — one Accept-Encoding predicate for compress, static and stream
+  (:alias http/util))
 
 (defn sse-field (name value)
   "One SSE header line `name: value\\n`, or \"\" when `value` is nil (the field is omitted)."
@@ -75,10 +77,10 @@
 ;; ---- byte / file streaming (chunked, optionally gzip) ------------------------
 
 (defn accepts-gzip? (conn)
-  "True if the request's `Accept-Encoding` offers gzip (a crude substring test — we only ever
-  advertise gzip)."
-  (let (ae (get (conn-headers conn) :accept-encoding))
-    (and (string? ae) (includes? ae "gzip"))))
+  "True if the request's `Accept-Encoding` offers gzip and does not refuse it with an
+  explicit `q=0` weight — `http/util/accepts-encoding?`, the same predicate `web/compress`
+  and `web/static` ask, so a client gets one answer from every layer."
+  (http/util/accepts-encoding? (get (conn-headers conn) :accept-encoding) "gzip"))
 
 (defn- write-blocks (write data block-size offset)
   "Write `data` (bytes) to the socket in `block-size`-byte chunks, from `offset` to the end."

@@ -76,3 +76,23 @@
   (test "404" (assert= (status-text 404) "Not Found"))
   (test "500" (assert= (status-text 500) "Internal Server Error"))
   (test "unknown" (assert= (status-text 999) "Unknown")))
+
+(describe "accepts-encoding?"
+  (test "a browser header offers gzip"
+    (assert= (accepts-encoding? "gzip, deflate, br" "gzip") true))
+  (test "and br" (assert= (accepts-encoding? "gzip, deflate, br" "br") true))
+  (test "a coding not listed is not offered" (assert= (accepts-encoding? "gzip" "br") false))
+  (test "a missing header offers nothing" (assert= (accepts-encoding? nil "gzip") false))
+  (test "an explicit q=0 is a refusal" (assert= (accepts-encoding? "gzip;q=0" "gzip") false))
+  (test "q=0.0 and q=0.000 too"
+    (assert= (accepts-encoding? "gzip;q=0.0" "gzip") false)
+    (assert= (accepts-encoding? "gzip;q=0.000" "gzip") false))
+  (test "whitespace around the weight does not hide the refusal"
+    (assert= (accepts-encoding? "gzip; q=0" "gzip") false))
+  (test "a refusal is per-coding, not per-header"
+    (assert= (accepts-encoding? "gzip;q=0, br" "br") true))
+  ; The fall-through the `includes? "0"` fast path exists to protect: a header carrying a
+  ; digit zero that is not a refusal must still read as an offer.
+  (test "a small positive weight is not a refusal"
+    (assert= (accepts-encoding? "gzip;q=0.001" "gzip") true))
+  (test "q=0.9 is not a refusal" (assert= (accepts-encoding? "gzip;q=0.9" "gzip") true)))

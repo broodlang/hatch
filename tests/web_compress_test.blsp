@@ -124,3 +124,23 @@
 
   (test "no header means no compression"
     (is (nil? (chosen-encoding (build (req {})))))))
+
+;; Three layers ask "does this client accept gzip?" — compress (compress the body?), static
+;; (serve the precompressed .gz sibling?) and stream (gzip the event stream?). They each had
+;; their own predicate and only compress's honoured `q=0`, so a client that spelled out
+;; "do not gzip me" was refused by one layer and gzipped by the other two. They share
+;; `http/util/accepts-encoding?` now; this pins that they cannot drift apart again.
+(describe "the three Accept-Encoding layers agree"
+  (defn- answers (accept-encoding)
+    (let (conn (build (req {:accept-encoding accept-encoding})))
+      [(accepts? conn "gzip")
+        (web/static/accepts? conn "gzip")
+        (web/stream/accepts-gzip? conn)]))
+  (test "a browser header: all three say yes"
+    (assert= (answers "gzip, deflate, br") [true true true]))
+  (test "an explicit refusal: all three say no"
+    (assert= (answers "gzip;q=0") [false false false]))
+  (test "a positive weight: all three say yes"
+    (assert= (answers "gzip;q=0.001") [true true true]))
+  (test "no gzip on offer: all three say no"
+    (assert= (answers "br") [false false false])))
