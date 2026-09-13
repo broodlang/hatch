@@ -5,8 +5,7 @@
 
 ;; A view with two independent dynamic slots: a heading bound to :title and a counter bound
 ;; to :count. Change tracking must let a change to one skip re-rendering the other.
-(deflive
-  (mount (params) {:title "hi" :count 0})
+(deflive (mount (params) {:title "hi" :count 0})
   (render (model) [:div {} [:h1 {} (get model :title)] [:span {} (str (get model :count))]])
   (on "inc" (params model) (assoc model :count (inc (get model :count)))))
 
