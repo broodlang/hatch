@@ -236,6 +236,16 @@
   (test "an explicit :secure opt overrides the default"
     (assert= (get (session-cookie-opts {:secure true}) :secure) true)))
 
+(defn future-deadline? (exp)
+  "Whether `exp` is an epoch-ms deadline still ahead of now.
+
+  A function rather than an inline `(> (get m \"__exp__\") (os/now))` because the session map
+  holds strings alongside the stamp, so `get` answers `string | nil | int` and comparing that
+  with `>` is a question the value might not be able to answer. Asking `int?` first is the
+  assertion anyway: a missing or non-numeric `__exp__` is exactly the failure these tests are
+  here to catch, and it should read as false rather than as a type error."
+  (and (int? exp) (> exp (os/now))))
+
 (describe "session expiry (__exp__)"
   (test "an expired cookie decodes to an empty session"
     (let (cookie (encode-session *secret* {"user" "x" "__exp__" 1}))
@@ -248,10 +258,10 @@
     ; a signed session must always carry a deadline — a captured cookie can't be valid forever
     (let (default (with-expiry {"a" "1"} {}))
       (assert= (get default "a") "1")
-      (assert= (> (get default "__exp__") (os/now)) true))
+      (assert= (future-deadline? (get default "__exp__")) true))
     (let (stamped (with-expiry {"a" "1"} {:max-age 60}))
       (assert= (get stamped "a") "1")
-      (assert= (> (get stamped "__exp__") (os/now)) true)))
+      (assert= (future-deadline? (get stamped "__exp__")) true)))
   ; a legacy cookie signed with no __exp__ still decodes (can't retroactively change issued
   ; cookies) — but every newly WRITTEN session now carries one via with-expiry above
   (test "a cookie with no __exp__ still decodes (legacy compatibility)"

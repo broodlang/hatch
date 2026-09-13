@@ -31,7 +31,10 @@
           c (web/ratelimit/spend (nth b 0) config 1 0))
       (assert= (nth a 1) :ok)
       (assert= (nth b 1) :ok)
-      (assert= (first (nth c 1)) :deny))))
+      ;; A verdict is either the bare keyword `:ok` or a `[:deny retry-after]` pair, so
+      ;; `(first …)` on it only works for one of the two — `match` asks which it is instead
+      ;; of assuming, and reads as the sum type the function actually returns.
+      (assert= (match (nth c 1) ([:deny _] :deny) (_ :not-denied)) :deny))))
 
 (describe "client-key"
   (test "prefers the first X-Forwarded-For hop"

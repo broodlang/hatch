@@ -219,6 +219,7 @@
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
   parse failure, or if the payload isn't a JSON object."
   (try (decode-json (base64-url-decode payload)) (catch _e {})))
+(sig decode-payload (any -> map))
 
 (defn decode-json (json)
   "A JSON object as a string-keyed map; `{}` for anything else. Shared by the signed and the
@@ -229,9 +230,20 @@
   body needs, which is why it lives one layer down rather than in a copy here. There were two
   copies, identical down to the `mapv`."
   (try
-    (let (parsed (if json (json/decode json) nil))
-      (if (map? parsed) (http/util/stringify-keys parsed) {}))
+    (let (parsed (if json (json/decode json) nil)
+          ;; `stringify-keys` walks any value and is typed as widely as its input — it has to
+          ;; be, since web/live hands it a decoded JSON array — so the map-ness established by
+          ;; the test below is lost at its return. Testing the RESULT rather than the input
+          ;; costs one `map?` per session decode and makes this function's promise something
+          ;; it enforces rather than something its docstring asserts.
+          stringified (http/util/stringify-keys parsed))
+      (if (map? stringified) stringified {}))
     (catch _e {})))
+
+;; Declared `-> map` because it is one on every path, and nothing downstream could see that:
+;; `check-expiry` reads a `get` and a `dissoc` off this, and without the declaration it was
+;; doing so against a value the checker believed could be anything.
+(sig decode-json (any -> map))
 
 ; ---- the SessionStore ability ----
 
