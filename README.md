@@ -6,6 +6,14 @@ HTTP/1.1 + WebSocket server, a server-rendered component layer (`bml`
 templates), CSRF/session/presence/pubsub, and a live view layer whose
 server-held state pushes diffs to the browser over a socket.
 
+Alongside the live layer: **channels** ([docs](docs/channels.md)) for clients that
+want JSON rather than HTML — one socket, many topics, sharing a namespace with
+pubsub so a live view and a channel client hear the same broadcast; **streams**
+for collections the server renders without holding, so a long feed costs a
+session nothing; **uploads** over the socket, spooled to disk with progress as an
+ordinary model key; and a **client** ([docs](docs/client.md)) with hooks for
+imperative JavaScript, debounce/throttle, and bindings for any DOM event.
+
 Hatch is a **library package**. The framework lives in `src/` (`http/` +
 `web/`); a full example app lives in the sibling project
 [`hatch-demo`](https://github.com/broodlang/hatch-demo), which depends on Hatch.

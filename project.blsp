@@ -8,11 +8,35 @@
   :repository "https://github.com/broodlang/hatch"
   :dependencies [[store :version "^0.4.0"]]
   ;; Formatter rules for Hatch's macros. A depending project opts in with
-  ;; `:format-plugins [hatch]` (see hatch-demo) and the formatter then indents these
   ;; macros correctly. Each entry is head-symbol → how many args ride the head line
   ;; when the form breaks: deflive 0 (every clause on its own line); mount/render 1
   ;; (the arg-list rides); on/tick 2 (the event-name|ms + the arg-list ride).
-  :format-headers {deflive 0 mount 1 render 1 on 2 tick 2})
+  ;;
+  ;; A macro missing from this table is not a style question: the formatter pulls its first
+  ;; clause up onto the head line, so `(defchannel (join …)` ends up reading as though the
+  ;; join were part of the definition form rather than the first of several peers. Every
+  ;; clause-taking macro hatch defines belongs here.
+  ;;
+  ;; These apply to CONSUMERS, not to this repo. A project cannot list itself in
+  ;; `:format-plugins` — it is not one of its own `:dependencies` — so hatch's own sources are
+  ;; formatted by the default rules and do read with the first clause on the head line. That
+  ;; is not drift and does not want fixing; it is the reason hatch-demo's `deflive` looks
+  ;; different from the ones in this repo's tests.
+  :format-headers
+    {deflive 0
+     deflive-component 0
+     defchannel 0
+     mount 1
+     render 1
+     join 1
+     handle-info 1
+     handle-out 1
+     handle-params 1
+     terminate 1
+     unmount 1
+     on-mount-guard 1
+     on 2
+     tick 2})
 
 ;; To depend on other Brood packages, add a :dependencies vector to the form
 ;; above (ADR-037). Dep names are bare symbols (no quoting):

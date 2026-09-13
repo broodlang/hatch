@@ -37,6 +37,11 @@ nest format        # format all .blsp source
 nest doctest       # check every `expr ;=> result` example in a docstring still holds
 nest docs          # generate the HTML API site into doc/ (gitignored)
 
+# The browser client (static/*.js) — Brood has no subprocess primitive, so `nest test`
+# cannot run these; they are plain node with no dependencies. See docs/client.md.
+node tests/js/timing_test.js   # the debounce/throttle decision
+node --check static/brood_live.js
+
 # In ../hatch-demo/ (the demo app, consumes a published Hatch):
 nest fetch         # resolve deps → project.lock.blsp (after a dep or version change)
 nest test          # loads `main`, exercising the dep end-to-end
@@ -83,7 +88,9 @@ src/
     multipart.blsp  — multipart/form-data parser (in-memory + spooled-to-disk uploads)
     response.blsp   — response serializer + helpers
     server.blsp     — TCP listener/worker; WS upgrade detection
-    websocket.blsp  — RFC 6455 handshake + frame codec
+    websocket.blsp  — RFC 6455 handshake, frame codec, and recv-frame — the socket reader
+                      both socket actors (web/live, web/channel) park in, which hands back
+                      any non-socket mailbox message rather than knowing about it
   web/
     endpoint.blsp   — THE standard endpoint: :static ahead of the router, then request →
                       task with a deadline → router →
@@ -106,13 +113,18 @@ src/
                       (statics baked at expansion time); shell-halves/with-shell/cached
                       (the runtime counterpart — a shell rendered once and split at a
                       marker, and a whole page cached when the caller says it may be)
-    router.blsp     — defrouter macro (incl. (live …) clause), path-param + *splat matching
+    router.blsp     — defrouter macro (incl. the (live …) and (channel …) clauses),
+                      path-param + *splat matching
     session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
     csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input);
                       live-token/live-csrf-input read the token off web/live/live-conn
     auth.blsp       — auth plugs for router through groups: basic-auth, bearer-auth
                       (RFC-9110 case-insensitive scheme), allow-ips / allow-ips-from-env
     static.blsp     — MIME table + path-safe static file handler
+    channel.blsp    — topic sockets: defchannel (join/on/handle-info/handle-out/terminate),
+                      one multiplexed /channel/ws socket, pattern-matched topic registry;
+                      broadcasts ride web/pubsub topics, so a live view and a channel client
+                      subscribed to the same topic both hear them
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-conn (the connection's read-only Conn, bound per session),
                       live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
@@ -130,18 +142,28 @@ src/
     application.blsp — canonical app entry point: default-logger-opts + start (logger + children + park)
     repo.blsp       — open a store repo, migrate schemas, warm up the pool (web/repo/start)
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
-    upload.blsp     — live upload progress: ?upload_token= → [:hatch :upload :progress]
-                      telemetry → pubsub → the view's handle-info as {:upload {…}}
+    upload.blsp     — getting a file from a browser here, two ways. Over the live socket:
+                      (allow name opts) at a model key, binary chunks spooled to disk,
+                      entries/percent/consume/cancel — so progress is an ordinary slot of an
+                      ordinary model key and the renderer knows nothing about uploads. Over a
+                      plain form POST: ?upload_token= → [:hatch :upload :progress] telemetry →
+                      pubsub → the view's handle-info as {:upload {…}}
     audit.blsp      — dev-only page audits, logged and never altering the response: a
                       control nothing can reach, a document too big for one round trip, a
-                      head with no color-scheme before its stylesheet, and a page that
-                      declares WebMCP tools yet leaves a GET form uncovered
+                      head with no color-scheme before its stylesheet, a page that declares
+                      WebMCP tools yet leaves a GET form uncovered, a skipped heading level,
+                      a head with no favicon, and a data-hook with no id (which the morph
+                      cannot recognise, so the hook is torn down mid-use)
     mcp.blsp        — WebMCP, both halves: tools-script (imperative, JS-registered, shapes
                       validated at render time) and form-tool (declarative annotations the
                       browser reads off a <form> — static HTML, so visible to a crawler)
     seo.blsp        — head-tags, robots.txt, llms.txt, and a sitemap derived from the
                       router's own route table
-    test.blsp       — view test harness: synthetic conns, router/handler dispatch, live-view drivers
+    test.blsp       — view test harness, in two halves. Spec-level: synthetic conns,
+                      router/handler dispatch, live-mount/live-event/… Markup-level:
+                      live-open then live-click/live-change/live-submit/live-has?/live-text,
+                      which go through the rendered Hiccup with a CSS-ish selector — so a test
+                      can only fire an event the markup actually wires up
     compress.blsp   — response compression (brotli over gzip), as a before-send plug
     cache.blsp      — fragment + whole-page caching: fetch (no expiry) / fetch-ttl (bounded
                       staleness); cluster-aware invalidation via web/cluster
@@ -153,15 +175,24 @@ src/
                       vocabulary (new-counters/bump-counter/rate-percent) cache and
                       ratelimit tally with
     dashboard.blsp  — the diagnostics page rendering metrics/cache/ratelimit/cluster counters
+    streams.blsp    — collections a live view renders WITHOUT holding: the model keeps only
+                      what changed since the last render, the client merges it into what is on
+                      screen (data-update="stream"), and the session empties the stream after
+                      every frame. No new wire protocol — it rides the ordinary render/diff
+                      path. A delete cannot be rendered, so it goes as an effect naming ids
     stream.blsp     — Server-Sent Events over chunked streaming responses
     job.blsp        — background work PACED so it cannot starve request serving on a
                       single shared vCPU (the reason a bare spawn is not safe)
 static/
-  brood_live.js     — vanilla JS client for live views
+  brood_live.js     — the live-view client: events, DOM morphing, navigation, uploads,
+                      hooks (data-hook + BroodLive.hook) and debounce/throttle.
+                      docs/client.md is the attribute vocabulary
   brood_webmcp.js   — the WebMCP client that registers a page's tools
-                      Both are served straight from the package — (web/live/client-js-handler)
-                      and (web/mcp/client-js-handler), no vendored copy. web/static locates
-                      and serves them (bundled-path / bundled-source / bundled-js-handler).
+  brood_channel.js  — the channel client: one socket, many topics, join/push/on
+                      All three are served straight from the package, no vendored copy —
+                      (web/live/client-js-handler), (web/mcp/client-js-handler) and
+                      (web/channel/client-js-handler). web/static locates and serves them
+                      (bundled-path / bundled-source / bundled-js-handler).
 tests/
   One <module>_test.blsp per src/ module (`ls tests/` is the list — it is not repeated
   here, because a copy of it went stale in eighteen places before this note replaced it).
@@ -179,6 +210,16 @@ tests/
     web_live_component_integration_test.blsp — components embedded in a live view
     web_live_conn_test.blsp              — the per-session read-only Conn
     web_parts_for_test.blsp              — per-item :for diffing
+  `tests/js/` holds the client's own tests, which `nest test` does NOT run — Brood has no
+  subprocess primitive. `node tests/js/timing_test.js`; see docs/client.md.
+    web_channel_test.blsp                — web/channel end to end over a loopback socket
+    web_streams_test.blsp                — web/streams, incl. a real session proving the
+                                           server no longer holds a row once its frame is out
+    web_live_watchdog_test.blsp          — the keepalive ping and the reap, on the wire
+    web_live_upload_test.blsp            — the socket-upload half of web/upload, plus one
+                                           real binary frame over a live session
+    web_test_markup_test.blsp            — the markup-driven drivers, incl. the bug they exist
+                                           for: a button wired to an event no handler has
     web_static_binary_test.blsp          — byte-faithful binary assets (no carrier round-trip)
     readme_example_test.blsp             — README.md's counter, run, so the front page cannot
                                            drift from the macro again (it had: see the file)
@@ -199,6 +240,12 @@ docs/
   rate-limiting.md        — the token-bucket plug, its four extension seams (key/skip/cost/
                             store), and what it deliberately does not do (per-node buckets,
                             no eviction, fails open)
+  channels.md             — web/channel end to end: defchannel, topic patterns, the shared
+                            pubsub topic namespace, presence over a socket, the wire, the
+                            browser client, and the per-socket topic ceiling
+  client.md               — the browser client's attribute vocabulary: data-event, debounce
+                            and throttle, hooks, data-update=ignore, navigation; and what of
+                            it is and is not covered by a test
   seo-and-headers.md      — what ships on by default (security headers, HSTS, ETag), what is
                             one line to add (canonical-host, robots/sitemap/llms, ugc rel),
                             what the dev audits warn about, and which audit-tool advice hatch

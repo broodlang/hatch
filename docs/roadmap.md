@@ -529,6 +529,268 @@ Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
 
+## 0.21.0
+
+One release, three pieces of work, and a run of fixes that came out of reviewing them.
+Nothing between 0.20.0 and this was published, so the whole of it lands at once.
+
+**Part one: channels, socket uploads, and a markup-driven test harness.** Two of the three are
+deliberately not shaped the way Phoenix shapes them, and the reasons are the interesting part.
+
+**`web/channel` — topic sockets.** A live view owns a URL; the socket *is* the view, and what
+crosses it is a diff of rendered markup. That is right for a page and wrong for everything
+else, and hatch had nothing else: a mobile client, a device feed, a game or a tab that wants
+JSON rather than HTML had no way in. `defchannel` gives them one — `join` / `on` /
+`handle-info` / `handle-out` / `terminate`, one multiplexed socket at `/channel/ws`, a topic
+registry matched by exact name or `prefix*` (exact wins; among wildcards the longest prefix
+does), and `(channel pattern module)` in the router to register it.
+
+Two decisions worth recording. **Topics are shared with `web/pubsub` on purpose**: a channel
+broadcast publishes on the topic name itself, so a live view that `pubsub/subscribe`s to
+`"room:lobby"` receives every channel message at its `handle-info`, and `broadcast-to` reaches
+both from a plain HTTP handler or a job. One topic namespace across both halves of the socket
+layer is what makes a channel worth having *next to* a live view rather than instead of one.
+And **`join` is a required clause** — every other clause defaults, and this one refuses to.
+A channel is reachable by anything that can open a socket, and a pattern like `"user:*"` lets
+the client name the rest of the topic itself; a channel whose author forgot `join` would be an
+open door that reads exactly like a closed one. It is an error at expansion, not a permissive
+default at runtime, and `require-join-clause` is a named function so the rule has a test.
+
+**Live uploads, as a model key rather than a namespace beside it.** Phoenix keeps uploads in
+`@uploads.avatar`, separate from the assigns, because its change tracking cannot see into them
+otherwise. Hatch does not need the exception and is better without it: `(upload/allow :avatar
+{…})` returns a value that lives at a model key, so a render reading `(get model :avatar)`
+tells `web/parts/deps-of` exactly which slot the upload feeds. A chunk landing repaints one
+`<progress>` and nothing else, with no special case anywhere in the renderer — the diff engine
+that already exists does the work.
+
+That is also why the reading functions take the upload (`(entries (get model :avatar))`) and
+the updating ones take the model (`(consume model :avatar f)`). It looks inconsistent and is
+not: a reader spelled `(entries model :avatar)` would use the model opaquely, mark the slot
+`:all`, and quietly re-render the whole view on every chunk — the exact granularity the design
+is for, lost to an API that reads more uniformly.
+
+`consume` is a plain function of an entry returning `[results model']`; there is no
+`{:ok …}`/`{:postpone …}` return contract to remember. If it raises, nothing is deleted and
+the model does not move, so a failed save leaves the upload there to retry. Bytes go up as
+binary frames — `[refLength][ref][bytes]`, no base64, since the transport already carries
+bytes — and the ref is the capability: unguessable, server-issued, and looked up in this
+session's own model, so a client cannot invent one or reach another session's entry. The size
+limit is enforced against bytes actually received rather than the size the browser declared,
+an entry that reports itself finished short of its declared size is failed rather than
+accepted, and `close-session` sweeps whatever a user abandoned by closing the tab.
+
+**A test harness that goes through the markup.** `(live-event spec "save" {} model)` passes
+whether or not anything rendered would ever send `"save"`. README's own counter shipped in
+exactly that state for months — a `handle-event` clause no markup could reach, compiling and
+rendering and doing nothing, with a green suite. `live-open` now returns a view value, and
+`live-click` / `live-change` / `live-submit` find an element by a CSS-ish selector, read the
+event off its `data-event`, and fire *that* — so a test can only trigger what a user could,
+and a misnamed or deleted control fails where it should. `live-has?` / `live-text` /
+`live-count` / `live-attr` assert on what is rendered.
+
+It matches the **Hiccup tree**, not parsed HTML: the Hiccup is the markup, `web/template`
+lowers it one to one, and matching the tree means no second HTML parser to keep correct.
+`live-submit` collects a form's fields the way `new FormData(form)` does, down to what it
+leaves out — the submit button, a file input, an unchecked box. A miss names the view's wired
+elements rather than dumping markup, because a failing selector is nearly always one id or one
+event name out. The correspondence with `brood_live.js` is the thing that makes any of it
+true, so it is pinned by its own tests.
+
+**Part two: hooks, and pacing what the client sends.** The two smallest items on the
+browser-side gap list, and between them they unblock more app work than anything else on it.
+
+**Hooks are the escape hatch to imperative JavaScript**, and without one a live view could
+host no third-party library at all — no chart, no map, no editor, no drag-and-drop, nothing
+that owns a piece of the DOM and has a lifecycle. `BroodLive.hook("Chart", {mounted, updated,
+destroyed, disconnected, reconnected})` against `data-hook="Chart"` in the markup; inside,
+`this.el`, `this.pushEvent` (routed to the enclosing component exactly as a click is) and
+`this.handleEvent` for what `push-event` sends.
+
+Two decisions carry the weight. `data-update="ignore"` keeps the morph out of a subtree the
+hook owns while still syncing its attributes — without it the next patch morphs a chart's
+canvas back to the empty `<div>` the server rendered, which makes hooks close to unusable
+rather than merely awkward. And **a hook element must carry an `id` or a `data-key`**: the
+morph recognises a node by one of those, so with neither an unrelated update can rebuild the
+element and tear the hook down underneath a library that is mid-use. Nothing raises when that
+happens — the symptom is a chart resetting when some *other* part of the page changes — so the
+client refuses to mount and says why, and `web/audit` grew a rule that catches it at render
+time in dev instead.
+
+`updated` fires on a change the SERVER made, not on every patch: the signature is the
+element's attributes, plus its children only when the framework is the one maintaining them.
+Under `data-update="ignore"` the children are the hook's own, and comparing them would fire
+`updated` at a hook for its own work.
+
+**`data-debounce` / `data-throttle`.** An input with `data-event` fired on every keystroke,
+full stop, so the signup demo pushed a frame per character. Now `data-debounce="300"` waits for
+a pause, `data-debounce="blur"` waits for the field to be left, and `data-throttle="500"` rate
+limits.
+
+Three rules in it are each a bug if you assume the opposite. Leaving a field flushes a debounce
+that has not run out. **Submitting flushes the form first** — type into a 300ms-debounced field
+and hit enter, and without that the submit overtakes the change, so the server validates a
+value it was never told about and the form is wrong in a way that depends on typing speed. And
+throttle treats the two kinds of event differently, which is where this departs from Phoenix: a
+throttled VALUE gets a trailing send at the end of the window, because dropping the last event
+of a dragged slider leaves the server holding a position the user never stopped on — a wrong
+answer rather than a coarse one — while a throttled ACTION is dropped outright, because
+replaying a click late is not rate limiting, it is a second click.
+
+The decision is a pure function (`decideSend`: state, settings and the clock in, a verdict out)
+for a reason beyond tidiness — Brood has no subprocess primitive, so `nest test` cannot shell
+out to node, and a pure function is the largest piece of the client that can be tested at all.
+`tests/js/timing_test.js` covers it under plain `node`, no dependencies. The DOM-bound half
+still has none, which `docs/client.md` says out loud rather than leaving to be discovered.
+
+`docs/client.md` is new and overdue: the client's whole attribute vocabulary —
+`data-event`, `data-params`, `data-nav`, `data-patch`, `data-upload`, `data-disable-with` and
+now the four new ones — had been documented only in the comments of the file that implements
+it.
+
+**Part three: the rest of the browser-side list, and streams.**
+
+**`web/streams` — collections a live view renders without holding.** The model is the state of
+the page and the diff engine works by comparing renders, which is right for a form and wrong
+for a message feed: unbounded, held in full in every connected session, re-rendered for rows
+nobody is looking at. A stream keeps only what changed since the last render; the view renders
+that; the client merges it into what is on screen; the server forgets. Fifty thousand rows cost
+the handful most recently handed over.
+
+The pleasing part is that it needed **no wire protocol**. `data-update="stream"` tells the
+client to MERGE the children it is sent rather than reconcile against them, so a stream travels
+the ordinary render/diff path with no special case in `web/parts`, `web/live` or the frame
+format — the same trick `data-update="ignore"` plays for hooks, pointed the other way. `reset`
+renders `stream-reset` for one patch, which empties first. Only a delete needed anything new,
+and only because it cannot be expressed by rendering what is left when you do not know what is
+left: it rides the effect channel `push-event` already uses, naming ids.
+
+What it gives up is stated rather than worked around. There is no `streams/all` — a handler
+that needs to know what is on screen wants an ordinary model key. A reconnect starts over,
+because `mount` runs again and the server was never the one holding the items, so a feed that
+must survive one seeds itself in `mount` from wherever they really live. And an item must carry
+an `:id`, enforced at the call: without one the row can never be morphed and never deleted, so
+it would simply accumulate with nothing to say why.
+
+**The remaining client bindings.** `data-on-<event>` binds any DOM event — one rule rather than
+Phoenix's twelve attributes, so `data-on-dblclick` and `data-on-contextmenu` need nothing added
+here — with `data-on-window-<event>`, `data-on-click-away`, and `data-keys` to filter a
+keystroke before it costs a frame. Listeners attach lazily, one per type per session, the first
+time a patch renders an element wanting it, so a page with no `data-on-mouseover` never pays for
+a mouseover listener.
+
+`data-js-<event>` runs a short list of DOM operations locally — toggle, show/hide, class and
+attribute changes, focus, dispatch — because opening a dropdown does not need the server to
+know, and a round trip to find out is latency the user can feel. Both families share one
+listener per type, so an element carrying both gets the local change immediately and the server
+event in flight.
+
+`data-target` fixes event routing in the two directions that were unreachable: `"view"` from
+inside a component, a selector from outside one. `brood-loading` goes on the element whose
+event is travelling and on the container while any is — two classes rather than a name per
+binding, since the element already says which binding it carries.
+
+**Form recovery**, where the ordering is the whole trick. A dropped socket re-mounts the view,
+so the next render is built from a fresh `mount` and the patch carrying it overwrites the
+fields — half a filled-in form gone because the wifi blinked. `data-recover="validate"` names
+an event to replay; values are snapshotted when the socket CLOSES, because by the time the
+rejoin patch lands the DOM no longer holds them. The event is the author's choice deliberately:
+the obvious thing is to replay the form's own submit, and that would place an order twice.
+
+**What the review pass caught**, all of it in the new client and none of it caught by the
+tests written alongside it.
+
+A throttled **button** was treated as a value stream, because `carriesValue` asked the ELEMENT
+(`el.value !== undefined`) and a `<button>`'s value is `""`. So a throttled click was replayed
+at the end of the window — the second click the drop path exists to prevent, on the most
+commonly throttled control there is. It asks the EVENT now (`input`/`change` are values,
+everything else is an action), which is what the distinction was always about.
+
+`data-debounce="blur"` on a `data-on-input` field **never fired at all**: the `focusout` flush
+was gated on `data-event`, the one spelling such a field does not carry. It is gated on having
+something parked instead, which covers every binding family.
+
+`morphStream` indexed `childNodes` rather than `children`, so any whitespace the renderer
+emitted between rows shifted every positioned insert; a same-key-different-tag row was inserted
+beside the old one rather than replacing it, leaving two rows under one id; and two items with
+the same id in one batch both missed a lookup taken before the loop and were both appended.
+`data-params` was `JSON.parse`d unguarded in three places — a stray comma throws inside a
+listener, where the browser swallows it and the event is simply lost.
+
+And the harness had not been taught the bindings the client had just learned: a view written
+with `data-on-click` was undrivable, failing with "has no data-event" against markup that is
+perfectly well wired — the opposite of the error the harness exists to give. `live-click` /
+`live-change` / `live-submit` accept both spellings now, and `live-fire` takes the attribute
+for everything else, because the binding family is open and a driver per event would go stale.
+
+**Loose ends closed.** `docs/channels.md` exists. And `web/presence` over a channel socket —
+flagged as "probably works, untested" — now has a test: it does, unchanged, because presence
+tracks a process and a channel socket is one.
+
+**A fragmented message spun the frame reader at 100% CPU.** `frame-shortfall` sizes the FIRST
+FRAME, so a buffer holding one complete non-FIN frame answers 0 while `parse-frame` still says
+`[:incomplete]` — the message needs its continuations. The reader read that 0 as "we have
+enough", re-parsed the identical buffer, got `[:incomplete]` again, and never reached a
+`receive`: a pinned worker and a wedged connection, from a message shape RFC 6455 §5.4
+explicitly allows. It has been there since the reader was written; what changed is that the
+32 KB upload chunks make a browser fragmenting a large binary send routine rather than
+theoretical. `needs-more-bytes?` is the predicate now, treating nil and any non-positive
+shortfall alike as "go back to the socket", with the reasoning at its definition and a test
+that feeds the continuation and asserts the message reassembles.
+
+**The idle watchdog has never worked, and the channel socket copied it before that was
+known.** `session-loop` spawned it as `(spawn (idle-watchdog (self) sock 0))`. `spawn`
+evaluates its expression in the CHILD, so `(self)` there is the watchdog: it monitored itself,
+and its `[:ws-send …]` keepalive and its `[:reap]` went into its own mailbox, where its
+`receive` has no arm for either and selective receive left them lying. So since it shipped, no
+live session has ever sent a keepalive ping, and no black-holed peer has ever been reaped — a
+half-open connection pinned a session process and an fd until something else closed it. The
+only arm that did match was `[:alive]`, which is why the thing looked alive: it ran, and it
+reset, and it did nothing.
+
+It is `web/live/start-watchdog` now, taking the pid as a parameter so `(self)` is evaluated
+where `self` means the session, with the trap written down at the definition.
+`web_live_watchdog_test` drives a real session with a shortened interval and asserts a ping
+frame (opcode 0x9) reaches an idle client and that an unanswered one closes the socket — both
+fail against the old spelling, which is the only way this shape of bug can be pinned: the
+symptom is the absence of something, so a test has to watch the wire rather than the wiring.
+
+**What else the review pass caught**, since several are the kind that would have shipped
+quietly.
+`defchannel` documented a `handle-info` clause and the runtime never called it — the socket
+matched `[:info …]` straight to the broadcast path, so a channel's own out-of-band messages
+went nowhere. A socket could join topics without limit, each one a pubsub subscription on
+every node. A refused upload entry used up a slot, so with the default `:max-entries` of 1 one
+wrong pick permanently refused the user's corrected choice as "too many files" — and fixing
+*that* let a client grow the entry list one rejected offer at a time, which is why an offer
+now considers a bounded number of files and carries forward only its own refusals. A chunk
+arriving after `finish` was appended to a file a handler was about to consume. `cancel` with a
+nil ref matched every refused entry at once, since those carry no ref. `web/test`'s form
+collection read `:value` off a `<select>`, which no select has, so every dropdown in a form
+submitted `""` — a wrong answer a test would have written down as correct. And
+`web/endpoint`'s channel default read the registry to ask whether any channels existed, which
+*started* it: two processes on every app that has never heard of channels.
+
+And four more from a second, independent pass. A channel socket never kicked its watchdog, and
+a browser's automatic pong arrives as an ordinary opcode-10 frame rather than an `[:alive]` —
+so a socket carrying traffic every second was reaped on the same schedule as a dead one, which
+the JS client's reconnect turned into a silent ninety-second drop-and-rejoin cycle rather than
+an outage. `web/test`'s `text-of` had no arm for a `web/template/raw`, so `live-text` over a
+section containing a component answered `"Title#<raw \"<div data-cid=…\">"`. The browser client
+keyed its pending files by upload name, so picking a second file before the server answered the
+first init streamed the second file's bytes into the first file's entry and left the second at
+0% forever — it is keyed by a per-offer id now, echoed back on `upload-ready`. And `finish`
+discarded `append-spool`'s result for the zero-byte case alone, so a missing `:dir` marked an
+entry done behind a path with no file at the end of it.
+
+**One extraction underneath all of it.** `web/live`'s frame reader enumerated every session
+control message in two places with a "keep the two in sync" comment between them — and a
+channel socket would have made that three. It is `http/websocket/recv-frame` now, shared by
+both socket actors: it handles bytes arriving and the peer closing, and hands back anything
+else as `[:other msg buf]` for the caller to interpret. `web/live`'s vocabulary moved into one
+`session-control`, which also fixed a small leak the old shape had — a message with no arm sat
+in the session mailbox forever, since selective receive left it where it lay.
+
 ---
 
 ## Still open
@@ -565,10 +827,31 @@ entries claimed.
 - ✅ **Q10 answered** — head updates are an effect: `web/live/push-title`. See below.
 ## Known issues
 
-None open. The three stale `bytes` type-signature warnings recorded here (`count`/`fold`
+None open. `nest check` and `nest check --strict` both report zero warnings across `src/` and
+`tests/`.
+
+Five had accumulated, in three files nobody had touched, and they surfaced when `nest`
+rebuilt its stdlib image mid-session — *"rebuilt the stdlib image (std/ or the commit
+changed)"* — and the newer checker turned out to be sharper than the one the previous
+all-clear was recorded against. Nothing here had changed; what could see it had.
+
+(A warm `.brood` does NOT hide warnings, which was the first guess and is worth writing down
+as wrong: three consecutive warm `nest check` runs against a deliberately bad file each
+reported it and each exited 1. The cache is not a place for a warning to go missing.)
+
+Those five are fixed. Two were `web/session/check-expiry` reading a `get` and a `dissoc` off
+the widened return of `decode-json` — widened because `stringify-keys` walks any value and is
+typed as widely as its input, which is right for it and lost the map-ness downstream.
+`decode-json` now tests its own result and is declared `-> map`, so the promise its docstring
+made is one it enforces. The other three were in tests: `(first verdict)` where a rate-limit
+verdict is either the bare keyword `:ok` or a `[:deny …]` pair (a `match` now asks which), and
+a `>` against `(get session "__exp__")` on a map that also holds strings (a
+`future-deadline?` predicate that checks `int?` first, which is the assertion those tests were
+making anyway).
+
+The three stale `bytes` type-signature warnings recorded here (`count`/`fold`
 called directly on `bytes` at `http/response.blsp`, `http/util.blsp`, `web/static.blsp`) are
-**gone as of 2026-08-13** — `nest check` reports zero warnings across `src/` and `tests/`,
-and as of 2026-09-12 so does `nest check --strict`. The six that had accumulated there were
+**gone as of 2026-08-13**. The six that had accumulated there were
 all one shape — index arithmetic the checker widens to `number` where a `string/substring` or
 an `epoch-ms->` wants an `int` — and each had a fix worth making on its own terms: a
 one-character `substring` became `string/char-at`, a `math/min` over two indices got the
