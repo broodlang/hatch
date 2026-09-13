@@ -613,11 +613,17 @@
                    (reverse found)
                    (let (open (last-index-before document "<" at)
                          container-tag (if (< open 0) "" (tag-text document open))
-                         ;; The container's own content, up to its first closing tag — enough
-                         ;; to see its immediate rows without a full parse, which this module
-                         ;; deliberately does not attempt.
+                         ;; The container's content, to ITS OWN closing tag — `</ul>`, not the
+                         ;; first `</` of any kind. Stopping at the first one read a feed row's
+                         ;; nested `<span>` as the end of the container, so every correctly
+                         ;; keyed row produced a warning about the span inside it and the
+                         ;; unkeyed row this rule exists for was never reached: a lint that is
+                         ;; wrong both ways, which is worse than no lint at all.
+                         container-name (tag-name-of container-tag)
                          body-start (index-of document ">" at)
-                         close-at (if (< body-start 0) -1 (index-of document "</" body-start))
+                         close-at (if (or (< body-start 0) (= container-name ""))
+                                    -1
+                                    (index-of document (str "</" container-name) body-start))
                          body (if (or (< body-start 0) (< close-at 0))
                                 ""
                                 (string/substring document (+ body-start 1) close-at))
@@ -628,20 +634,44 @@
                          (cons {:container (attr-value container-tag "id") :snippet (first bad)}
                            found))))))))
     (scan 0 nil)))
+(defn- tag-name-of (tag)
+  "The element name of an opening tag — `\"<ul id=…>\"` → `\"ul\"`, `\"\"` if it has none.
+
+  (hatch/web/audit/tag-name-of \"<ul id=\\\"feed\\\">\") ;=> \"ul\"
+  (hatch/web/audit/tag-name-of \"<li>\") ;=> \"li\"
+  (hatch/web/audit/tag-name-of \"\") ;=> \"\""
+  (let (rest-of (if (string/starts-with? tag "<")
+                  (string/substring tag 1 (string/length tag))
+                  tag)
+        stop (seq/find [" " ">" "\n"]
+               (fn (c) (>= (index-of rest-of c) 0))))
+    (if (nil? stop) "" (string/substring rest-of 0 (index-of rest-of stop)))))
+
 (defn- unkeyed-rows-in (body)
-  "Every opening tag in `body` carrying neither `id` nor `data-key`, as source text."
-  (let (scan (fn (from found)
+  "Every DIRECT-CHILD opening tag in `body` carrying neither `id` nor `data-key`.
+
+  Direct children only: a row's own markup is its business, and a `<span>` inside a properly
+  keyed `<li>` is not a stream row. Depth is tracked by counting opening and closing tags
+  rather than parsed, which is this module's standing trade — it declines to judge what it
+  cannot cheaply prove."
+  (let (scan (fn (from depth found)
                (let (at (index-of body "<" from))
                  (if (< at 0)
                    (reverse found)
-                   (let (tag (tag-text body at))
-                     (scan (+ at 1)
-                       (if (or (string/starts-with? tag "</")
-                             (attr-value tag "id")
-                             (attr-value tag "data-key"))
-                         found
-                         (cons tag found))))))))
-    (scan 0 nil)))
+                   (let (tag (tag-text body at)
+                         closing? (string/starts-with? tag "</")
+                         self-closing? (string/ends-with? tag "/>")
+                         keyed? (or (attr-value tag "id") (attr-value tag "data-key")))
+                     (cond
+                       closing? (scan (+ at 1) (- depth 1) found)
+                       ;; only a tag at depth 0 is a row of this container
+                       (> depth 0) (scan (+ at 1) (if self-closing? depth (+ depth 1)) found)
+                       keyed? (scan (+ at 1) (if self-closing? depth (+ depth 1)) found)
+                       else
+                         (scan (+ at 1)
+                           (if self-closing? depth (+ depth 1))
+                           (cons tag found))))))))
+    (scan 0 0 nil)))
 
 (defn warn-unkeyed-stream-rows! (document)
   "Log a dev warning for every stream row the merge cannot recognise. A no-op outside dev and
@@ -656,6 +686,23 @@
                   "already has by id or data-key. Without one, every re-render appends "
                   "another copy. web/streams/item-attrs emits it for you."))))
   document)
+
+(defn warn-live-markup! (document)
+  "The audits that describe LIVE markup — a hook without an identity, a stream row without
+  one — run over a live view's rendered document. Returns `document` unchanged.
+
+  These exist separately from `warn-page!` because they would otherwise never fire. That one
+  is called from `web/page/page`, the plain non-live renderer, and `data-hook` and
+  `data-update=\"stream\"` are meaningless on a plain page: both rules described markup they
+  were structurally incapable of seeing. A lint nothing reaches is worse than no lint, because
+  it reads in review as coverage.
+
+  `web/live` calls this on a full render only — a join, not every diff — and only in dev."
+  (if (dev?)
+    (-> document
+      (warn-anonymous-hooks!)
+      (warn-unkeyed-stream-rows!))
+    document))
 
 (defn warn-anonymous-hooks! (document)
   "Log a dev warning for every `data-hook` element with no stable identity. A no-op outside
@@ -703,8 +750,10 @@
 (defn warn-page! (document)
   "Run every page audit and return `document` unchanged — the single hook a renderer calls.
   Currently [[warn-inert!]], [[warn-first-flight!]], [[warn-canvas-flash!]],
-  [[warn-tool-coverage!]], [[warn-headings!]], [[warn-anonymous-hooks!]],
-  [[warn-unkeyed-stream-rows!]] and [[warn-favicon!]].
+  [[warn-tool-coverage!]], [[warn-headings!]] and [[warn-favicon!]]. The two that describe
+  LIVE markup — [[warn-anonymous-hooks!]] and [[warn-unkeyed-stream-rows!]] — are reached
+  through [[warn-live-markup!]] instead, which web/live calls on a full render: a plain page
+  has no `data-hook` and no stream container, so running them here was coverage in name only.
 
   A thread rather than the six-deep nest of calls this was: every audit takes the document
   and answers it unchanged, which is a pipeline, and written inside-out it read backwards
@@ -721,7 +770,5 @@
       (warn-canvas-flash!)
       (warn-tool-coverage!)
       (warn-headings!)
-      (warn-anonymous-hooks!)
-      (warn-unkeyed-stream-rows!)
       (warn-favicon!))
     document))

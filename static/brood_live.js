@@ -536,8 +536,13 @@ const BroodLive = (() => {
         if (!form) continue;
         const { event, data } = snapshot[id];
         for (const field of Object.keys(data)) {
+          // Strings only. `new FormData(form)` yields a File for a file input, and assigning
+          // one to `.value` throws — inside `_afterPatch`, on the rejoin patch, so the hook
+          // sync and the timing prune below it never ran either. A file cannot be restored
+          // from a snapshot anyway; web/upload owns that channel.
+          if (typeof data[field] !== "string") continue;
           const input = form.elements[field];
-          if (input && input.value !== undefined) input.value = data[field];
+          if (input && typeof input.value === "string") input.value = data[field];
         }
         this.pushEvent(event, data, nearestCid(form));
       }
@@ -946,8 +951,12 @@ const BroodLive = (() => {
       // rows with one id, which is a duplicate the client can never resolve and a `delete`
       // that only ever removes one of them.
       if (match) {
-        existing.delete(key);
         match.parentNode.replaceChild(node, match);
+        // `set`, not `delete` — the replacement IS now the node holding this key, and the
+        // lookup was taken before the loop. Clearing it made the same batch's second mention
+        // of this id miss and append, producing exactly the duplicate the insert branch below
+        // records itself to avoid.
+        existing.set(key, node);
         continue;
       }
       // `children`, not `childNodes`: the position is an index among ROWS, and childNodes
@@ -1258,6 +1267,19 @@ const BroodLive = (() => {
 
     const fire = (el, handler, event) => {
       if (!keyAllowed(el, event)) return;
+      // A submit or a click on a link has a DEFAULT the browser performs on top of whatever
+      // we do — a native form post, a navigation — and either tears the socket down and
+      // reloads the page. The dedicated `data-event` handlers prevent it; this generic one
+      // reached the same elements through `data-on-submit` / `data-on-click` and did not, so
+      // the binding pushed its event and then destroyed the session that was about to handle
+      // it. Submitting also flushes the form's debounced fields first, which is the guarantee
+      // docs/client.md makes and which only the dedicated path was keeping.
+      if (event.type === "submit") {
+        event.preventDefault();
+        session._flushPending(el);
+      } else if (event.type === "click" && el.closest("a[href]")) {
+        event.preventDefault();
+      }
       session._scheduleSend(el, carriesValue(event), () => {
         beginLoading(el);
         session.pushEvent(handler, eventParams(el, event), nearestCid(el));

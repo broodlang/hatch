@@ -326,15 +326,27 @@
             ;; has already replaced. Without that, a refusal not costing a slot (which is
             ;; right) would let a client grow the list one rejected offer at a time.
             considered (vec (take files (+ (spec-max-entries upload) *max-refusals*)))
-            offered (map (range (count considered))
-                      (fn (i)
-                        (let (f (nth considered i)
-                              client-name (get f "name" "")
-                              size (get f "size" 0)
-                              content-type (get f "type" nil))
-                          (if (>= i room)
-                            (refusal client-name size content-type "too many files")
-                            (admit upload client-name size content-type))))))
+            ;; A running count of the room LEFT, not the file's index. Comparing the index to
+            ;; a precomputed `room` charges a slot to a file that was then refused for its
+            ;; type or its size: pick `[notes.txt, photo.png]` against `{:accept [".png"]
+            ;; :max-entries 1}` and the .txt spends index 0, so the .png — the only valid
+            ;; file, against an upload with its slot still free — is refused as "too many
+            ;; files", which is not true and leaves the user nothing to act on. The rule the
+            ;; comment above states held across offers and not within one.
+            offered (reverse (first (fold considered
+                                      [(list) room]
+                                      (fn (acc f)
+                                        (let ([built left] acc
+                                              client-name (get f "name" "")
+                                              size (get f "size" 0)
+                                              content-type (get f "type" nil)
+                                              admitted (if (<= left 0)
+                                                         (refusal client-name
+                                                           size content-type "too many files")
+                                                         (admit upload
+                                                           client-name size content-type)))
+                                          [(cons admitted built)
+                                            (if (nil? (entry-error admitted)) (- left 1) left)]))))))
         [(put-upload model key (with-entries upload (append kept offered)))
           (map offered entry-ref)]))))
 
@@ -375,6 +387,13 @@
                       false
                       "this file is too large"))
                 else
+                ;; The write-failure branch below DELETES before it nils the path. Every
+                ;; sweeper — cancel, consume, cleanup — reaches a file only through
+                ;; `entry-path`, so nilling it without deleting strands whatever was already
+                ;; written: it survives the session, the process and the deploy, on exactly
+                ;; the disk-full path where a leak hurts most. http/server's own spool append
+                ;; deletes the partial before it re-raises; that ending was lost when the
+                ;; rule was copied here.
                   (if (append-spool (entry-path e) chunk)
                     (entry (entry-ref e)
                       (entry-client-name e)
@@ -384,14 +403,16 @@
                       (+ (entry-received e) (count chunk))
                       false
                       nil)
-                    (entry (entry-ref e)
-                      (entry-client-name e)
-                      (entry-size e)
-                      (entry-content-type e)
-                      nil
-                      (entry-received e)
-                      false
-                      "could not be written to disk"))))))))))
+                    (do
+                      (delete-spool (entry-path e))
+                      (entry (entry-ref e)
+                        (entry-client-name e)
+                        (entry-size e)
+                        (entry-content-type e)
+                        nil
+                        (entry-received e)
+                        false
+                        "could not be written to disk")))))))))))
 
 (defn finish (model ref)
   "Mark entry `ref` complete — the client has sent its last chunk. Returns the updated model.

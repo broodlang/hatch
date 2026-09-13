@@ -77,7 +77,14 @@
       (tcp/close ls))
     (def web/live/*ws-ping-ms* default-ping-ms))
 
-  (test "a peer that never answers a ping has its session reaped and the socket closed"
+  ;; `:isolated` applies per TEST, not to the describe — and only an isolated test's `def`s
+  ;; are rolled back. Without it here, this test's `(def *ws-ping-ms* 80)` ran during the
+  ;; parallel phase and pinged EVERY other suite's live session at 80ms, reaping them after
+  ;; ~240ms of quiet: the end-to-end cases in web_channel_test, web_live_conn_test and
+  ;; readme_example_test would read `:closed` and fail, in files with nothing to do with the
+  ;; watchdog, moving with worker scheduling. The restore at the end does not save it either —
+  ;; it is skipped entirely if an assertion raises.
+  :isolated (test "a peer that never answers a ping has its session reaped and the socket closed"
     (def web/live/*ws-ping-ms* 80)
     (let ([client ls] (open-session))
       (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))

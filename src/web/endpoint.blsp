@@ -461,6 +461,13 @@
                               (empty? (web/channel/channel-table)))
                           nil
                           (web/channel/channel-dispatcher))
+                      ;; nil disables, exactly as `false` does and exactly as `{:live nil}`
+                      ;; does two lines up. Without this arm nil is not `:default`, is not
+                      ;; `false` (in Brood `(= nil false)` is false) and is not `true` — so it
+                      ;; fell to the guard branch and served /channel/ws with `connect` = nil:
+                      ;; an UNGUARDED channel endpoint from a config that plainly asked for
+                      ;; none. `{:channels (and (prod?) guard-fn)}` is nil in dev.
+                      (nil? channels) nil
                       (= channels false) nil
                       (= channels true) (web/channel/channel-dispatcher)
                       ;; anything else is the connect guard itself

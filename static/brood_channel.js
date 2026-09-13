@@ -28,10 +28,19 @@ const BroodChannel = (() => {
       this.params = params || {};
       this.handlers = new Map();
       this.state = "closed"; // closed | joining | joined
-      // Re-join automatically after a reconnect. The server keeps no state for a dropped
-      // socket, so a channel that was joined before the drop is not joined after it; without
-      // this the page keeps its listeners and silently stops receiving anything.
-      this.rejoinOnReconnect = true;
+      // Whether the PAGE wants this channel, which is not the same question as what the
+      // socket is currently doing. `join()` sets it, `leave()` clears it, and nothing else
+      // touches it — so a reconnect can ask "did the app ask for this?" rather than trying to
+      // read intent out of `state`.
+      //
+      // Reading `state` got it wrong in both directions. A channel still "joining" (the
+      // documented usage is synchronous, so the first join is queued before the socket is
+      // open) was re-joined on the very first `onopen` — two joins, the second accepted and
+      // the first answered "already joined", which rejected the promise the app was holding.
+      // And a channel whose join was in flight when the socket dropped had its promise
+      // rejected, which set `state` to "closed" in a microtask long before the reconnect
+      // timer fired, so the reconnect skipped it and the page received nothing ever again.
+      this.wanted = false;
     }
 
     on(event, callback) {
@@ -50,6 +59,7 @@ const BroodChannel = (() => {
         return Promise.reject(new Error(`already ${this.state} ${this.topic}`));
       }
       this.state = "joining";
+      this.wanted = true;
       return this.socket
         ._request(this.topic, "join", this.params)
         .then((payload) => {
@@ -58,8 +68,29 @@ const BroodChannel = (() => {
           return payload;
         })
         .catch((err) => {
+          // `state`, not `wanted`: the app still wants this channel, the attempt just did
+          // not land. A reconnect re-joins on intent, so a join interrupted by the drop that
+          // rejected it is retried rather than abandoned.
           this.state = "closed";
           throw err;
+        });
+    }
+
+    // Re-join after a reconnect. Separate from `join()` because the app's promise from the
+    // original call is long settled, so a failure here has nobody to reject at — it is
+    // reported and retried on the next reconnect rather than surfacing as an unhandled
+    // rejection the page never asked for.
+    _rejoin() {
+      this.state = "joining";
+      this.socket
+        ._request(this.topic, "join", this.params)
+        .then((payload) => {
+          this.state = "joined";
+          this._fire("join", payload);
+        })
+        .catch((err) => {
+          this.state = "closed";
+          console.warn(`brood channel: could not rejoin ${this.topic}`, err);
         });
     }
 
@@ -70,7 +101,7 @@ const BroodChannel = (() => {
     }
 
     leave() {
-      this.rejoinOnReconnect = false;
+      this.wanted = false;
       const done = this.socket._request(this.topic, "leave", {});
       this.state = "closed";
       this.socket.channels.delete(this.topic);
@@ -98,6 +129,9 @@ const BroodChannel = (() => {
       this.pending = new Map();
       this.nextRef = 1;
       this.queue = [];
+      // Whether this socket has ever been open, so the first `onopen` does not re-join what
+      // has not been joined yet — see the rejoin note there.
+      this.opened = false;
       this.reconnectDelay = 250;
       this.reconnectTimer = null;
       this._connect();
@@ -124,15 +158,21 @@ const BroodChannel = (() => {
       this.socket.onopen = () => {
         this.connected = true;
         this.reconnectDelay = 250;
-        // Flush anything sent while the socket was down, then re-join. Order matters:
-        // a queued push for a topic is meaningless until its join has been re-sent, so
-        // re-joins go first.
-        for (const ch of this.channels.values()) {
-          if (ch.rejoinOnReconnect && ch.state !== "closed") {
-            ch.state = "closed";
-            ch.join().catch(() => {});
+        // Re-join only on a RE-connect. On the first open there is nothing to re-join: the
+        // app's own `join()` is already queued (the documented usage is synchronous, so it
+        // was made before the socket opened) and re-joining here would send a second one —
+        // the server accepts whichever arrives first and answers the other "already joined",
+        // rejecting the promise the app is holding on every single page load.
+        if (this.opened) {
+          for (const ch of this.channels.values()) {
+            // On INTENT, not on `state`: a join still in flight when the socket dropped had
+            // its promise rejected, which set `state` to "closed" long before this runs.
+            if (ch.wanted) ch._rejoin();
           }
         }
+        this.opened = true;
+        // Then whatever was queued while the socket was down — a push for a topic is
+        // meaningless until its join has gone out, so this order matters.
         const queued = this.queue;
         this.queue = [];
         for (const frame of queued) this._write(frame);
@@ -151,6 +191,12 @@ const BroodChannel = (() => {
           reject(new Error("brood channel: disconnected"));
         }
         this.pending.clear();
+        // The queue goes with them. A frame written while the socket was down sits in both
+        // `queue` and `pending`; rejecting the promise and keeping the frame meant the app
+        // was told its push failed — and a retrying app had already re-sent it — while the
+        // reconnect replayed the original anyway, so the room got it twice and the reply was
+        // dropped as an unknown ref. Nothing bounded the queue across a long outage either.
+        this.queue = [];
         for (const ch of this.channels.values()) {
           if (ch.state === "joined") ch._fire("close", { reason: "disconnected" });
         }

@@ -375,12 +375,32 @@
       (assert= (includes? text "\"event\":\"info-seen\"") true)
       (assert= (includes? text "reached") true))))
 
+;; This asserted only that the constant was between 1 and 1024 — the guard it is named after
+;; could be deleted outright and the suite stayed green, while a single socket joined topics
+;; without limit, each costing a map entry plus a pubsub subscription on every node. It joins
+;; past the ceiling on a real socket now.
 (describe "a socket may not join topics without limit"
-  :isolated (test "past the ceiling a join is refused"
-    (register-channel "e2e:*" (fn () (live-channel-spec)))
-    ; the ceiling itself is the guard; assert it is set to something finite and modest, since
-    ; a cap that is effectively no cap is the failure mode worth catching
-    (assert= (and (> *max-topics-per-socket* 0) (<= *max-topics-per-socket* 1024)) true)))
+  :isolated (test "the join past the ceiling is refused, and the ones under it are not"
+    (register-channel "cap:*" (fn () (live-channel-spec)))
+    (let (replies (with-socket (fn (client)
+                                 (fold (range (+ *max-topics-per-socket* 1))
+                                   [(list) (bytes [])]
+                                   (fn (acc i)
+                                     (let ([seen buf] acc)
+                                       (tcp/send client
+                                         (masked-text-frame (str "{\"topic\":\"cap:"
+                                                              i "\",\"event\":\"join\",\"ref\":\"r"
+                                                              i "\"}")))
+                                       (let (frame (expect-frame client buf))
+                                         [(cons (first frame) seen) (second frame)])))))))
+      (let (texts (vec (reverse (first replies))))
+        ; every join under the ceiling is accepted
+        (assert= (includes? (nth texts 0) "\"status\":\"ok\"") true)
+        (assert= (includes? (nth texts (- *max-topics-per-socket* 1)) "\"status\":\"ok\"") true)
+        ; the one past it is refused, and says why
+        (let (last-text (nth texts *max-topics-per-socket*))
+          (assert= (includes? last-text "\"status\":\"error\"") true)
+          (assert= (includes? last-text "too many topics") true))))))
 
 ;; ---- the keepalive, and not reaping a socket that is busy -------------------
 ;;
@@ -475,3 +495,38 @@
           (web/presence/untrack "e2e:presence")
           (sleep 50)
           (assert= (empty? (web/presence/roster "e2e:presence")) true))))))
+
+;; ---- an app's own pubsub payload is not a channel broadcast -------------------
+;;
+;; Found by review. Routing on the presence of a `:topic` key took any app payload that named
+;; its own topic for a channel broadcast: it was pushed to the client as
+;; {"event":null,"payload":null} — the app's keys destroyed in transit — and never reached
+;; `handle-info`, where the app was waiting for it. Topics are shared by design, so a message
+;; has to say it is a channel message rather than merely mention a topic.
+
+(describe "a raw pubsub payload naming a joined topic still goes to handle-info"
+  :isolated (test "it reaches handle-info intact rather than being pushed as a null event"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket
+                 (fn (client)
+                   (tcp/send client
+                     (masked-text-frame "{\"topic\":\"e2e:mine\",\"event\":\"join\",\"ref\":\"j\"}"))
+                   (let (after-join (second (expect-frame client (bytes []))))
+                     ; names its own topic, as an app payload naturally might, but is not a
+                     ; channel message
+                     (pubsub/broadcast "e2e:mine" {:topic "e2e:mine" :marker "intact"})
+                     (first (expect-frame client after-join))))))
+      ; handle-info pushed it back, so it went where the app expected
+      (assert= (includes? text "\"event\":\"info-seen\"") true)
+      (assert= (includes? text "intact") true)
+      (assert= (includes? text "null") false)))
+
+  (test "a real channel broadcast still takes the handle-out path"
+    (register-channel "e2e:*" (fn () (live-channel-spec)))
+    (let (text (with-socket (fn (client)
+                              (tcp/send client
+                                (masked-text-frame "{\"topic\":\"e2e:theirs\",\"event\":\"join\",\"ref\":\"j\"}"))
+                              (let (after-join (second (expect-frame client (bytes []))))
+                                (broadcast-to "e2e:theirs" "news" {:ok true})
+                                (first (expect-frame client after-join))))))
+      (assert= (includes? text "\"event\":\"news\"") true))))

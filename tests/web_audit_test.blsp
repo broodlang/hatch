@@ -491,3 +491,24 @@
   (test "warn-unkeyed-stream-rows! returns the document unchanged, like every audit"
     (let (document "<ul data-update=\"stream\"><li>x</li></ul>")
       (assert= (web/audit/warn-unkeyed-stream-rows! document) document))))
+
+;; Found by review: the rule was wrong in BOTH directions. It stopped the container's body at
+;; the first `</` of any kind, so a keyed row containing a `<span>` reported the span and never
+;; reached the unkeyed row the rule exists for — a lint that cries wolf AND misses, which is
+;; worse than no lint.
+(describe "unkeyed-stream-rows judges rows, not their contents"
+  (test "a keyed row with nested markup is clean"
+    (assert= (empty? (web/audit/unkeyed-stream-rows (str "<ul data-update=\"stream\">"
+                                                      "<li id=\"a\"><span class=\"body\">hello</span></li>"
+                                                      "</ul>")))
+      true))
+  (test "and the unkeyed row beside it is still caught"
+    (let (findings (web/audit/unkeyed-stream-rows (str "<ul data-update=\"stream\">"
+                                                    "<li id=\"a\"><span>ok</span></li>"
+                                                    "<li><span>bad</span></li>" "</ul>")))
+      (assert= (count findings) 1)
+      (assert= (includes? (get (first findings) :snippet) "<li") true)))
+  (test "markup after the container is not judged"
+    (assert= (empty? (web/audit/unkeyed-stream-rows (str "<ul data-update=\"stream\"><li id=\"a\">x</li></ul>"
+                                                      "<div><p>outside</p></div>")))
+      true)))

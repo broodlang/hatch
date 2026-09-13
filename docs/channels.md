@@ -73,7 +73,7 @@ For a decision about the *connection* rather than a topic, the endpoint takes a 
 
 ```clojure
 (web/endpoint/serve {:router routes
-                     :channels (fn (conn) (when-not (signed-in? conn) :refused))})
+                     :channels (fn (conn) (unless (signed-in? conn) :refused))})
 ```
 
 Return a falsy value to accept. It is the counterpart of a live view's `on-mount-guard`.
@@ -116,9 +116,11 @@ job, a `handle-info` in some other process:
 
 ```clojure
 (join (topic params socket)
-  (do
-    (presence/track topic (assigned socket :user-id) {:name (assigned socket :name)})
-    [:ok socket]))
+  ;; assign FIRST — `socket` arrives with empty assigns, so reading them here would track
+  ;; every member under nil
+  (let (joined (assign socket {:user-id (get params "user_id") :name (get params "name")}))
+    (presence/track topic (assigned joined :user-id) {:name (assigned joined :name)})
+    [:ok joined]))
 ```
 
 Roster updates arrive at the channel's `handle-info`. The presence is dropped automatically
@@ -157,8 +159,10 @@ room.leave();
 ```
 
 Served from the package at `/static/brood_channel.js`, like the live client. It reconnects with
-jittered backoff, re-joins the topics it held, queues pushes made while the socket was down,
-and rejects every in-flight request on a drop rather than leaving promises pending forever.
+jittered backoff and re-joins the topics the page asked for. A drop rejects every in-flight
+request rather than leaving promises pending forever, and discards what was queued with them:
+a frame whose promise was already rejected must not also be replayed on reconnect, or the app
+is told its push failed while the room receives it twice.
 
 ## Limits
 

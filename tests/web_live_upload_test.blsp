@@ -490,3 +490,28 @@
       (assert= (upload/entry-done? e) false)
       (assert= (includes? (upload/entry-error e) "could not be written") true)
       (assert= (upload/entry-path e) nil))))
+
+(describe "a file refused inside an offer does not spend a slot"
+  ; Found by review. The rule held across offers via `kept` and not within one: the index was
+  ; charged before the file was judged, so a bad pick beside a good one refused the good one
+  ; as "too many files" — untrue, and nothing the user can act on.
+  (test "the valid file is accepted even when an invalid one precedes it"
+    (let (model (avatar {:accept [".png"] :max-entries 1})
+          [next refs] (upload/offer model
+                        :avatar (list {"name" "notes.txt" "size" 10}
+                          {"name" "photo.png" "size" 10})))
+      (assert= (nth (vec refs) 0) nil)
+      (assert= (nil? (nth (vec refs) 1)) false)
+      (let (entries (vec (upload/entries (get next :avatar))))
+        (assert= (includes? (upload/entry-error (nth entries 0)) "not accepted") true)
+        (assert= (upload/entry-error (nth entries 1)) nil))))
+  (test "and the surplus past the real limit still says too many"
+    (let (model (avatar {:accept [".png"] :max-entries 1})
+          [next _refs] (upload/offer model
+                         :avatar (list {"name" "a.txt" "size" 1}
+                           {"name" "b.png" "size" 1}
+                           {"name" "c.png" "size" 1})))
+      (let (entries (vec (upload/entries (get next :avatar))))
+        (assert= (includes? (upload/entry-error (nth entries 0)) "not accepted") true)
+        (assert= (upload/entry-error (nth entries 1)) nil)
+        (assert= (includes? (upload/entry-error (nth entries 2)) "too many") true)))))

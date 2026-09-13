@@ -601,6 +601,31 @@
       (assoc view :model (web/streams/flush model))
       view)))
 
+(defn- audit-live-render (spec model)
+  "Run `web/audit`'s live-markup rules over this view's rendered document. Dev only, and on a
+  FULL render only — a join, not every diff — so the cost is one extra render per connection
+  rather than one per event.
+
+  It renders a second time rather than reusing the statics and dynamics just computed, for one
+  reason: those are a split, and a `data-hook` element's attributes can straddle the boundary
+  between a static and the slot next to it, so the audit would be reading half a tag. A second
+  render is the honest way to get a document, and it is paid only in dev.
+
+  The component table it renders with is a FRESH one, never the session's. `render-slot`
+  writes component state into the table it is handed, and re-rendering through the live one
+  would mount every component on the page a second time — an audit must not be able to change
+  what it is auditing.
+
+  Wrapped whole: a render that throws here has already been reported by the real render beside
+  it, and an audit is the last thing that should be able to end a session."
+  (when (web/audit/dev?)
+    (check-allow :discarded-catch
+      (try
+        (web/audit/warn-live-markup! (web/template/render ((view-spec-render spec) model
+                                                            (table/new))))
+        (catch _ nil))))
+  nil)
+
 (defn push-full (sock view buf)
   "Send the whole view — `{:event \"join\" :s statics :d dynamics :f fingerprint}` — and record
   the dynamic slots (and the model they were rendered from) so later updates diff and
@@ -626,7 +651,8 @@
                    (catch e (live-handler-error "render" :render e nil))))
     (if (nil? dynamics)
       (close-session sock view)
-      (let (view (assoc view :dynamics dynamics :render-model model)
+      (let (_audit (audit-live-render spec model)
+            view (assoc view :dynamics dynamics :render-model model)
             fp (web/parts/statics-fingerprint statics)
             ; the client's claim is consumed by this join and not carried forward: a later
             ; re-join on the same socket (a live-navigate) is a fresh negotiation
@@ -697,7 +723,16 @@
               ;; there — and carrying them into the next diff would render the same rows twice.
               view (flush-streams (assoc view :dynamics dynamics :render-model model)))
           (if (= (count changed) 0)
-            (session-recv sock view buf)
+            ;; Nothing to patch, but the client is still holding the loading state it put up
+            ;; when it sent the event — `brood-loading`, and a `data-disable-with` control
+            ;; disabled and relabelled — and it clears that only when a patch arrives. A
+            ;; handler that renders identically (a no-op save, a toggle already in that state,
+            ;; a re-submitted unchanged form) would otherwise leave the button disabled and
+            ;; the container dimmed until some unrelated later patch, which on a view with no
+            ;; ticker is never. An empty diff is cheap and says "I am done".
+            (if (send-msg sock {:event "diff" :d {}})
+              (session-recv sock view buf)
+              (close-session sock view))
             (if (send-msg sock {:event "diff" :d changed})
               (session-recv sock view buf)
               (close-session sock view))))))))
@@ -776,10 +811,18 @@
     ([:ok 8 _ _] (close-session sock view))
     ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
     ; is best-effort: a failed write means the peer is gone, so end the session.
-    ([:ok 9 payload _] (kick-watchdog view)
+    ;
+    ; `remainder`, NOT `buf`. `recv-frame` answers from the buffer without touching the
+    ; socket, so re-entering with the buffer the ping came out of re-parses that same ping
+    ; forever: a pong per iteration, a core pinned, and the loop never reaching a `receive`
+    ; — so `[:reap]` and every out-of-band message pile up unread while `kick-watchdog`
+    ; fires each time round, disarming the one thing that would have reaped it. A client
+    ; writing `[text][ping]` in one TCP segment is enough, since the text arm threads its
+    ; remainder here. Every sibling arm already threads it; this one did not.
+    ([:ok 9 payload remainder] (kick-watchdog view)
       (if (check-allow :discarded-catch
             (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
-        (session-recv sock view buf)
+        (session-recv sock view remainder)
         (close-session sock view)))
     ; client message
     ([:ok 1 payload remainder] (kick-watchdog view) (session-dispatch sock view remainder payload))
@@ -1117,6 +1160,15 @@
                         ; before it's replaced — the session process lives on across a navigate,
                         ; so the monitor-based cleanup never fires for it. Runs here in the session
                         ; process, so (self) is the same pid that mount subscribed/tracked.
+                        ;; Sweep the outgoing model's upload spools. `:model` is replaced a
+                        ;; few lines down and the old one was the only thing holding an
+                        ;; `entry-path`; the socket stays open, so `close-session` later
+                        ;; sweeps the NEW model and finds nothing. `cleanup`'s own docstring
+                        ;; names this case — "navigated away from" — and had no caller for it.
+                        _spools (check-allow :discarded-catch
+                                  (try
+                                    (web/upload/cleanup (session-view-model view))
+                                    (catch _ nil)))
                         _unmount (try
                                    ((view-spec-unmount (session-view-spec view)) (session-view-model view))
                                    (catch e (live-handler-error "unmount" :unmount e nil)))

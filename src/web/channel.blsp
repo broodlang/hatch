@@ -132,8 +132,17 @@
   subscribed to the same topic receives exactly this at its `handle-info`, which is the point
   — see the module docstring.
 
-  (hatch/web/channel/message \"room:1\" \"msg\" {:a 1}) ;=> {:topic \"room:1\" :event \"msg\" :payload {:a 1}}"
-  {:topic topic :event event :payload payload})
+  It carries a `:hatch/channel` marker, and that is what a socket routes on — NOT the mere
+  presence of a `:topic` key. Topics are shared with app pubsub traffic by design, and naming
+  where a message came from is a natural thing for an app's own payload to do; routing on
+  `:topic` meant `(pubsub/broadcast \"room:1\" {:topic \"room:1\" :kind :invalidated})` was
+  taken for a channel broadcast, pushed to the client as `{\"event\":null,\"payload\":null}`
+  with the app's own keys destroyed in transit, and never delivered to `handle-info` where the
+  app was waiting for it.
+
+  (get (hatch/web/channel/message \"room:1\" \"msg\" {:a 1}) :event) ;=> \"msg\"
+  (get (hatch/web/channel/message \"room:1\" \"msg\" {:a 1}) :hatch/channel) ;=> true"
+  {:hatch/channel true :topic topic :event event :payload payload})
 
 (defn parse-client-frame (payload)
   "Decode a client frame (`bytes` of UTF-8 JSON) into `{:topic :event :payload :ref}`.
@@ -149,8 +158,13 @@
                   (try (web/live/json-decode (string/bytes-> payload)) (catch _ nil)))
         msg (if (map? decoded) decoded {})
         raw (get msg "payload" {}))
-    {:topic (get msg "topic" "")
-     :event (get msg "event" "")
+    ;; `:topic` and `:event` are coerced to STRINGS, not passed through. `{"topic":7}` is
+    ;; valid JSON, and a topic reaches `topic-matches?` — `(string/starts-with? 7 "room:")`
+    ;; raises, outside every guard, killing the socket actor with no `terminate` for any
+    ;; joined channel and no telemetry to say it happened. A 43-byte frame, and the client
+    ;; reconnects and sends it again.
+    {:topic (->string (get msg "topic" ""))
+     :event (->string (get msg "event" ""))
      :payload (if (map? raw) raw {})
      :ref (get msg "ref" nil)}))
 
@@ -335,6 +349,12 @@
   belt-and-braces — the registry monitors its subscribers and reaps this pid anyway — but
   `terminate` is the channel's own cleanup hook and only this path can run it."
   (fold (vec (keys joined)) joined (fn (acc topic) (leave-topic topic acc reason)))
+  ;; A Close frame before the fd goes, as web/live does. Without it the browser sees the
+  ;; connection vanish rather than end, treats it as a failure, and reconnects on its backoff
+  ;; — so a client the connect guard refused comes back roughly every second, forever, each
+  ;; attempt costing a full upgrade and a `web/conn/build`. Saying no properly is what stops
+  ;; it asking again.
+  (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
   (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
   nil)
 
@@ -380,18 +400,35 @@
           (send-frame sock (reply-frame topic ref "error" {:reason "too many topics"})))
         joined)
     else
-      (let (entry (lookup-channel topic))
+    ;; The LOOKUP is inside the guard too, not just the `join` callback.
+    ;;
+    ;; Resolving a topic runs app-supplied code twice over before any handler is called:
+    ;; `topic-matches?` against every registered pattern, and the registry's own spec thunk.
+    ;; Either can raise — a pattern registered as a keyword (`(channel :room …)`, accepted
+    ;; silently at load), a thunk whose module fails to load — and the raise lands outside
+    ;; every guard, in `socket-dispatch` → `socket-loop` → `start-socket` → the ws-handler,
+    ;; none of which catch. The socket process dies with no `terminate` for any joined
+    ;; channel and no telemetry, and the client reconnects and does it again.
+    ;;
+    ;; web/live guards both equivalents; this did not.
+      (let (entry (try
+                    (lookup-channel topic)
+                    (catch e (channel-error "lookup" topic e nil))))
         (if (nil? entry)
           (do
             (when ref
               (send-frame sock (reply-frame topic ref "error" {:reason "no such channel"})))
             joined)
-          (let (spec ((get entry :spec))
+          (let (spec (try
+                       ((get entry :spec))
+                       (catch e (channel-error "spec" topic e nil)))
                 socket (new-socket topic conn)
-                result (try
-                         ((channel-spec-join spec) topic params socket)
-                         (catch e
-                           (channel-error "join" topic e [:error {:reason "join failed"}]))))
+                result (if (nil? spec)
+                         [:error {:reason "channel unavailable"}]
+                         (try
+                           ((channel-spec-join spec) topic params socket)
+                           (catch e
+                             (channel-error "join" topic e [:error {:reason "join failed"}])))))
             (match result
               ; `[:ok socket]` / `[:ok payload socket]` — joined. Subscribe AFTER the channel
               ; has agreed to the join, so a refused join leaves no subscription behind.
@@ -453,7 +490,7 @@
   message reached the PROCESS, and the process is several channels. A sender that means one
   of them says so by using its topic, which is what `broadcast-to` does. A socket with no
   joined topics drops it, since there is nothing to hand it to."
-  (if (and (map? msg) (contains? joined (get msg :topic)))
+  (if (and (map? msg) (get msg :hatch/channel) (contains? joined (get msg :topic)))
     (handle-broadcast sock joined msg)
     (fold (vec (keys joined)) joined (fn (acc topic) (handle-channel-info sock acc topic msg)))))
 
@@ -531,10 +568,12 @@
   (flush-pushes sock)
   (match (recv-frame sock buf)
     ([:ok 8 _ _] (shutdown sock joined :closed))
-    ([:ok 9 payload _] (kick watchdog)
+    ;; `remainder`, NOT `buf` — see the same arm in web/live's `session-recv`. Re-entering
+    ;; with the buffer the ping came out of re-parses that same ping forever.
+    ([:ok 9 payload remainder] (kick watchdog)
       (if (check-allow :discarded-catch
             (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
-        (socket-loop sock conn joined buf watchdog)
+        (socket-loop sock conn joined remainder watchdog)
         (shutdown sock joined :closed)))
     ([:ok 1 payload remainder] (kick watchdog)
       (socket-dispatch sock conn joined remainder payload watchdog))
@@ -562,7 +601,11 @@
                   (try (connect conn) (catch _ :hatch/connect-error))
                   nil))
     (if refused
-      (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
+      ;; Close frame first, for the reason `shutdown` gives: a refused client that sees the
+      ;; connection vanish rather than end reconnects on its backoff, forever.
+      (do
+        (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
+        (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil))))
       ;; `(self)` here and not inside the spawn — see web/live/start-watchdog for why that
       ;; distinction is the whole difference between a watchdog and a decoration.
       (let (socket-pid (self)
@@ -589,8 +632,19 @@
 ; a backtick Brood would qualify both to `web/channel` and gensym every binder. See CLAUDE.md.
 
 (defn- channel-clause (tag clauses)
-  "The single clause headed by symbol `tag`, or nil."
+  "The single clause headed by symbol `tag`, or nil. A DUPLICATE is an error.
+
+  It used to keep the first and drop the rest silently, which is worst on the one clause
+  that matters most: appending a stricter `(join …)` — the natural edit when tightening
+  auth — would compile clean, change nothing, and leave the permissive one in force. The
+  same hole applied to `handle-info` / `handle-out` / `terminate`. `web/live`'s
+  `deflive-clause` has raised on this for the same reason; this is that rule, here."
   (let (hits (seq/filter clauses (fn (c) (and (pair? c) (= (first c) tag)))))
+    (when (> (count hits) 1)
+      (error "defchannel: duplicate ("
+        (->string tag)
+        " …) clause — a channel declares it at "
+        "most once, and keeping the first silently would make a later, stricter one a no-op"))
     (if (empty? hits) nil (first hits))))
 
 (defn- channel-clauses (tag clauses)
