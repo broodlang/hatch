@@ -81,15 +81,15 @@
 ;; `defchannel` defines join/handle-in/handle-info/handle-out/terminate into THIS module,
 ;; the way a real channel module is written.
 
-(defchannel
-  (join (topic params socket)
-    (cond
-      (= (get params "token") "bad") [:error {:reason "unauthorized"}]
-      else [:ok {:joined topic} (assign socket {:user (get params "user" "anon")})]))
+(defchannel (join (topic params socket)
+              (cond
+                (= (get params "token") "bad") [:error {:reason "unauthorized"}]
+                else [:ok {:joined topic} (assign socket {:user (get params "user" "anon")})]))
 
   (on "echo" (params socket) [:reply {:said (get params "text")} socket])
 
-  (on "shout" (params socket)
+  (on "shout"
+    (params socket)
     (do
       (broadcast socket "shouted" {:text (get params "text")})
       [:noreply socket]))

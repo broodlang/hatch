@@ -18,6 +18,14 @@
   ; the recursion stays in tail position.
   (string/join (reverse (encode-bytes-acc bytes (list))) ""))
 
+;; The `cond` arms below prove each byte is present, and that proof does not survive into
+;; `first`'s type — it answers `nil` for an empty collection, so every byte reads as
+;; `nil | int` however carefully the emptiness was just tested. Narrowing here rather than at
+;; each of the six uses keeps the arithmetic readable; the 0 can never be reached.
+(defn- byte-or-zero (v)
+  "`v` when it is a byte, else 0 — see the note above."
+  (if (int? v) v 0))
+
 (defn- encode-bytes-acc (bytes acc)
   (cond
     (empty? bytes) acc
@@ -29,7 +37,7 @@
           acc))
     (empty? (rest (rest bytes)))
       (let (a (first bytes)
-            b (first (rest bytes)))
+            b (byte-or-zero (first (rest bytes))))
         (cons (str (b64-char (bit/shift-right a 2))
                 (b64-char (bit/or (bit/shift-left (bit/and a 3) 4) (bit/shift-right b 4)))
                 (b64-char (bit/shift-left (bit/and b 15) 2))
@@ -37,8 +45,8 @@
           acc))
     else
       (let (a (first bytes)
-            b (first (rest bytes))
-            c (first (rest (rest bytes)))
+            b (byte-or-zero (first (rest bytes)))
+            c (byte-or-zero (first (rest (rest bytes))))
             tail (rest (rest (rest bytes))))
         (encode-bytes-acc tail
           (cons (str (b64-char (bit/shift-right a 2))

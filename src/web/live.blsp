@@ -181,17 +181,8 @@
 ;; swap fails the suite rather than shipping a view whose ticks run its event handler.
 (defrecord view-spec
   (mount render
-    render-static
-    render-dynamic
-    render-slots
-    slot-deps
-    handle-event
-    handle-tick
-    handle-info
-    unmount
-    mount-guard
-    handle-params
-    ticks))
+    render-static render-dynamic render-slots slot-deps handle-event handle-tick handle-info unmount
+    mount-guard handle-params ticks))
 
 (impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
 
@@ -1444,6 +1435,29 @@
       (if (= (count render-body) 1) (first render-body) (cons 'do render-body)))
     (compile-template (first (rest template-clause)))))
 
+(defn require-literal-interval (ms)
+  "The tick interval, which must be a LITERAL number. Raises otherwise, and returns it when
+  it is one.
+
+  `handle-tick` dispatches on the interval with a `match`, and the arm is the interval exactly
+  as written — so a bare symbol there does not match the beat, it BINDS it. Every tick fires
+  the first clause whatever its interval, and a view with two tickers silently runs one of
+  them twice; with the catch-all after it, the expansion is also an unreachable clause, which
+  is what the compiler reports.
+
+  The message that produced is `match: unreachable clause after a catch-all`, pointing at the
+  `(deflive` form, with nothing connecting it to `(tick *every-two-seconds* …)` — which is a
+  perfectly reasonable thing to write and the first thing someone reaches for on the second
+  ticker. Named here so the error names the cause.
+
+  (hatch/web/live/require-literal-interval 1000) ;=> 1000"
+  (when (not (number? ms))
+    (error "deflive: a (tick …) interval must be a literal number, got "
+      (pr-str ms)
+      " — the interval is matched against the beat, so a symbol there binds every tick "
+      "instead of selecting this one"))
+  ms)
+
 (defn- deflive-handle-event-body (on-clauses)
   "The macro-time `handle-event` body: one `match` arm per `(on \"name\" (args…) …)`
   clause, keyed by the client's event name, falling through to an identity default (an
@@ -1564,7 +1578,7 @@
         ; tick-model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
         tick-arms (map tick-clauses
                     (fn (c)
-                      (let (ms (first (rest c))
+                      (let (ms (require-literal-interval (first (rest c)))
                             msym (first (first (rest (rest c))))
                             body (rest (rest (rest c))))
                         (list ms

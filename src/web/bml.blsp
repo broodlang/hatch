@@ -284,6 +284,13 @@
       [(read-expr (string/trim (string/substring spec 0 idx)))
         (read-expr (string/trim (string/substring spec (+ idx 2) (string/length spec))))])))
 
+(defn- directive (directives key)
+  "The text of directive `key`. `contains?` establishes it is there before every call below,
+  but that proof does not survive into `get`'s type — it answers `nil | string`, and the
+  readers downstream want a string. An empty string is also the right reading of a directive
+  written with no value at all."
+  (let (v (get directives key)) (if (string? v) v "")))
+
 (defn apply-directives (form directives)
   "Wrap an element form per its directive attributes. `:for` becomes a `for`
   comprehension and `:if` an `if` guard — but when both are present, `:if` becomes
@@ -293,14 +300,14 @@
         has-if (contains? directives ":if"))
     (cond
       (and has-for has-if)
-        (let ([binder coll] (parse-for (get directives ":for")))
+        (let ([binder coll] (parse-for (directive directives ":for")))
           (list 'for
-            (list binder coll :when (read-expr (get directives ":if")))
+            (list binder coll :when (read-expr (directive directives ":if")))
             form))
       has-for
-        (let ([binder coll] (parse-for (get directives ":for")))
+        (let ([binder coll] (parse-for (directive directives ":for")))
           (list 'for (list binder coll) form))
-      has-if (list 'if (read-expr (get directives ":if")) form nil)
+      has-if (list 'if (read-expr (directive directives ":if")) form nil)
       else form)))
 
 ; ---- attributes ----

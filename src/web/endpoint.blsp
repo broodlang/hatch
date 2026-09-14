@@ -120,6 +120,11 @@
       (assoc resp :headers (assoc headers :strict-transport-security value))
       resp)))
 
+;; `resp` declared `map` on the three below. Each reads it with `get`/`empty?` before
+;; `assoc`ing onto it, and those narrow the parameter to `countable` — which `assoc` will not
+;; take. It is a response map at every call site; saying so is what the sig is for.
+(sig hsts-header (any map any -> map))
+
 (defn- secured (conn resp config headers)
   "The baseline headers, plus HSTS — which depends on the transport and so cannot live in
   the flat default map — plus `no-transform` on anything carrying a validator.
@@ -135,6 +140,17 @@
       secured-resp
       (cache/forbid-transform secured-resp))))
 
+(sig secured (any map any any -> map))
+
+(defn- as-response (v)
+  "`v` as a response map.
+
+  `cache/conditional` answers one in both arms of its result, but that result is a pair the
+  checker cannot see into — so the response arrives at `secured` widened, and `secured` has to
+  `assoc` onto it. Narrowing once here is cheaper than declaring every function downstream,
+  and the `{}` fallback is unreachable: both arms carry a map."
+  (if (map? v) v {}))
+
 (defn security-headers (resp headers)
   "Merge baseline security `headers` into `resp`, without clobbering any a handler already
   set. The handler wins, deliberately: a page that needs to be framed, or an endpoint that
@@ -142,6 +158,8 @@
   (if (empty? headers)
     resp
     (assoc resp :headers (merge headers (get resp :headers {})))))
+
+(sig security-headers (map any -> map))
 
 (defn compress-response (conn resp opts)
   "Compress a text response body with the best coding the client accepts — brotli where it
@@ -203,11 +221,12 @@
         coding (compress/chosen-encoding conn)
         pre-tagged? (not (nil? (get (get resp :headers {}) :etag))))
     (match (cache/conditional conn resp coding)
-      ([:not-modified not-modified] (secured conn not-modified config headers))
+      ([:not-modified not-modified] (secured conn (as-response not-modified) config headers))
       ([:send validated] (secured conn
-                           (if (and compress-opts (not pre-tagged?))
-                             (compress-response conn validated compress-opts)
-                             validated)
+                           (let (response (as-response validated))
+                             (if (and compress-opts (not pre-tagged?))
+                               (compress-response conn response compress-opts)
+                               response))
                            config
                            headers)))))
 

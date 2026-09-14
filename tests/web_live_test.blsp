@@ -115,8 +115,13 @@
 (defn ws-masked-frame (opcode payload-vals key)
   "A masked client frame (16-bit length form) as a `bytes` value: FIN+opcode, masked|126, the
   big-endian length, the 4-byte mask, then payload XORed with key[i%4]."
+  ;; `i` is drawn from `(range n)` where `n` is the payload's own length, so every index is in
+  ;; bounds — but `nth` answers `nil` off the end and that possibility is in its type whatever
+  ;; the caller knows. `(or … 0)` is the narrow; it is never reached.
   (let (n (count payload-vals)
-        masked (map (range n) (fn (i) (bit/xor (nth payload-vals i) (nth key (math/mod i 4))))))
+        masked (map (range n)
+                 (fn (i)
+                   (bit/xor (or (nth payload-vals i) 0) (or (nth key (math/mod i 4)) 0)))))
     (bytes (append [(+ 128 opcode) (+ 128 126) (math/quot n 256) (math/mod n 256)] key masked))))
 
 (defn feed-tcp (sock frame chunk)
@@ -401,8 +406,7 @@
 ;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
 ;; socket stays open. Each of those reads is now a name.
 
-(deflive
-  (mount (params) {:n 0})
+(deflive (mount (params) {:n 0})
   (render (model) [:p {} (str (get model :n))])
   (tick 1000 (model) (assoc model :n (inc (get model :n)))))
 
@@ -485,3 +489,32 @@
                             (is (includes? json "\"event\":\"title\""))
                             (is (includes? json "\"title\":\"Tab\""))))
       (after 500 (is false)))))
+
+;; ---- a tick interval must be a literal ---------------------------------------
+;;
+;; Found by writing a demo view with `(tick *tick-ms* (model) …)`, which is the obvious thing
+;; to reach for on a second ticker. `handle-tick` matches the beat against the interval AS
+;; WRITTEN, so a symbol there binds every tick rather than selecting one — every beat fires
+;; the first clause, and a view with two tickers silently runs one of them twice. The
+;; expansion also leaves the catch-all unreachable, which is what the compiler reports:
+;; "match: unreachable clause after a catch-all", pointing at `(deflive` and naming nothing
+;; that would lead you to the tick.
+
+(describe "deflive's tick interval"
+  (test "a literal number passes through"
+    (assert= (require-literal-interval 1000) 1000)
+    (assert= (require-literal-interval 0) 0))
+  (test "a symbol raises, and the message names the interval and why"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do (require-literal-interval 'my-interval) "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message "literal number") true)
+      (assert= (includes? message "my-interval") true)
+      (assert= (includes? message "binds every tick") true)))
+  (test "an expression raises too — it is the same mistake spelled longer"
+    (assert= (check-allow :discarded-catch
+               (try
+                 (do (require-literal-interval (list '* 2 1000)) :no-error)
+                 (catch _ :raised)))
+      :raised)))
