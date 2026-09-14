@@ -1060,6 +1060,30 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
   third. Nothing to do hatch-side — `defdyn` was used correctly throughout, and the failure was
   invisible on a first run, which is why CI starting from a clean checkout never caught it.
 
+### New upstream finding (2026-09-14)
+
+- **`%registry-swap!` spins forever when the registry name does not resolve** — not yet
+  reported. `%registry-swap!` is a compare-and-swap retry loop: read the global, compute the
+  new value, `%registry-cas!`, and recurse if it did not land. If the *name* it is handed
+  names nothing, the CAS can never land, so it recurses forever — a hang with no error, no
+  log line and no bound on it. It held `nest test` until the 600-second timeout, with no
+  indication which of 1801 tests was stuck.
+
+  The name is easy to get wrong, which is what makes this matter. `%swap-registry!` takes the
+  registry as a **literal symbol**, and its docstring says to write it "fully qualified
+  (`debug/*traced-fns*`) for a module-level `def`". Inside a **packaged** module that is not
+  enough: the name a `def` actually binds in hatch is `hatch/web/live/*live-routes*` — module
+  namespace *plus* the package prefix — so the documented spelling `web/live/*live-routes*`
+  silently creates a *second* global that nothing reads, and the bare `*live-routes*` names a
+  root global that does not exist and hangs. Two of the three plausible spellings fail, one
+  loudly in the wrong place and one not at all.
+
+  Worth two changes upstream: bound the retry (or fail when the symbol is unbound — a CAS
+  against a name with no binding is a programming error, not contention), and give the macro
+  the same load-time namespace resolution `defonce` already has in `%defonce-qualified-name`,
+  so a module can name its own global without knowing its package prefix. Hatch works around
+  it by computing the symbol from `(reflect/current-ns)` at load.
+
 ---
 
 ## Open design questions
