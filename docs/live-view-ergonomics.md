@@ -53,10 +53,12 @@ imports (they existed only for the `show` page, which the router now generates):
 - **`deflive`** (`web/live`) generates `live-spec` (a 0-arg thunk →
   `{:mount :render :handle-event :handle-tick :ticks}`). Unchanged — `ws-handler-for`
   still exists for wiring a single view without the router.
-- **Live-route registry** (`web/live`) — a named process (`:hatch-live-routes`) holding
-  a `path → live-spec` map. The router registers at load (`register-live`); the worker
-  looks paths up per connection (`lookup-live`). A process because those two run in
-  different green processes and must share the mapping.
+- **Live-route registry** (`web/live`) — a `defonce` global (`*live-routes*`) holding a
+  `path → live-spec` map. The router registers at load (`register-live`); the worker looks
+  paths up per connection (`lookup-live`). A global, not a process: globals are already
+  shared across green processes, and load-time state has to survive a startup image, which
+  no process does (see the 0.21.1 entry in `roadmap.md` — it was a process, and every live
+  view broke on an app's second run).
 - **`live-dispatcher`** (`web/live`) — the server's single ws-handler. brood_live.js
   connects to `/live/ws` + the page's `data-live` path, so `/live/ws/counter` strips to
   `/counter` (`live--ws-path`), which is looked up in the registry and run via the

@@ -529,6 +529,50 @@ Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
 
+## 0.21.1
+
+One bug, found by dogfooding, present since live views were first wired into the router
+(`b674c5f`): **every live view stopped working on the second run of an app.**
+
+`(live …)` registers a view's spec thunk at load. The table it registered into was a named
+process — supervised, mirrored to a vault, re-seeded on restart, a whole Tier-3 apparatus
+from `docs/robustness.md`. All of that answers a *crash*. None of it answers a **startup
+image** (ADR-218), and an image is what a second `nest run` boots from: the image restores
+globals and re-runs no module top-level, so `(live …)` never re-registered, `defonce` did
+not re-run, and `live-ensure` obligingly spawned a fresh **empty** registry. Every live view
+then answered its WebSocket upgrade by closing the socket, and `brood_live.js` sat in a
+reconnect loop with `brood-disconnected` on `<html>` — eight opens in 2.5 seconds, and no
+error anywhere saying the *table*, rather than the view, was what had gone missing.
+
+The fix is to stop holding load-time state somewhere the image cannot follow. The route
+table is now a `defonce` global (`web/live/*live-routes*`), and the channel table beside it
+(`web/channel/*channel-routes*`, which had inherited the same shape this release). Globals
+are shared across green processes, so the process was never buying the cross-process sharing
+its comment claimed — and with it went the vault, the monitor, the boot-time pull, the
+re-mirror-on-restart arm and two supervisor children. `lookup-live` is now a map lookup
+rather than a send/receive with a 1000ms timeout. `web/endpoint` also drops the
+`proc/whereis` guard it needed only because *asking* whether an app had channels used to
+start a supervised pair.
+
+Two things worth keeping from the diagnosis:
+
+- **`%swap-registry!` cannot name a packaged module's global.** It takes the registry name
+  as a literal symbol, and the name a `def` actually binds inside hatch is
+  `hatch/web/live/*live-routes*` — module namespace *plus* the package prefix. A bare
+  `*live-routes*` names a root global that does not exist, so the compare-and-swap never
+  succeeds and `%registry-swap!` **retries forever**: a hang, not an error (it hung
+  `nest test` until the 600s timeout). A hand-written `web/live/*live-routes*` misses the
+  package prefix and silently registers into a *second* global that nothing reads. Both
+  spellings were tried before the third worked. The name is now computed at load with
+  `(reflect/current-ns)` — the same trick `defonce` itself uses to find the binding its
+  `bound?` must test. A lookup that spins rather than raises is a bad failure mode and is
+  worth reporting upstream.
+- **No Brood test could have caught this, and the browser suite caught it immediately.**
+  The demo's 158 tests passed throughout, because a test run loads from source. It takes an
+  imaged boot *and* a real client to see it, which is exactly what the new Playwright suite
+  does — it was written to cover the client bindings and found a server bug on its first
+  green run. That is the argument for it existing.
+
 ## 0.21.0
 
 One release, three pieces of work, and a run of fixes that came out of reviewing them.

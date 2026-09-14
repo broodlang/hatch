@@ -212,68 +212,38 @@
 
 ; ---- the channel registry: pattern → spec thunk ----
 ;
-; Supervised and vault-backed on web/registry's scaffolding, for the reason web/live's route
-; table is: the table is written once at load by the router's `(channel …)` clauses, so a
-; registry crash would empty it until the next module load and every join would 404 — with
-; nothing in the logs saying the table, rather than the channel, was what went missing.
+; A global, for the reason web/live's route table is one: the table is written once at load
+; by the router's `(channel …)` clauses, and load-time state must live somewhere a startup
+; image (ADR-218) can carry it. A process cannot — an imaged boot re-runs no module
+; top-level, so nothing would re-register, and every join would answer "no channel" on the
+; second run of an app that worked on the first. Globals are shared across green processes,
+; so the registry process was buying nothing here that a map does not.
 
-(defn- channel-registry-loop (table)
-  (receive
-    ([:put pattern entry] (let (next (assoc table pattern entry))
-                            (registry/mirror :hatch-channels-vault next)
-                            (channel-registry-loop next)))
-    ; reply keyed by the caller's ref so a late reply from a timed-out lookup can't be
-    ; mismatched to a later one in the same process
-    ([:snapshot-for from r] (send from [:table r table]) (channel-registry-loop table))
-    ; the vault we monitor died: once the supervisor restarts it, re-mirror the whole table
-    ([:down _ _ _] (registry/rewatch-vault :hatch-channels-vault table)
-      (channel-registry-loop table))))
+(defonce *channel-routes* {})
 
-(defn- channel-registry-boot ()
-  (let (table (registry/pull-snapshot :hatch-channels-vault {}))
-    (registry/watch-vault :hatch-channels-vault)
-    (channel-registry-loop table)))
-
-(defn- start-channel-registries ()
-  "Start the channel registry and its vault under one supervisor and block until they're up.
-  Idempotent via the supervisor's `:name`, so a hot reload converges on the one already
-  running. The vault starts first, so the registry's boot-time pull sees it."
-  (registry/ensure-supervised :hatch-channels-sup
-    [{:id :hatch-channels-vault
-      :name :hatch-channels-vault
-      :restart :permanent
-      :start (fn () (spawn (registry/vault-loop {})))}
-      {:id :hatch-channels
-       :name :hatch-channels
-       :restart :permanent
-       :start (fn () (spawn (channel-registry-boot)))}]
-    :hatch-channels))
-
-(defn channels ()
-  "The channel-registry pid, starting the supervised pair on first use."
-  (or (proc/whereis :hatch-channels) (start-channel-registries)))
+; The symbol `def` binds this under — module namespace plus hatch's package prefix. The CAS
+; in `register-channel` needs that exact name; see the same note in `web/live`, where a bare
+; name spins forever and a hand-qualified one writes to a global nothing reads.
+(def- channel-routes-global-name
+  (symbol (str (->string (reflect/current-ns)) "/*channel-routes*")))
 
 (defn register-channel (pattern spec-fn)
   "Register channel `spec-fn` (a 0-arg spec thunk) for topics matching `pattern`. The
   router's `(channel pattern module)` clause calls this at load; idempotent, so a hot reload
   just re-puts. Returns nil."
-  (send (channels) [:put pattern {:spec spec-fn :pattern pattern}])
+  (%registry-swap! channel-routes-global-name
+    (fn () *channel-routes*)
+    (fn (m) (assoc m pattern {:spec spec-fn :pattern pattern})))
   nil)
 
 (defn channel-table ()
   "A snapshot of the `pattern → entry` table (mostly for tests and diagnostics)."
-  (let (r (ref))
-    (send (channels) [:snapshot-for (self) r])
-    (receive
-      ([:table ^r t] t)
-      (after 1000 {}))))
+  *channel-routes*)
 
 (defn lookup-channel (topic)
   "The registry entry `{:spec :pattern}` serving `topic`, or nil if no channel covers it."
-  (let (table (channel-table)
-        pattern (best-match (vec (keys table)) topic))
-    (if pattern (get table pattern) nil)))
-
+  (let (pattern (best-match (vec (keys *channel-routes*)) topic))
+    (if pattern (get *channel-routes* pattern) nil)))
 ; ---- broadcasting ----
 
 (defn broadcast (socket event payload)

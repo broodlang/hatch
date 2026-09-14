@@ -81,19 +81,26 @@ Without these the server is trivially exhausted by a single bad client.
   `TLS_KEY_FILE` (production) or generates a self-signed localhost cert in dev when
   `HATCH_TLS` is set. WSS comes for free (the WebSocket upgrade rides the same transport).
   Verified end-to-end (`curl -k` → 200, live mounts, themed errors).
-- **Supervise the live registries** — ✅ `:hatch-live`, `:hatch-live-routes`, and a new
-  `:hatch-live-routes-vault` run under a `:one-for-one` supervisor (`:hatch-live-sup`),
-  started once at `web/live` load. The route registry mirrors every entry to the vault
-  and re-seeds from it on (re)start, and *monitors* the vault to re-mirror when the vault
-  restarts — so a registry crash no longer empties the route table. `live--ensure`
-  self-heals: it (re)starts the supervisor on demand if it isn't running.
-  (Note: the registry tests pass under the default and `-j2+` runners but fail under
-  `nest test --max-parallel 1`. That's a **brood runtime bug**, not this code: with a
-  single worker thread, a `nest test` body that makes a synchronous call to another
+- **Supervise the live registries** — ✅ `:hatch-live` (the hot-reload registry: the open
+  session pids a `[:reload]` fans out to) runs under a `:one-for-one` supervisor
+  (`:hatch-live-sup`), started once at `web/live` load. `live-ensure` self-heals: it
+  (re)starts the supervisor on demand if it isn't running.
+
+  The **route** table used to be supervised here too, mirrored to a `:hatch-live-routes-vault`
+  and re-seeded from it on restart. In 0.21.1 it stopped being a process at all: it is
+  load-time state, and the thing that was actually destroying it was not a crash but a
+  startup image, which no supervisor can survive. A `defonce` global answers both at once,
+  so the vault and its two supervisor children are gone (roadmap, 0.21.1). The lesson
+  generalises — supervise *runtime* state; anything written once at load belongs in a
+  global, where the image can carry it.
+
+  (Note: the old registry tests passed under the default and `-j2+` runners but failed
+  under `nest test --max-parallel 1`. That was a **brood runtime bug**, not this code: with
+  a single worker thread, a `nest test` body that makes a synchronous call to another
   spawned process deadlocks (the callee never gets scheduled). Minimal repro — no hatch:
   a test that `(spawn …)`s a server, `(send)`s it a ping and `(receive …)`s the reply
-  times out under `-j1`, passes under `-j2`. `nest run -j1` is unaffected. The committed
-  registry tests failed under `-j1` the same way before this change.)
+  times out under `-j1`, passes under `-j2`. `nest run -j1` is unaffected. The route-table
+  tests no longer send anything, so they are no longer exposed to it.)
 - **HTTP/2** — its own project (HPACK, framing, stream multiplexing, flow control);
   this is where genuine process-per-request (per stream) would live.
 

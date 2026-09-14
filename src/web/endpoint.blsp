@@ -470,14 +470,14 @@
         ;; `(channel …)` clause should not be answering upgrades on a URL it has nothing
         ;; behind — and one that has them should not have to remember a config line.
         channels-fn (cond
-                      ;; `proc/whereis` first, and not merely as an optimisation: reading the
-                      ;; table through `channel-table` STARTS the registry supervisor, so the
-                      ;; default would stand up a pair of processes on every app that has
-                      ;; never heard of channels, purely to be told it has none. A registry
-                      ;; that was never started is proof that no `(channel …)` clause ran.
+                      ;; An empty table is proof that no `(channel …)` clause ran: the
+                      ;; router registers into it at load, and it is a plain global, so
+                      ;; reading it costs a map lookup and starts nothing. (It used to be a
+                      ;; process, and this arm had to `proc/whereis` first so that merely
+                      ;; asking "do I have channels?" would not stand up a supervised pair
+                      ;; on every app that has none.)
                       (= channels :default)
-                        (if (or (nil? (proc/whereis :hatch-channels))
-                              (empty? (web/channel/channel-table)))
+                        (if (empty? (web/channel/channel-table))
                           nil
                           (web/channel/channel-dispatcher))
                       ;; nil disables, exactly as `false` does and exactly as `{:live nil}`

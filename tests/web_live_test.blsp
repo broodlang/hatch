@@ -157,10 +157,10 @@
                                               (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok))))))
 
-; :isolated — registering and looking up both touch the shared :hatch-live-routes process,
-; and running concurrently with other suites (especially the crash test below) would race its
-; kill/restart window. Isolated units run alone, serially, first — mirroring production, where
-; the router registers every route at load, before any connection looks a path up.
+; :isolated — registering writes a process-wide global, so running concurrently with other
+; suites would let their registrations interleave with these assertions. Isolated units run
+; alone, serially, first — mirroring production, where the router registers every route at
+; load, before any connection looks a path up.
 (describe "live-route registry"
   :isolated (test "register, look up, and miss"
     (do
@@ -172,32 +172,35 @@
         (assert= (get e :session) :admin))
       (assert= (lookup-live "/never-registered-xyz") nil))))
 
-; Tier-3 (docs/robustness.md): the route table survives the registry process crashing —
-; it mirrors to a supervised vault and re-seeds from it on restart.
-(defn wait-live-route (path tries)
-  "Poll until `path` resolves in the route registry again (after a supervised restart), or
-  give up after `tries` x 10ms and return whatever the last lookup gave."
-  (let (e (lookup-live path))
-    (cond
-      (not (nil? e)) e
-      (<= tries 0) e
-      else (do (sleep 10) (wait-live-route path (- tries 1))))))
-
-(describe "live-route registry survives a crash"
-  :isolated (test "a registered route is still there after the registry process is killed"
+; The route table is load-time state, and load-time state has to survive two things a
+; process does not: a crash, and a **startup image** (ADR-218). It used to be a supervised
+; process mirroring to a vault, which answered the first and silently lost the second — an
+; imaged boot re-runs no module top-level, so nothing re-registered and every live view
+; closed its WebSocket. A global answers both, and these are the two properties that say so.
+(describe "the live-route table is not held by a process"
+  :isolated (test "no process owns it, so none can take it down"
     (do
       (register-live "/crash-test" (fn () {:ok true}) :customer)
-      (assert= (get (lookup-live "/crash-test") :session) :customer)
-      ; hard-kill the route registry; the supervisor restarts it and it re-seeds from the vault
-      (exit (or (proc/whereis :hatch-live-routes)
-              (error "test: :hatch-live-routes is not registered"))
-        :kill)
-      ; Poll for the supervised restart + re-seed rather than sleeping a guessed 80ms: the
-      ; restart is async w.r.t. the kill, so a fixed wait is a race on a loaded machine.
-      (let (e (wait-live-route "/crash-test" 200))
-        (assert= (nil? e) false)
-        (assert= ((get e :spec)) {:ok true})
-        (assert= (get e :session) :customer)))))
+      (assert= (proc/whereis :hatch-live-routes) nil)
+      (assert= (proc/whereis :hatch-live-routes-vault) nil)
+      ; The lookup does not message anything: it answers from inside a process that was
+      ; spawned after the registration and shares nothing with the registrar but globals.
+      (let (parent (self))
+        (spawn (send parent [:saw (lookup-live "/crash-test")]))
+        (receive
+          ([:saw e] (do
+                      (assert= (nil? e) false)
+                      (assert= ((get e :spec)) {:ok true})
+                      (assert= (get e :session) :customer)))
+          (after 2000 (assert= :no-reply :a-reply))))))
+
+  ; What an image restore replays: the module's globals come back, and nothing re-runs. A
+  ; table reachable only through the module's own global is therefore a table the image
+  ; carries. `*live-routes*` is that global — read it directly, with no registrar in sight.
+  :isolated (test "the entries live in the module global an image would carry"
+    (do
+      (register-live "/image-test" (fn () {:ok true}) :customer)
+      (assert= (get (get *live-routes* "/image-test") :session) :customer))))
 
 (describe "reload broadcast"
   ; notify-reload fans a [:reload] out to every registered session via the :hatch-live

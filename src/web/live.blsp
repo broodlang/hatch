@@ -314,7 +314,7 @@
   nil)
 
 ; ---- named singleton processes ----
-; Both live registries below are "get-or-spawn a process registered under a name".
+; The reload registry below is "get-or-spawn a process registered under a name".
 
 (defn- live-ensure (nm)
   "Resolve registry `nm` — the supervised child (started by the `defonce` below). If it's
@@ -326,7 +326,7 @@
       (start-live-registries)
       (live-await nm 60)
       ;; Raise rather than answer nil — same reason as `web/registry/ensure-supervised`:
-      ;; `live-register`/`live-route-put` hand the result straight to `send`, which then
+      ;; `live-register` hands the result straight to `send`, which then
       ;; fails describing the wrong thing.
       (or (proc/whereis nm)
         (error "live-ensure: " nm " did not register within the start window")))))
@@ -1251,74 +1251,37 @@
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
 ; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
-; server's single ws-handler (`live-dispatcher`) looks the path up per connection. A
-; named process holds the table because the router registers at load while the worker
-; dispatches per request — different processes that need to share the mapping.
+; server's single ws-handler (`live-dispatcher`) looks the path up per connection.
+;
+; The table is a GLOBAL, not a process, and that is load-bearing rather than a style call.
+; Globals are shared across green processes, so a process bought nothing on that front —
+; and it lost on two others. A process dies: this table used to be mirrored to a vault,
+; monitored, re-pulled on restart and supervised, a Tier-3 apparatus that existed only to
+; recover state that a global never loses. And a process does not survive a **startup
+; image** (ADR-218): an imaged boot re-runs no module top-level, so `(live …)` never
+; re-registered, while `live-ensure` happily spawned a fresh EMPTY registry — every live
+; view answered its WebSocket upgrade by closing the socket, and the client sat in a
+; reconnect loop showing `brood-disconnected`. The first run of a project worked and the
+; second did not, which is the signature of state kept somewhere the image cannot follow.
+; A global's value travels in the image with the module that defines it, so the routes an
+; imaged boot restores are exactly the ones the imaged load registered.
+;
+; `defonce` (not `def`) so hot-reloading THIS module keeps the routes an app already
+; registered; `%swap-registry!` because a plain `def` inside a function is not how a global
+; is updated, and the kernel op is atomic against a concurrent registration.
 
-(defn- live-routes-loop (table/new)
-  (receive
-    ; mirror every change to the vault, so the table survives this process crashing
-    ([:put path entry] (let (v (proc/whereis :hatch-live-routes-vault))
-                         (when v (send v [:put path entry])))
-      (live-routes-loop (assoc table/new path entry)))
-    ; reply keyed by the caller's ref `r` so a late reply from a timed-out :get can't be
-    ; mismatched to a later lookup in the same process
-    ([:get path from r] (send from [:entry r (get table/new path)]) (live-routes-loop table/new))
-    ; the vault we monitor died: once the supervisor restarts it, re-mirror our whole
-    ; table so the backup is whole again, and re-watch the fresh vault
-    ([:down _ _ _] (live-await :hatch-live-routes-vault 60)
-      (let (v (proc/whereis :hatch-live-routes-vault))
-        (when v
-          (dolist (kv (%map-pairs table/new)) (send v [:put (first kv) (second kv)]))
-          (monitor v)))
-      (live-routes-loop table/new))))
+(defonce *live-routes* {})
 
-(defn- live-routes ()
-  "The live-route registry pid — the supervised `:hatch-live-routes` (see
-  `start-live-registries`), waiting through a restart window; lazily spawned only if no
-  supervisor is running."
-  (live-ensure :hatch-live-routes))
-
-; ---- crash recovery: a vault mirrors the route table (docs/robustness.md Tier 3) ----
-; The route table is registered once at load by `(live …)` clauses, so a registry crash
-; used to empty it until the next module load (live views 404). Now the registry mirrors
-; every entry to a tiny `:hatch-live-routes-vault`. Recovery is one-directional to avoid a
-; mutual boot deadlock: the registry pulls the table from the vault when it (re)starts, and
-; it *monitors* the vault so it can re-mirror the whole table when the vault restarts. Both
-; run under one supervisor (below), which also bounds a crash loop.
-
-(defn- live-vault-loop (table/new)
-  "The durable mirror of the route table: it only stores `:put`s and serves `:get-snapshot`
-  (the registry's boot-time pull), so it's far simpler — and less crash-prone — than the
-  registry it backs. It never pulls, so registry and vault can't deadlock at boot."
-  (receive
-    ([:put path entry] (live-vault-loop (assoc table/new path entry)))
-    ([:get-snapshot from] (send from [:snapshot table/new]) (live-vault-loop table/new))))
-
-(defn- live-pull (nm)
-  "Request a `{path -> entry}` snapshot from the process registered `nm`, or `{}` if it
-  isn't up or doesn't answer in time. Run in the new process at (re)start to recover."
-  (let (p (proc/whereis nm))
-    (if (nil? p)
-      {}
-      (do
-        (send p [:get-snapshot (self)])
-        (receive ([:snapshot t] t) (after 300 {}))))))
-
-(defn- live-watch-vault ()
-  "Monitor the route vault from the registry, so the registry is told (`[:down …]`) when
-  the vault dies and can re-mirror its table to the restarted vault."
-  (let (v (proc/whereis :hatch-live-routes-vault)) (when v (monitor v))))
-
-(defn- live-routes-boot ()
-  ; recover the table from the vault, then watch the vault for its own restarts
-  (let (table/new (live-pull :hatch-live-routes-vault))
-    (live-watch-vault)
-    (live-routes-loop table/new)))
-
-(defn- live-vault-boot ()
-  ; the vault never pulls (it's repopulated by the registry's mirroring) — no deadlock
-  (live-vault-loop {}))
+; The name `def` actually BINDS `*live-routes*` under — the loading module's namespace and,
+; because hatch ships as a package, its prefix too: `hatch/web/live/*live-routes*`. The CAS
+; below needs that exact symbol, and neither spelling a literal would give is it. A bare
+; `*live-routes*` names a ROOT global that does not exist, so the compare-and-swap can never
+; succeed and `%registry-swap!` retries forever — a hang, not an error. A hand-written
+; `web/live/*live-routes*` misses the package prefix and quietly registers into a SECOND,
+; unread global. `reflect/current-ns` is evaluated here, at load, where it is the module being
+; loaded — the same trick `defonce` itself uses to find the binding its `bound?` must test.
+(def- live-routes-global-name
+  (symbol (str (->string (reflect/current-ns)) "/*live-routes*")))
 
 (defn- live-await (nm tries)
   "Block until `nm` is registered (the supervisor starts children asynchronously), so the
@@ -1329,30 +1292,22 @@
     else (do (sleep 5) (live-await nm (- tries 1)))))
 
 (defn start-live-registries ()
-  "Start the live registries under a supervisor and block until they're up. Idempotent —
+  "Start the live reload registry under a supervisor and block until it's up. Idempotent —
   reload-stable via the supervisor's `:name`, so a hot reload returns the existing one.
-  Children (start order): the reload registry, the route-table vault, then the route
-  registry (which seeds from the vault). Called once at module load by the `defonce`."
+  Called once at module load by the `defonce`.
+
+  The route table is deliberately NOT here: it is a global (`*live-routes*`), because a
+  supervisor cannot carry load-time state across a startup image."
   (let (reload {:id :hatch-live
                 :name :hatch-live
                 :restart :permanent
                 :start (fn () (spawn (live-registry-loop nil)))}
-        routes-vault {:id :hatch-live-routes-vault
-                      :name :hatch-live-routes-vault
-                      :restart :permanent
-                      :start (fn () (spawn (live-vault-boot)))}
-        routes {:id :hatch-live-routes
-                :name :hatch-live-routes
-                :restart :permanent
-                :start (fn () (spawn (live-routes-boot)))}
-        sup (supervisor/start [reload routes-vault routes]
-              {:name :hatch-live-sup :strategy :one-for-one}))
-    (live-await :hatch-live-routes 60)
+        sup (supervisor/start [reload] {:name :hatch-live-sup :strategy :one-for-one}))
+    (live-await :hatch-live 60)
     sup))
 
-; Start the supervised registries at module load — before any router `(live …)` clause
-; runs `register-live` (which loads this module), so the registry owns its name first and
-; nothing races it. `defonce` + the supervisor `:name` make this safe under hot reload.
+; Start the supervised reload registry at module load, so it owns its name before any
+; session registers. `defonce` + the supervisor `:name` make this safe under hot reload.
 (defonce *live-registries* (start-live-registries))
 
 (defn register-live (path spec-fn session)
@@ -1360,18 +1315,15 @@
   in live-session group `session` (any value; nil = the default group). Views in the
   same group can live-navigate between each other; crossing groups forces a full
   reload — the auth boundary. `(live path module …)` calls this at load; idempotent,
-  so a hot reload just re-puts."
-  (send (live-routes) [:put path {:spec spec-fn :session session}])
+  so a hot reload just re-puts. Returns nil."
+  (%registry-swap! live-routes-global-name
+    (fn () *live-routes*)
+    (fn (m) (assoc m path {:spec spec-fn :session session})))
   nil)
 
 (defn lookup-live (path)
   "The registry entry `{:spec :session}` for `path`, or nil if no live view is there."
-  (let (registry (live-routes)
-        r (ref))
-    (send registry [:get path (self) r])
-    (receive
-      ([:entry ^r e] e)
-      (after 1000 nil))))
+  (get *live-routes* path))
 
 (defn- live-ws-path (req-path)
   "The app path a `/live/ws<path>` WebSocket URL targets. brood_live.js connects to
