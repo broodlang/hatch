@@ -225,7 +225,9 @@
 ; in `register-channel` needs that exact name; see the same note in `web/live`, where a bare
 ; name spins forever and a hand-qualified one writes to a global nothing reads.
 (def- channel-routes-global-name
-  (symbol (str (->string (reflect/current-ns)) "/*channel-routes*")))
+  (let (ns (reflect/current-ns))
+    ;; nil means loaded at root, where the bare name IS the binding (see web/live).
+    (if (nil? ns) (quote *channel-routes*) (symbol (str (->string ns) "/*channel-routes*")))))
 
 (defn register-channel (pattern spec-fn)
   "Register channel `spec-fn` (a 0-arg spec thunk) for topics matching `pattern`. The

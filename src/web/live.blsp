@@ -1290,7 +1290,9 @@
 ; unread global. `reflect/current-ns` is evaluated here, at load, where it is the module being
 ; loaded — the same trick `defonce` itself uses to find the binding its `bound?` must test.
 (def- live-routes-global-name
-  (symbol (str (->string (reflect/current-ns)) "/*live-routes*")))
+  (let (ns (reflect/current-ns))
+    ;; nil means this module was loaded at root, where the bare name IS the binding.
+    (if (nil? ns) (quote *live-routes*) (symbol (str (->string ns) "/*live-routes*")))))
 
 (defn- live-await (nm tries)
   "Block until `nm` is registered (the supervisor starts children asynchronously), so the
