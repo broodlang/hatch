@@ -1110,9 +1110,9 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
 
 ## Open design questions
 
-**None.** All five are answered, and two of them had been answered by shipped code for some
-time while the table went on asking — which is its own small lesson about a decision log that
-is not checked against the tree.
+**One open (Q11).** The other four are answered, and two of them had been answered by shipped
+code for some time while the table went on asking — which is its own small lesson about a
+decision log that is not checked against the tree.
 
 | # | Question | Answer |
 |---|----------|--------|
@@ -1120,6 +1120,7 @@ is not checked against the tree.
 | Q5 | Session storage: fixed cookie, or pluggable? | **Pluggable, through the `SessionStore` ability** (0.14.0). See below. |
 | Q8 | Auth: `on-mount-guard` clause in `deflive`, or convention in `mount`? | **The clause.** A convention in `mount` cannot refuse a mount — it can only return a model and hope the render notices — whereas the clause redirects before the view exists. hatch-demo's `/dashboard` is the worked example. |
 | Q10 | Head updates: a `[:set-title]` effect, or a `<head>` slot in the layout? | **The effect** — `web/live/push-title` (0.19.0). See below. |
+| Q11 | A live view loses its state when the server restarts or a deploy rolls. What, if anything, should hatch do about it? | **Open.** Mostly a question of which *kind* of state is meant — the answer differs per kind, and one of the three needs no server coordination at all. See below. |
 
 **Q10, in full.** A `<head>` slot looks like the more general answer and is the wrong one.
 It would mean the live template covering the whole document rather than the view's own
@@ -1146,6 +1147,45 @@ the thing worth seeing. `(cookie-store secret {})` names the store and shows whe
 go; a bare secret is a string, implements nothing, and now fails at the plug.
 
 ---
+
+**Q11, the state a restart costs.** A live session is a process holding a model. A process
+cannot outlive its runtime, and a new instance in a rolling deploy shares no memory with the
+old — so on reconnect the client re-`mount`s and the user loses their place. That is the same
+structural fact that cost hatch its route table in 0.21.0, one layer up: state in a process
+does not survive the process. Phoenix has it for the same reason. The useful move is to stop
+treating "fix state loss" as one problem, because it is three:
+
+- **Derivable state** — whatever `mount` can rebuild from the URL, the session and the
+  database. Losing it is invisible if the remount is cheap. Hatch already covers the URL half
+  (`handle-params`) and the session half (a signed cookie a new instance reads identically).
+  Little to do here beyond keeping mount fast.
+- **Ephemeral UI state** — scroll position, focus, a half-typed draft, a dismissed banner.
+  Never in the database, and the key observation is that the *client still has all of it*
+  across a reconnect, because the page was never unloaded. So this is a client-side problem
+  wearing a distributed-state costume. Hatch already does it in one narrow place —
+  `_snapshotForms` / `_restoreForms` in `brood_live.js` restore form values across a patch —
+  and generalising that to survive a reconnect needs no server coordination whatsoever.
+- **Genuinely server-only state** — an expensive computed result, an in-progress socket
+  upload, a counter in no table. Only this bucket needs one instance to hand something to
+  another.
+
+The instinct, written down so it can be argued with rather than silently assumed: **the third
+bucket is much smaller than it first looks, and most of the felt win — "the page did not lose
+my place" — sits in the second.** So the order is client-side reconnect restoration first, and
+hand-off machinery only if something concrete still hurts once that is done.
+
+Two things make the third bucket harder than it sounds, and both argue for doing it last. A
+rolling deploy runs **different code** on the new instance, so anything handed over is a
+serialized value meeting a changed `render` — a schema-versioning problem dressed as a
+distribution problem, and exactly where a Phoenix-style answer gets expensive. And a handover
+must still be correct when the old instance is already gone, which means it degrades to a
+remount anyway: a design that is not simply *better remounting* has to earn the difference.
+
+Two pieces hatch already has are worth weighing when this is taken up. `web/cluster` means
+nodes find each other without new machinery. And `web/streams` has already moved one class of
+state the other way — the client is the authority on which rows are on screen, and the server
+holds none of them — which is a sharper answer to "do not lose it on restart" than replicating
+it would be. State the server never had cannot be lost when the server goes away.
 
 ## Dependency graph
 
