@@ -254,6 +254,21 @@ A server-side `push-event` also dispatches `brood:event` on `document` with
 `{name, payload}` — the pre-hooks escape hatch, still supported, for page script that is not
 inside a hook.
 
+**Stuck on `brood-disconnected`?** The client reconnects on a loop, so a page that never
+connects looks the same as a flaky network. Check the **server** log in dev: an upgrade that
+finds no live view now says so, and distinguishes the two causes.
+
+```
+[live] no live view registered at "/live/ws/typo" — registered paths: ["/counter" "/feed"]
+[live] no live view at "/live/ws/counter" — and the route table is EMPTY, so no `(live …)`
+       clause has registered at all. … Every live view will fail this way, not just this one.
+```
+
+The second line means no `(live …)` clause ever ran — the router module never loaded, or its
+load-time registrations did not survive however the process started. That is not a problem
+with the view you were looking at; every view is down. Before 0.21.2 the dispatcher closed
+the socket in silence, and this was a day of bisecting.
+
 ---
 
 ## Testing

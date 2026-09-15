@@ -46,6 +46,12 @@ node --check static/brood_live.js
 nest fetch         # resolve deps → project.lock.blsp (after a dep or version change)
 nest test          # loads `main`, exercising the dep end-to-end
 nest run           # start the demo server ($HATCH_PORT, default 5000)
+
+# Browser tests — they live in ../hatch-demo, because hatch is a library with
+# nothing to drive. CI only; nothing in the app needs npm. The job warms the
+# startup image BEFORE the suite deliberately: a fresh runner always boots cold,
+# and the 0.21.1 bug was invisible on a cold boot.
+npm run test:browser         # 21 tests: bindings, streams, socket uploads, channels
 ```
 
 The demo (`../hatch-demo/src/web/routes.blsp`) serves:
@@ -136,7 +142,8 @@ src/
     form.blsp       — validate/rules → [:ok params]/[:error {field message}]; built-in
                       validators (required?/email?/min-length?/max-length?/matches-pattern?);
                       error-for/field-class template helpers
-    registry.blsp   — supervised, vault-backed named registries (shared by pubsub/presence)
+    registry.blsp   — supervised, vault-backed named registries (pubsub, presence, cache,
+                      ratelimit — all reach it bare, via `(:use web/registry)`)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
     presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
     application.blsp — canonical app entry point: default-logger-opts + start (logger + children + park)
@@ -253,6 +260,23 @@ docs/
 ```
 
 ## Key conventions
+
+- **Load-time state belongs in a global, never in a process.** Anything registered
+  once at load — the `(live …)` route table, the `(channel …)` pattern table —
+  must live in a `defonce` global that `%registry-swap!` updates. A process cannot
+  carry it, and the reason is not crash-safety but the **ADR-218 startup image**:
+  an imaged boot restores globals and re-runs no module top-level, so nothing
+  re-registers, and a lazily-spawned registry comes back EMPTY. That is exactly
+  how every live view in every hatch app broke on an app's *second* run, from the
+  first release that wired live views into the router until 0.21.1. Globals are
+  shared across green processes anyway, so a process was never buying the sharing
+  it looked like it bought. Supervise **runtime** state (pubsub subscribers, the
+  presence roster, rate-limit buckets, the reload registry); anything written once
+  at load goes in a global, where the image carries it with the module.
+
+  A test proving "no process owns it" is not enough on its own — a Brood test run
+  loads from source and never boots from an image. The demo's browser suite is
+  what covers the imaged path, which is why its CI job warms the image first.
 
 - **No MCP tool calls** — use `grep` on `docs/brood-for-claude.md` for
   stdlib discovery; use `nest test` to verify code.

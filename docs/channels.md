@@ -173,6 +173,25 @@ a ceiling one connection can grow the registry without bound. No honest client m
 The idle watchdog pings a silent peer and reaps one that never answers, exactly as it does for a
 live session — and every client frame resets it, so a busy socket is never reaped.
 
+## When a join is refused
+
+The client is told `{:reason "no such channel"}` and nothing more, deliberately: a client has
+no business learning which topics exist. In **dev** the server also logs which of the two
+things went wrong, because from the reply they are identical and they are nothing alike:
+
+```
+[channel] no channel matches topic "user:9" — registered patterns: ["chat:*" "room:*"]
+[channel] no channel for topic "room:lobby" — and the channel table is EMPTY, so no
+          `(channel …)` clause has registered at all. … Every join will fail this way,
+          not just this one.
+```
+
+The second is the one to recognise. An empty table means no `(channel …)` clause ever ran —
+the router module never loaded, or its load-time registrations were lost — so every join
+fails, not the topic you happened to try. `web/live` logs the same distinction for a live
+upgrade. The message is a pure function (`unjoinable-channel-message`), so the wording is
+under test rather than incidental.
+
 ## Testing
 
 `tests/web_channel_test.blsp` drives a real socket over loopback: join replies land on the ref
