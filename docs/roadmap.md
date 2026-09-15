@@ -529,6 +529,32 @@ Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
 
+## 0.21.2
+
+Two things that came out of dogfooding 0.21.1, neither changing behaviour in a working app.
+
+**A refused live upgrade now says why.** The dispatcher closed the socket in silence, which
+from a browser is indistinguishable from any other disconnect — `brood_live.js` reconnects
+and the page sits on `brood-disconnected` with nothing naming a cause. That silence is what
+turned 0.21.1's one-line bug into a day of bisecting: the framework knew the route table was
+empty and declined to say so. Two cases, worded apart on purpose. An EMPTY table means no
+`(live …)` clause ever ran, so *every* view is broken rather than this one, and saying that is
+the whole diagnosis. A populated table means this path is not in it, and the useful answer is
+the paths that are. `unrouted-live-message` is pure, with the logging split off the way
+`web/audit` splits a rule from its `warn-…!` — the wording is the value of a diagnostic, so it
+is what the tests hold. Dev only.
+
+**The registry name no longer rests on an invariant.** `live-routes-global-name` (and the
+channel twin) prefix `reflect/current-ns` to build the symbol `def` binds. A nil namespace
+would have produced `/*live-routes*`, which names nothing — an unbounded CAS retry on
+released brood. Unreachable today, since both modules carry a `defmodule`, but the right
+answer at root is the bare name, so it says so.
+
+Also upstream, for whenever it releases: brood's `%registry-swap!` now raises instead of
+spinning when the name and the reader disagree, and `%swap-registry!` resolves a module's own
+registry name at macro-expansion time. Hatch keeps computing its own name regardless — it has
+to run on released brood.
+
 ## 0.21.1
 
 One bug, found by dogfooding, present since live views were first wired into the router
