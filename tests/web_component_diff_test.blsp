@@ -17,7 +17,8 @@
 
 ; Two dynamic holes — a label and a count — so a change to one can be shown NOT to ship the
 ; other. The literal markup around them is static and never crosses the wire twice.
-(deflive-component (mount (id assigns) {:label (get assigns "label" "hi") :n 0})
+(deflive-component
+  (mount (id assigns) {:label (get assigns "label" "hi") :n 0})
   (render (state)
     [:div {} [:span {:class "label"} (get state :label)] [:b {} (str (get state :n))]])
   (on "bump" (params state) (assoc state :n (inc (get state :n))))

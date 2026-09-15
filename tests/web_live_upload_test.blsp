@@ -353,7 +353,8 @@
 
 ;; ---- end to end: a real session, a real binary frame -----------------------
 
-(deflive (mount (params) {:avatar (upload/allow :avatar {:dir "/tmp/hatch-live-upload-test"})})
+(deflive
+  (mount (params) {:avatar (upload/allow :avatar {:dir "/tmp/hatch-live-upload-test"})})
   (render (model)
     [:div
       {}

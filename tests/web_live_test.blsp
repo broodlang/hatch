@@ -161,6 +161,24 @@
 ; suites would let their registrations interleave with these assertions. Isolated units run
 ; alone, serially, first — mirroring production, where the router registers every route at
 ; load, before any connection looks a path up.
+; A live upgrade that finds no route closes the socket, and the client reconnects into
+; `brood-disconnected`. That is the same picture whether the view is missing or the whole
+; table is, and telling those apart from the browser is impossible — which is why the
+; wording is tested rather than just the fact that something is logged.
+(describe "why a live upgrade was refused"
+  (test "an empty table says the table is empty, not that this view is missing"
+    (let (message (unrouted-live-message "/live/ws/counter" '()))
+      (is (includes? message "EMPTY"))
+      ; the distinguishing claim: this is not about the path the user asked for
+      (is (includes? message "not just this one"))))
+
+  (test "a populated table answers with the paths that are registered"
+    (let (message (unrouted-live-message "/live/ws/typo" ["/counter" "/feed"]))
+      (is (not (includes? message "EMPTY")))
+      (is (includes? message "/counter"))
+      (is (includes? message "/feed"))
+      (is (includes? message "/live/ws/typo")))))
+
 (describe "live-route registry"
   :isolated (test "register, look up, and miss"
     (do
@@ -409,7 +427,8 @@
 ;; yet" and silently drops the message. The view stops updating, nothing is logged, and the
 ;; socket stays open. Each of those reads is now a name.
 
-(deflive (mount (params) {:n 0})
+(deflive
+  (mount (params) {:n 0})
   (render (model) [:p {} (str (get model :n))])
   (tick 1000 (model) (assoc model :n (inc (get model :n)))))
 

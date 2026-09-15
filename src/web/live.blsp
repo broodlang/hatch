@@ -181,8 +181,17 @@
 ;; swap fails the suite rather than shipping a view whose ticks run its event handler.
 (defrecord view-spec
   (mount render
-    render-static render-dynamic render-slots slot-deps handle-event handle-tick handle-info unmount
-    mount-guard handle-params ticks))
+    render-static
+    render-dynamic
+    render-slots
+    slot-deps
+    handle-event
+    handle-tick
+    handle-info
+    unmount
+    mount-guard
+    handle-params
+    ticks))
 
 (impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
 
@@ -1333,6 +1342,34 @@
       (string/substring req-path (string/length prefix) (string/length req-path))
       req-path)))
 
+(defn unrouted-live-message (req-path known)
+  "Why a live upgrade at `req-path` cannot be served, given the `known` registered paths.
+
+  Pure, and separate from the logging for the reason `web/audit` splits its rules from its
+  `warn-…!` wrappers: the wording is the whole value of a diagnostic, so it is the part a
+  test should be able to hold.
+
+  The two cases look identical from a browser — the socket closes, the client reconnects,
+  the page sits on `brood-disconnected` — and could not be further apart. An EMPTY table
+  means no `(live …)` clause ever ran, so every view is broken, not this one. A populated
+  table means this path is simply not in it, and the useful answer is the paths that are."
+  (if (empty? known)
+    (str "[live] no live view at "
+      (pr-str req-path)
+      " — and the route table is EMPTY, so no `(live …)` clause has registered at all. Either the router module never loaded, or its load-time registrations were lost. Every live view will fail this way, not just this one.")
+    (str "[live] no live view registered at "
+      (pr-str req-path)
+      " — registered paths: "
+      (pr-str (vec (sort known))))))
+
+(defn- warn-unrouted-live! (req-path)
+  "Log `unrouted-live-message` before the dispatcher closes an unroutable upgrade. A no-op
+  outside dev. The miss used to be silent — no log line anywhere named a cause, which is
+  what made an empty route table cost a day to find."
+  (when (web/audit/dev?)
+    (log/warn (unrouted-live-message req-path (keys *live-routes*))))
+  nil)
+
 (defn live-dispatcher ()
   "The server's single ws-handler: route each `/live/ws<path>` upgrade to the live view
   registered at `<path>` (via `(live path module)` in the router); close the socket on
@@ -1344,7 +1381,7 @@
     (let (entry (lookup-live (live-ws-path (get request :path))))
       (if entry
         (start-session sock request entry)
-        (tcp/close sock)))))
+        (do (warn-unrouted-live! (get request :path)) (tcp/close sock))))))
 
 ; ---- the LiveModule behaviour ----
 ; The contract a live-view module satisfies — exactly what `deflive` generates.
