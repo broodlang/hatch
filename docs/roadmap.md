@@ -1062,8 +1062,9 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
 
 ### New upstream finding (2026-09-14)
 
-- **`%registry-swap!` spins forever when the registry name does not resolve** — not yet
-  reported. `%registry-swap!` is a compare-and-swap retry loop: read the global, compute the
+- **`%registry-swap!` spins forever when the registry name does not resolve** — **fixed in
+  brood, unreleased** (a patch to `std/prelude/tools.blsp`, verified 2026-09-15; see the end
+  of this entry). `%registry-swap!` is a compare-and-swap retry loop: read the global, compute the
   new value, `%registry-cas!`, and recurse if it did not land. If the *name* it is handed
   names nothing, the CAS can never land, so it recurses forever — a hang with no error, no
   log line and no bound on it. It held `nest test` until the 600-second timeout, with no
@@ -1083,6 +1084,27 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
   the same load-time namespace resolution `defonce` already has in `%defonce-qualified-name`,
   so a module can name its own global without knowing its package prefix. Hatch works around
   it by computing the symbol from `(reflect/current-ns)` at load.
+
+  **Fixed upstream 2026-09-15** (in a brood working tree, not yet committed or released).
+  Both halves land in `std/prelude/tools.blsp`, no Rust: `%registry-swap!` raises when `sym`
+  is unbound and the reader answered non-nil — the one case where the compare provably can
+  never hold — and `%swap-registry!` resolves the name at macro-EXPANSION time via
+  `reflect/current-ns`, so a module names its own registry without knowing its namespace or
+  package prefix. The resolution checks rather than assumes: an already-qualified name passes
+  through, and between the qualified and bare spellings it takes whichever is actually bound,
+  so root and `defdyn` registries keep resolving to root.
+
+  Verified: the module-scoped repro that hung returns normally, a `defdyn` registry still
+  resolves to root, an unresolvable name raises with a message naming the mismatch, and
+  brood's suite is 5891/5895 — the 4 failures are in `introspection_test.blsp` and fail
+  identically with the patch stashed, so they belong to unrelated in-flight type-checker work.
+
+  One correction to the note above: this was never reachable from `std/`. Every existing
+  caller was already correct — `std/protocol.blsp` is CORE (loaded in the prelude with no
+  `defmodule`, so `*protocols*` is a root global and its bare swap is right), `editor/face`'s
+  `*faces*` is `defdyn` and therefore ambient, and the rest are written out qualified. The
+  bug only ever bit module- and package-scoped code, which is hatch. Hatch's own workaround
+  stays regardless: it has to keep working on released brood.
 
 ---
 
