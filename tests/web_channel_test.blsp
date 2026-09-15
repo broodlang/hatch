@@ -39,6 +39,22 @@
 
 ;; ---- the socket value ------------------------------------------------------
 
+; A client is told `no such channel` either way, and must be: it has no business learning
+; which topics exist. A developer needs the opposite distinction, and an empty table is the
+; shape the 0.21.1 image bug took — so the two wordings are what the tests hold.
+(describe "why a join was refused"
+  (test "an empty table says every join fails, not just this one"
+    (let (message (unjoinable-channel-message "room:lobby" '()))
+      (is (includes? message "EMPTY"))
+      (is (includes? message "not just this one"))))
+
+  (test "a populated table answers with the registered patterns"
+    (let (message (unjoinable-channel-message "user:9" ["room:*" "chat:*"]))
+      (is (not (includes? message "EMPTY")))
+      (is (includes? message "room:*"))
+      (is (includes? message "chat:*"))
+      (is (includes? message "user:9")))))
+
 (describe "assigns are immutable, like everything else a handler holds"
   (test "assign returns a new socket and leaves the original alone"
     (let (s0 (new-socket "room:1" nil)
@@ -81,15 +97,15 @@
 ;; `defchannel` defines join/handle-in/handle-info/handle-out/terminate into THIS module,
 ;; the way a real channel module is written.
 
-(defchannel
-  (join (topic params socket)
-    (cond
-      (= (get params "token") "bad") [:error {:reason "unauthorized"}]
-      else [:ok {:joined topic} (assign socket {:user (get params "user" "anon")})]))
+(defchannel (join (topic params socket)
+              (cond
+                (= (get params "token") "bad") [:error {:reason "unauthorized"}]
+                else [:ok {:joined topic} (assign socket {:user (get params "user" "anon")})]))
 
   (on "echo" (params socket) [:reply {:said (get params "text")} socket])
 
-  (on "shout" (params socket)
+  (on "shout"
+    (params socket)
     (do
       (broadcast socket "shouted" {:text (get params "text")})
       [:noreply socket]))

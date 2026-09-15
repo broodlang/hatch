@@ -242,6 +242,29 @@
   "A snapshot of the `pattern → entry` table (mostly for tests and diagnostics)."
   *channel-routes*)
 
+(defn unjoinable-channel-message (topic known)
+  "Why `topic` cannot be joined, given the `known` registered patterns. Pure, so the wording
+  is testable — see `web/live/unrouted-live-message`, which this mirrors deliberately.
+
+  The client is told `no such channel` either way, and that is right for a client: it must
+  not learn which topics exist. A developer needs the opposite. An EMPTY table means no
+  `(channel …)` clause ever ran, so every join fails rather than this one — the same shape
+  the 0.21.1 image bug took, and the sentence that identifies it."
+  (if (empty? known)
+    (str "[channel] no channel for topic "
+      (pr-str topic)
+      " — and the channel table is EMPTY, so no `(channel …)` clause has registered at all. Either the router module never loaded, or its load-time registrations were lost. Every join will fail this way, not just this one.")
+    (str "[channel] no channel matches topic "
+      (pr-str topic)
+      " — registered patterns: "
+      (pr-str (vec (sort known))))))
+
+(defn- warn-unjoinable-channel! (topic)
+  "Log `unjoinable-channel-message` when a join finds no channel. Dev only."
+  (when (web/audit/dev?)
+    (log/warn (unjoinable-channel-message topic (keys *channel-routes*))))
+  nil)
+
 (defn lookup-channel (topic)
   "The registry entry `{:spec :pattern}` serving `topic`, or nil if no channel covers it."
   (let (pattern (best-match (vec (keys *channel-routes*)) topic))
@@ -388,6 +411,7 @@
                     (catch e (channel-error "lookup" topic e nil))))
         (if (nil? entry)
           (do
+            (warn-unjoinable-channel! topic)
             (when ref
               (send-frame sock (reply-frame topic ref "error" {:reason "no such channel"})))
             joined)
