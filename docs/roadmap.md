@@ -529,6 +529,21 @@ Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
 
+## 0.21.3
+
+The channel half of 0.21.2's diagnostic. A join matching no pattern replies `no such channel`
+— right for a client, which must not learn which topics exist, and useless to a developer,
+who gets the same answer whether one pattern is missing or the table is empty. The image bug
+emptied the channel table exactly as it emptied the route table, so this is the case worth
+naming: an empty table means no `(channel …)` clause ever ran, and every join fails rather
+than this one. Pure message, logging split off, dev only, wording under test — the same shape
+as `web/live/unrouted-live-message`.
+
+Found by asking what else the 0.21.1 audit had left behind, which also re-checked
+`web/registry`: the channel rewrite looked like it had orphaned most of it, and had not —
+presence, cache, pubsub and ratelimit all reach it through `(:use web/registry)`, so every
+helper still has call sites. Nothing to delete.
+
 ## 0.21.2
 
 Two things that came out of dogfooding 0.21.1, neither changing behaviour in a working app.
