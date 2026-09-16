@@ -23,7 +23,9 @@
   (:alias web/cache)
   (:alias node)
   (:alias web/template)
-  (:alias json))
+  (:alias json)
+  ; picker / render-on / self-node? — the page for another machine is this page evaluated there
+  (:alias web/cluster))
 
 ; Captured when this module loads, which is boot — the counters below are all "since this
 ; process started", and without this the numbers have no denominator.
@@ -45,7 +47,8 @@
     "td{padding:.45rem .6rem;border-bottom:1px solid #1a1e26}"
     "td.n{text-align:right;font-variant-numeric:tabular-nums}"
     ".err{color:#f0776c}.warn{color:#e3b341}.dim{color:#5c6370}"
-    "footer{color:#5c6370;font-size:.75rem;margin-top:1.5rem}"))
+    "footer{color:#5c6370;font-size:.75rem;margin-top:1.5rem}"
+    ".picker{background:#161a21;color:#d7dae0;border:1px solid #232833;border-radius:6px;padding:.2rem .5rem;margin-left:1rem;font:inherit;text-transform:none;letter-spacing:0}"))
 
 (defn- card (label value &optional (class ""))
   [:div {:class "card"} [:b {:class class} (str value)] [:span {} label]])
@@ -210,8 +213,18 @@
                         "setTimeout(tick,ms)})();"))])
 
 (defn page (title &optional (opts {}))
-  "The dashboard as an HTML string, from a snapshot of the current metrics. `opts`
+  "The dashboard as an HTML string, from a snapshot of the current metrics — of this
+  process, or of the machine `opts` `:node` names, rendered there (`web/cluster/render-on`)
+  and carrying a picker of every machine when there is more than one. `opts`
   `:refresh-ms` adds `refresh-script`, so the page keeps itself current."
+  (if (web/cluster/self-node? (get opts :node))
+    (local-page title opts)
+    (web/cluster/render-on (get opts :node)
+      (fn () (web/dashboard/local-page title opts))
+      (fn (message) (local-page title (assoc opts :notice message))))))
+
+(defn local-page (title opts)
+  "`page`, for this process — what a peer evaluates on `render-on`."
   (let (rows (web/metrics/snapshot)
         t (web/metrics/totals)
         refresh (get opts :refresh-ms))
@@ -229,7 +242,8 @@
                              {}
                              [:div
                                {:class "wrap"}
-                               [:h1 {} title]
+                               [:h1 {} title (web/cluster/picker (get opts :node))]
+                               (if (get opts :notice) [:p {:class "err"} (get opts :notice)] "")
                                [:div
                                  {:class "cards"}
                                  (card "requests" (get t :count))
@@ -285,4 +299,4 @@
       (-> conn
         (put-resp-header :cache-control "no-store")
         (put-resp-header :content-type "text/html; charset=utf-8")
-        (send-resp 200 (page title opts))))))
+        (send-resp 200 (page title (assoc opts :node (param conn "node"))))))))

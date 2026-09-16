@@ -107,3 +107,14 @@
       (is (includes? html "Refreshes every 4s"))))
   (test "the selector is JSON-quoted into the script"
     (is (includes? (web/template/render (refresh-script 1000 "#main")) "sel=\"#main\""))))
+
+(describe "cluster-aware"
+  (test "no node, or this node, renders locally and shows no picker on a single machine"
+    (is (includes? (page "t" {}) "<h1>t</h1>"))
+    (is (includes? (page "t" {:node :local}) "<h1>t</h1>"))
+    (is (not (includes? (page "t" {}) "<select"))))
+  (test "an unknown node falls back to this page with the reason as a notice"
+    (let (html (page "t" {:node "hive@[nowhere]"}))
+      (is (includes? html "<h1>t</h1>"))
+      (is (includes? html "is not a connected peer"))
+      (is (includes? html "hive@[nowhere]")))))

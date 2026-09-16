@@ -1,0 +1,40 @@
+;; web/cluster's ask-a-peer half, on a runtime that is not a node: the local paths, and the
+;; refusals a query-string value gets. The cross-machine path needs two nodes and is exercised
+;; by hive's /dev pages in production.
+(defmodule web-cluster-call-test
+  (:use test)
+  (:alias web/cluster)
+  (:alias web/template))
+
+(describe "call"
+  (test "on this node the thunk just runs"
+    (assert= [:ok 3] (web/cluster/call nil (fn () (+ 1 2))))
+    (assert= [:ok 3] (web/cluster/call :local (fn () (+ 1 2)))))
+  (test "a raise is an error, not a crash"
+    (assert= [:error "boom: 1"] (web/cluster/call :local (fn () (error "boom: " 1)))))
+  (test "a name that is not a peer is refused by name"
+    (let ([tag message] (web/cluster/call "hive@[fdaa::1]" (fn () 1)))
+      (assert= :error tag)
+      (is (includes? message "hive@[fdaa::1]")))))
+
+(describe "self-node?"
+  (test "nil, :local and this runtime's own name"
+    (is (web/cluster/self-node? nil))
+    (is (web/cluster/self-node? :local))
+    (is (web/cluster/self-node? (node/name)))
+    (is (not (web/cluster/self-node? "hive@[fdaa::1]")))))
+
+(describe "nodes and the picker"
+  (test "a lone runtime lists itself and renders no picker"
+    (let (all (web/cluster/nodes))
+      (assert= 1 (count all))
+      (is (get (first all) :self?))
+      (is (string? (get (first all) :label))))
+    (assert= "" (web/cluster/picker nil))))
+
+(describe "render-on"
+  (test "the fallback gets the reason, escaped by the caller's renderer"
+    (assert= "<p>web/cluster/call: &lt;x&gt; is not a connected peer</p>"
+      (web/template/render [:p
+                             {}
+                             (web/cluster/render-on "<x>" (fn () "never") (fn (message) message))]))))

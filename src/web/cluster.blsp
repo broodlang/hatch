@@ -24,7 +24,10 @@
   (:alias node)
   (:alias dns)
   (:alias web/env)
-  (:alias log))
+  (:alias log)
+  (:alias table)
+  (:alias web/template)
+  (:alias seq))
 
 ;; The distribution port. It must NOT be exposed publicly: a node port reachable from the
 ;; internet is a remote-code-execution endpoint guarded by nothing but the cookie. On Fly
@@ -160,3 +163,108 @@
         (log/info (str "[cluster] node " (node/name) " listening on " (address host port)))
         (spawn (discovery-loop nm port poll-ms discover))
         (node/name)))))
+
+;; ---- asking a peer ---------------------------------------------------------------------
+;;
+;; Every operational page — the metrics dashboard, observe-local's — renders what THIS
+;; process knows, and on a platform that runs the app on two machines a browser lands on
+;; either. The honest answer to "which machine am I looking at" is a picker, and the thing
+;; the picker needs is one primitive: run this thunk over there and hand me its value. A pid
+;; is location-transparent and a closure crosses the wire (`node/spawn`, ADR-033), so that
+;; primitive is a spawn on the peer that sends its result home, and a page for machine X is
+;; simply the same page function evaluated on X.
+
+(def *default-call-timeout-ms* 5000)
+
+(defn self-node? (nm)
+  "Whether `nm` names this runtime: its own node name, `:local`, or nil."
+  (or (nil? nm) (= nm :local) (= (str nm) (str (node/name)))))
+
+(defn call (nm thunk &optional (timeout-ms *default-call-timeout-ms*))
+  "Run the zero-argument `thunk` on node `nm` and answer `[:ok value]`, or `[:error message]`
+  when it raised, `nm` is not a connected peer, or nothing came back within `timeout-ms`.
+  On this node the thunk simply runs. The thunk ships as a closure: free locals travel,
+  free globals resolve on the receiver — so it must name only code the peer also has,
+  which for an app's own modules is every deploy of the same image."
+  (if (self-node? nm)
+    (try [:ok (thunk)] (catch e [:error (error-message e)]))
+    (if (not (includes? (map (remote-nodes) str) (str nm)))
+      [:error (str "web/cluster/call: " nm " is not a connected peer")]
+      (let (me (self)
+            r (ref)
+            target (find-node nm))
+        (node/spawn target
+          (fn ()
+            (send me [:cluster-call r (try [:ok (thunk)] (catch e [:error (error-message e)]))])))
+        (receive
+          ([:cluster-call ^r result] result)
+          (after timeout-ms
+            [:error (str "web/cluster/call: no answer from " nm " in " timeout-ms "ms")]))))))
+
+(defn- find-node (nm)
+  "The connected peer whose name prints as `nm` — a query-string value is a string, and a
+  node name is a keyword."
+  (first (seq/filter (remote-nodes) (fn (peer) (= (str peer) (str nm))))))
+
+;; Labels are asked of the peer once a minute, not per render: a page that refreshes every
+;; few seconds must not cost a round trip per peer per tick.
+(def- *labels* (table/new))
+(def *label-ttl-ms* 60000)
+
+(defn machine-label ()
+  "How this machine introduces itself in a picker: Fly's machine id with its region, else
+  the node name, else `this process` for a runtime that is not a node."
+  (let (machine (os/env "FLY_MACHINE_ID")
+        region (os/env "FLY_REGION"))
+    (cond
+      machine (if region (str machine " (" region ")") machine)
+      (not (= (node/name) :nonode)) (str (node/name))
+      :else "this process")))
+
+(defn- peer-label (nm)
+  (let (key (str nm)
+        now (os/now)
+        stored (table/get *labels* key))
+    (if (and stored (> (get stored :expires) now))
+      (get stored :label)
+      (let (answer (call nm (fn () (web/cluster/machine-label)) 2000)
+            label (if (= (first answer) :ok) (second answer) (str nm)))
+        (table/put *labels* key {:label label :expires (+ now *label-ttl-ms*)})
+        label))))
+
+(defn nodes ()
+  "This node and every connected peer, this one first, each as `{:node :label :self?}` —
+  what a machine picker lists. A runtime that is not a node answers itself alone."
+  (cons {:node (node/name) :label (machine-label) :self? true}
+    (map (remote-nodes) (fn (peer) {:node peer :label (peer-label peer) :self? false}))))
+
+(defn picker (selected &optional (param "node"))
+  "A `<select>` of `nodes` that navigates to the same page with `?<param>=<node>` on change
+  — the machine picker every operational page carries when there is more than one machine.
+  `selected` is the query value (a string) or nil for this node. Hiccup; renders nothing
+  for a single node."
+  (let (all (nodes))
+    (if (< (count all) 2)
+      ""
+      [:select
+        {:class "picker"
+         :onchange "var u=new URL(location.href);u.searchParams.set(this.name,this.value);location.href=u.toString()"
+         :name param}
+        (map all
+          (fn (entry)
+            (let (value (str (get entry :node))
+                  chosen (if (nil? selected) (get entry :self?) (= selected value)))
+              [:option
+                (if chosen {:value value :selected "selected"} {:value value})
+                (get entry :label)])))])))
+
+(defn render-on (nm thunk fallback)
+  "`call`, for a page: the HTML `thunk` renders on `nm`, or `(fallback message)` when it
+  cannot be had — usually this process's own page with the message as a notice, so the
+  picker is still there to choose again. What makes a page cluster-aware in a few lines:
+  a page function is pure over its process, so evaluating it on the peer IS the peer's
+  page."
+  (let (result (call nm thunk))
+    (if (= (first result) :ok)
+      (second result)
+      (fallback (second result)))))
