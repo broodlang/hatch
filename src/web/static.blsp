@@ -574,6 +574,48 @@
   (let (name (if (prod?) (get (load-manifest dir) logical logical) logical))
     (str "/" dir "/" name)))
 
+; ---- head hints: telling the browser about an asset before it would discover it ----
+;
+; The browser finds most assets late. A font is fetched only once style resolution applies a
+; rule that uses it, which is after the stylesheet has arrived; a module's static imports
+; are fetched only once the module itself has been downloaded and parsed. Each of those is a
+; full round trip that starts strictly after the one before it — a chain, and the chain's
+; length is what the reader waits for. These links flatten it: they name the asset in the
+; document head, so the fetch starts with the document and lands in parallel with the rest.
+;
+; They take LOGICAL names for the same reason `asset-path` does: a hint that names the
+; un-fingerprinted URL preloads a file the page never uses, and the browser then downloads
+; the real one a second time — the hint made the page slower, and warned in a console nobody
+; was watching. A helper that resolves the name cannot get that wrong.
+
+(defn modulepreload (logical &optional (dir "static"))
+  "A `<link rel=\"modulepreload\">` for the ES module `logical` names, as Hiccup.
+
+  For a module the page's entry script `import`s: without the hint the browser discovers it
+  only after downloading and parsing the entry, so the two load in series rather than
+  together. Unlike a plain preload it also parses and compiles the module, so the import
+  resolves from the module map without a second wait."
+  [:link {:rel "modulepreload" :href (asset-path logical dir)}])
+
+(defn preload-font (logical &optional (dir "static"))
+  "A `<link rel=\"preload\" as=\"font\">` for the font file `logical` names, as Hiccup.
+
+  Fonts are the asset the browser finds latest of all: the fetch starts only when a style
+  rule that names the face is applied to some text, which is after the stylesheet has
+  landed and been resolved. Preloading starts it with the document instead.
+
+  The link carries `crossorigin=\"anonymous\"` even for a same-origin font, because the
+  specification fetches fonts in CORS mode and a preload is matched to its use by fetch mode
+  as well as by URL. A font preload WITHOUT the attribute is never matched: the browser
+  downloads the file, discards it, and downloads it again when the rule fires — worse than
+  no hint. `type` lets a browser that cannot use the format skip the download."
+  [:link
+    {:rel "preload"
+     :as "font"
+     :type (mime-type logical)
+     :crossorigin "anonymous"
+     :href (asset-path logical dir)}])
+
 ; ---- hatch's own bundled assets ----
 
 ; Hatch ships three browser clients in its package `static/` dir — brood_live.js,

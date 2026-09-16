@@ -386,3 +386,18 @@
       (assert= (get h :vary) "Accept-Encoding")
       (assert= (string/blank? (get h :etag)) false)
       (assert= (get h :content-type) nil))))
+
+(describe "head hints"
+  (test "modulepreload links the module by its asset path"
+    (assert= (modulepreload "editor.js") [:link {:rel "modulepreload" :href "/static/editor.js"}]))
+  (test "preload-font carries as, the font MIME type and crossorigin"
+    (assert= (preload-font "fonts/hack.woff2")
+      [:link
+        {:rel "preload"
+         :as "font"
+         :type "font/woff2"
+         :crossorigin "anonymous"
+         :href "/static/fonts/hack.woff2"}]))
+  (test "both honour a custom dir"
+    (assert= (get (second (modulepreload "a.js" "assets")) :href) "/assets/a.js")
+    (assert= (get (second (preload-font "a.woff2" "assets")) :href) "/assets/a.woff2")))

@@ -187,6 +187,15 @@ are cached per file and only recomputed when the file's mtime/size changes — s
 manifest lookup nor the content hash is paid per request on the hot path. `clear-manifest-cache`
 forces a re-read (tests, or a dev rebuild that rewrote the manifest in a running process).
 
+**3. Hint** — for an asset the browser would otherwise discover late, name it in the head
+by the same logical name. `(static/preload-font "fonts/hack.woff2")` starts a font download
+with the document rather than after the stylesheet has landed and been resolved (the link
+carries the `crossorigin` a font preload needs to be matched; without it the browser fetches
+the file twice). `(static/modulepreload "editor.js")` fetches a module the entry script
+`import`s in parallel with the entry instead of after it. Both resolve the fingerprint, so a
+hint never names a URL the page does not use — which is the way a hand-written hint goes
+wrong, and the one that makes the page slower than no hint.
+
 ---
 
 ## Switching tools
