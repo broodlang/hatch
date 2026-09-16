@@ -95,3 +95,15 @@
     ;; No traffic is not a healthy zero, and printing one invites the wrong fix.
     (web/ratelimit/reset-stats)
     (is (includes? (page "test dashboard") "—"))))
+
+(describe "refresh"
+  (test "without :refresh-ms the page carries no script"
+    (is (not (includes? (page "t") "<script"))))
+  (test "with it, the page polls its own URL and says so"
+    (let (html (page "t" {:refresh-ms 4000}))
+      (is (includes? html "<script>"))
+      (is (includes? html "var ms=4000"))
+      (is (includes? html "fetch(location.href"))
+      (is (includes? html "Refreshes every 4s"))))
+  (test "the selector is JSON-quoted into the script"
+    (is (includes? (web/template/render (refresh-script 1000 "#main")) "sel=\"#main\""))))

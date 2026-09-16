@@ -22,7 +22,8 @@
   (:alias web/ratelimit)
   (:alias web/cache)
   (:alias node)
-  (:alias web/template))
+  (:alias web/template)
+  (:alias json))
 
 ; Captured when this module loads, which is boot — the counters below are all "since this
 ; process started", and without this the numbers have no denominator.
@@ -186,10 +187,34 @@
     [:td {:class (if (> (get r :client-error) 0) "n warn" "n dim")} (str (get r :client-error))]
     [:td {:class (if (> (get r :server-error) 0) "n err" "n dim")} (str (get r :server-error))]])
 
-(defn page (title)
-  "The dashboard as an HTML string, from a snapshot of the current metrics."
+(defn refresh-script (ms &optional (selector ".wrap"))
+  "A `<script>` that keeps an operational page current: every `ms` milliseconds it fetches
+  the page's own URL and swaps the `selector` element's contents for the fresh one — so
+  the numbers move while the scroll position, the address bar and a query-string filter
+  all stay put, which a `<meta http-equiv=refresh>` would throw away every tick. Skips a
+  tick while the tab is hidden. The whole thing is inline and self-contained so the page
+  stays a single response with no assets."
+  [:script
+    {}
+    (web/template/raw (str "(function(){var ms="
+                        ms
+                        ",sel="
+                        (json/encode selector)
+                        ";"
+                        "function tick(){if(document.hidden){return setTimeout(tick,ms)}"
+                        "fetch(location.href,{cache:'no-store',headers:{'X-Requested-With':'refresh'}})"
+                        ".then(function(r){return r.text()})"
+                        ".then(function(t){var d=new DOMParser().parseFromString(t,'text/html');"
+                        "var n=d.querySelector(sel),o=document.querySelector(sel);if(n&&o){o.innerHTML=n.innerHTML}})"
+                        ".catch(function(){}).then(function(){setTimeout(tick,ms)})}"
+                        "setTimeout(tick,ms)})();"))])
+
+(defn page (title &optional (opts {}))
+  "The dashboard as an HTML string, from a snapshot of the current metrics. `opts`
+  `:refresh-ms` adds `refresh-script`, so the page keeps itself current."
   (let (rows (web/metrics/snapshot)
-        t (web/metrics/totals))
+        t (web/metrics/totals)
+        refresh (get opts :refresh-ms))
     (web/template/render [:html
                            {:lang "en"}
                            [:head
@@ -243,10 +268,15 @@
                                [:footer
                                  {}
                                  "Durations in milliseconds. Percentiles are histogram upper bounds. "
-                                 "Counters are since this process started."]]]])))
+                                 "Counters are since this process started."
+                                 (if refresh
+                                   (str " Refreshes every " (math/quot refresh 1000) "s.")
+                                   "")]
+                               (if refresh (refresh-script refresh) "")]]])))
 
 (defn handler (&optional (opts {}))
-  "A conn handler serving the dashboard. `:title` names the page.
+  "A conn handler serving the dashboard. `:title` names the page; `:refresh-ms` makes it
+  keep itself current (see `refresh-script`).
 
   Never cached: it reports the state of this process at this moment, and a stored copy is a
   stale answer to the only question anyone asks it."
@@ -255,4 +285,4 @@
       (-> conn
         (put-resp-header :cache-control "no-store")
         (put-resp-header :content-type "text/html; charset=utf-8")
-        (send-resp 200 (page title))))))
+        (send-resp 200 (page title opts))))))
