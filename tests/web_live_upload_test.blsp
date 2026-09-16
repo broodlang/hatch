@@ -393,10 +393,12 @@
                      (after 10000 [:timeout (bytes [])])))))
 
 (defn expect-frame (sock buf)
-  (let (result (read-frame sock buf))
-    (when (or (= (first result) :timeout) (= (first result) :closed))
-      (error "test: no frame from the live session (" (->string (first result)) ")"))
-    result))
+  "`[text remainder]` for the next frame — a `:closed`/`:timeout` result is the test's
+failure, named."
+  (let ([head remainder] (read-frame sock buf))
+    (if (string? head)
+      [head remainder]
+      (error "test: no frame from the live session (" (->string head) ")"))))
 
 (describe "an upload over a real live session"
   :isolated

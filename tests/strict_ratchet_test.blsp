@@ -1,0 +1,26 @@
+;; The `nest check --strict` gate. Plain `nest check` is the CI gate (zero); `--strict`
+;; reads every positively-known bound by inclusion — `nil | model` handed to `assoc`, a
+;; `number` where an `int` is declared — and this file is what holds it at ZERO here, the
+;; way bedit's ratchet does. A new function that adds a finding declares its contract (a
+;; `sig`, a `deftype` for its shape) or handles the `nil` it was handed, or this stops you.
+;;
+;; The count is against the INSTALLED nest the suite runs under. A brood change that makes
+;; the checker sharper can raise it legitimately — fix what it found, or raise the ceiling
+;; in the same commit with the reason.
+(defmodule strict-ratchet-test (:use test))
+
+(defn- strict-findings ()
+  "Every `--strict` finding in this project, one string per line, from a fresh check."
+  (let (r (%os-cmd "nest" ["check" "--strict"]))
+    (seq/filter (string/split (str (:stdout r) "\n" (:stderr r)) "\n")
+      (fn (line) (includes? line "warning:")))))
+(sig strict-findings (-> seqable))
+
+(describe "nest check --strict only shrinks"
+  (test "the strict finding count never exceeds the ceiling"
+    ;; Compared through `math/max` so the failure PRINTS the number that broke it.
+    ;; ZERO since 2026-09-16: `json-of` answers an object or nil, the audit reads a level
+    ;; with the default it never takes, and three tests read a tagged result under its
+    ;; own tag.
+    (let (findings (strict-findings))
+      (assert= 0 (math/max 0 (count findings))))))

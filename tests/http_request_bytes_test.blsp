@@ -24,14 +24,14 @@
       (not (= t1 t2)) false
       (= t1 :incomplete) true
       (= t1 :error) (= (nth old 1) (nth new 1))
+      ;; both `:ok` (the tags are equal by now); matched so each side's request map is
+      ;; read under its own tag
       (= t1 :ok)
-        (let (r1 (nth old 1)
-              rem1 (nth old 2)
-              r2 (nth new 1)
-              rem2 (nth new 2))
-          (and (= (dissoc r1 :body) (dissoc r2 :body))
-            (= (carrier->bytes (get r1 :body)) (get r2 :body))
-            (= (carrier->bytes rem1) rem2)))
+        (match [old new]
+          ([[:ok r1 rem1] [:ok r2 rem2]] (and (= (dissoc r1 :body) (dissoc r2 :body))
+                                           (= (carrier->bytes (get r1 :body)) (get r2 :body))
+                                           (= (carrier->bytes rem1) rem2)))
+          (_ false))
       else false)))
 
 (defn agree? (buf)

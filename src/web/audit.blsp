@@ -529,7 +529,7 @@
                             ;; `i - 1` is in range once `i > 0`; the default is never read
                             base (if (= i 0) 1 (nth levels (- i 1) 1)))
                         (if (> current (+ base 1)) {:from base :to current} nil)))))
-        (seq/filterv pairs (fn (p) (not (nil? p))))))))
+        (apply vector (seq/reject pairs nil?))))))
 
 (defn warn-headings! (document)
   "Log a dev warning for every skipped heading level in `document`. Returns it unchanged."
