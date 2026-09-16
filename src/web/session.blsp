@@ -380,6 +380,20 @@
 
 ; ---- session accessors ----
 
+(defn fetch (store conn)
+  "`conn` with its session loaded from `store` — the `fetch-session` plug's read, for a conn
+  the plug has NOT run over: a channel socket's upgrade conn (`web/channel/channel-socket-conn`),
+  or one built by hand. Idempotent: a conn the plug already loaded is returned as is.
+
+  The trap this exists for: a raw conn's `:session` is an EMPTY MAP, not nil, so
+  `(or (conn-session conn) …)` reads as \"already loaded, nothing there\" and every socket
+  looks signed out. The store the plug attaches (`conn-session-store`) is the honest signal.
+
+      (session/get-session (session/fetch store (channel-socket-conn socket)) \"user-id\")"
+  (if (conn-session-store conn)
+    conn
+    (assoc conn :session (session-read store conn) :session-store store :session-changed? false)))
+
 (defn get-session (conn key &optional (default nil))
   "Read a session value by string `key`, or `default` if absent."
   (get (or (conn-session conn) {}) key default))

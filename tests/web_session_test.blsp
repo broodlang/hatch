@@ -374,3 +374,14 @@
                  "k" "v")
           line (first (get (get (conn->response conn) :headers) :set-cookie)))
       (is (includes? line "Max-Age=60")))))
+
+(describe "fetch — the session on a conn the plug never ran over"
+  (test "loads it from the cookie once, and leaves a loaded conn alone"
+    (let (store (cookie-store "test-secret-that-is-long-enough-00000000" {})
+          cookie (web/test/session-cookie store {"who" "ada"})
+          raw (web/test/conn-for "GET" "/channel/ws" {:headers {:cookie cookie}}))
+      ;; a raw conn's session is {} — which is exactly why this exists
+      (assert= (conn-session raw) {})
+      (assert= (get-session (fetch store raw) "who") "ada")
+      (let (loaded (put-session (fetch store raw) "who" "grace"))
+        (assert= (get-session (fetch store loaded) "who") "grace")))))

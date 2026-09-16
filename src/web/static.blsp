@@ -574,6 +574,22 @@
   (let (name (if (prod?) (get (load-manifest dir) logical logical) logical))
     (str "/" dir "/" name)))
 
+(defn file-text (logical &optional (dir "static"))
+  "The text of a static file, read from disk NOW — for inlining into a page.
+
+  Now, and not at load: a `(def *css* (file/slurp …))` is restored from the startup image
+  (ADR-218) on every later boot, and the image is keyed on `src/` — an edit to the file never
+  reaches the page until something in `src/` changes. That cost an app a whole restart of
+  confusion once. A read per render is a few microseconds for a few kilobytes, and the
+  endpoint's ETag makes the page itself cheap to revalidate."
+  (file/slurp (str dir "/" logical)))
+
+(defn inline-css (logical &optional (dir "static"))
+  "A `<style>` node holding the stylesheet `logical`, read per render (`file-text`). For a
+  small stylesheet this beats a `<link>`: no second round trip before the first paint, which
+  is the one Lighthouse audit a terminal-sized app otherwise fails."
+  [:style {} (web/template/raw (file-text logical dir))])
+
 ; ---- head hints: telling the browser about an asset before it would discover it ----
 ;
 ; The browser finds most assets late. A font is fetched only once style resolution applies a

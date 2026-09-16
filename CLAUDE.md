@@ -121,12 +121,17 @@ src/
                       marker, and a whole page cached when the caller says it may be)
     router.blsp     — defrouter macro (incl. the (live …) and (channel …) clauses),
                       path-param + *splat matching
-    session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs
+    session.blsp    — signed-cookie sessions + flash; fetch-session / fetch-flash plugs;
+                      fetch (the session off a raw conn — a channel socket's)
     csrf.blsp       — synchronizer-token CSRF (protect-from-forgery plug, csrf-input);
                       live-token/live-csrf-input read the token off web/live/live-conn
+    oidc.blsp       — OpenID Connect sign-in (authorization code + PKCE): start/complete,
+                      end-session-url, zitadel-config; the app keeps identity, gating,
+                      session and refusal rendering
     auth.blsp       — auth plugs for router through groups: basic-auth, bearer-auth
                       (RFC-9110 case-insensitive scheme), allow-ips / allow-ips-from-env
-    static.blsp     — MIME table + path-safe static file handler
+    static.blsp     — MIME table + path-safe static file handler; file-text/inline-css (a
+                      static file read per render, never captured in a def)
     channel.blsp    — topic sockets: defchannel (join/on/handle-info/handle-out/terminate),
                       one multiplexed /channel/ws socket, pattern-matched topic registry;
                       broadcasts ride web/pubsub topics, so a live view and a channel client

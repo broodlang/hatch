@@ -199,3 +199,19 @@ the client sent, a broadcast from outside reaches a joined client through `handl
 for an unjoined topic is answered rather than dropped, `leave` runs `terminate` and drops the
 subscription, and presence works across it. The `defchannel` expansion and the topic matcher are
 covered as plain functions.
+
+## Who is on the socket
+
+A channel socket's conn is the upgrade request's, built before any router `through` group
+runs — so the session plug never touched it. Its `:session` is an EMPTY MAP, not nil, which
+is the trap: `(or (conn-session conn) …)` looks loaded and empty, and every socket reads as
+signed out. Read it with the store the app's plug uses:
+
+```clojure
+(join (topic params socket)
+  (let (conn (session/fetch app-store (channel-socket-conn socket))
+        user (session/get-session conn "user-id"))
+    (if user [:ok (assign socket {:user user})] [:error {:reason "sign in first"}])))
+```
+
+`fetch` is idempotent, so a conn the plug did load is returned as is.

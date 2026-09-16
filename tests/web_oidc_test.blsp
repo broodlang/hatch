@@ -1,0 +1,143 @@
+;; web/oidc — the code flow with the network stubbed: `complete` takes its transport.
+(defmodule web-oidc-test
+  (:use web/test)
+  (:use test)
+  (:alias web/oidc :as oidc)
+  (:alias web/session :as session))
+
+(def *store* (session/cookie-store "test-secret-that-is-long-enough-00000000" {}))
+(def *config*
+  (oidc/zitadel-config "https://auth.example.test/" "CLIENT" "http://localhost:5000/auth/callback"))
+
+(defn json-response (status body)
+  {:status status :headers {} :body (string/->bytes (json/encode body))})
+
+(defn stub (token-body claims &optional (token-status 200) (userinfo-status 200))
+  (fn (method url opts)
+    (cond
+      (string/ends-with? url "/oauth/v2/token") (json-response token-status token-body)
+      (string/ends-with? url "/oidc/v1/userinfo") (json-response userinfo-status claims)
+      :else {:status 404 :headers {} :body (string/->bytes "")})))
+
+(defn callback-conn (pending params)
+  (signed-in (conn-for "GET" "/auth/callback" {:params params})
+    *store*
+    {oidc/*session-key* pending}))
+
+(describe "config and urls"
+  (test "zitadel-config fills the paths and trims the issuer"
+    (assert= (get *config* :issuer) "https://auth.example.test")
+    (assert= (get *config* :authorize-path) "/oauth/v2/authorize")
+    (assert= (get *config* :scopes) ["openid" "profile" "email"]))
+
+  (test "the authorize URL carries the code flow, PKCE and the state"
+    (let (url (oidc/authorize-url *config* "STATE" "CHALLENGE"))
+      (assert= (string/starts-with? url "https://auth.example.test/oauth/v2/authorize?") true)
+      (assert= (includes? url "client_id=CLIENT") true)
+      (assert= (includes? url "redirect_uri=http%3A%2F%2Flocalhost%3A5000%2Fauth%2Fcallback") true)
+      (assert= (includes? url "response_type=code") true)
+      (assert= (includes? url "scope=openid%20profile%20email") true)
+      (assert= (includes? url "code_challenge=CHALLENGE&code_challenge_method=S256") true)
+      (assert= (includes? url "state=STATE") true)))
+
+  (test "the end-session URL names the id token and, when given, where to go after"
+    (assert= (oidc/end-session-url *config* "ID.TOKEN" "http://localhost:5000/")
+      "https://auth.example.test/oidc/v1/end_session?id_token_hint=ID.TOKEN&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5000%2F")
+    (assert= (oidc/end-session-url *config* "ID.TOKEN")
+      "https://auth.example.test/oidc/v1/end_session?id_token_hint=ID.TOKEN"))
+
+  ;; RFC 7636 appendix B
+  (test "the PKCE challenge is base64url(sha256(verifier)) without padding"
+    (assert= (oidc/challenge-of "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")))
+
+(describe "start"
+  (test "remembers state and verifier in the session and redirects to the provider"
+    (let (conn (signed-in (conn-for "GET" "/auth/sign-in") *store* {})
+          resp (call (fn (c) (oidc/start c *config*)) conn))
+      (assert= (status resp) 302)
+      (assert= (string/starts-with? (resp-header resp :location)
+                 "https://auth.example.test/oauth/v2/authorize?")
+        true))))
+
+(describe "complete"
+  (test "exchanges the code with the verifier, fetches the claims, clears the pending sign-in"
+    (let (claims {:email "ada@x.y" :email_verified true :preferred_username "ada"}
+          seen (fn (method url opts)
+                 (if (string/ends-with? url "/oauth/v2/token")
+                   (do
+                     (assert= (includes? (get opts :body) "code_verifier=V1") true)
+                     (assert= (includes? (get opts :body) "code=C1") true)
+                     (assert= (includes? (get opts :body) "client_secret") false)
+                     (json-response 200 {:access_token "AT" :id_token "IDT"}))
+                   (do
+                     (assert= (get (get opts :headers) "Authorization") "Bearer AT")
+                     (json-response 200 claims)))))
+      (match (oidc/complete (callback-conn {"state" "S1" "verifier" "V1"}
+                              {"code" "C1" "state" "S1"})
+               *config* seen)
+        ([:ok got conn] (do
+                          (assert= (get got :email) "ada@x.y")
+                          (assert= (get got :id_token) "IDT")
+                          (assert= (session/get-session conn oidc/*session-key*) nil)))
+        (other (assert= (first other) :ok)))))
+
+  (test "a confidential client sends its secret"
+    (let (config (assoc *config* :client-secret "SHH")
+          seen (fn (method url opts)
+                 (if (string/ends-with? url "/oauth/v2/token")
+                   (do
+                     (assert= (includes? (get opts :body) "client_secret=SHH") true)
+                     (json-response 200 {:access_token "AT"}))
+                   (json-response 200 {:email "a@b.c"}))))
+      (match (oidc/complete (callback-conn {"state" "S1" "verifier" "V1"}
+                              {"code" "C1" "state" "S1"})
+               config seen)
+        ([:ok _ _] (assert= true true))
+        (other (assert= (first other) :ok)))))
+
+  (test "a state mismatch, a provider error, a missing code, a failing token endpoint"
+    (let (attempt (fn (pending params transport)
+                    (match (oidc/complete (callback-conn pending params) *config* transport)
+                      ([:error status why _] [status why])
+                      (other [:ok]))))
+      (assert= (first (attempt {"state" "S1" "verifier" "V1"}
+                        {"code" "C1" "state" "OTHER"}
+                        (stub {} {})))
+        403)
+      (assert= (first (attempt nil {"code" "C1" "state" "S1"} (stub {} {}))) 403)
+      (assert= (attempt {"state" "S1" "verifier" "V1"}
+                 {"error" "access_denied" "error_description" "nope" "state" "S1"}
+                 (stub {} {}))
+        [403 "the provider refused: access_denied — nope"])
+      (assert= (first (attempt {"state" "S1" "verifier" "V1"} {"state" "S1"} (stub {} {}))) 400)
+      (assert= (first (attempt {"state" "S1" "verifier" "V1"}
+                        {"code" "C1" "state" "S1"}
+                        (stub {} {} 400)))
+        502)
+      (assert= (first (attempt {"state" "S1" "verifier" "V1"}
+                        {"code" "C1" "state" "S1"}
+                        (stub {:nope 1} {})))
+        502)
+      (assert= (first (attempt {"state" "S1" "verifier" "V1"}
+                        {"code" "C1" "state" "S1"}
+                        (stub {:access_token "AT"} {} 200 500)))
+        502))))
+
+(describe "claim helpers"
+  (test "verified-email? and email-domain"
+    (assert= (oidc/verified-email? {:email "a@b.c" :email_verified true}) true)
+    (assert= (oidc/verified-email? {:email "a@b.c" :email_verified "true"}) true)
+    (assert= (oidc/verified-email? {:email "a@b.c"}) false)
+    (assert= (oidc/verified-email? {:email "" :email_verified true}) false)
+    (assert= (oidc/email-domain "Ada@Example.COM") "example.com")
+    (assert= (oidc/email-domain "nope") nil)))
+
+(describe "the test helpers"
+  (test "signed-in hands a handler a loaded session; session-cookie mints what a browser sends"
+    (let (conn (signed-in (conn-for "GET" "/") *store* {"user-id" "7"}))
+      (assert= (session/get-session conn "user-id") "7"))
+    (let (cookie (session-cookie *store* {"user-id" "7"})
+          conn (conn-for "GET" "/" {:headers {:cookie cookie}}))
+      (assert= (string/starts-with? cookie "_hatch_session=") true)
+      (assert= (session/get-session (session/fetch *store* conn) "user-id") "7"))))

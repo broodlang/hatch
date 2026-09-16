@@ -1,0 +1,213 @@
+(defmodule web/oidc
+  "OpenID Connect sign-in, authorization code flow with PKCE — the mechanics, not the policy.
+
+  Two legs, two handlers an app writes around them:
+
+      (defn sign-in (conn) (oidc/start conn (config)))
+
+      (defn callback (conn)
+        (match (oidc/complete conn (config) http/request)
+          ([:ok claims conn] …decide who this is, gate them, sign the session, redirect…)
+          ([:error status why conn] …render a refusal — never redirect it to a page that
+                                     starts another sign-in, or the browser loops…)))
+
+  `start` puts a fresh `state` and PKCE verifier in the session (the app's `fetch-session`
+  plug must be on both routes) and redirects to the authorize endpoint. `complete` checks the
+  returned `state` against the cookie's, exchanges the code at the token endpoint (server to
+  server, the verifier as the proof — a PKCE client has no secret), fetches the claims from
+  userinfo, and hands them back with the pending sign-in cleared from the session. Identity
+  is trusted because both answers came straight from the issuer over TLS; the ID token is
+  not verified here (it is returned in the claims as `:id_token` for an `end-session-url`).
+
+  What is deliberately the APP's: which claims make a user (`preferred_username`? email?),
+  whether the email must be verified (`verified-email?` helps), which domains are allowed
+  (`email-domain` helps), what goes in the session, and what a refusal looks like. The
+  Elixir `zitadel_ex` draws the same line, for the same reason: the mechanics are identical
+  everywhere and security-relevant; the policy is not.
+
+  A `config` is a map:
+
+      {:issuer        \"https://auth.example.com\"        ; no trailing slash
+       :client-id     \"…\"
+       :redirect-uri  \"https://app.example.com/auth/callback\"  ; registered, compared exactly
+       :scopes        [\"openid\" \"profile\" \"email\"]   ; default
+       :authorize-path \"/oauth/v2/authorize\"        ; defaults: Zitadel's paths
+       :token-path     \"/oauth/v2/token\"
+       :userinfo-path  \"/oidc/v1/userinfo\"
+       :end-session-path \"/oidc/v1/end_session\"
+       :client-secret  nil}                          ; only for a confidential client
+
+  `zitadel-config` fills the paths for a Zitadel instance; another provider supplies its
+  own from its discovery document."
+  (:alias web/conn :as conn)
+  (:alias web/session :as session)
+  ; request / body-text — brood's std HTTP client (the module is `http`, file std/net/http)
+  (:alias http))
+
+(def *session-key* "oidc/pending")
+(def *default-scopes* ["openid" "profile" "email"])
+
+(def *zitadel-paths*
+  {:authorize-path "/oauth/v2/authorize"
+   :token-path "/oauth/v2/token"
+   :userinfo-path "/oidc/v1/userinfo"
+   :end-session-path "/oidc/v1/end_session"})
+
+(defn zitadel-config (issuer client-id redirect-uri &optional (extra {}))
+  "A config for a Zitadel instance: its fixed endpoint paths, merged with `extra`."
+  (merge *zitadel-paths*
+    {:issuer (without-trailing-slash (string/trim issuer))
+     :client-id (string/trim client-id)
+     :redirect-uri redirect-uri
+     :scopes *default-scopes*}
+    extra))
+
+;; ---- the URLs -------------------------------------------------------------------
+
+(defn authorize-url (config state challenge)
+  "The authorize endpoint with everything the code flow needs, for `state` and the S256
+  `challenge`."
+  (str (get config :issuer)
+    (get config :authorize-path (get *zitadel-paths* :authorize-path))
+    "?"
+    (query {"client_id" (get config :client-id)
+            "redirect_uri" (get config :redirect-uri)
+            "response_type" "code"
+            "scope" (string/join (get config :scopes *default-scopes*) " ")
+            "state" state
+            "code_challenge" challenge
+            "code_challenge_method" "S256"})))
+
+(defn end-session-url (config id-token &optional (post-logout-uri nil))
+  "The provider's end-session endpoint for `id-token` (the `:id_token` `complete` returned) —
+  where a logout sends the browser so the provider's own session ends too. `post-logout-uri`
+  must be registered on the client."
+  (str (get config :issuer)
+    (get config :end-session-path (get *zitadel-paths* :end-session-path))
+    "?"
+    (query (merge {"id_token_hint" id-token}
+             (if post-logout-uri {"post_logout_redirect_uri" post-logout-uri} {})))))
+
+(defn query (pairs)
+  "`pairs` (a string-keyed map) as a query string, keys sorted so it is stable.
+
+      (web/oidc/query {\"b\" \"2\" \"a\" \"x y\"}) ;=> \"a=x%20y&b=2\""
+  (string/join (map (sort (keys pairs))
+                 (fn (key)
+                   (str (url/percent-encode key)
+                     "="
+                     (url/percent-encode (->string (get pairs key))))))
+    "&"))
+
+(defn challenge-of (verifier)
+  "PKCE S256: base64url(sha256(verifier)), unpadded (RFC 7636).
+
+      (web/oidc/challenge-of \"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\") ;=> \"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\""
+  (string/replace (encoding/base64-url-encode-bytes (hash/sha256-raw (string/->bytes verifier)))
+    "=" ""))
+
+;; ---- the two legs ---------------------------------------------------------------
+
+(defn start (conn config)
+  "Begin a sign-in: remember `state` + verifier in the session, redirect to the provider.
+  The response — put it on the route as the handler's return."
+  (let (state (rand/token 16)
+        verifier (rand/token 32))
+    (conn/redirect-resp (session/put-session conn *session-key* {"state" state "verifier" verifier})
+      (authorize-url config state (challenge-of verifier)))))
+
+(defn complete (conn config transport)
+  "Finish a sign-in from the callback request: `[:ok claims conn]` — the userinfo claims
+  (keyword keys) plus `:id_token` and `:access_token` from the token response — or
+  `[:error status why conn]`. Either way the returned conn has the pending sign-in cleared
+  from its session. `transport` is `(fn (method url opts) → {:status :body})`:
+  `http/request`, or a stub in a test."
+  (let (pending (session/get-session conn *session-key*)
+        cleared (session/delete-session conn *session-key*)
+        code (conn/param conn "code")
+        state (conn/param conn "state")
+        returned-error (conn/param conn "error"))
+    (cond
+      returned-error
+        [:error
+          403
+          (str "the provider refused: "
+            returned-error
+            (let (description (conn/param conn "error_description"))
+              (if description (str " — " description) "")))
+          cleared]
+
+      (or (nil? pending) (nil? state) (not (= state (get pending "state"))))
+        [:error 403 "the state that came back is not the one this browser started with" cleared]
+
+      (or (nil? code) (string/blank? code)) [:error 400 "no code came back" cleared]
+      :else
+        (match (claims-for config transport code (get pending "verifier"))
+          ([:error status why] [:error status why cleared])
+          ([:ok claims] [:ok claims cleared])))))
+
+(defn claims-for (config transport code verifier)
+  "Exchange `code` at the token endpoint, then fetch userinfo: `[:ok claims]` or
+  `[:error status why]`. The claims carry `:access_token` and `:id_token` too."
+  (let (form (append [["grant_type" "authorization_code"]
+                       ["code" code]
+                       ["redirect_uri" (get config :redirect-uri)]
+                       ["client_id" (get config :client-id)]
+                       ["code_verifier" verifier]]
+               (if (get config :client-secret) [["client_secret" (get config :client-secret)]] []))
+        token-response (transport "POST"
+                         (str (get config :issuer)
+                           (get config :token-path (get *zitadel-paths* :token-path)))
+                         {:headers {"Content-Type" "application/x-www-form-urlencoded"
+                                    "Accept" "application/json"}
+                          :body (string/join (map form
+                                               (fn ([key value])
+                                                 (str key "=" (url/percent-encode value))))
+                                  "&")})
+        token (json-of token-response))
+    (cond
+      (not (= 200 (get token-response :status)))
+        [:error 502 (str "the token endpoint answered " (get token-response :status))]
+
+      (not (string? (get token :access_token)))
+        [:error 502 "the token endpoint sent no access token"]
+      :else
+        (let (userinfo-response (transport "GET"
+                                  (str (get config :issuer)
+                                    (get config :userinfo-path (get *zitadel-paths* :userinfo-path)))
+                                  {:headers {"Authorization" (str "Bearer "
+                                                               (get token :access_token))
+                                             "Accept" "application/json"}})
+              claims (json-of userinfo-response))
+          (if (and (= 200 (get userinfo-response :status)) (map? claims))
+            [:ok
+              (assoc claims :access_token (get token :access_token) :id_token (get token :id_token))]
+            [:error 502 (str "userinfo answered " (get userinfo-response :status))])))))
+
+;; ---- claim helpers, for the app's policy -------------------------------------------
+
+(defn verified-email? (claims)
+  "True when the claims carry a non-blank email the provider marked verified — the only
+  kind an identity keyed by email should be built on.
+
+      (web/oidc/verified-email? {:email \"a@b.c\" :email_verified true}) ;=> true
+      (web/oidc/verified-email? {:email \"a@b.c\"}) ;=> false"
+  (let (email (get claims :email) flag (get claims :email_verified))
+    (and (string? email) (not (string/blank? email)) (or (= flag true) (= flag "true")))))
+
+(defn email-domain (email)
+  "The lowercase domain of `email`, or nil.
+
+      (web/oidc/email-domain \"Ada@Example.COM\") ;=> \"example.com\""
+  (if (and (string? email) (includes? email "@"))
+    (string/lower (last (string/split email "@")))
+    nil))
+
+;; ---- helpers ----------------------------------------------------------------------
+
+(defn- json-of (response)
+  (let (text (http/body-text response))
+    (check-allow :discarded-catch (try (json/decode text) (catch _ nil)))))
+
+(defn- without-trailing-slash (text)
+  (if (string/ends-with? text "/") (string/substring text 0 (dec (string/length text))) text))

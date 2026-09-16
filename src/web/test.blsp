@@ -59,6 +59,30 @@
           :headers (get opts :headers {})
           :body (get opts :body "")}))
 
+(defn signed-in (conn store data)
+  "`conn` as the `fetch-session` plug over `store` would hand it to a handler, with `data`
+  (a string-keyed map) already in the session — a request from someone signed in, without
+  minting and parsing a cookie:
+
+      (signed-in (conn-for \"GET\" \"/account\") (session/cookie-store secret {}) {\"user-id\" \"7\"})"
+  (assoc conn :session data :session-store store :session-changed? false))
+
+(defn session-cookie (store data)
+  "The `Cookie` header value a browser would send for a session holding `data` — signed by
+  `store` exactly as the app signs it — for a browser test that needs a signed-in tab:
+
+      (session-cookie (session/cookie-store secret {}) {\"user-id\" \"7\"})
+      ;=> \"_hatch_session=eyJ…\"
+
+  The signed value carries the store's expiry, so the cookie is good for the session's
+  lifetime and no longer."
+  (let (opts (web/session/cookie-store-opts store))
+    (str (web/session/session-cookie-name opts)
+      "="
+      (web/session/encode-session (web/session/cookie-store-secret store)
+        (web/session/with-expiry data opts)
+        opts))))
+
 ; ---- dispatching -----------------------------------------------------------
 
 (defn request (router method path &optional (opts {}))

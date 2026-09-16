@@ -38,7 +38,7 @@ trade-offs behind them — is archived in
 | Layer | Modules |
 |---|---|
 | HTTP/1.1 + WebSocket | `http/request` `http/response` `http/server` `http/websocket` `http/multipart` `http/util` `http/base64` |
-| Request pipeline | `web/endpoint` `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` `web/errors` |
+| Request pipeline | `web/endpoint` `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` `web/oidc` `web/errors` |
 | Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) |
 | Live views | `web/live` `web/component` `web/pubsub` `web/presence` `web/registry` |
 | Forms & uploads | `web/form` `web/upload` |
@@ -528,6 +528,33 @@ dependency in the suite would cost more than the check is worth as a permanent f
 Closed bugs, cleanup passes and post-merge reviews are archived in
 [`_archive/fixed-issues.md`](_archive/fixed-issues.md) — worth reading for the root causes,
 several of which document non-obvious Brood behaviour.
+
+## 0.22.0
+
+What building notjira (a terminal-shaped todo list on hatch, signed in through HST's
+Zitadel) had to hand-roll, moved here:
+
+- **`web/oidc`** — OpenID Connect authorization code + PKCE, the mechanics only: `start`
+  (state + verifier into the session, redirect to the provider) and `complete` (state check,
+  code exchange with the verifier, userinfo) → `[:ok claims conn]` / `[:error status why
+  conn]`, plus `end-session-url`, `zitadel-config` (the instance's fixed paths — any other
+  provider passes its own) and the two policy helpers `verified-email?`/`email-domain`. Who
+  a user is, what goes in the session and what a refusal looks like stay the app's, as in
+  the Elixir `zitadel_ex`. Identity rests on the token and userinfo answers having come
+  from the issuer over TLS; no ID-token signature is checked. Stub-transport tests, the
+  RFC 7636 vector.
+- **`web/session/fetch`** — the session on a conn the plug never ran over, which is every
+  channel socket's upgrade conn. The trap: a raw conn's `:session` is `{}`, not nil, so
+  `(or (conn-session conn) …)` reads every socket as signed out. `fetch` keys on the store
+  the plug attaches and is idempotent. `docs/channels.md` says so where a channel author
+  would look.
+- **`web/static/file-text` / `inline-css`** — a static file read PER RENDER, for inlining.
+  A `def` that slurps a file is restored from the startup image on later boots, and the
+  image is keyed on `src/`, so an edit to the file never reaches the page — a restart's
+  worth of confusion, once, is enough.
+- **`web/test/signed-in` / `session-cookie`** — a conn as the session plug hands it over
+  with data already in the session, and the exact `Cookie` header a browser test needs to be
+  signed in — minted by the store, expiry included.
 
 ## 0.21.3
 
