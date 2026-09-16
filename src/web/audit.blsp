@@ -526,7 +526,8 @@
                             ;; as one that jumps mid-page. Opening at h2 is NOT reported: a
                             ;; page whose title is its h1 and whose sections are h2 is
                             ;; ordinary, and so is a fragment rendered on its own.
-                            base (if (= i 0) 1 (nth levels (- i 1))))
+                            ;; `i - 1` is in range once `i > 0`; the default is never read
+                            base (if (= i 0) 1 (nth levels (- i 1) 1)))
                         (if (> current (+ base 1)) {:from base :to current} nil)))))
         (seq/filterv pairs (fn (p) (not (nil? p))))))))
 

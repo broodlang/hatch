@@ -206,8 +206,12 @@
 ;; ---- helpers ----------------------------------------------------------------------
 
 (defn- json-of (response)
-  (let (text (http/body-text response))
-    (check-allow :discarded-catch (try (json/decode text) (catch _ nil)))))
+  "The JSON OBJECT `response` carries, or nil — for a body that is not JSON, or is JSON
+but not an object (a bare string or array answers nothing an `(get … :field)` can read)."
+  (let (text (http/body-text response)
+        decoded (check-allow :discarded-catch (try (json/decode text) (catch _ nil))))
+    (when (map? decoded) decoded)))
+(sig json-of (any -> (or nil map)))
 
 (defn- without-trailing-slash (text)
   (if (string/ends-with? text "/") (string/substring text 0 (dec (string/length text))) text))
