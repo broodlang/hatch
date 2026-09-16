@@ -269,8 +269,8 @@
         (halt (send-resp conn status body))))))
 
 (defn allow-ips-from-env (var &optional (opts {}))
-  "`allow-ips` with the list read from environment variable `var` — comma-separated, at
-  boot.
+  "`allow-ips` with the list read from environment variable `var` — comma-separated, on
+  each request.
 
       (through [(auth/allow-ips-from-env \"DASHBOARD_IPS\")]
         (get \"/dashboard\" (web/dashboard/handler {})))
@@ -278,5 +278,17 @@
   This is the form `allow-ips`' own docstring tells you to use, so it may as well be one
   call. An unset variable yields an empty list, which admits NOBODY (`web/env/items`
   answers `[]`, and `allowed-ip?` refuses an empty list): a gate whose list was never
-  configured must close, not open."
-  (allow-ips (web/env/items var) opts))
+  configured must close, not open.
+
+  Per request and not at boot, and not for freshness: a router is a `def`, so this plug
+  is built when the module LOADS — which in dev is when the startup image is built, with
+  whatever the environment held then. A list read once was baked into `.brood/image.bin`
+  as `[]`, and every later `nest run` with the variable set answered 404 to the address
+  it named (hive, 2026-09-16). `web/env` is a table lookup, so reading it each time costs
+  nothing worth saving."
+  (let (status (get opts :status 404)
+        body (get opts :body "<h1>404 Not Found</h1>"))
+    (fn (conn)
+      (if (allowed-ip? conn (web/env/items var))
+        conn
+        (halt (send-resp conn status body))))))
