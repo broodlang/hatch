@@ -27,6 +27,8 @@
   (:alias log)
   (:alias table)
   (:alias web/template)
+  (:alias web/conn)
+  (:alias url)
   (:alias seq))
 
 ;; The distribution port. It must NOT be exposed publicly: a node port reachable from the
@@ -268,3 +270,22 @@
     (if (= (first result) :ok)
       (second result)
       (fallback (second result)))))
+
+(defn pinned (conn &optional (param "node"))
+  "For an operational page in a cluster: nil when the request already names a machine (or
+  there is only one), else a redirect to the same URL with `?<param>=` this node — so the
+  view is pinned to the machine that first answered.
+
+  Without this a page with no `?node=` shows whichever machine the platform's load balancer
+  picked for THAT request, and a page that refreshes itself every few seconds flips between
+  machines — the numbers change under the reader for no reason they can see, and the picker
+  flips with them (hive, 2026-09-16). One redirect on the first request, and every link and
+  every refresh from then on says which machine it means."
+  (let (chosen (web/conn/param conn param))
+    (when (and (nil? chosen) (> (count (remote-nodes)) 0))
+      (let (query (get conn :query)
+            pin (url/query-encode {param (str (node/name))})
+            target (str (get conn :path)
+                     "?"
+                     (if (or (nil? query) (= query "")) pin (str query "&" pin))))
+        (web/conn/redirect-resp conn target)))))

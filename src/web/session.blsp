@@ -219,7 +219,6 @@
   "Decode a verified base64url JSON `payload` into a string-keyed map; `{}` on any decode or
   parse failure, or if the payload isn't a JSON object."
   (try (decode-json (base64-url-decode payload)) (catch _e {})))
-(sig decode-payload (any -> map))
 
 (defn decode-json (json)
   "A JSON object as a string-keyed map; `{}` for anything else. Shared by the signed and the
@@ -243,7 +242,6 @@
 ;; Declared `-> map` because it is one on every path, and nothing downstream could see that:
 ;; `check-expiry` reads a `get` and a `dissoc` off this, and without the declaration it was
 ;; doing so against a value the checker believed could be anything.
-(sig decode-json (any -> map))
 
 ; ---- the SessionStore ability ----
 

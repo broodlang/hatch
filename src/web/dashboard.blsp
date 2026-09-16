@@ -290,13 +290,15 @@
 
 (defn handler (&optional (opts {}))
   "A conn handler serving the dashboard. `:title` names the page; `:refresh-ms` makes it
-  keep itself current (see `refresh-script`).
+  keep itself current (see `refresh-script`). In a cluster a request naming no machine is
+  redirected to `?node=` this one (`web/cluster/pinned`), so the view never flips.
 
   Never cached: it reports the state of this process at this moment, and a stored copy is a
   stale answer to the only question anyone asks it."
   (let (title (get opts :title "Hatch metrics"))
     (fn (conn)
-      (-> conn
-        (put-resp-header :cache-control "no-store")
-        (put-resp-header :content-type "text/html; charset=utf-8")
-        (send-resp 200 (page title (assoc opts :node (param conn "node"))))))))
+      (or (web/cluster/pinned conn)
+        (-> conn
+          (put-resp-header :cache-control "no-store")
+          (put-resp-header :content-type "text/html; charset=utf-8")
+          (send-resp 200 (page title (assoc opts :node (param conn "node")))))))))

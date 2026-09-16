@@ -38,3 +38,21 @@
       (web/template/render [:p
                              {}
                              (web/cluster/render-on "<x>" (fn () "never") (fn (message) message))]))))
+
+(describe "pinned"
+  (test "on a lone runtime nothing is pinned"
+    (assert= nil
+      (web/cluster/pinned (web/conn/build {:method "GET"
+                                           :path "/dev/metrics"
+                                           :query ""
+                                           :params {}
+                                           :headers {}
+                                           :body ""}))))
+  (test "a request that already names a machine is left alone"
+    (assert= nil
+      (web/cluster/pinned (web/conn/build {:method "GET"
+                                           :path "/x"
+                                           :query "node=a"
+                                           :params {"node" "a"}
+                                           :headers {}
+                                           :body ""})))))

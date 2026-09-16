@@ -100,7 +100,6 @@
   (let (ref (get monitors pid))
     (when ref (demonitor ref)))
   (dissoc monitors pid))
-(sig release-monitor (map any -> map))
 
 ;; ---- watching the vault -------------------------------------------------------------
 
