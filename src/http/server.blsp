@@ -735,6 +735,7 @@ port) still returns and lets the caller fail on its own terms."
           (spool-cleanup path)
           (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
           (tcp/close sock))))))
+(sig spool-drain (any any any any any string int int number any -> any))
 
 (defn- spool-cleanup (path)
   "Delete a spool temp file, ignoring 'already gone' (the handler may have moved it)."

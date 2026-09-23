@@ -89,6 +89,7 @@
       (let (end (math/min n (+ offset block-size)))
         (write (bytes/slice data offset end))
         (write-blocks write data block-size end)))))
+(sig write-blocks (any bytes int int -> any))
 
 (defn stream-bytes (conn data &optional (opts {}))
   "Stream `data` (a string or `bytes`) as a chunked response, written to the socket in
