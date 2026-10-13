@@ -9,7 +9,8 @@
   (:alias web/parts)
   (:use test))
 
-(deflive-component (mount (id assigns) {:n 0 :label "start"})
+(deflive-component
+  (mount (id assigns) {:n 0 :label "start"})
   (render (state)
     [:div {} [:span {} (get state :label)] [:b {} (str (get state :n))]])
   (on "reset" (params state) (assoc state :n 0))

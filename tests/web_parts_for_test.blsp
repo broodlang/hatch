@@ -9,7 +9,8 @@
 
 ;; A live view whose render contains a `(for …)` comprehension — the case per-item diffing
 ;; targets. Each item renders to one <li>; the whole list is a single comprehension slot.
-(deflive (mount (params) {:items ["a" "b" "c"]})
+(deflive
+  (mount (params) {:items ["a" "b" "c"]})
   (render (model) [:ul {} (for (x (get model :items)) [:li {:data-key x} x])])
   (on "noop" (params model) model))
 

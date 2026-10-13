@@ -181,8 +181,17 @@
 ;; swap fails the suite rather than shipping a view whose ticks run its event handler.
 (defrecord view-spec
   (mount render
-    render-static render-dynamic render-slots slot-deps handle-event handle-tick handle-info unmount
-    mount-guard handle-params ticks))
+    render-static
+    render-dynamic
+    render-slots
+    slot-deps
+    handle-event
+    handle-tick
+    handle-info
+    unmount
+    mount-guard
+    handle-params
+    ticks))
 
 (impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
 

@@ -45,7 +45,8 @@
 
 ;; ---- a view to drive -------------------------------------------------------
 
-(deflive (mount (params) {:count 0 :name "" :errors {} :saved nil})
+(deflive
+  (mount (params) {:count 0 :name "" :errors {} :saved nil})
 
   (render (model)
     [:div
@@ -236,7 +237,8 @@
   (:use web/live)
   (:use test))
 
-(deflive (mount (params) {:count 0})
+(deflive
+  (mount (params) {:count 0})
   (render (model)
     [:div
       {}
@@ -270,7 +272,8 @@
   (:alias web/template)
   (:use test))
 
-(deflive (mount (params) {:n 1})
+(deflive
+  (mount (params) {:n 1})
   (render (model)
     [:div
       {:id "panel"}
@@ -298,7 +301,8 @@
   (:use web/live)
   (:use test))
 
-(deflive (mount (params) {:n 0 :text "" :saved nil})
+(deflive
+  (mount (params) {:n 0 :text "" :saved nil})
   (render (model)
     [:div
       {}
@@ -355,7 +359,8 @@
   (:use web/live)
   (:use test))
 
-(deflive (mount (params) {:last nil :key nil})
+(deflive
+  (mount (params) {:last nil :key nil})
   (render (model)
     [:div
       {}

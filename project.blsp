@@ -17,11 +17,10 @@
   ;; join were part of the definition form rather than the first of several peers. Every
   ;; clause-taking macro hatch defines belongs here.
   ;;
-  ;; These apply to CONSUMERS, not to this repo. A project cannot list itself in
-  ;; `:format-plugins` — it is not one of its own `:dependencies` — so hatch's own sources are
-  ;; formatted by the default rules and do read with the first clause on the head line. That
-  ;; is not drift and does not want fixing; it is the reason hatch-demo's `deflive` looks
-  ;; different from the ones in this repo's tests.
+  ;; They apply to this repo too: a project's own `:format-headers` sit on top of its
+  ;; plugins' rules, so hatch's sources and tests are formatted the way a consumer's are.
+  ;; The rules match on head symbol alone, so a data list that happens to start with one of
+  ;; these names — `view-spec`'s field list starts with `mount` — is laid out one per line.
   :format-headers
     {deflive 0
      deflive-component 0

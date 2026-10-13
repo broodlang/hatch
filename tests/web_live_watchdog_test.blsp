@@ -17,7 +17,8 @@
 ;; :isolated, since every other suite's sessions read the same one.
 (def default-ping-ms web/live/*ws-ping-ms*)
 
-(deflive (mount (params) {:n 0})
+(deflive
+  (mount (params) {:n 0})
   (render (model) [:div {} (str (get model :n))]))
 
 (defn masked-text-frame (s)
