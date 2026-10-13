@@ -265,6 +265,9 @@
   fragment has no head, and scanning all of it is the conservative reading."
   (let (end (index-of document "</head>"))
     (if (< end 0) document (string/substring document 0 end))))
+;; `index-of` reads any sequence, so nothing below this can prove `document` is text; the
+;; head is what every tag scan walks with `string/substring`.
+(sig head-of (string -> string))
 
 (defn first-flight (document)
   "How `document` fares against the initial congestion window, as

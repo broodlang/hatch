@@ -335,9 +335,7 @@
 
 (describe "parse-chunk-frame"
   (test "splits the length-prefixed ref off the payload"
-    (let (parsed (parse-chunk-frame (bytes/concat [3 97 98 99 7 8])))
-      (assert= (first parsed) "abc")
-      (assert= (vec (seq (first (rest parsed)))) [7 8])))
+    (assert= (parse-chunk-frame (bytes/concat [3 97 98 99 7 8])) ["abc" (bytes [7 8])]))
   (test "an empty frame is refused"
     (assert= (parse-chunk-frame (bytes [])) nil))
   ; the length is read before it is trusted — a declared ref longer than the frame must not

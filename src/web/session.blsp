@@ -229,7 +229,8 @@
   body needs, which is why it lives one layer down rather than in a copy here. There were two
   copies, identical down to the `mapv`."
   (try
-    (let (parsed (if json (json/decode json) nil)
+    ;; `string?`, not truthiness: a payload that is not base64 arrives as a failure value.
+    (let (parsed (if (string? json) (json/decode json) nil)
           ;; `stringify-keys` walks any value and is typed as widely as its input — it has to
           ;; be, since web/live hands it a decoded JSON array — so the map-ness established by
           ;; the test below is lost at its return. Testing the RESULT rather than the input

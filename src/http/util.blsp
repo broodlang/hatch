@@ -251,6 +251,12 @@
     (vector? v) (mapv v stringify-keys)
     else v))
 
+;; The result is as wide as the input, which no signature can say. Left to derive it, the
+;; checker spells "a decoded JSON leaf" out as every tag but map and vector — failure among
+;; them — so each truthiness test on a field read from a request body or a session reads as
+;; testing a possible failure. `any` is the honest claim: it is whatever came in.
+(sig stringify-keys (any -> any))
+
 ;; ---- status codes ----
 
 (defn status-text (code)
