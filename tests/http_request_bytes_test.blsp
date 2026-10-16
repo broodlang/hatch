@@ -1,19 +1,174 @@
 (defmodule http-request-bytes-test
   (:use http/request)
-  ; carrier->bytes — recover the bytes of the OLD parser's carrier-string body for comparison
+  ; parse-query — the oracle builds its request map the way the parser used to
   (:use http/util)
-  ; bytes->carrier — feed the OLD parser the whole request as a carrier, as the server used to
-  (:alias http/websocket)
   ; int->hex — build chunk size lines
   (:alias http/response)
   (:use test))
 
 ;; Differential fuzz: the bytes-native parser (`try-parse-bytes`) must agree, verdict for verdict,
-;; with the proven carrier parser (`try-parse` fed `bytes->carrier`) on every input. The head
+;; with the string-buffer parser it replaced (`reference-parse` below, fed `bytes->carrier`) on every input. The head
 ;; classification is literally the same code (the byte twin reuses `parse-request-line`/
 ;; `parse-headers` and the smuggling rejections verbatim), so any divergence can only be in body
 ;; slicing or de-chunking — exactly the new code. Golden assertions below also pin the new
 ;; parser's actual output, so a bug shared by both parsers can't pass unseen.
+
+;; ---- the oracle: the string-buffer parser the bytes parser replaced ----------------------------
+;; This was `http/request/try-parse` (with its `dechunk-step` / `dechunk-trailers`) while the
+;; server read requests as a *carrier* string — one codepoint 0-255 per wire byte. Production is
+;; bytes-only now, so it lives here, where its one remaining job is: an independent second
+;; implementation for `try-parse-bytes` to agree with.
+
+(defn- bytes->carrier (buffer)
+  "A `bytes` value → a carrier string, one Latin-1 codepoint per byte."
+  (string/codepoints-> (seq buffer)))
+
+(defn- carrier->bytes (carrier)
+  "A carrier string → the `bytes` it carries."
+  (bytes (map (string/->list carrier) string/char->int)))
+
+(defn- reference-request (method path query version headers body)
+  {:method method
+   :path path
+   :query query
+   :params (parse-query query)
+   :version version
+   :headers headers
+   :body body})
+
+(defn- reference-dechunk-trailers (buf pos buflen)
+  "Skip any trailer headers after the last (0-size) chunk; return the index past the
+  terminating empty CRLF, or -1 if the trailer section isn't fully buffered yet."
+  (let (eol (index-of buf "\r\n" pos))
+    (cond
+      (= eol -1) -1
+      (= eol pos) (+ eol 2)
+      ; empty line → end of trailers
+      else (reference-dechunk-trailers buf (+ eol 2) buflen))))
+
+(defn- reference-dechunk-step (buf pos decoded dlen)
+  "Incremental de-chunk: decode every chunk that is *fully present* in `buf` from `pos`,
+  accumulating decoded pieces (newest-first) in `decoded` with running length `dlen`. Returns:
+    `[:ok body remainder]`  — the terminating 0-size chunk was reached; `body` is the joined
+                              decoded bytes, `remainder` anything after the trailers.
+    `[:more tail decoded dlen]` — need more bytes; `tail` is only the *undecoded* remainder (a
+                              partial chunk/size-line), so a streaming caller (server/chunked-drain)
+                              feeds the next read onto `tail` and resumes without re-scanning the
+                              bytes already decoded — what makes streaming O(n).
+    `[:error msg]`          — malformed framing.
+  Pieces are `join`ed once (at `:ok`) rather than `(str acc …)` per chunk. `reference-parse` reuses this
+  on a whole buffer (`:more` → `:incomplete`), so both paths share one decoder."
+  (let (buflen (string/length buf)
+        eol (index-of buf "\r\n" pos))
+    (if (= eol -1)
+      [:more (string/substring buf pos buflen) decoded dlen]
+      (let (size-line (string/substring buf pos eol)
+            semi (index-of size-line ";")
+            size-tok (if (= semi -1) size-line (string/substring size-line 0 semi))
+            size (parse-hex (string/trim size-tok)))
+        (cond
+          (nil? size) [:error "invalid chunk size"]
+          (= size 0)
+            (let (end (reference-dechunk-trailers buf (+ eol 2) buflen))
+              (if (= end -1)
+                [:more (string/substring buf pos buflen) decoded dlen]
+                [:ok (string/join (reverse decoded) "") (string/substring buf end buflen)]))
+          else
+            (let (data-start (+ eol 2)
+                  data-end (+ data-start size)
+                  after (+ data-end 2))
+              (if (< buflen after)
+                [:more (string/substring buf pos buflen) decoded dlen]
+                (if (= (string/substring buf data-end after) "\r\n")
+                  (reference-dechunk-step buf
+                    after
+                    (cons (string/substring buf data-start data-end) decoded)
+                    (+ dlen size))
+                  [:error "malformed chunk"]))))))))
+
+(defn- reference-parse (buf)
+  "Attempt to parse a complete HTTP/1.1 request from a string buffer.
+  Returns `[:ok request-map remainder]`, `[:incomplete]`, or `[:error msg]`.
+  `remainder` contains any bytes in `buf` after the parsed request (pipelined data)."
+  (let (sep (index-of buf "\r\n\r\n"))
+    (if (= sep -1)
+      [:incomplete]
+      (let (header-block (string/substring buf 0 sep)
+            body-start (+ sep 4)
+            lines (string/split header-block "\r\n"))
+        (match lines
+          (nil [:error "empty request"])
+          ((req-line & header-lines)
+            (if (> (count header-lines) *max-header-count*)
+              [:error "too many headers"]
+              (match (parse-request-line req-line)
+                ([:error e] [:error e])
+                ([:ok method path query version]
+                  ;; Grouped ONCE — see `try-parse-head` for why.
+                  (let (grouped (group-headers header-lines)
+                        headers (join-grouped-headers grouped)
+                        buflen (string/length buf))
+                    (cond
+                      ; A bare CR or LF in the head (only CRLF was split away) lets a proxy that
+                      ; splits on it see a different header set — a smuggling primitive (§3.5).
+                      (bare-line-break? lines) [:error "bare CR or LF in header block"]
+                      ; Whitespace before a field-name colon — we'd trim it and honor the header,
+                      ; a strict proxy wouldn't; a CL.TE desync (§3.2.4), same class as obs-fold.
+                      (any-ws-before-colon? header-lines) [:error "whitespace before header colon"]
+                      ; A header line with no colon is malformed — reject rather than silently drop.
+                      (colonless-header? header-lines) [:error "header line without a colon"]
+                      ; obs-fold (a header line starting with SP/HTAB) — RFC 7230 §3.2.4 says a
+                      ; server must reject it in a request; folding disagreements are a header-
+                      ; desync / smuggling primitive. `parse-headers` would otherwise promote a
+                      ; continuation line to a standalone header.
+                      (obs-fold? header-lines) [:error "obs-fold header line"]
+                      ; More than one Transfer-Encoding header line is ambiguous framing: a
+                      ; proxy honoring a different occurrence than we do (we keep the last) is a
+                      ; smuggling vector. (A list value like "x, chunked" is already rejected
+                      ; below, since `chunked?` requires the value to be exactly "chunked".)
+                      (duplicate-transfer-encoding-grouped? grouped)
+                        [:error "multiple Transfer-Encoding"]
+                      ; Transfer-Encoding *and* Content-Length is ambiguous framing
+                      ; (request smuggling) — reject outright (RFC 7230 §3.3.3).
+                      (and (contains? headers :transfer-encoding)
+                        (contains? headers :content-length))
+                        [:error "Transfer-Encoding with Content-Length"]
+                      ; Chunked Transfer-Encoding: de-chunk the body. Any other TE coding
+                      ; (gzip, …) we don't decode, so reject rather than mis-frame it.
+                      (contains? headers :transfer-encoding)
+                        (if (chunked? (get headers :transfer-encoding))
+                          ; one decoder for both paths: `reference-dechunk-step`
+                          ; (its `:more` = "need more bytes" = `:incomplete`
+                          ; for a single whole-buffer parse)
+                          (match (reference-dechunk-step buf body-start (list) 0)
+                            ([:more _tail _decoded _dlen] [:incomplete])
+                            ([:error e] [:error e])
+                            ([:ok body remainder] [:ok
+                                                    (reference-request method
+                                                      path query version headers body)
+                                                    remainder]))
+                          [:error "unsupported transfer-encoding"])
+                      ; Conflicting Content-Length values → ambiguous framing.
+                      (content-length-conflict-grouped? grouped)
+                        [:error "conflicting Content-Length"]
+                      ; Content-Length, when present, must be a non-negative
+                      ; integer. Without this a negative value made body-end <
+                      ; body-start and `substring` threw, crashing the worker.
+                      (not (valid-content-length? (get headers :content-length)))
+                        [:error "invalid Content-Length"]
+                      else
+                        (let (clen (content-length-value (get headers :content-length))
+                              body-end (+ body-start clen))
+                          (if (< buflen body-end)
+                            [:incomplete]
+                            [:ok
+                              (reference-request method
+                                path
+                                query
+                                version
+                                headers
+                                (string/substring buf body-start body-end))
+                              (string/substring buf body-end buflen)])))))))))))))
 
 (defn verdicts-equal? (old new)
   "True if the OLD (carrier) and NEW (bytes) verdicts are equivalent: same tag; same error
@@ -36,7 +191,7 @@
 
 (defn agree? (buf)
   "Run `buf` (a bytes value) through both parsers; true if the verdicts are equivalent."
-  (verdicts-equal? (try-parse (websocket/bytes->carrier buf)) (try-parse-bytes buf)))
+  (verdicts-equal? (reference-parse (bytes->carrier buf)) (try-parse-bytes buf)))
 
 ;; ---- request builders (produce raw `bytes`) ----
 

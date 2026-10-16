@@ -382,7 +382,7 @@ port) still returns and lets the caller fail on its own terms."
                                     buf
                                     head
                                     body-start)))
-    ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
+    ; Malformed framing → 400 (mirrors `try-parse-bytes`'s :error path).
     ([:error msg] (bad-request-close sock msg))
     ; tcp/read-until only returns a head once the terminator has landed, so :incomplete
     ; cannot occur here; be defensive.
@@ -633,9 +633,9 @@ port) still returns and lets the caller fail on its own terms."
 
 ; ---- O(n) incremental de-chunk drain (Transfer-Encoding: chunked bodies) ----
 ; The buffered path de-chunks by re-running the whole decoder over the entire buffer on every
-; socket read (via `try-parse`), so a chunked body arriving over R reads is decoded ~R times —
+; socket read (via the whole-buffer parse), so a chunked body arriving over R reads is decoded ~R times —
 ; O(n²), and the decoder itself `(str acc …)`-accumulated each chunk (a second O(n²)). Here we
-; keep only the *undecoded* tail plus the decoded pieces so far (see request/dechunk-step),
+; keep only the *undecoded* tail plus the decoded pieces so far (see request/dechunk-step-bytes),
 ; decode each chunk exactly once, and `join` the body once at the terminating 0-size chunk.
 ; Chunked bodies have no Content-Length (so they can't be spooled by size); this is their
 ; in-memory, memory-capped reader.

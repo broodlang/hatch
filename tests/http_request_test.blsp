@@ -1,5 +1,24 @@
 (defmodule http-request-test (:use http/request) (:use test))
 
+;; The parser reads `bytes` and answers a `bytes` body and remainder. These cases were written
+;; against text, which is what they are about, so the two wrappers below translate at the edge:
+;; text in, and the body / remainder / tail decoded back to text on the way out.
+
+(defn- try-parse (text)
+  "`try-parse-bytes` over `text`, with the body and remainder of an `:ok` read back as text."
+  (match (try-parse-bytes (string/->bytes text))
+    ([:ok request remainder] [:ok
+                               (assoc request :body (string/bytes-> (get request :body)))
+                               (string/bytes-> remainder)])
+    (other other)))
+
+(defn- dechunk-step (text pos decoded dlen)
+  "`dechunk-step-bytes` over `text`, with the body / remainder / tail read back as text."
+  (match (dechunk-step-bytes (string/->bytes text) pos decoded dlen)
+    ([:ok body remainder] [:ok (string/bytes-> body) (string/bytes-> remainder)])
+    ([:more tail pieces length] [:more (string/bytes-> tail) pieces length])
+    (other other)))
+
 (describe "parse-request-line"
   (test "GET no query"
     (assert= (parse-request-line "GET / HTTP/1.1") [:ok "GET" "/" "" "1.1"]))
@@ -202,3 +221,15 @@
     (let ([tag _ _] (try-parse (str "POST / HTTP/1.1\r\nContent-Length: 5\r\n"
                                  "Content-Length: 5\r\n\r\nhello")))
       (assert= tag :ok))))
+
+(describe "parse-hex"
+  (test "reads a chunk size in either case"
+    (assert= (parse-hex "1f") 31)
+    (assert= (parse-hex "1F") 31)
+    (assert= (parse-hex "0") 0))
+  (test "nil for an empty, signed or non-hex size"
+    (assert= (parse-hex "") nil)
+    (assert= (parse-hex "-5") nil)
+    (assert= (parse-hex "+5") nil)
+    (assert= (parse-hex "zz") nil)
+    (assert= (parse-hex " 5") nil)))
