@@ -147,7 +147,7 @@
                                   (server/chunked-drain) feeds the next read onto `tail` and
                                   resumes without re-scanning what is already decoded — what
                                   makes streaming O(n). `try-parse-bytes` reuses this on a whole
-                                  buffer (`:more` → `:incomplete`).
+                                  buffer, reading `:more` as `:incomplete`.
     `[:error msg]`              — malformed framing. The chunk SIZE line is ASCII, so it is
   Latin-1-decoded for the hex parse; the chunk DATA is sliced with `subbytes`, never decoded."
   (let (buflen (count buf)
