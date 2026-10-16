@@ -110,7 +110,7 @@
         ;; deflive builds for a view, so a component's beat reads identically to a view's.
         tick-arms (map tick-clauses
                     (fn (c)
-                      (let (ms (first (rest c))
+                      (let (ms (live/require-literal-interval (first (rest c)))
                             state-sym (first (first (rest (rest c))))
                             body (rest (rest (rest c))))
                         (list ms (list 'let (list state-sym 'tick-state) (cons 'do body))))))
