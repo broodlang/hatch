@@ -62,8 +62,8 @@
   (:alias web/route-table)
   ; clause / dispatch-match / optional-defn — defchannel's expansion, shared with deflive
   (:alias web/macro-helpers :as macro)
-  ; bundled-source / bundled-js-handler — serve brood_channel.js straight from the package
-  (:alias web/static)
+  ; from-package / handler — brood_channel.js, served straight out of the package
+  (:alias web/bundled-client)
   ; build — a read-only Conn from the upgrade request, so a connect guard can read cookies
   (:use web/conn)
   ; emit — a raising channel callback surfaces as [:hatch :channel :exception], matching
@@ -653,24 +653,18 @@
 
 ; ---- the browser client ----
 ;
-; Served out of the package, like brood_live.js and brood_webmcp.js, so an app never vendors
-; a copy that can drift from the server half it talks to. `web/endpoint`'s `:static` stage
-; picks it up automatically; see `web/static/bundled-js-handler` for what a released binary
-; (which carries no package `static/`) does instead.
+; Served out of the package, like brood_live.js and brood_webmcp.js — see web/bundled-client.
 
-(def *client-file* "brood_channel.js")
-
-;; Read once at load, and nil in a released binary — see the same note on web/live's copy.
-(def *client-source* (web/static/bundled-source *client-file*))
+(def *client* (web/bundled-client/from-package "brood_channel.js"))
 
 (defn client-js ()
   "The framework's brood_channel.js source, or nil if it could not be located at load."
-  *client-source*)
+  (web/bundled-client/client-source *client*))
 
 (defn client-js-handler ()
   "A conn handler serving hatch's brood_channel.js with the right content-type:
     (get \"/static/brood_channel.js\" (channel/client-js-handler))"
-  (web/static/bundled-js-handler *client-file* *client-source*))
+  (web/bundled-client/handler *client*))
 
 (defn client-script (&optional (src "/static/brood_channel.js"))
   "The `<script>` tag for the channel client, as Hiccup — for a layout that serves pages

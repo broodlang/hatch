@@ -147,6 +147,10 @@ src/
                       share: clause/clauses (duplicate → error), dispatch-match for `on`,
                       tick-match (literal intervals only), optional-defn, render-expr +
                       compile-render (the static/dynamic split with its opaque fallback)
+    route-table.blsp — the load-time route tables (live paths, channel patterns) as image-
+                      safe globals: global-name, register, the empty-vs-miss diagnostic
+    bundled-client.blsp — one of hatch's own browser clients (brood_live/channel/webmcp.js)
+                      declared once per module and served by web/endpoint's :static stage
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
     component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
                       render-slot (its own static/dynamic split, so a component diffs
