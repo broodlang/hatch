@@ -23,7 +23,9 @@
   ; dev? / prod? — the one place $HATCH_ENV is read
   (:alias web/env)
   ; not-modified? — the one implementation of RFC 9110 §13.1.2 If-None-Match matching
-  (:alias web/cache))
+  (:alias web/cache)
+  ; accepts? — the Accept-Encoding predicate the endpoint negotiates with
+  (:alias web/compress))
 
 ; ---- MIME types ----
 
@@ -378,9 +380,9 @@
 
   A refusal matters more here than anywhere else in hatch: this gates serving a
   *precompressed* `.gz`/`.br` sibling, so reading `gzip;q=0` as a yes hands a client that
-  said it cannot decode gzip a body it cannot read. The predicate is
-  `http/util/accepts-encoding?`, shared with `web/compress` and `web/stream`."
-  (http/util/accepts-encoding? (get (conn-headers conn) :accept-encoding) coding))
+  said it cannot decode gzip a body it cannot read. It is `web/compress/accepts?` — one
+  predicate for every layer that negotiates a coding."
+  (web/compress/accepts? conn coding))
 
 (defn accepts-gzip? (conn)
   "True if the request's `Accept-Encoding` offers gzip."

@@ -175,7 +175,7 @@ src/
                       live-open then live-click/live-change/live-submit/live-has?/live-text,
                       which go through the rendered Hiccup with a CSS-ish selector — so a test
                       can only fire an event the markup actually wires up
-    compress.blsp   — response compression (brotli over gzip), as a before-send plug
+    compress.blsp   — coding negotiation (brotli over gzip) + the encoders web/endpoint uses
     cache.blsp      — fragment + whole-page caching: fetch (no expiry) / fetch-ttl (bounded
                       staleness); cluster-aware invalidation via web/cluster
     ratelimit.blsp  — token-bucket plug with four seams (:key-fn/:skip?/:cost/:store, the
