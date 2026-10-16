@@ -34,19 +34,19 @@
   ; format-response returns an ADR-139 iolist of `bytes` leaves. Flattened, a multibyte body
   ; is single-encoded (not doubled) and Content-Length matches the bytes actually sent.
   (test "flattens to a bytes value"
-    (assert= (bytes? (bytes/concat (format-response (ok "em dash — arrow → done")))) true))
+    (assert= (bytes? (bytes/concat (format-response {:status 200 :body "em dash — arrow → done"}))) true))
   (test "the body round-trips through UTF-8 decoding back to the original text"
-    (let (out (format-response (ok "em dash — arrow →")))
+    (let (out (format-response {:status 200 :body "em dash — arrow →"}))
       (assert= (includes? (rtext out) "em dash — arrow →") true)))
   (test "the multibyte body is encoded exactly once (no doubling)"
     ; the wire bytes must equal the single UTF-8 encoding of header + body, byte for byte
-    (let (out (bytes/concat (format-response (ok "é"))))
+    (let (out (bytes/concat (format-response {:status 200 :body "é"})))
       (assert= (string/ends-with? (rtext out) "é") true)
       ; last byte = 0xA9, the 2nd byte of é; preceding = 0xC3 — not a doubled C3 82…
       (assert= (bytes/at out (- (count out) 1)) 169)
       (assert= (bytes/at out (- (count out) 2)) 195)))
   (test "Content-Length reports UTF-8 byte length, matching the encoded body actually sent"
-    (let (out (format-response (ok "é")))
+    (let (out (format-response {:status 200 :body "é"}))
       ; 1 codepoint, 2 UTF-8 bytes
       (assert= (includes? (rtext out) "Content-Length: 2") true))))
 
@@ -55,43 +55,6 @@
   (test "content-type" (assert= (header-name :content-type) "Content-Type"))
   (test "content-length" (assert= (header-name :content-length) "Content-Length"))
   (test "x-request-id" (assert= (header-name :x-request-id) "X-Request-Id")))
-
-(describe "ok"
-  (test "status 200"
-    (assert= (get (ok "hi") :status) 200))
-  (test "body preserved"
-    (assert= (get (ok "hi") :body) "hi")))
-
-(describe "ok-text"
-  (test "status 200"
-    (assert= (get (ok-text "hi") :status) 200))
-  (test "content-type header"
-    (assert= (get (get (ok-text "hi") :headers) :content-type) "text/plain; charset=utf-8")))
-
-(describe "ok-json"
-  (test "content-type application/json"
-    (assert= (get (get (ok-json "{}") :headers) :content-type) "application/json")))
-
-(describe "not-found"
-  (test "status 404"
-    (assert= (get (not-found) :status) 404))
-  (test "custom body"
-    (assert= (get (not-found "gone") :body) "gone")))
-
-(describe "redirect"
-  (test "default 302"
-    (assert= (get (redirect "/new") :status) 302))
-  (test "custom 301"
-    (assert= (get (redirect "/new" 301) :status) 301))
-  (test "location header"
-    (assert= (get (get (redirect "/new") :headers) :location) "/new")))
-
-(describe "error-resp"
-  (test "status 500"
-    (assert= (get (error-resp "oops") :status) 500))
-  (test "body includes message"
-    (let (body (get (error-resp "oops") :body))
-      (assert= (includes? body "oops") true))))
 
 (describe "server-error-resp"
   (test "status 500"
@@ -103,22 +66,22 @@
 
 (describe "format-response"
   (test "starts with status line"
-    (let (r (rtext (format-response (ok "hello"))))
+    (let (r (rtext (format-response {:status 200 :body "hello"})))
       (assert= (includes? r "HTTP/1.1 200 OK") true)))
   (test "includes content-length"
-    (let (r (rtext (format-response (ok "hello"))))
+    (let (r (rtext (format-response {:status 200 :body "hello"})))
       (assert= (includes? r "Content-Length: 5") true)))
   (test "body at end"
-    (let (r (rtext (format-response (ok "hello"))))
+    (let (r (rtext (format-response {:status 200 :body "hello"})))
       (assert= (includes? r "\r\n\r\nhello") true)))
   (test "404 status line"
-    (let (r (rtext (format-response (not-found "gone"))))
+    (let (r (rtext (format-response {:status 404 :body "gone"})))
       (assert= (includes? r "HTTP/1.1 404 Not Found") true)))
   (test "custom header included"
-    (let (r (rtext (format-response (redirect "/new"))))
+    (let (r (rtext (format-response {:status 302 :headers {:location "/new"} :body ""})))
       (assert= (includes? r "Location: /new") true)))
   (test "does not force a Connection header (http/server sets it)"
-    (let (r (rtext (format-response (ok "hi"))))
+    (let (r (rtext (format-response {:status 200 :body "hi"})))
       (assert= (includes? r "Connection:") false)))
   (test "emits whatever Connection the caller set"
     (let (r (rtext (format-response {:status 200 :body "hi" :headers {:connection "close"}})))
@@ -142,7 +105,7 @@
 
 (describe "format-response: HEAD"
   (test "keeps the GET Content-Length but drops the body"
-    (let (r (rtext (format-response (ok "hello") true)))
+    (let (r (rtext (format-response {:status 200 :body "hello"} true)))
       (assert= (includes? r "Content-Length: 5") true)
       (assert= (includes? r "\r\n\r\nhello") false)
       (assert= (string/ends-with? r "\r\n\r\n") true))))
@@ -156,7 +119,7 @@
   (test "a normal value is unchanged"
     (assert= (format-header [:content-type "text/html"]) "Content-Type: text/html\r\n"))
   (test "an injected redirect Location does not become its own header line"
-    (let (r (rtext (format-response (redirect "/ok\r\nSet-Cookie: x=1"))))
+    (let (r (rtext (format-response {:status 302 :headers {:location "/ok\r\nSet-Cookie: x=1"} :body ""})))
       ; the bytes survive inside the Location value, but never after a CRLF (a new header)
       (assert= (includes? r "\r\nSet-Cookie:") false))))
 

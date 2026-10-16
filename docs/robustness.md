@@ -56,8 +56,7 @@ Without these the server is trivially exhausted by a single bad client.
   echoes the exception text. On a raising handler it emits a `[:hatch :request :exception]`
   telemetry event (method/path/error — the logging hook) and answers whatever
   `:error-handler` returns. Knob: `:error-handler` — a `(fn [request err-message] →
-  response)`, default `server-error-resp` (a generic 500 with no detail in the body). The
-  old `error-resp` (which embeds the message) remains as an opt-in debugging helper.
+  response)`, default `server-error-resp` (a generic 500 with no detail in the body).
 - **Chunked `Transfer-Encoding`.** ✅ `http/request` now de-chunks a
   `Transfer-Encoding: chunked` body (chunk sizes, extensions, trailers, pipelined
   remainder). `Transfer-Encoding` + `Content-Length` together is rejected (smuggling),
