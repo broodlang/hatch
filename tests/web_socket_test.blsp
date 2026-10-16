@@ -27,7 +27,7 @@
 (defn- read-server-bytes (sock wait-ms)
   (receive ([:tcp ^sock chunk] chunk) (after wait-ms nil)))
 
-(defn- close-all (sockets) (dolist (s sockets) (tcp/close s)))
+(defn- close-all (sockets) (doseq (s sockets) (tcp/close s)))
 
 (describe "recv answers what the actor must act on"
   :isolated (test "a text frame, with the bytes after it as the remainder"

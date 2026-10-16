@@ -402,7 +402,7 @@
 ;; cannot read is a frame hatch should not obey.
 (describe "json-decode refuses malformed input rather than guessing at it"
   (test "a number token that cannot parse refuses the frame"
-    (dolist (bad (list "-" "+" "." "1.2.3" "1e" "--5" "1e+"))
+    (doseq (bad (list "-" "+" "." "1.2.3" "1e" "--5" "1e+"))
       (assert= (decoded-or-refused (str "{\"n\": " bad "}")) :refused)))
 
   (test "so does a bare one at top level"

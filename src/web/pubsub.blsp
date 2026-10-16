@@ -76,7 +76,7 @@
     ; is never re-forwarded — that bounds cross-node traffic to one hop and can't loop.
     ([:broadcast topic except payload origin]
       (do
-        (dolist (p (get subs topic #{}))
+        (doseq (p (get subs topic #{}))
           (when (not (= p except)) (send-info p payload)))
         (when (= origin :local) (pubsub-fanout-remote topic payload))
         ; broadcast doesn't change state — no mirror
@@ -117,7 +117,7 @@
   `:remote` so the peer delivers to its own subscribers without re-forwarding (no loops,
   O(node/list) messages per publish). Best-effort: a peer that isn't running PubSub, or a link
   that just dropped, is skipped rather than failing the publish."
-  (dolist (n (web/cluster/remote-nodes))
+  (doseq (n (web/cluster/remote-nodes))
     (check-allow :discarded-catch
       (try
         (send {:name :hatch-pubsub :node n} [:broadcast topic nil payload :remote])

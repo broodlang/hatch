@@ -312,7 +312,7 @@
 
 (describe "bytes parser agrees with the carrier parser across the corpus"
   ; one named test per case, so a divergence names the exact request that failed
-  (dolist (entry corpus)
+  (doseq (entry corpus)
     (test (str "agrees: " (first entry))
       (is (agree? (nth entry 1))))))
 
@@ -333,19 +333,19 @@
   (fdp buf 1 (count buf)))
 
 (describe "bytes parser agrees on every truncated prefix (boundary fuzz)"
-  (dolist (entry [["CL text" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 5"] "hello")]
-                   ["CL binary" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body)]
-                   ["chunked multi"
-                     (build "POST /c HTTP/1.1"
-                       ["Host: x" "Transfer-Encoding: chunked"]
-                       (chunked-body ["ab" "cde"]))]
-                   ["chunked+trailer"
-                     (build "POST /c HTTP/1.1"
-                       ["Host: x" "Transfer-Encoding: chunked"]
-                       (chunked-body ["x"] "T: 1"))]
-                   ["pipelined"
-                     (bytes/concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
-                                     (build "GET /n HTTP/1.1" ["Host: x"] "")])]])
+  (doseq (entry [["CL text" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 5"] "hello")]
+                  ["CL binary" (build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 9"] bin-body)]
+                  ["chunked multi"
+                    (build "POST /c HTTP/1.1"
+                      ["Host: x" "Transfer-Encoding: chunked"]
+                      (chunked-body ["ab" "cde"]))]
+                  ["chunked+trailer"
+                    (build "POST /c HTTP/1.1"
+                      ["Host: x" "Transfer-Encoding: chunked"]
+                      (chunked-body ["x"] "T: 1"))]
+                  ["pipelined"
+                    (bytes/concat [(build "POST /f HTTP/1.1" ["Host: x" "Content-Length: 3"] "abc")
+                                    (build "GET /n HTTP/1.1" ["Host: x"] "")])]])
     (test (str "all prefixes agree: " (first entry))
       (assert= (first-divergent-prefix (nth entry 1)) nil))))
 

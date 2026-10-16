@@ -53,7 +53,7 @@
 
 (defn reset-counters (counters keys)
   "Zero each of `keys` (tests, and a dashboard that wants a fresh window)."
-  (dolist (key keys) (table/put counters key 0))
+  (doseq (key keys) (table/put counters key 0))
   nil)
 
 (defn rate-percent (part total)
@@ -185,7 +185,7 @@
 
 (defn reset ()
   "Drop every recorded route. For tests, and for an operator starting a fresh window."
-  (dolist (key (keys (table/snapshot *stats*))) (table/delete *stats* key))
+  (doseq (key (keys (table/snapshot *stats*))) (table/delete *stats* key))
   nil)
 
 (defn attach (&optional (opts {}))

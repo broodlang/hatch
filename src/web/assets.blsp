@@ -45,7 +45,7 @@
 (defn stop-watchers (managers)
   "Stop watcher managers started by `watch`: each closes its bundler subprocess and exits, so
   the external `--watch` process doesn't linger. Wire it into the endpoint's shutdown."
-  (dolist (m managers) (send m [:stop]))
+  (doseq (m managers) (send m [:stop]))
   nil)
 
 (defn watcher-loop (w)
@@ -87,7 +87,7 @@
   contains `marker`; return the trailing incomplete line (no newline yet) to carry forward."
   (let (lines (string/split buf "\n")
         complete (reverse (rest (reverse lines))))
-    (dolist (line complete) (emit-line line marker))
+    (doseq (line complete) (emit-line line marker))
     (first (reverse lines))))
 
 (defn emit-line (line marker)
@@ -145,7 +145,7 @@
   compresses ~3x — and `web/static/serve-encoded` finds a sidecar by path alone, with no
   manifest involved."
   (let (dir (get spec :dir "static"))
-    (dolist (file (or (get spec :files) (list)))
+    (doseq (file (or (get spec :files) (list)))
       (precompress (str dir "/" file)))))
 
 (defn precompress-verified (spec)
@@ -180,9 +180,9 @@
     (let (dir (get spec :dir "static")
           files (or (get spec :files) (list)))
       (precompress-spec spec)
-      (dolist (file files)
+      (doseq (file files)
         (let (path (str dir "/" file))
-          (dolist (coding [".br" ".gz"])
+          (doseq (coding [".br" ".gz"])
             (when (not (file/exists? (str path coding)))
               (error "web/assets/precompress-verified: no " coding " was written for " path))
             (log/info (str "[assets] "
@@ -356,7 +356,7 @@
 (defn run-each (cmds label)
   "Run each argv in `cmds` with `os/run-process` (inherited stdio), in order; raise on the
   first non-zero exit."
-  (dolist (cmd cmds)
+  (doseq (cmd cmds)
     (log/info (str "[assets] " label ": " (string/join cmd " ")))
     (let (code (os/run-process (first cmd) (rest cmd)))
       (when (not (= code 0))

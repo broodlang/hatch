@@ -167,7 +167,7 @@
 
 (defn- local-clear ()
   "Drop every cached fragment on THIS node only."
-  (dolist (key (keys (table/snapshot *fragments*)))
+  (doseq (key (keys (table/snapshot *fragments*)))
     (table/delete *fragments* key)))
 
 (defn invalidate (key)
@@ -199,7 +199,7 @@
   "Send `msg` to every peer's cache listener — once each, and never re-sent by the receiver,
   so there are no loops and a write costs O(peers) messages. Best-effort: a peer not running
   the listener, or a link that just dropped, is skipped rather than failing the invalidation."
-  (dolist (n (web/cluster/remote-nodes))
+  (doseq (n (web/cluster/remote-nodes))
     (check-allow :discarded-catch
       (try (send {:name :hatch-cache :node n} msg) (catch _e nil)))))
 
@@ -278,5 +278,5 @@
 
 (defn clear-compressed ()
   "Drop every cached compressed body."
-  (dolist (key (keys (table/snapshot *compressed*))) (table/delete *compressed* key))
+  (doseq (key (keys (table/snapshot *compressed*))) (table/delete *compressed* key))
   nil)

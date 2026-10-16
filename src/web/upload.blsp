@@ -525,7 +525,7 @@
             results (map ready f)
             remaining (seq/filter (entries upload)
                         (fn (e) (not (and (entry-done? e) (nil? (entry-error e)))))))
-        (dolist (e ready) (delete-spool (entry-path e)))
+        (doseq (e ready) (delete-spool (entry-path e)))
         [results (put-upload model key (with-entries upload remaining))]))))
 
 (defn cleanup (model)
@@ -533,9 +533,9 @@
   session when the connection ends, so an upload the user abandoned — navigated away from,
   closed the tab on — does not leave a file behind. Returns nil."
   (when (map? model)
-    (dolist (kv (%map-pairs model))
+    (doseq (kv (%map-pairs model))
       (let ([_k v] kv)
-        (when (spec? v) (dolist (e (entries v)) (delete-spool (entry-path e)))))))
+        (when (spec? v) (doseq (e (entries v)) (delete-spool (entry-path e)))))))
   nil)
 
 (defn- append-spool (path chunk)

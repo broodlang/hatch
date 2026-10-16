@@ -95,7 +95,7 @@
     ; monitor already fired, so just drop the ref ([:down ref pid reason])
     ([:down _ pid _] (let (affected (presence-topics-of state pid)
                            state2 (presence-remove-pid state pid))
-                       (dolist (t affected)
+                       (doseq (t affected)
                          (presence-broadcast-sync state2 t)
                          (presence-notify-merged state2 remotes t))
                        (presence-save state2 (dissoc refs pid) remotes vault-ref)))
@@ -114,7 +114,7 @@
     ; A peer node went down — forget its presences and refresh every topic it was on.
     ([:nodedown node] (let (topics (presence-remote-topics-of remotes node)
                             remotes2 (dissoc remotes node))
-                        (dolist (t topics) (presence-notify-merged state remotes2 t))
+                        (doseq (t topics) (presence-notify-merged state remotes2 t))
                         (presence-loop state refs remotes2 vault-ref)))
     ; reply with the merged roster, keyed by the caller's ref `r` so a late reply can't be
     ; mismatched to another call
@@ -200,7 +200,7 @@
   observers (via pubsub). Remote members are notified by their own node (their pid lives there),
   so we never send to a remote member's pid."
   (let (roster (presence-merged state remotes topic))
-    (dolist (e (presence-entries state topic)) (send-info (get e :pid) {:presence roster}))
+    (doseq (e (presence-entries state topic)) (send-info (get e :pid) {:presence roster}))
     (presence-notify-observers topic roster)))
 
 (defn- presence-notify-observers (topic roster)
@@ -226,13 +226,13 @@
   replication). A no-op with no peers."
   (let (me (node/name)
         roster (presence-roster state topic))
-    (dolist (n (web/cluster/remote-nodes)) (presence-sync-to n me topic roster))))
+    (doseq (n (web/cluster/remote-nodes)) (presence-sync-to n me topic roster))))
 
 (defn- presence-sync-all-to (state target-node)
   "Send this node's full local rosters (every topic) to `target-node` — the one-time bootstrap
   when a peer is first seen, so it learns our already-tracked presences."
   (let (me (node/name))
-    (dolist (kv (%map-pairs state))
+    (doseq (kv (%map-pairs state))
       (presence-sync-to target-node me (first kv) (presence-roster state (first kv))))))
 
 (defn- presence-record-remote (remotes from topic roster)

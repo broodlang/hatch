@@ -118,7 +118,7 @@
   (check-allow :discarded-catch (try (node/connect (node-spec nm host port)) (catch _e nil))))
 
 (defn- discovery-loop (nm port poll-ms discover)
-  (dolist (host (discover)) (dial nm host port))
+  (doseq (host (discover)) (dial nm host port))
   (receive (after poll-ms nil))
   (discovery-loop nm port poll-ms discover))
 

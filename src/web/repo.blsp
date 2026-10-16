@@ -25,7 +25,7 @@
   startup forever."
   (let (r (repo/open adaptor opts)
         size (get opts :size 5))
-    (dolist (s schemas)
+    (doseq (s schemas)
       (try
         (repo/migrate r s)
         (catch e (error "web/repo: migration failed: " (error-message e)))))
@@ -36,7 +36,7 @@
   "Fire `size` parallel `SELECT 1` probes across the pool and wait for their results. Raises
   if none succeed — a fully unreachable pool must fail the boot, not pass as healthy."
   (let (parent (self))
-    (dolist (_ (range size))
+    (doseq (_ (range size))
       (spawn (fn ()
                (send parent
                  [:warmed

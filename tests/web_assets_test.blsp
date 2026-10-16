@@ -112,7 +112,7 @@
       (assert= (file/exists? (str dir "/mod_bg.wasm.gz")) true)
       (is (< (count (file/slurp-bytes (str dir "/mod_bg.wasm.br")))
             (count (file/slurp-bytes (str dir "/mod_bg.wasm")))))
-      (dolist (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
+      (doseq (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
         (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f)))))))
 
 ;; Re-running the step must be a no-op, not the work again. `serve` calls `prepare` on every
@@ -139,7 +139,7 @@
         (assert= (fresh-sibling? (str path ".br") path) false)
         (precompress path)
         (is (not (= (count (file/slurp-bytes (str path ".br"))) (count first-bytes)))))
-      (dolist (f ["asset.css" "asset.css.br" "asset.css.gz"])
+      (doseq (f ["asset.css" "asset.css.br" "asset.css.gz"])
         (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f))))))
 
   (test "a missing sibling is not fresh"
@@ -158,7 +158,7 @@
         (into [] (precompress-verified {:dir dir :files ["mod_bg.wasm"]})))
       (assert= true (file/exists? (str dir "/mod_bg.wasm.br")))
       (assert= true (file/exists? (str dir "/mod_bg.wasm.gz")))
-      (dolist (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
+      (doseq (f ["mod_bg.wasm" "mod_bg.wasm.br" "mod_bg.wasm.gz"])
         (when (file/exists? (str dir "/" f)) (file/rm (str dir "/" f))))))
 
   ;; The whole point: a missing source produces no siblings, and that must STOP the build

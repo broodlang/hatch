@@ -128,8 +128,8 @@
   (receive
     ([:register p] (live-registry-loop (cons p pids)))
     ([:unregister p] (live-registry-loop (seq/filter pids (fn (q) (not (= q p))))))
-    ([:reload] (dolist (p pids) (send p [:reload])) (live-registry-loop pids))
-    ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live-registry-loop pids))))
+    ([:reload] (doseq (p pids) (send p [:reload])) (live-registry-loop pids))
+    ([:reload-css] (doseq (p pids) (send p [:reload-css])) (live-registry-loop pids))))
 
 (def- reload-registry-children
   [{:id :hatch-live
@@ -895,7 +895,7 @@
   ; barrier the pubsub/presence registries so every broadcast queued before the old view's
   ; unsubscribe (run in unmount above) has landed here, THEN drop those stale out-of-band
   ; messages so none reaches the new view
-  (dolist (registry-name (seq *navigate-barriers*)) (sync-registry registry-name))
+  (doseq (registry-name (seq *navigate-barriers*)) (sync-registry registry-name))
   (drain-oob)
   ; A fresh view over the same connection: the Conn carries across (same socket, same session
   ; lifetime), the component table starts empty, the idle watchdog is the socket's, not the

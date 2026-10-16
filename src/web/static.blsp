@@ -494,7 +494,7 @@
 (defn clear-manifest-cache ()
   "Drop every memoized manifest, so the next `load-manifest` re-reads from disk. For tests
   and a dev rebuild that rewrote the manifest within a running process."
-  (dolist (dir (keys (table/snapshot *manifest-cache*)))
+  (doseq (dir (keys (table/snapshot *manifest-cache*)))
     (table/delete *manifest-cache* dir))
   nil)
 

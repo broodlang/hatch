@@ -145,7 +145,7 @@
 
   This is the one operation that says something about the whole collection, and it says it by
   replacing it rather than by reading it."
-  (dolist (item new-items) (require-id item "reset"))
+  (doseq (item new-items) (require-id item "reset"))
   (stream (stream-name s)
     (mapv new-items (fn (item) (assoc item :hatch/at -1)))
     (list)
