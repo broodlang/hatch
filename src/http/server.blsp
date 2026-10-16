@@ -435,7 +435,7 @@ port) still returns and lets the caller fail on its own terms."
   (`:tls` is configured), else `\"http\"`.
 
   Stamped onto every request as `:scheme`, which `web/conn/build` carries onto the conn and
-  `web/conn/secure?` falls back to when no proxy header names the protocol. Until this was
+  `web/forwarded/secure?` falls back to when no proxy header names the protocol. Until this was
   stamped, that fallback could not fire: `secure?` read a key nothing ever set, so an app
   terminating its own TLS reported every request as insecure — which suppressed HSTS and
   turned off the session cookie's `Secure` flag on exactly the deployment that had earned

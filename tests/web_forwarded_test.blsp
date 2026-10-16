@@ -1,0 +1,133 @@
+;; web/forwarded — what a request says about itself through the proxy: the client's address,
+;; the scheme it arrived over, and the host it asked for.
+(defmodule web-forwarded-test (:use web/forwarded) (:use web/conn) (:use test))
+
+;; ---- the client ---------------------------------------------------------------------
+;; Behind a proxy the socket peer is the PROXY, so an allow-list compared against it admits
+;; everyone or no one. The address has to come from a header the proxy sets — and is only
+;; trustworthy because the proxy overwrites it.
+(defn- ip-conn (headers)
+  (build {:method "GET" :path "/dashboard" :query "" :params {} :headers headers :body ""}))
+
+(describe "client-ip"
+  (test "prefers the proxy's own header"
+    (assert= "1.2.3.4" (client-ip (ip-conn {:fly-client-ip "1.2.3.4"}))))
+
+  (test "falls back through the other proxy headers"
+    (assert= "5.6.7.8" (client-ip (ip-conn {:x-real-ip "5.6.7.8"})))
+    (assert= "9.9.9.9" (client-ip (ip-conn {:cf-connecting-ip "9.9.9.9"}))))
+
+  ;; X-Forwarded-For is a chain; the client is the first entry.
+  (test "takes the first entry of a forwarded chain"
+    (assert= "1.1.1.1" (client-ip (ip-conn {:x-forwarded-for "1.1.1.1, 10.0.0.1, 10.0.0.2"}))))
+
+  (test "no header at all means unknown"
+    (is (nil? (client-ip (ip-conn {})))))
+
+  ;; A forwarded address may carry the source PORT — RFC 7239 spells it
+  ;; `for="192.0.2.43:47011"` and proxies do it. This answer is what web/ratelimit keys a
+  ;; bucket on, so an unnormalised one gave a single client a fresh bucket per CONNECTION
+  ;; and the limiter never limited. `allow-ips` normalised already; these two layers must
+  ;; agree about who a caller is.
+  (test "a v4 address keeps its host when the proxy appended a port"
+    (assert= "203.0.113.9" (client-ip (ip-conn {:x-forwarded-for "203.0.113.9:41001"})))
+    (assert= "203.0.113.9" (client-ip (ip-conn {:fly-client-ip "203.0.113.9:41002"}))))
+
+  (test "a bracketed v6 address loses its brackets and port, not its colons"
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-forwarded-for "[2001:db8::1]:5000"})))
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-real-ip "2001:db8::1"}))))
+
+  (test "case and surrounding space do not make a second client"
+    (assert= "2001:db8::1" (client-ip (ip-conn {:x-real-ip "  2001:DB8::1  "})))))
+
+(describe "allowed-ip?"
+  (test "an allowed v4 address passes"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4"}) ["1.2.3.4"])))
+
+  (test "a v6 address compares case-insensitively"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "2C0F:EF18::1"}) ["2c0f:ef18::1"])))
+
+  (test "a bracketed or port-suffixed address still matches"
+    (is (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4:5555"}) ["1.2.3.4"]))
+    (is (allowed-ip? (ip-conn {:fly-client-ip "[2c0f:ef18::1]"}) ["2c0f:ef18::1"])))
+
+  (test "a different address does not"
+    (is (not (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.5"}) ["1.2.3.4"]))))
+
+  ;; A gate that cannot identify the caller must not admit them.
+  (test "an unknown address is not allowed"
+    (is (not (allowed-ip? (ip-conn {}) ["1.2.3.4"]))))
+
+  (test "an empty list allows nothing"
+    (is (not (allowed-ip? (ip-conn {:fly-client-ip "1.2.3.4"}) [])))))
+
+;; An IPv6 privacy address rotates its HOST half — the same machine on the same network
+;; appears as a different address within a day. An allow-list of exact addresses locks its
+;; owner out, which is not hypothetical: it happened within an hour of the first one being
+;; set on hive.
+(describe "allowed-ip? matches an IPv6 prefix"
+  (defn- from (address) (ip-conn {:fly-client-ip address}))
+
+  (test "a rotated host half still matches its /64"
+    (let (allowed ["2c0f:ef18:1b2e:0::/64"])
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:231b:2728:665b:78a9") allowed))
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:5d71:db2c:e7f6:f054") allowed))))
+
+  (test "a different network does not match"
+    (is (not (allowed-ip? (from "2c0f:ef18:9999:0:231b:2728:665b:78a9") ["2c0f:ef18:1b2e:0::/64"]))))
+
+  (test "a shorter prefix matches more"
+    (is (allowed-ip? (from "2c0f:ef18:9999:0:1:2:3:4") ["2c0f:ef18::/32"])))
+
+  (test "exact addresses still work alongside prefixes"
+    (let (allowed ["1.2.3.4" "2c0f:ef18:1b2e:0::/64"])
+      (is (allowed-ip? (from "1.2.3.4") allowed))
+      (is (allowed-ip? (from "2c0f:ef18:1b2e:0:aaaa:bbbb:cccc:dddd") allowed))
+      (is (not (allowed-ip? (from "1.2.3.5") allowed)))))
+
+  ;; Not a guess: a prefix length this cannot evaluate is not a match.
+  (test "a non-multiple-of-16 prefix is refused rather than approximated"
+    (is (not (allowed-ip? (from "2c0f:ef18:1b2e:0:1:2:3:4") ["2c0f:ef18:1b2e:0::/60"]))))
+
+  (test "a v4 address never matches a v6 prefix"
+    (is (not (allowed-ip? (from "1.2.3.4") ["2c0f:ef18::/32"])))))
+
+;; ---- the host the visitor asked for ---------------------------------------------------
+
+(defn- conn-for-host (host)
+  (build {:method "GET" :path "/" :query "" :params {} :headers {:host host} :body ""}))
+
+(describe "request-host"
+  (test "reads the Host header"
+    (assert= (request-host (conn-for-host "example.com")) "example.com"))
+  (test "a port is not part of the identity"
+    (assert= (request-host (conn-for-host "example.com:8080")) "example.com"))
+  (test "X-Forwarded-Host wins — behind a proxy, Host may be the proxy's own"
+    (let (conn (build {:method "GET"
+                       :path "/"
+                       :query ""
+                       :params {}
+                       :headers {:host "internal.fly" :x-forwarded-host "example.com"}
+                       :body ""}))
+      (assert= (request-host conn) "example.com")))
+  (test "no host header at all is nil"
+    (assert= (request-host (build {:method "GET"
+                                   :path "/"
+                                   :query ""
+                                   :params {}
+                                   :headers {}
+                                   :body ""}))
+      nil)))
+
+(describe "request-host through a proxy chain"
+  (test "the first forwarded host is the client's"
+    (assert= (request-host {:headers {:x-forwarded-host "a.test, b.test" :host "internal"}})
+      "a.test")))
+
+(describe "normalise-ip"
+  (test "a bracketed v6 address with a port"
+    (assert= (normalise-ip " [2001:DB8::1]:443") "2001:db8::1"))
+  (test "a v4 address with a port"
+    (assert= (normalise-ip "203.0.113.9:41001") "203.0.113.9"))
+  (test "a bare v6 address keeps its colons"
+    (assert= (normalise-ip "2001:db8::1") "2001:db8::1")))

@@ -75,7 +75,7 @@
   alternative is an outage caused by the thing meant to prevent one.
 
   **An address is a weak identity.** `client-key` trusts a proxy header (see
-  `web/auth/client-ip`), which is only meaningful because the proxy overwrites it. Read it
+  `web/forwarded/client-ip`), which is only meaningful because the proxy overwrites it. Read it
   from a request that did not come through one and it is whatever the caller typed. This is
   an outer defence, never the only one.
 
@@ -89,8 +89,9 @@
   (:use web/conn)
   ; ensure-supervised — the buckets live in a supervised singleton
   (:use web/registry)
-  ; client-ip — the one implementation of "which header names the real client"
-  (:alias web/auth)
+  ; client-ip / ipv6-groups / normalise-ip — the one reading of "which header names the real
+  ; client", and the one parse of the address it names
+  (:alias web/forwarded)
   ; emit — a rejection is worth seeing; web/metrics and a dashboard read this
   (:alias telemetry)
   ; new-counters / bump-counter / counter-value / rate-percent — shared with web/cache, so
@@ -275,13 +276,13 @@
   `\"global\"` (one shared bucket). Behind a proxy, set one of the client-IP headers or every
   client shares the global bucket.
 
-  `web/auth/client-ip` decides which header that is — `Fly-Client-IP`, `X-Real-IP`,
+  `web/forwarded/client-ip` decides which header that is — `Fly-Client-IP`, `X-Real-IP`,
   `CF-Connecting-IP`, then the first hop of `X-Forwarded-For`. This module used to answer the
   question itself and answered it differently: it did not look at `Fly-Client-IP` at all, and
   it preferred `X-Forwarded-For` — which the CLIENT can write — over the headers a proxy
   overwrites. Whichever header identifies a caller for the auth gate is the one that should
   identify them for the rate limiter."
-  (or (web/auth/client-ip conn) "global"))
+  (or (web/forwarded/client-ip conn) "global"))
 
 (def *ipv6-prefix-groups* 4)
 
@@ -305,7 +306,7 @@
 
   IPv4 is returned unchanged: there is no equivalent host/network split to take, and a v4
   address is already one customer far more often than not."
-  (let (address (web/auth/client-ip conn))
+  (let (address (web/forwarded/client-ip conn))
     (cond
       (nil? address) "global"
       (not (includes? address ":")) address
@@ -318,17 +319,10 @@
       (hatch/web/ratelimit/ipv6-network \"2c0f:ef18:1b2e:0:231b:1:2:3\") ;=> \"2c0f:ef18:1b2e:0000::/64\"
       (hatch/web/ratelimit/ipv6-network \"::1\") ;=> \"0000:0000:0000:0000::/64\"
       (hatch/web/ratelimit/ipv6-network \"10.0.0.1\") ;=> nil"
-  (let (groups (web/auth/ipv6-groups (unbracket address)))
+  (let (groups (web/forwarded/ipv6-groups (web/forwarded/normalise-ip address)))
     (if (nil? groups)
       nil
       (str (string/join (into [] (take groups *ipv6-prefix-groups*)) ":") "::/64"))))
-
-(defn- unbracket (address)
-  "`address` without a `[…]` wrapper and without a trailing `:port` on a bracketed form."
-  (let (lower (string/lower (string/trim address)))
-    (if (string/starts-with? lower "[")
-      (let (close (index-of lower "]")) (if (< close 0) lower (string/substring lower 1 close)))
-      lower)))
 
 ; ---- the plug ----
 

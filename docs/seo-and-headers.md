@@ -22,7 +22,7 @@ different referrer policy, just sets it.
 
 ### HSTS, and why `includeSubDomains` is not the default
 
-It is sent only when `web/conn/secure?` says the request arrived over HTTPS — behind a
+It is sent only when `web/forwarded/secure?` says the request arrived over HTTPS — behind a
 proxy, read from `X-Forwarded-Proto`. Over plaintext the specification says a client MUST
 ignore the header, and a header that is ignored is one nobody notices is misconfigured.
 

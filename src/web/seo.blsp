@@ -53,6 +53,8 @@
         (get \"/widgets\"     widgets/index))"
   (:use web/conn)
   (:alias web/http-cache)
+  ; request-host — the host the visitor asked for, through the proxy
+  (:alias web/forwarded)
   (:alias web/template)
   ; present? — one "is this worth emitting?" predicate, shared with web/mcp
   (:use web/template :only [present?]))
@@ -204,7 +206,8 @@
   a crawler fetches it before every crawl, so leaving its freshness undefined means every
   one of those is a full round trip for a file that changes when the app is redeployed."
   (fn (conn)
-    (text-resp (put-resp-header conn :cache-control (web/http-cache/public-for (get opts :max-age 3600)))
+    (text-resp (put-resp-header conn
+                 :cache-control (web/http-cache/public-for (get opts :max-age 3600)))
       (robots-text site opts))))
 
 ;; ---- llms.txt ---------------------------------------------------------------
@@ -381,7 +384,7 @@
         status (get opts :status 301)
         except (get opts :except []))
     (fn (conn)
-      (let (requested (request-host conn))
+      (let (requested (web/forwarded/request-host conn))
         (if (or (nil? requested)
               (= requested canonical)
               (= canonical "")
@@ -401,15 +404,6 @@
                 (if (< at 0) url (string/substring url (+ at 3) (count url))))
         host (first (string/split (first (string/split after "/")) ":")))
     (string/lower (string/trim host))))
-
-(defn request-host (conn)
-  "The hostname this request asked for, lowercased and without a port, or nil.
-
-  `X-Forwarded-Host` first: behind a proxy the `Host` the app sees may be the proxy's own,
-  and the one the visitor typed is the one that matters for canonicalisation."
-  (let (headers (or (conn-headers conn) {})
-        raw (or (get headers :x-forwarded-host) (get headers :host)))
-    (if (or (nil? raw) (= raw "")) nil (host-of (first (string/split raw ","))))))
 
 (defn- request-target (conn)
   "The path and query of `conn`, so a redirect preserves what was asked for. A canonical

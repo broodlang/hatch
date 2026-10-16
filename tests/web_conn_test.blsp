@@ -292,13 +292,15 @@
 
 (describe "build carries the request scheme"
   (test "an https listener's request is secure"
-    (is (secure? (build (assoc *req* :scheme "https")))))
+    (is (web/forwarded/secure? (build (assoc *req* :scheme "https")))))
   (test "a plaintext listener's is not"
-    (assert= (secure? (build (assoc *req* :scheme "http"))) false))
+    (assert= (web/forwarded/secure? (build (assoc *req* :scheme "http"))) false))
   (test "a proxy header still wins over the listener's own scheme"
-    (is (secure? (build (assoc *req* :scheme "http" :headers {:x-forwarded-proto "https"})))))
+    (is (web/forwarded/secure? (build (assoc *req*
+                                        :scheme "http"
+                                        :headers {:x-forwarded-proto "https"})))))
   (test "and no scheme at all is still not secure"
-    (assert= (secure? (build *req*)) false)))
+    (assert= (web/forwarded/secure? (build *req*)) false)))
 
 (describe "parse-body-params"
   (test "urlencoded form body"
@@ -323,4 +325,3 @@
     (assert= (parse-body-params {:content-type "text/plain"} "hello") {}))
   (test "empty body → no params"
     (assert= (parse-body-params {:content-type "application/json"} "") {})))
-

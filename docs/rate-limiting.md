@@ -138,7 +138,7 @@ reason: a steadily climbing count is the bug, visible before it is a memory prob
 The worst case of admitting a window of traffic is a busy server; the worst case of the
 alternative is an outage caused by the thing meant to prevent one.
 
-**An address is a weak identity.** `client-key` trusts a proxy header (`web/auth/client-ip`),
+**An address is a weak identity.** `client-key` trusts a proxy header (`web/forwarded/client-ip`),
 meaningful only because the proxy overwrites it. Read from a request that did not come
 through one, it is whatever the caller typed. An outer defence, never the only one.
 

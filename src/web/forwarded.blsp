@@ -1,0 +1,182 @@
+(defmodule web/forwarded
+  "What a request says about itself through the proxy in front of the app: who the client is
+  (`client-ip`), whether it arrived over HTTPS (`secure?`) and which host it asked for
+  (`request-host`).
+
+  Behind a proxy the app's own socket says none of this — the peer is the proxy, the
+  transport is the plaintext hop from the edge, and the `Host` may be the proxy's own. The
+  answers come from headers the proxy sets, and every one of them is trustworthy for exactly
+  one reason: the proxy OVERWRITES them on the way in. On a request that did not come through
+  one they are whatever the client typed. So each answer here is evidence for routing,
+  logging, rate limiting and an outer allow-list; it is never authentication.
+
+  One module, so the rule for reading the proxy lives in one place. The auth gate and the rate
+  limiter had to agree on who a caller is, and agreed only after they read the same function;
+  the scheme and host reads were in `web/conn` and `web/seo`, a module apiece."
+  ; conn-headers / conn-scheme — what the request carries
+  (:use web/conn))
+
+;; ---- the client ---------------------------------------------------------------
+
+(def *client-ip-headers* [:fly-client-ip :x-real-ip :cf-connecting-ip])
+
+(defn client-ip (conn)
+  "The originating client's address, or nil.
+
+  Behind a proxy the socket peer is the PROXY, so an allow-list compared against it would
+  admit everyone or no one. The address has to come from a header the proxy sets:
+  `Fly-Client-IP`, `X-Real-IP`, `CF-Connecting-IP`, then the first entry of
+  `X-Forwarded-For`.
+
+  Only trustworthy because the proxy OVERWRITES these on the way in. Read them from a
+  request that did not come through one — a direct connection, a misconfigured route — and
+  they are whatever the client typed, so an allow-list built on this must be the outer of
+  two defences and never the only one.
+
+  **Normalised, which is not cosmetic.** A forwarded address may carry the source PORT —
+  RFC 7239 spells it `for=\"192.0.2.43:47011\"`, and proxies do it — and this answer is what
+  `web/ratelimit` keys a bucket on. Unnormalised, one client got a DIFFERENT bucket per
+  connection and the rate limiter silently never limited: not a degraded defence, an absent
+  one, on the login form it exists to protect. `web/auth/allow-ips` already normalised both
+  sides before comparing, so the two layers disagreed about who a caller was — which is what
+  having the rule in one place and not the other looks like from the outside."
+  (let (headers (or (conn-headers conn) {})
+        direct (first (seq/filter (map *client-ip-headers* (fn (h) (get headers h)))
+                        (fn (v) (and (string? v) (not (= v ""))))))
+        forwarded (get headers :x-forwarded-for))
+    (cond
+      direct (normalise-ip direct)
+      (and (string? forwarded) (not (= forwarded "")))
+        (normalise-ip (first (string/split forwarded ",")))
+      else nil)))
+
+(defn normalise-ip (address)
+  "`address` lowercased and stripped of a `[…]` wrapper or a `:port` suffix on a v4 address, so
+  a configured address and a header value compare equal.
+
+  (hatch/web/forwarded/normalise-ip \" [2001:DB8::1]:443\") ;=> \"2001:db8::1\"
+  (hatch/web/forwarded/normalise-ip \"203.0.113.9:41001\") ;=> \"203.0.113.9\""
+  (let (lower (string/lower (string/trim address))
+        unbracketed (if (string/starts-with? lower "[")
+                      (let (close (index-of lower "]"))
+                        (if (< close 0) lower (string/substring lower 1 close)))
+                      lower)
+        ;; a single colon is a v4 host:port; several mean it is v6, where colons are the
+        ;; address itself
+        colons (count (seq/filter (string/->list unbracketed) (fn (c) (= c ":")))))
+    (if (= colons 1) (first (string/split unbracketed ":")) unbracketed)))
+
+(defn ipv6-groups (address)
+  "An IPv6 address as its eight 16-bit groups, lowercased and zero-padded, expanding a `::`
+  run. nil for anything that is not IPv6.
+
+  Public because `web/ratelimit/network-key` needs it too, and carried its own near-identical
+  copy. That module already reads `client-ip` from here on the stated principle that the
+  header naming a caller for the auth gate must be the one naming them for the limiter; how
+  that address is then PARSED is the same argument. Two parsers that disagree mean an address
+  the allow-list admits is bucketed as a different client."
+  (if (< (count (seq/filter (string/->list address) (fn (c) (= c ":")))) 2)
+    nil
+    (let (halves (string/split address "::")
+          head (seq/filter (string/split (first halves) ":") (fn (g) (not (= g ""))))
+          ;; bound and nil-checked, not counted then indexed — the count never reaches
+          ;; `(second halves)`
+          after (second halves)
+          tail (if (nil? after)
+                 []
+                 (seq/filter (string/split after ":") (fn (g) (not (= g "")))))
+          gap (- 8 (+ (count head) (count tail)))
+          filled (append (into [] head)
+                   (map (range (%max 0 gap)) (fn (_) "0"))
+                   (into [] tail)))
+      (if (= (count filled) 8)
+        (apply vector (map filled (fn (g) (string/pad-left (string/lower g) 4 "0"))))
+        nil))))
+
+(defn- prefix-match? (address entry)
+  "Whether `address` falls inside `entry` when `entry` is written as `prefix/bits`.
+
+  Only IPv6, and only prefix lengths that are a multiple of 16 — which covers the ones
+  anyone writes by hand (/32, /48, /64) and needs no bit arithmetic. Anything else is not a
+  match rather than a guess.
+
+  This exists because an IPv6 privacy address ROTATES its host half: the same machine on the
+  same network appears as `2c0f:ef18:1b2e:0:231b:…` one day and `2c0f:ef18:1b2e:0:5d71:…`
+  the next. An allow-list of exact addresses locks its owner out on the next rotation, which
+  is not a hypothetical — it happened within an hour of the first one being set."
+  (match (string/split entry "/")
+    ((prefix bits-text)
+      (let (bits (string/->number bits-text)
+            groups (ipv6-groups prefix)
+            theirs (ipv6-groups address))
+        ;; `int?`, not `(not (failure? …))`: `math/rem` below wants an int, and a
+        ;; non-failure could still be a float — "2c0f::/64.5" parses.
+        (and (int? bits)
+          groups
+          theirs
+          (= 0 (math/rem bits 16))
+          (> bits 0)
+          (<= bits 128)
+          (let (n (/ bits 16))
+            (= (apply vector (take groups n)) (apply vector (take theirs n)))))))
+    (_ false)))
+
+(defn allowed-ip? (conn allowed)
+  "Whether this request's client address is admitted by `allowed` — a list of exact
+  addresses and/or IPv6 `prefix/bits` ranges (`2c0f:ef18:1b2e:0::/64`).
+
+  An empty list allows nothing, and an unknown address is not allowed — a gate that cannot
+  identify the caller must not admit them."
+  ;; `client-ip` answers an address already normalised, so only the configured side needs it.
+  (let (address (client-ip conn))
+    (and address
+      (any? allowed
+        (fn (entry)
+          (if (includes? entry "/")
+            (prefix-match? address (string/trim entry))
+            (= (normalise-ip entry) address)))))))
+
+;; ---- the scheme ---------------------------------------------------------------
+
+(def *forwarded-proto-headers* [:x-forwarded-proto :fly-forwarded-proto :x-forwarded-scheme])
+
+(defn secure? (conn)
+  "Whether this request reached the app over HTTPS.
+
+  Behind a proxy the app's own socket is plaintext — TLS was terminated an edge away — so
+  the only evidence is a header the proxy sets: `X-Forwarded-Proto` and the two spellings
+  that appear in the wild. Trustworthy for exactly the reason `client-ip` is: the
+  proxy OVERWRITES these on the way in. On a request that did not come through one they are
+  whatever the client typed, so this answers a question about transport, never about
+  authorisation.
+
+  Falls back to the connection's own scheme when the server is terminating TLS itself.
+
+      (hatch/web/forwarded/secure? {:headers {:x-forwarded-proto \"https\"}}) ;=> true
+      (hatch/web/forwarded/secure? {:headers {:x-forwarded-proto \"http\"}}) ;=> false
+      (hatch/web/forwarded/secure? {:headers {} :scheme \"https\"}) ;=> true
+      (hatch/web/forwarded/secure? {:headers {}}) ;=> false"
+  (let (headers (or (conn-headers conn) {})
+        forwarded (first (seq/filter (map *forwarded-proto-headers* (fn (h) (get headers h)))
+                           (fn (v) (and (string? v) (not (= v ""))))))
+        ;; a proxy chain may forward a list; the first hop is the client's
+        proto (if forwarded (string/lower (string/trim (first (string/split forwarded ",")))) nil))
+    (if proto (= proto "https") (= (conn-scheme conn) "https"))))
+
+;; ---- the host -----------------------------------------------------------------
+
+(defn request-host (conn)
+  "The hostname this request asked for, lowercased and without a port, or nil.
+
+  `X-Forwarded-Host` first: behind a proxy the `Host` the app sees may be the proxy's own,
+  and the one the visitor typed is the one that matters — for canonicalisation, say. A proxy
+  chain may forward a list; the first entry is the client's.
+
+      (hatch/web/forwarded/request-host {:headers {:host \"Example.com:8080\"}}) ;=> \"example.com\"
+      (hatch/web/forwarded/request-host {:headers {:x-forwarded-host \"a.test, b.test\" :host \"internal\"}}) ;=> \"a.test\"
+      (hatch/web/forwarded/request-host {:headers {}}) ;=> nil"
+  (let (headers (or (conn-headers conn) {})
+        raw (or (get headers :x-forwarded-host) (get headers :host)))
+    (if (or (nil? raw) (= raw ""))
+      nil
+      (string/lower (string/trim (first (string/split (first (string/split raw ",")) ":")))))))

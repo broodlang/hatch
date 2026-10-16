@@ -35,6 +35,8 @@
   because it is the part that is easy to get wrong and impossible to notice."
   (:alias http/server)
   (:alias web/conn)
+  ; secure? — whether the request reached the proxy over HTTPS (gates HSTS)
+  (:alias web/forwarded)
   (:alias web/live)
   ; channel-dispatcher / channel-table — the topic-socket half of the WebSocket layer,
   ; routed beside live views by `ws-handler`
@@ -119,7 +121,7 @@
   `:hsts false` sends none. A handler that set its own is left alone, as with every other
   header here."
   (let (headers (get resp :headers {}))
-    (if (and value (web/conn/secure? conn) (nil? (get headers :strict-transport-security)))
+    (if (and value (web/forwarded/secure? conn) (nil? (get headers :strict-transport-security)))
       (assoc resp :headers (assoc headers :strict-transport-security value))
       resp)))
 

@@ -129,6 +129,8 @@ src/
                       session and refusal rendering
     auth.blsp       — auth plugs for router through groups: basic-auth, bearer-auth
                       (RFC-9110 case-insensitive scheme), allow-ips / allow-ips-from-env
+    forwarded.blsp  — what the proxy says about a request: client-ip (+ allowed-ip?, the
+                      ipv6-groups parse), secure? (scheme), request-host
     static.blsp     — MIME table + path-safe static file handler; file-text/inline-css (a
                       static file read per render, never captured in a def)
     channel.blsp    — topic sockets: defchannel (join/on/handle-info/handle-out/terminate),

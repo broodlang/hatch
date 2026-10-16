@@ -330,28 +330,6 @@
   (test "a bare host is already one" (assert= (host-of "example.com") "example.com"))
   (test "nothing is nothing" (assert= (host-of "") "")))
 
-(describe "request-host"
-  (test "reads the Host header"
-    (assert= (request-host (conn-for-host "example.com")) "example.com"))
-  (test "a port is not part of the identity"
-    (assert= (request-host (conn-for-host "example.com:8080")) "example.com"))
-  (test "X-Forwarded-Host wins — behind a proxy, Host may be the proxy's own"
-    (let (conn (web/conn/build {:method "GET"
-                                :path "/"
-                                :query ""
-                                :params {}
-                                :headers {:host "internal.fly" :x-forwarded-host "example.com"}
-                                :body ""}))
-      (assert= (request-host conn) "example.com")))
-  (test "no host header at all is nil"
-    (assert= (request-host (web/conn/build {:method "GET"
-                                            :path "/"
-                                            :query ""
-                                            :params {}
-                                            :headers {}
-                                            :body ""}))
-      nil)))
-
 (describe "canonical-host"
   (test "the canonical host passes straight through"
     (let (conn ((canonical-host *site*) (conn-for-host "example.com")))
