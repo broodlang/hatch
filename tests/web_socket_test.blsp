@@ -1,0 +1,89 @@
+;; `web/socket/recv` — the one read step web/live's session and web/channel's socket share.
+;;
+;; The codec (`encode` / `json-str` / `json-decode`) is pinned in web_live_test, where it grew
+;; up; this file pins what the step answers and what it handles without answering.
+(defmodule web-socket-test
+  (:use web/socket)
+  (:use http/websocket)
+  (:use test))
+
+(defn- loopback ()
+  "`[client server listener]` — a connected pair over 127.0.0.1, both in binary mode, the
+  server end owned by this process."
+  (let (listener (tcp/listen "127.0.0.1" 0)
+        port (or (tcp/local-port listener) (error "test: the listener reported no local port"))
+        client (tcp/connect "127.0.0.1" port)
+        server (receive ([:tcp-accept ^listener accepted] accepted) (after 5000 :timeout)))
+    (tcp/set-binary server true)
+    (tcp/set-binary client true)
+    (tcp/controlling-process server (self))
+    [client server listener]))
+
+(defn- masked-frame (opcode text)
+  "A masked client frame (mask key zero, so the payload is the plaintext); < 126 bytes."
+  (let (b (string/->bytes text))
+    (bytes/concat [(+ 128 opcode) (+ 128 (count b)) 0 0 0 0 b])))
+
+(defn- read-server-bytes (sock wait-ms)
+  (receive ([:tcp ^sock chunk] chunk) (after wait-ms nil)))
+
+(defn- close-all (sockets) (dolist (s sockets) (tcp/close s)))
+
+(describe "recv answers what the actor must act on"
+  :isolated (test "a text frame, with the bytes after it as the remainder"
+    (let ([client server listener] (loopback))
+      (tcp/send client (masked-frame 1 "hi"))
+      (match (recv server (bytes []) nil)
+        ([:text payload remainder] (do
+                                     (assert= (string/bytes-> payload) "hi")
+                                     (assert= (count remainder) 0)))
+        (other (assert= other :text)))
+      (close-all (list client server listener))))
+  :isolated (test "a binary frame as :binary"
+    (let ([client server listener] (loopback))
+      (tcp/send client (masked-frame 2 "xy"))
+      (assert= (first (recv server (bytes []) nil)) :binary)
+      (close-all (list client server listener))))
+  :isolated (test "a message that isn't the plumbing's own comes back as :control"
+    (let ([client server listener] (loopback))
+      (send (self) [:info 42])
+      (assert= (recv server (bytes []) nil) [:control [:info 42] (bytes [])])
+      (close-all (list client server listener))))
+  :isolated (test "the watchdog's reap ends the read as :reaped"
+    (let ([client server listener] (loopback))
+      (send (self) [:reap])
+      (assert= (recv server (bytes []) nil) [:closed :reaped])
+      (close-all (list client server listener))))
+  :isolated (test "a client close frame ends it as :closed"
+    (let ([client server listener] (loopback))
+      (tcp/send client (masked-frame 8 ""))
+      (assert= (recv server (bytes []) nil) [:closed :closed])
+      (close-all (list client server listener)))))
+
+(describe "recv handles the plumbing itself"
+  :isolated (test "a ping is answered with a pong and the read carries on to the next frame"
+    (let ([client server listener] (loopback))
+      (tcp/send client (bytes/concat [(masked-frame 9 "p") (masked-frame 1 "after")]))
+      (match (recv server (bytes []) nil)
+        ([:text payload _] (assert= (string/bytes-> payload) "after"))
+        (other (assert= other :text)))
+      ;; opcode 0xA, FIN set: the pong went out before the text frame was handed back
+      (assert= (bytes/at (read-server-bytes client 2000) 0) 138)
+      (close-all (list client server listener))))
+  :isolated (test "a queued push is written before the read blocks"
+    (let ([client server listener] (loopback))
+      (queue-push {:event "hello"})
+      (send (self) [:reap])
+      (recv server (bytes []) nil)
+      (let (chunk (read-server-bytes client 2000))
+        (assert= (bytes/at chunk 0) 129)
+        (assert= (includes? (string/bytes-> (bytes/slice chunk 2 (count chunk))) "hello") true))
+      (close-all (list client server listener))))
+  :isolated (test "every client frame kicks the watchdog"
+    (let ([client server listener] (loopback))
+      (tcp/send client (bytes/concat [(masked-frame 10 "") (masked-frame 1 "x")]))
+      ;; this process stands in for the watchdog: a pong and a text frame, two kicks
+      (recv server (bytes []) (self))
+      (assert= (receive ([:alive] :kicked) (after 0 :none)) :kicked)
+      (assert= (receive ([:alive] :kicked) (after 0 :none)) :kicked)
+      (close-all (list client server listener)))))

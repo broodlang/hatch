@@ -11,7 +11,7 @@
   (:use web/component)
   (:alias web/parts)
   ; encode — the JSON codec the diff actually reaches the client through
-  (:alias web/live)
+  (:alias web/socket)
   (:use web/template)
   (:use test))
 
@@ -120,7 +120,7 @@
   ; every test above, which all work on the Brood values directly.
   (test "a component slot encodes with the keys the client reads"
     (let (t (table/new)
-          json (web/live/encode (slot-for t "c8")))
+          json (web/socket/encode (slot-for t "c8")))
       (assert= (includes? json "\"__kslot__\":true") true)
       (assert= (includes? json "\"cid\":\"c8\"") true)
       (assert= (includes? json "\"s\":[") true)
@@ -129,7 +129,7 @@
     (let (t (table/new)
           before (slot-for t "c9")
           _ (dispatch-event t "c9" "bump" {})
-          json (web/live/encode (web/parts/slot-diff before (slot-for t "c9"))))
+          json (web/socket/encode (web/parts/slot-diff before (slot-for t "c9"))))
       (assert= (includes? json "\"__kdiff__\":{") true)
       (assert= (includes? json "\"cid\":\"c9\"") true))))
 

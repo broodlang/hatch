@@ -1,0 +1,272 @@
+(defmodule web/macro-helpers
+  "Macro-time expansion shared by hatch's three clause macros — `deflive` (web/live),
+  `deflive-component` (web/component) and `defchannel` (web/channel).
+
+  All three read a body of `(tag …)` clauses, refuse a duplicate singular clause, turn
+  repeatable `(on \"name\" (a b) …)` clauses into one `match` over the event name, and default
+  every optional hook to a no-op `defn`. The view and the component also share `(tick ms …)`
+  dispatch and the render clause — inline Hiccup or a `.bml` template — compiled into a
+  static/dynamic split.
+
+  Each macro had its own copy of most of that, and the copies had drifted where it mattered:
+  the component's tick arms skipped the literal-interval check `deflive` enforces, and the
+  component reached into web/live's internals for the rest, which made the two modules a load
+  cycle. These run only at expansion time; nothing here is called by a running view — which is
+  also why `deflive`'s own expansion (`deflive-expansion`) lives here rather than beside the
+  session runtime in web/live.
+
+  Hand-built with `list`/`cons` rather than quasiquote, for the reason every macro in hatch is:
+  the expansion defines into the CONSUMING module and the clause bodies are anaphoric (a user's
+  body names `model`, `socket`, its own params) — inside a backtick Brood would qualify those
+  to this module and gensym every binder."
+  ; compile-template — a (template \"file.bml\") clause, compiled to Hiccup at expansion
+  (:use web/bml)
+  ; compile-parts / rewrite-components — the static/dynamic split and its opaque fallback
+  (:alias web/parts))
+
+; ---- reading the clauses ----
+
+(defn clause (form-name tag body)
+  "The single clause in `body` headed by symbol `tag` (e.g. `'mount`), or nil. A DUPLICATE
+  is an error naming `form-name` (the macro, e.g. `\"deflive\"`).
+
+  Keeping the first and silently dropping the rest is worst on the clause that matters most:
+  appending a stricter `(join …)` — the natural edit when tightening auth — would compile clean,
+  change nothing, and leave the permissive one in force.
+
+  (hatch/web/macro-helpers/clause \"deflive\" 'mount '((mount (p) 1) (render (m) 2))) ;=> '(mount (p) 1)
+  (hatch/web/macro-helpers/clause \"deflive\" 'unmount '((mount (p) 1))) ;=> nil"
+  (let (hits (clauses tag body))
+    (when (> (count hits) 1)
+      (error form-name
+        ": duplicate ("
+        (->string tag)
+        " …) clause — a "
+        form-name
+        " form declares it at most once, and keeping the first silently would make a later, "
+        "stricter one a no-op"))
+    (if (empty? hits) nil (first hits))))
+
+(defn clauses (tag body)
+  "Every clause in `body` headed by symbol `tag`, in source order — the repeatable ones
+  (`on`, `tick`).
+
+  (hatch/web/macro-helpers/clauses 'on '((on \"a\" (p m) m) (mount (p) 1) (on \"b\" (p m) m))) ;=> '((on \"a\" (p m) m) (on \"b\" (p m) m))"
+  (seq/filter body (fn (c) (and (pair? c) (= (first c) tag)))))
+
+(defn optional-defn (found name default-args default-body)
+  "`(defn name args (do body…))` from the clause `found` — `(tag args body…)` — or, when the
+  clause is absent, `(defn name default-args default-body)`: the no-op every optional hook
+  falls back to.
+
+  (hatch/web/macro-helpers/optional-defn nil 'unmount '(m) nil) ;=> '(defn unmount (m) nil)
+  (hatch/web/macro-helpers/optional-defn '(unmount (m) (stop) m) 'unmount '(x) nil) ;=> '(defn unmount (m) (do (stop) m))"
+  (if found
+    (list 'defn name (first (rest found)) (cons 'do (rest (rest found))))
+    (list 'defn name default-args default-body)))
+
+; ---- dispatch ----
+
+(defn dispatch-match (key-symbol on-clauses first-symbol second-symbol default)
+  "The `match` body for an `on`-dispatching hook: one arm per `(on \"name\" (a b) body…)`
+  clause, keyed by the event name, binding the clause's `a`/`b` to `first-symbol` /
+  `second-symbol` (the generated function's own parameters), falling through to `default` —
+  an unrecognised event is a no-op, not an error.
+
+  (hatch/web/macro-helpers/dispatch-match 'ev '((on \"inc\" (p m) (+ m 1))) 'ps 'md 'md) ;=> '(match ev (\"inc\" (let (p ps m md) (do (+ m 1)))) (_ md))"
+  (cons 'match
+    (cons key-symbol
+      (append (map on-clauses
+                (fn (c)
+                  (let (event-name (first (rest c))
+                        args (first (rest (rest c)))
+                        body (rest (rest (rest c))))
+                    (list event-name
+                      (list 'let
+                        (list (first args) first-symbol (first (rest args)) second-symbol)
+                        (cons 'do body))))))
+        (list (list '_ default))))))
+
+(defn require-literal-interval (ms)
+  "The tick interval, which must be a LITERAL number. Raises otherwise, and returns it when
+  it is one.
+
+  `handle-tick` dispatches on the interval with a `match`, and the arm is the interval exactly
+  as written — so a bare symbol there does not match the beat, it BINDS it. Every tick fires
+  the first clause whatever its interval, and a view with two tickers silently runs one of
+  them twice; with the catch-all after it, the expansion is also an unreachable clause, which
+  is what the compiler reports.
+
+  The message that produced is `match: unreachable clause after a catch-all`, pointing at the
+  `(deflive` form, with nothing connecting it to `(tick *every-two-seconds* …)` — which is a
+  perfectly reasonable thing to write and the first thing someone reaches for on the second
+  ticker. Named here so the error names the cause.
+
+  (hatch/web/macro-helpers/require-literal-interval 1000) ;=> 1000"
+  (when (not (number? ms))
+    (error "deflive: a (tick …) interval must be a literal number, got "
+      (pr-str ms)
+      " — the interval is matched against the beat, so a symbol there binds every tick "
+      "instead of selecting this one"))
+  ms)
+
+(defn tick-match (key-symbol tick-clauses value-symbol)
+  "The `match` body for `handle-tick`: one arm per `(tick ms (state) body…)` clause, keyed by
+  its (literal) interval and binding `state` to `value-symbol`, falling through to
+  `value-symbol` unchanged — a beat for an interval nobody declares is a no-op.
+
+  (hatch/web/macro-helpers/tick-match 'k '((tick 500 (m) (+ m 1))) 'v) ;=> '(match k (500 (let (m v) (do (+ m 1)))) (_ v))"
+  (cons 'match
+    (cons key-symbol
+      (append (map tick-clauses
+                (fn (c)
+                  (list (require-literal-interval (first (rest c)))
+                    (list 'let
+                      (list (first (first (rest (rest c)))) value-symbol)
+                      (cons 'do (rest (rest (rest c))))))))
+        (list (list '_ value-symbol))))))
+
+(defn tick-intervals (tick-clauses)
+  "The intervals the `tick` clauses declare, as a vector, in source order — what the session
+  starts one timer for each of.
+
+  (hatch/web/macro-helpers/tick-intervals '((tick 500 (m) m) (tick 1000 (m) m))) ;=> [500 1000]"
+  (apply vector (map tick-clauses (fn (c) (first (rest c))))))
+
+; ---- render ----
+
+(defn render-expr (render-clause template-clause)
+  "The macro-time render expression: an inline `(render …)` clause's body (`do`-wrapped if
+  more than one form), or — failing that — a `(template \"file.bml\")` clause compiled to
+  Hiccup here at expansion time.
+
+  (hatch/web/macro-helpers/render-expr '(render (m) [:p {} m]) nil) ;=> '[:p {} m]"
+  (if render-clause
+    (let (render-body (rest (rest render-clause)))
+      (if (= (count render-body) 1) (first render-body) (cons 'do render-body)))
+    (compile-template (first (rest template-clause)))))
+
+(defn compile-render (expression)
+  "The static/dynamic split of a render `expression` (web/parts' `{:statics :dynamics}`), or —
+  for a form the compiler can't split — one opaque dynamic that renders the whole thing:
+  correct, just not granular. The fallback still rewrites `(component …)` holes so they compile
+  to their render-slot call."
+  (try
+    (web/parts/compile-parts expression)
+    (catch _e
+      {:statics ["" ""]
+       :dynamics (list (list 'web/template/render (web/parts/rewrite-components expression)))})))
+
+; ---- deflive's expansion ----
+;
+;; Here rather than beside the macro in web/live, which is the session RUNTIME: this runs only
+;; at expansion. The expansion names `web/live/view-spec` and `web/live/notify-reload` as
+;; symbols, which the consuming module resolves — it already `(:use web/live)`s to call deflive.
+
+(defn deflive-expansion (body)
+  "The `(do …)` form `web/live/deflive` expands its clause `body` into. See `deflive` for the
+  clauses and what each defines."
+  (let (singular (fn (tag) (clause "deflive" tag body))
+        mount-clause (singular 'mount)
+        render-clause (singular 'render)
+        tick-clauses (clauses 'tick body)
+        render-args (first (rest render-clause))
+        ; render comes from an inline (render …) clause or, failing that, a
+        ; (template "file.bml") clause compiled to Hiccup here at expansion time — computed
+        ; once and reused for both the full `render` and the static/dynamic split below.
+        expression (render-expr render-clause (singular 'template))
+        render-dyn-args (if render-clause render-args (list 'model))
+        ; Static/dynamic split for minimal-diff rendering (web/parts). On a malformed form
+        ; the whole render falls back to one opaque dynamic — correct, just not granular.
+        parts (compile-render expression)
+        ; Both render and render-dynamic take one extra, optional, framework-internal arg
+        ; beyond the user-facing render-dyn-args: the session's live component table (a
+        ; `table`), which a `(component …)` hole (web/parts' component-form? case, or
+        ; rewrite-components for a nested one) reads/writes via web/component/render-slot.
+        ; Optional + defaulted so every existing view (no component holes) is unaffected —
+        ; only component holes ever reference `live-components`.
+        render-with-components-args (list (first render-dyn-args)
+                                      '&optional
+                                      (list web/parts/*component-table-param* (list 'table/new)))
+        ; Change tracking (Phoenix HEEx-style): a per-slot render fn plus, in parallel, the
+        ; set of model keys each slot reads. `push-diff` re-renders only the slots whose
+        ; dependencies changed and reuses the prior HTML for the rest — so a one-field update
+        ; doesn't re-run every hole (or re-render a whole `:for` list). The model symbol is
+        ; the render clause's first arg; if it isn't a plain symbol (e.g. a destructure), we
+        ; can't track keys, so every slot is `:all` (always re-render) — correct, just not
+        ; granular.
+        model-sym (if (and (pair? render-dyn-args) (symbol? (first render-dyn-args)))
+                    (first render-dyn-args)
+                    nil))
+    (list 'do
+      ; a (component …) hole in the render compiles to a call on web/component/render-slot
+      ; (fully qualified — this module needn't :use web/component itself). No explicit
+      ; require needed here: every view already (:use web/live) before calling deflive,
+      ; and web/live now (:alias web/component) itself.
+      (list 'defn 'mount (first (rest mount-clause)) (cons 'do (rest (rest mount-clause))))
+      (list 'def 'render-static (get parts :statics))
+      (list 'defn 'render-dynamic render-with-components-args (cons 'vector (get parts :dynamics)))
+      ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a slot
+      ; compiled from a `(component …)` hole references `live-components` as a free variable
+      ; (see web/parts' component-slot-form), so it must be bound as a parameter here too.
+      (list 'def
+        'render-slots
+        (cons 'vector
+          (map (get parts :dynamics) (fn (d) (list 'fn render-with-components-args d)))))
+      (list 'def
+        'slot-deps
+        (apply vector
+          (map (get parts :dynamics)
+            (fn (d) (if (nil? model-sym) :all (web/parts/form-deps d model-sym))))))
+      ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap it in
+      ; web/template/render themselves), so it can't just call render-dynamic, which returns an
+      ; already-rendered string. Instead every `(component module assigns)` sub-form becomes a
+      ; `(web/template/raw (web/component/render-slot …))` call, with a fresh, unshared
+      ; component table each call — correct for a one-off render outside a live session.
+      (list 'defn 'render render-with-components-args (web/parts/rewrite-components expression))
+      (list 'defn
+        'handle-event
+        (list 'event-name 'event-params 'event-model)
+        (dispatch-match 'event-name
+          (clauses 'on body)
+          'event-params
+          'event-model
+          'event-model))
+      ; one match arm per tick clause, keyed by its (literal) interval
+      (list 'defn
+        'handle-tick
+        (list 'tick-key 'tick-model)
+        (tick-match 'tick-key tick-clauses 'tick-model))
+      ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an out-of-band
+      ; message (PubSub/Presence/timer). Absent → identity: the view ignores such messages.
+      (optional-defn (singular 'handle-info)
+        'handle-info
+        (list 'info-msg 'info-model)
+        'info-model)
+      ; Optional `(unmount (model) …)` — runs (in the session process) when the session leaves
+      ; this view via live-navigation, before the next view mounts: undo what mount did
+      ; (pubsub/unsubscribe, presence/untrack, a timer). Absent → a no-op.
+      (optional-defn (singular 'unmount) 'unmount (list 'unmount-model) nil)
+      ; Optional `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
+      ; live-navigate into this view). Absent → always allow.
+      (optional-defn (singular 'on-mount-guard) 'mount-guard (list 'guard-conn) nil)
+      ; Optional `(handle-params (params model) …)` — a live-patch on the *current* view, no
+      ; remount (Phoenix's handle_params). Absent → identity: the model is unchanged.
+      (optional-defn (singular 'handle-params)
+        'handle-params
+        (list 'patch-params 'patch-model)
+        'patch-model)
+      (list 'def 'live-ticks (tick-intervals tick-clauses))
+      ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
+      ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
+      ;; Positional, in `view-spec`'s declared field order — change one and change the other.
+      (list 'defn
+        'live-spec
+        (list)
+        (list 'web/live/view-spec
+          'mount 'render 'render-static 'render-dynamic 'render-slots 'slot-deps 'handle-event
+          'handle-tick 'handle-info 'unmount 'mount-guard 'handle-params 'live-ticks))
+      ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
+      ; top-level defs), so a save signals open sessions to re-render. No-op at first
+      ; load (no registry yet).
+      (list 'def 'live-reloaded (list 'web/live/notify-reload)))))

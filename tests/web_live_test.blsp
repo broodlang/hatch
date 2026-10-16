@@ -3,6 +3,8 @@
 (defmodule web-live-test
   (:use web/live)
   (:use-internals web/live)
+  ; json-str / json-decode / send-info — the wire codec and delivery, now web/socket's
+  (:use web/socket :only [json-str json-decode send-info])
   (:use web/template)
   (:use web/conn)
   (:use test))
@@ -10,15 +12,16 @@
 (defn client-js-conn ()
   (build {:method "GET" :path "/static/brood_live.js" :query "" :params {} :headers {} :body ""}))
 
-(describe "deflive--clause: a duplicate singular clause is rejected"
+(describe "macro-helpers/clause: a duplicate singular clause is rejected"
   (test "two render clauses error at expansion"
-    (assert-error (web/live/deflive-clause 'render
+    (assert-error (web/macro-helpers/clause "deflive"
+                    'render
                     (list (list 'render '(m) "a") (list 'render '(m) "b")))))
   (test "a single clause is returned"
-    (assert= (web/live/deflive-clause 'render (list (list 'render '(m) "a")))
+    (assert= (web/macro-helpers/clause "deflive" 'render (list (list 'render '(m) "a")))
       (list 'render '(m) "a")))
   (test "no clause is nil"
-    (assert= (web/live/deflive-clause 'render (list (list 'mount '(p) 1))) nil)))
+    (assert= (web/macro-helpers/clause "deflive" 'render (list (list 'mount '(p) 1))) nil)))
 
 (describe "json-str: escapes all C0 control characters (RFC 8259)"
   (test "named escapes" (assert= (json-str "a\nb\tc") "\"a\\nb\\tc\""))
@@ -440,7 +443,7 @@
       ;; field is always present — so a `(get view :generation 0)` style default would not
       ;; have fired and every beat would have been discarded as stale.
       (assert= (session-view-generation view) 0)
-      (assert= (session-view-ticker-pids view) (list))
+      (assert= (session-view-ticker-handles view) (list))
       (assert= (session-view-model view) nil)
       (assert= (session-view-dynamics view) nil)))
 
@@ -507,7 +510,7 @@
   (test "the effect encodes with the key the client branches on"
     (web/live/push-title "Tab")
     (receive
-      ([:push-effect msg] (let (json (web/live/encode msg))
+      ([:push-effect msg] (let (json (web/socket/encode msg))
                             (is (includes? json "\"event\":\"title\""))
                             (is (includes? json "\"title\":\"Tab\""))))
       (after 500 (is false)))))
@@ -524,12 +527,12 @@
 
 (describe "deflive's tick interval"
   (test "a literal number passes through"
-    (assert= (require-literal-interval 1000) 1000)
-    (assert= (require-literal-interval 0) 0))
+    (assert= (web/macro-helpers/require-literal-interval 1000) 1000)
+    (assert= (web/macro-helpers/require-literal-interval 0) 0))
   (test "a symbol raises, and the message names the interval and why"
     (let (message (check-allow :discarded-catch
                     (try
-                      (do (require-literal-interval 'my-interval) "")
+                      (do (web/macro-helpers/require-literal-interval 'my-interval) "")
                       (catch e (error-message e)))))
       (assert= (includes? message "literal number") true)
       (assert= (includes? message "my-interval") true)
@@ -537,6 +540,6 @@
   (test "an expression raises too — it is the same mistake spelled longer"
     (assert= (check-allow :discarded-catch
                (try
-                 (do (require-literal-interval (list '* 2 1000)) :no-error)
+                 (do (web/macro-helpers/require-literal-interval (list '* 2 1000)) :no-error)
                  (catch _ :raised)))
       :raised)))

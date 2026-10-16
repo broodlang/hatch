@@ -58,7 +58,7 @@ length frame for payloads > 65535 (8-byte big-endian length).
 Was: no idle/ping timeout (an idle WS pinned an OS reader thread + a parked green process
 forever), no control-frame validation, and `pong-frame` could overflow its length byte.
 **Fixed:**
-- **Idle/keepalive watchdog** (`web/live` `idle-watchdog`): every `*ws-ping-ms*` (30 s) with
+- **Idle/keepalive watchdog** (`web/socket` `start-watchdog`): every `*ws-ping-ms*` (30 s) with
   no client frame, the session pings; a live browser auto-pongs (resets the timer), a
   dead/black-hole peer is reaped after a couple of unanswered pings. Any client frame
   `kick-watchdog`s it alive.

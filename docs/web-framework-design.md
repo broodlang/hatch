@@ -1211,7 +1211,7 @@ myapp/
 
 `nest new myapp --template web-api` scaffolds the minimal JSON variant — no live layer,
 no database (just the `hatch` dep): `src/main.blsp`, `src/web/{endpoint,routes,api}.blsp`,
-and `tests/{main_test,web/api_test}.blsp`. Handlers return JSON via `web/live/encode`.
+and `tests/{main_test,web/api_test}.blsp`. Handlers return JSON via `web/socket/encode`.
 
 `src/main.blsp` (web-api):
 ```lisp

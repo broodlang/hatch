@@ -324,11 +324,7 @@
   build, and falling through is what makes that work with nothing else changed. Before it,
   the missing copy was served as a 200 with an empty body — hive shipped its WebMCP client
   that way, every page pointing an agent at a script that was nothing."
-  (cond
-    (and (= subpath "brood_live.js") (web/live/client-js)) (web/live/client-js-handler)
-    (and (= subpath "brood_webmcp.js") (web/mcp/client-js)) (web/mcp/client-js-handler)
-    (and (= subpath "brood_channel.js") (web/channel/client-js)) (web/channel/client-js-handler)
-    else nil))
+  (web/bundled-client/serving [web/live/*client* web/mcp/*client* web/channel/*client*] subpath))
 
 (defn- static-options (config)
   "The `:static` options as a full map, or nil when the app does not want this stage.

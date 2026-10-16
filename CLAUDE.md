@@ -139,8 +139,19 @@ src/
                       subscribed to the same topic both hear them
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-conn (the connection's read-only Conn, bound per session),
-                      live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
-                      page-chrome
+                      live-route dispatch, page-chrome
+    socket.blsp     — the plumbing web/live and web/channel share: the JSON wire codec
+                      (Encode/json-decode), send-msg/close-socket, the push queue, the idle
+                      watchdog, send-info (out-of-band → handle-info), and `recv` — the one
+                      read step ([:text]/[:binary]/[:control]/[:closed])
+    macro-helpers.blsp — macro-time expansion deflive, deflive-component and defchannel
+                      share: clause/clauses (duplicate → error), dispatch-match for `on`,
+                      tick-match (literal intervals only), optional-defn, render-expr +
+                      compile-render (the static/dynamic split with its opaque fallback)
+    route-table.blsp — the load-time route tables (live paths, channel patterns) as image-
+                      safe globals: global-name, register, the empty-vs-miss diagnostic
+    bundled-client.blsp — one of hatch's own browser clients (brood_live/channel/webmcp.js)
+                      declared once per module and served by web/endpoint's :static stage
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
     component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
                       render-slot (its own static/dynamic split, so a component diffs

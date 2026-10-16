@@ -8,6 +8,7 @@
 (defmodule web-live-upload-test
   (:alias web/upload :as upload)
   (:use web/live)
+  (:alias web/socket)
   (:alias web/template)
   (:use http/websocket)
   (:use test))
@@ -430,7 +431,7 @@ failure, named."
             ; the refs frame names the upload and carries one ref
             (assert= (includes? ready-text "\"event\":\"upload-ready\"") true)
             (assert= (includes? ready-text "\"name\":\"avatar\"") true)
-            (let (decoded (web/live/json-decode ready-text)
+            (let (decoded (web/socket/json-decode ready-text)
                   refs (if (map? decoded) (get decoded "refs") (list))
                   ref (first refs)
                   ref-bytes (string/->bytes ref)

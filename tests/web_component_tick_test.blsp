@@ -57,7 +57,8 @@
   ;; view navigated away. It must be a no-op, not a crashing session.
   (test "a beat for an id that is not mounted does nothing"
     (let (t (table/new))
-      (apply-tick t "never-mounted" 1000)
+      ;; false, so the session has nothing to render for it
+      (assert= (apply-tick t "never-mounted" 1000) false)
       (assert= (table/get t "never-mounted") nil))))
 
 (describe "a beat reaches the wire as the component's own inner-slot diff"
@@ -78,3 +79,19 @@
           _ (apply-tick t "c5" 777)
           after (render-slot 'web-component-tick-test live-component-spec {"id" "c5"} t))
       (assert= (web/parts/diff-dynamics [before] [after]) {}))))
+
+;; A component's tick dispatches on the interval exactly as a view's does, so a symbol there
+;; binds every beat instead of selecting one. `deflive` has refused that since it was found;
+;; `deflive-component` built the same arms without the check.
+(describe "a component's tick interval must be a literal"
+  (test "a symbol interval is refused at expansion, naming the cause"
+    (let (message (check-allow :discarded-catch
+                    (try
+                      (do
+                        (macroexpand '(web/component/deflive-component (mount (id assigns) {})
+                                        (render (state) [:p {} "x"])
+                                        (tick *every-second* (state) state)))
+                        "")
+                      (catch e (error-message e)))))
+      (assert= (includes? message "literal number") true)
+      (assert= (includes? message "*every-second*") true))))

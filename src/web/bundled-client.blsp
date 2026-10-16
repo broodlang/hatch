@@ -1,0 +1,50 @@
+(defmodule web/bundled-client
+  "One of hatch's own browser clients — brood_live.js, brood_channel.js, brood_webmcp.js —
+  served out of the package so an app never vendors a copy that can drift from the server half
+  it talks to.
+
+  Each of web/live, web/channel and web/mcp declares its client once:
+
+      (def *client* (web/bundled-client/from-package \"brood_live.js\"))
+
+  and `web/endpoint`'s `:static` stage serves every declared client by name (`serving`). The
+  three used to carry the same five definitions apiece — the file name, a load-time read, the
+  path, the source accessor and the handler — and the endpoint named all three by hand.
+
+  The source is read ONCE, at load, and is nil in a released binary: `nest release` bundles
+  only `.blsp`, so the package's `static/` is not there. `serving` then answers nil and the
+  `:static` stage falls through to the app's own static directory — see `web/static`'s note on
+  why a package asset can be absent."
+  ; bundled-path / bundled-source / bundled-js-handler — the package's static/ dir
+  (:alias web/static))
+
+(defrecord client (file source))
+
+(impl Display
+  web/bundled-client/client
+  (->string [c] (str "#<bundled-client " (client-file c) ">")))
+
+(defn from-package (file)
+  "The bundled client `file` in hatch's package `static/` directory, its source read now.
+  Call it from a load-time `def`."
+  (client file (web/static/bundled-source file)))
+
+(defn path (bundled)
+  "Absolute path to the `bundled` client's file in hatch's package."
+  (web/static/bundled-path (client-file bundled)))
+
+(defn handler (bundled)
+  "A conn handler serving the `bundled` client with the right content-type, through the static
+  cache pipeline (content ETag, 304, nosniff). A client whose source could not be read answers
+  404, not an empty 200 — see `web/static/bundled-js-handler`."
+  (web/static/bundled-js-handler (client-file bundled) (client-source bundled)))
+
+(defn serving (clients subpath)
+  "The handler for whichever of `clients` is named `subpath` — or nil when none is, **or when
+  that client's source is not readable**, so the caller can fall through to the app's own
+  static directory.
+
+  (hatch/web/bundled-client/serving [] \"brood_live.js\") ;=> nil
+  (hatch/web/bundled-client/serving [(hatch/web/bundled-client/client \"a.js\" nil)] \"a.js\") ;=> nil"
+  (let (found (seq/find clients (fn (c) (and (= (client-file c) subpath) (client-source c)))))
+    (if found (handler found) nil)))

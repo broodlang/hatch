@@ -27,7 +27,7 @@
   departed peer's presences are dropped on node-down. With no node started it's a single-node
   registry, unchanged."
   ; send-info — push the roster to a tracked session
-  (:use web/live)
+  (:use web/socket :only [send-info])
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry;
   ; watch-vault / rewatch-vault / monitor-each / hold-monitor / release-monitor — the
   ; monitor + vault bookkeeping every registry on this scaffolding needs, in one place

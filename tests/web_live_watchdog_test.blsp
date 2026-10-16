@@ -11,11 +11,13 @@
 (defmodule web-live-watchdog-test
   (:use web/live)
   (:use http/websocket)
+  ; *ws-ping-ms* — the watchdog interval the end-to-end case shortens
+  (:alias web/socket)
   (:use test))
 
 ;; The watchdog's interval is an ambient global, so a test can shorten it — and must run
 ;; :isolated, since every other suite's sessions read the same one.
-(def default-ping-ms web/live/*ws-ping-ms*)
+(def default-ping-ms web/socket/*ws-ping-ms*)
 
 (deflive
   (mount (params) {:n 0})
@@ -63,7 +65,7 @@
 (describe "start-watchdog hands the watchdog the SESSION's pid"
   :isolated (test "an idle client is sent a WebSocket ping frame"
     ;; 120ms rather than the 30s default: the whole test is waiting for one interval to pass.
-    (def web/live/*ws-ping-ms* 120)
+    (def web/socket/*ws-ping-ms* 120)
     (let ([client ls] (open-session))
       ; join first, so the session is past its mount and simply sitting in the recv loop —
       ; the state a real idle tab is in
@@ -76,7 +78,7 @@
         (assert= (read-opcode client (bytes []) 5000) 9))
       (tcp/close client)
       (tcp/close ls))
-    (def web/live/*ws-ping-ms* default-ping-ms))
+    (def web/socket/*ws-ping-ms* default-ping-ms))
 
   ;; `:isolated` applies per TEST, not to the describe — and only an isolated test's `def`s
   ;; are rolled back. Without it here, this test's `(def *ws-ping-ms* 80)` ran during the
@@ -86,7 +88,7 @@
   ;; watchdog, moving with worker scheduling. The restore at the end does not save it either —
   ;; it is skipped entirely if an assertion raises.
   :isolated (test "a peer that never answers a ping has its session reaped and the socket closed"
-    (def web/live/*ws-ping-ms* 80)
+    (def web/socket/*ws-ping-ms* 80)
     (let ([client ls] (open-session))
       (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
       (assert= (read-opcode client (bytes []) 5000) 1)
@@ -96,7 +98,7 @@
       (assert= (drain-until-closed client (bytes []) 5000) :closed)
       (tcp/close client)
       (tcp/close ls))
-    (def web/live/*ws-ping-ms* default-ping-ms)))
+    (def web/socket/*ws-ping-ms* default-ping-ms)))
 
 (defn drain-until-closed (sock buf deadline)
   "Read frames, ignoring them, until the peer closes — or `:timeout`."
