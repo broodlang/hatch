@@ -4,8 +4,9 @@
   ; socket plumbing this session shares with web/channel's topic socket
   (:use web/socket)
   (:use web/template)
-  ; parse-file — the (template …) clause's BML→Hiccup compiler
-  (:use web/bml)
+  ; clause / dispatch-match / tick-match / render-expr / compile-render — deflive's expansion,
+  ; shared with deflive-component and defchannel
+  (:alias web/macro-helpers :as macro)
   ; compile-parts — split a render form into statics + dynamic holes (minimal diffs)
   (:use web/parts)
   ; build — a read-only Conn from the WS upgrade request, for on-mount-guard
@@ -1130,86 +1131,6 @@
   (render [model &optional (live-components (table/new))])
   (handle-event [name params model]))
 
-; ---- shared macro-time expansion, used by both deflive and deflive-component ----
-
-(defn- deflive-clause (tag clauses)
-  "The single clause in `clauses` headed by symbol `tag` (e.g. `'mount`), or nil — the
-  singular clauses (`mount`/`render`/`template`/`handle-info`/`unmount`/`on-mount-guard`/
-  `handle-params`), of which a deflive/deflive-component form has at most one each. A duplicate
-  is a mistake (a second one would be silently ignored), so it's an error at macro-expansion."
-  (let (matches (seq/filter clauses (fn (c) (= (first c) tag))))
-    (if (> (count matches) 1)
-      (error (str "deflive: duplicate `"
-               (->string tag)
-               "` clause — a view declares it at most once"))
-      (first matches))))
-
-(defn- deflive-clauses (tag clauses)
-  "Every clause in `clauses` headed by symbol `tag` — the repeatable ones (`on`/`tick`),
-  of which a deflive/deflive-component form can have several."
-  (seq/filter clauses (fn (c) (= (first c) tag))))
-
-(defn- deflive-render-expr (render-clause template-clause)
-  "The macro-time render expression: an inline `(render …)` clause's body (`do`-wrapped
-  if more than one form), or — failing that — a `(template \"file.bml\")` clause compiled
-  to Hiccup here at expansion time. Shared by `deflive` and `deflive-component` so the
-  inline-vs-template resolution lives in one place."
-  (if render-clause
-    (let (render-body (rest (rest render-clause)))
-      (if (= (count render-body) 1) (first render-body) (cons 'do render-body)))
-    (compile-template (first (rest template-clause)))))
-
-(defn require-literal-interval (ms)
-  "The tick interval, which must be a LITERAL number. Raises otherwise, and returns it when
-  it is one.
-
-  `handle-tick` dispatches on the interval with a `match`, and the arm is the interval exactly
-  as written — so a bare symbol there does not match the beat, it BINDS it. Every tick fires
-  the first clause whatever its interval, and a view with two tickers silently runs one of
-  them twice; with the catch-all after it, the expansion is also an unreachable clause, which
-  is what the compiler reports.
-
-  The message that produced is `match: unreachable clause after a catch-all`, pointing at the
-  `(deflive` form, with nothing connecting it to `(tick *every-two-seconds* …)` — which is a
-  perfectly reasonable thing to write and the first thing someone reaches for on the second
-  ticker. Named here so the error names the cause.
-
-  (hatch/web/live/require-literal-interval 1000) ;=> 1000"
-  (when (not (number? ms))
-    (error "deflive: a (tick …) interval must be a literal number, got "
-      (pr-str ms)
-      " — the interval is matched against the beat, so a symbol there binds every tick "
-      "instead of selecting this one"))
-  ms)
-
-(defn- deflive-handle-event-body (on-clauses)
-  "The macro-time `handle-event` body: one `match` arm per `(on \"name\" (args…) …)`
-  clause, keyed by the client's event name, falling through to an identity default (an
-  unrecognized event name is a no-op, not an error). Shared by `deflive` and
-  `deflive-component` — an `on` clause reads the same either way, just with a different
-  second binding (`model` for a view, `state` for a component)."
-  (let (event-arms (map on-clauses
-                     (fn (c)
-                       (let (ev-name (first (rest c))
-                             args (first (rest (rest c)))
-                             body (rest (rest (rest c))))
-                         (list ev-name args body)))))
-    (cons 'match
-      (cons 'event-name
-        (append (map event-arms
-                  (fn (arm)
-                    (let (ev-name (first arm)
-                          args (first (rest arm))
-                          body (first (rest (rest arm))))
-                      (list ev-name
-                        (list 'let
-                          (list (first args)
-                            'event-params
-                            (first (rest args))
-                            'event-model)
-                          (cons 'do body))))))
-          (list (list '_ 'event-model)))))))
-
 ; ---- deflive macro ----
 
 (defmacro deflive (& clauses)
@@ -1285,57 +1206,19 @@
   `{\"event\":\"redirect\"}` message live-navigation already sends for a cross-live-session jump
   — `brood_live.js` does a full page load, so the target path's own HTTP-side `through` plugs
   run again. Omit the clause and every view mounts unconditionally, as before."
-  (let (mount-clause (deflive-clause 'mount clauses)
-        render-clause (deflive-clause 'render clauses)
-        template-clause (deflive-clause 'template clauses)
-        on-clauses (deflive-clauses 'on clauses)
-        tick-clauses (deflive-clauses 'tick clauses)
-        info-clause (deflive-clause 'handle-info clauses)
-        unmount-clause (deflive-clause 'unmount clauses)
-        guard-clause (deflive-clause 'on-mount-guard clauses)
-        params-clause (deflive-clause 'handle-params clauses)
-        mount-args (first (rest mount-clause))
-        mount-body (rest (rest mount-clause))
+  (let (clause (fn (tag) (macro/clause "deflive" tag clauses))
+        mount-clause (clause 'mount)
+        render-clause (clause 'render)
+        tick-clauses (macro/clauses 'tick clauses)
         render-args (first (rest render-clause))
-        handle-body (deflive-handle-event-body on-clauses)
-        ; One match arm per tick clause, keyed by its interval ms: `(MS (let (model
-        ; tick-model) (do BODY)))`. handle-tick dispatches the fired ticker's ms.
-        tick-arms (map tick-clauses
-                    (fn (c)
-                      (let (ms (require-literal-interval (first (rest c)))
-                            msym (first (first (rest (rest c))))
-                            body (rest (rest (rest c))))
-                        (list ms
-                          (list 'let
-                            (list msym 'tick-model)
-                            (cons 'do body))))))
-        handle-tick-body (cons 'match
-                           (cons 'tick-key
-                             (append tick-arms (list (list '_ 'tick-model)))))
         ; render comes from an inline (render …) clause or, failing that, a
-        ; (template "file.bml") clause compiled to Hiccup here at expansion time.
-        ; If compiling the template throws (a missing file, or a BML syntax error),
-        ; emit a render that re-raises that error when *called* rather than letting
-        ; the macro throw — the latter would leave the whole `deflive` form
-        ; unexpanded (an "unbound deflive" cascade in the advisory checker / LSP,
-        ; which can't resolve the view's path). At real runtime the file compiles, so
-        ; the error render is only reached on a genuine bad template, and loudly.
-        ; The single render expression — the inline `(render …)` body or the compiled
-        ; `.bml` form — computed once and reused for both the full `render` and the
-        ; static/dynamic split below.
-        render-expr (deflive-render-expr render-clause template-clause)
+        ; (template "file.bml") clause compiled to Hiccup here at expansion time — computed
+        ; once and reused for both the full `render` and the static/dynamic split below.
+        render-expr (macro/render-expr render-clause (clause 'template))
         render-dyn-args (if render-clause render-args (list 'model))
         ; Static/dynamic split for minimal-diff rendering (web/parts). On a malformed form
         ; the whole render falls back to one opaque dynamic — correct, just not granular.
-        parts (try
-                (web/parts/compile-parts render-expr)
-                (catch _e
-                  ; rewrite-components so a `(component …)` in the fallback render still compiles
-                  ; to its render-slot call (same crash as an un-rewritten nested component)
-                  {:statics ["" ""]
-                   :dynamics (list (list 'web/template/render
-                                     (web/parts/rewrite-components render-expr)))}))
-        render-static-defn (list 'def 'render-static (get parts :statics))
+        parts (macro/compile-render render-expr)
         ; Both render and render-dynamic take one extra, optional, framework-internal arg
         ; beyond the user-facing render-dyn-args: the session's live component table (a
         ; `table`), which a `(component …)` hole (web/parts' component-form? case, or
@@ -1345,23 +1228,6 @@
         render-with-components-args (list (first render-dyn-args)
                                       '&optional
                                       (list web/parts/*component-table-param* (list 'table/new)))
-        ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap
-        ; it in web/template/render themselves), so it can't just call render-dynamic
-        ; (which returns an already-rendered *string*,
-        ; and wrapping that in web/template/render again would double-escape it). Instead
-        ; run render-expr through web/parts/rewrite-components: every `(component module
-        ; assigns)` sub-form — direct child or nested inside `(if …)`/`(for …)` — becomes
-        ; a `(web/template/raw (web/component/render-slot …))` call, itself a valid Hiccup
-        ; node (a raw-escaped string), with a fresh, unshared component table each call —
-        ; correct for a one-off render outside a live session (no persistence to offer).
-        render-defn (list 'defn
-                      'render
-                      render-with-components-args
-                      (web/parts/rewrite-components render-expr))
-        render-dynamic-defn (list 'defn
-                              'render-dynamic
-                              render-with-components-args
-                              (cons 'vector (get parts :dynamics)))
         ; Change tracking (Phoenix HEEx-style): a per-slot render fn plus, in parallel, the
         ; set of model keys each slot reads. `push-diff` re-renders only the slots whose
         ; dependencies changed and reuses the prior HTML for the rest — so a one-field update
@@ -1371,86 +1237,66 @@
         ; granular.
         model-sym (if (and (pair? render-dyn-args) (symbol? (first render-dyn-args)))
                     (first render-dyn-args)
-                    nil)
-        ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a
-        ; slot compiled from a `(component …)` hole references `live-components` as a free
-        ; variable (see web/parts' component-slot-form), so it must be bound as a parameter
-        ; here too, exactly like render-dynamic itself.
-        render-slots-defn (list 'def
-                            'render-slots
-                            (cons 'vector
-                              (map (get parts :dynamics)
-                                (fn (d) (list 'fn render-with-components-args d)))))
-        slot-deps-defn (list 'def
-                         'slot-deps
-                         (apply vector
-                           (map (get parts :dynamics)
-                             (fn (d)
-                               (if (nil? model-sym)
-                                 :all (web/parts/form-deps d model-sym))))))
-        ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an
-        ; out-of-band message (PubSub/Presence/timer). Absent → an identity handler, so a
-        ; view that doesn't opt in just ignores such messages, keeping its model.
-        handle-info-defn (if info-clause
-                           (list 'defn
-                             'handle-info
-                             (first (rest info-clause))
-                             (cons 'do (rest (rest info-clause))))
-                           (list 'defn 'handle-info (list 'info-msg 'info-model) 'info-model))
-        ; Optional `(unmount (model) …)` — runs (in the session process) when the session
-        ; leaves this view via live-navigation, before the next view mounts. The place to
-        ; undo what mount did: pubsub/unsubscribe, presence/untrack, a timer. On a dropped
-        ; socket the session process dies and registries clean up via their monitors, so
-        ; unmount is only needed for the navigate-without-death case. Absent → a no-op.
-        unmount-defn (if unmount-clause
-                       (list 'defn
-                         'unmount
-                         (first (rest unmount-clause))
-                         (cons 'do (rest (rest unmount-clause))))
-                       (list 'defn 'unmount (list 'unmount-model) nil))
-        ; Optional `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
-        ; live-navigate into this view). Absent → a no-op guard that always allows the mount,
-        ; so every existing view is unaffected.
-        mount-guard-defn (if guard-clause
-                           (list 'defn
-                             'mount-guard
-                             (first (rest guard-clause))
-                             (cons 'do (rest (rest guard-clause))))
-                           (list 'defn 'mount-guard (list 'guard-conn) nil))
-        ; Optional `(handle-params (params model) …)` — runs on a live-patch (params/URL
-        ; change on the *current* view, no remount — Phoenix's handle_params, the light
-        ; sibling of a full mount). Absent → an identity handler, so a view that doesn't
-        ; opt in just keeps its model unchanged on a patch.
-        handle-params-defn (if params-clause
-                             (list 'defn
-                               'handle-params
-                               (first (rest params-clause))
-                               (cons 'do (rest (rest params-clause))))
-                             (list 'defn
-                               'handle-params
-                               (list 'patch-params 'patch-model)
-                               'patch-model)))
+                    nil))
     (list 'do
       ; a (component …) hole in render-expr compiles to a call on web/component/render-slot
       ; (fully qualified — this module needn't :use web/component itself). No explicit
       ; require needed here: every view already (:use web/live) before calling deflive,
       ; and web/live now (:alias web/component) itself.
-      (list 'defn 'mount mount-args (cons 'do mount-body))
-      render-static-defn
-      render-dynamic-defn
-      render-slots-defn
-      slot-deps-defn
-      render-defn
+      (list 'defn 'mount (first (rest mount-clause)) (cons 'do (rest (rest mount-clause))))
+      (list 'def 'render-static (get parts :statics))
+      (list 'defn 'render-dynamic render-with-components-args (cons 'vector (get parts :dynamics)))
+      ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a slot
+      ; compiled from a `(component …)` hole references `live-components` as a free variable
+      ; (see web/parts' component-slot-form), so it must be bound as a parameter here too.
+      (list 'def
+        'render-slots
+        (cons 'vector
+          (map (get parts :dynamics) (fn (d) (list 'fn render-with-components-args d)))))
+      (list 'def
+        'slot-deps
+        (apply vector
+          (map (get parts :dynamics)
+            (fn (d) (if (nil? model-sym) :all (web/parts/form-deps d model-sym))))))
+      ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap it in
+      ; web/template/render themselves), so it can't just call render-dynamic, which returns an
+      ; already-rendered string. Instead every `(component module assigns)` sub-form becomes a
+      ; `(web/template/raw (web/component/render-slot …))` call, with a fresh, unshared
+      ; component table each call — correct for a one-off render outside a live session.
+      (list 'defn 'render render-with-components-args (web/parts/rewrite-components render-expr))
       (list 'defn
         'handle-event
         (list 'event-name 'event-params 'event-model)
-        handle-body)
-      (list 'defn 'handle-tick (list 'tick-key 'tick-model) handle-tick-body)
-      handle-info-defn
-      unmount-defn
-      mount-guard-defn
-      handle-params-defn
-      (list 'def 'live-ticks (apply vector (map tick-clauses (fn (c) (first (rest c))))))
+        (macro/dispatch-match 'event-name
+          (macro/clauses 'on clauses)
+          'event-params
+          'event-model
+          'event-model))
+      ; one match arm per tick clause, keyed by its (literal) interval
+      (list 'defn
+        'handle-tick
+        (list 'tick-key 'tick-model)
+        (macro/tick-match 'tick-key tick-clauses 'tick-model))
+      ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an out-of-band
+      ; message (PubSub/Presence/timer). Absent → identity: the view ignores such messages.
+      (macro/optional-defn (clause 'handle-info)
+        'handle-info
+        (list 'info-msg 'info-model)
+        'info-model)
+      ; Optional `(unmount (model) …)` — runs (in the session process) when the session leaves
+      ; this view via live-navigation, before the next view mounts: undo what mount did
+      ; (pubsub/unsubscribe, presence/untrack, a timer). Absent → a no-op.
+      (macro/optional-defn (clause 'unmount) 'unmount (list 'unmount-model) nil)
+      ; Optional `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
+      ; live-navigate into this view). Absent → always allow.
+      (macro/optional-defn (clause 'on-mount-guard) 'mount-guard (list 'guard-conn) nil)
+      ; Optional `(handle-params (params model) …)` — a live-patch on the *current* view, no
+      ; remount (Phoenix's handle_params). Absent → identity: the model is unchanged.
+      (macro/optional-defn (clause 'handle-params)
+        'handle-params
+        (list 'patch-params 'patch-model)
+        'patch-model)
+      (list 'def 'live-ticks (macro/tick-intervals tick-clauses))
       ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
       ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
       ;; Positional, in `view-spec`'s declared field order — change one and change the other.

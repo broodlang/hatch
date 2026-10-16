@@ -33,20 +33,10 @@
   patch is gated on a matching cid, a comp item has only its index, and indices shift on insert
   and delete — so patching item 3 after a row was removed would splice two unrelated rows
   together. Per-item string diffing has no such hazard, which is why the wrapped case keeps it."
-  ; deflive-render-expr / deflive-handle-event-body — the macro-expansion deflive
-  ; already built for inline-vs-template render resolution and event-arm dispatch;
-  ; deflive-component reuses both (called fully-qualified below) rather than
-  ; duplicating them.
-  (:alias web/live)
-  ; deflive-clause / deflive-clauses / deflive-render-expr / deflive-handle-event-body
-  ; are web/live internals (ADR-146 `--` names); reuse them here deliberately (see above).
-  ; `:only` (not a refer-all) is required because web/live and web/component are mutually
-  ; dependent (web/live :alias web/component): a plain (:use-internals web/live) refers-all
-  ; into a still-loading web/live mid-cycle, which the loader rejects. A subset refer
-  ; resolves lazily and is cycle-safe.
-  (:use-internals web/live
-    :only [deflive-clause
-      deflive-clauses deflive-render-expr deflive-handle-event-body])
+  ; clause / dispatch-match / tick-match / render-expr / compile-render — the expansion
+  ; deflive-component shares with deflive and defchannel. (It used to borrow web/live's own
+  ; internals for this, which made the two modules a load cycle.)
+  (:alias web/macro-helpers :as macro)
   ; render — lowers a component's Hiccup to HTML (the wrapper open tag, and the fallback
   ; whole-component render for a spec with no static/dynamic split)
   (:use web/template)
@@ -103,60 +93,43 @@
   that keeps the same id does *not* re-mount; push new data in with `web/component/send-update`
   instead. `render` and `on` read exactly like `deflive`'s, with `state` standing in for a
   view's `model`."
-  (let (mount-clause (live/deflive-clause 'mount clauses)
-        render-clause (live/deflive-clause 'render clauses)
-        template-clause (live/deflive-clause 'template clauses)
-        on-clauses (live/deflive-clauses 'on clauses)
-        tick-clauses (live/deflive-clauses 'tick clauses)
-        ;; One match arm per `(tick ms (state) …)`, keyed by its interval — the same shape
-        ;; deflive builds for a view, so a component's beat reads identically to a view's.
-        tick-arms (map tick-clauses
-                    (fn (c)
-                      (let (ms (live/require-literal-interval (first (rest c)))
-                            state-sym (first (first (rest (rest c))))
-                            body (rest (rest (rest c))))
-                        (list ms (list 'let (list state-sym 'tick-state) (cons 'do body))))))
-        handle-tick-body (cons 'match
-                           (cons 'tick-ms (append tick-arms (list (list '_ 'tick-state)))))
-        mount-args (first (rest mount-clause))
-        mount-body (rest (rest mount-clause))
-        render-args (first (rest render-clause))
-        handle-body (live/deflive-handle-event-body on-clauses)
-        render-expr (live/deflive-render-expr render-clause template-clause)
+  (let (clause (fn (tag) (macro/clause "deflive-component" tag clauses))
+        mount-clause (clause 'mount)
+        render-clause (clause 'render)
+        tick-clauses (macro/clauses 'tick clauses)
+        render-expr (macro/render-expr render-clause (clause 'template))
         ; a (template …) clause's compiled body always references a variable literally
         ; named `model` (web/bml hardcodes `@field` -> `(get model :field)`, matching
         ; deflive's own template default) — *not* `state`, even though inline (render
         ; (state) …) is the idiomatic name elsewhere in this module.
-        render-dyn-args (if render-clause render-args (list 'model))
-        render-defn (list 'defn 'render render-dyn-args render-expr)
+        render-dyn-args (if render-clause (first (rest render-clause)) (list 'model))
         ; The component's own static/dynamic split, so it can be diffed independently of its
-        ; parent (see render-slot). Same shape and same fallback as deflive's: a form the
-        ; compiler can't split becomes one opaque dynamic — correct, just not granular.
-        parts (try
-                (web/parts/compile-parts render-expr)
-                (catch _e
-                  {:statics ["" ""]
-                   :dynamics (list (list 'web/template/render
-                                     (web/parts/rewrite-components render-expr)))}))
-        render-static-defn (list 'def 'render-static (get parts :statics))
-        render-dynamic-defn (list 'defn
-                              'render-dynamic
-                              render-dyn-args
-                              (cons 'vector (get parts :dynamics))))
+        ; parent (see render-slot). Same fallback as deflive's: a form the compiler can't
+        ; split becomes one opaque dynamic — correct, just not granular.
+        parts (macro/compile-render render-expr))
     (list 'do
-      (list 'defn 'mount mount-args (cons 'do mount-body))
-      render-defn
-      render-static-defn
-      render-dynamic-defn
+      (list 'defn 'mount (first (rest mount-clause)) (cons 'do (rest (rest mount-clause))))
+      (list 'defn 'render render-dyn-args render-expr)
+      (list 'def 'render-static (get parts :statics))
+      (list 'defn 'render-dynamic render-dyn-args (cons 'vector (get parts :dynamics)))
       (list 'defn
         'handle-event
         (list 'event-name 'event-params 'event-model)
-        handle-body)
-      (list 'defn 'handle-tick (list 'tick-ms 'tick-state) handle-tick-body)
+        (macro/dispatch-match 'event-name
+          (macro/clauses 'on clauses)
+          'event-params
+          'event-model
+          'event-model))
+      ;; One match arm per `(tick ms (state) …)`, keyed by its (literal) interval — the same
+      ;; shape deflive builds for a view, so a component's beat reads identically to a view's.
+      (list 'defn
+        'handle-tick
+        (list 'tick-ms 'tick-state)
+        (macro/tick-match 'tick-ms tick-clauses 'tick-state))
       ;; The intervals this component beats on. Read at mount, when the session starts one
       ;; timer per interval for this id; empty for a component with no `tick` clause, which
       ;; is the overwhelming majority and costs nothing.
-      (list 'def 'live-component-ticks (apply vector (map tick-clauses (fn (c) (first (rest c))))))
+      (list 'def 'live-component-ticks (macro/tick-intervals tick-clauses))
       ; A 0-arg thunk, mirroring deflive's live-spec — re-resolves the component's
       ; functions by name each call, so hot-reloaded code is picked up.
       ;; Positional, in `component-spec`'s declared field order.

@@ -58,7 +58,8 @@
   ; the same keepalive/reaper, so a channel socket is protected from a black-holed peer for free
   (:alias web/socket)
   (:alias web/pubsub)
-  (:alias web/registry)
+  ; clause / dispatch-match / optional-defn — defchannel's expansion, shared with deflive
+  (:alias web/macro-helpers :as macro)
   ; bundled-source / bundled-js-handler — serve brood_channel.js straight from the package
   (:alias web/static)
   ; build — a read-only Conn from the upgrade request, so a connect guard can read cookies
@@ -586,26 +587,6 @@
 ; clause bodies are anaphoric — a user's body says `socket` and the params name by hand. Inside
 ; a backtick Brood would qualify both to `web/channel` and gensym every binder. See CLAUDE.md.
 
-(defn- channel-clause (tag clauses)
-  "The single clause headed by symbol `tag`, or nil. A DUPLICATE is an error.
-
-  It used to keep the first and drop the rest silently, which is worst on the one clause
-  that matters most: appending a stricter `(join …)` — the natural edit when tightening
-  auth — would compile clean, change nothing, and leave the permissive one in force. The
-  same hole applied to `handle-info` / `handle-out` / `terminate`. `web/live`'s
-  `deflive-clause` has raised on this for the same reason; this is that rule, here."
-  (let (hits (seq/filter clauses (fn (c) (and (pair? c) (= (first c) tag)))))
-    (when (> (count hits) 1)
-      (error "defchannel: duplicate ("
-        (->string tag)
-        " …) clause — a channel declares it at "
-        "most once, and keeping the first silently would make a later, stricter one a no-op"))
-    (if (empty? hits) nil (first hits))))
-
-(defn- channel-clauses (tag clauses)
-  "Every clause headed by symbol `tag`, in source order (the repeatable `on`)."
-  (seq/filter clauses (fn (c) (and (pair? c) (= (first c) tag)))))
-
 (defn require-join-clause (join-clause)
   "Raise unless `defchannel` was given a `join` clause. Returns nil when it was.
 
@@ -616,23 +597,6 @@
     (error "defchannel: a (join (topic params socket) …) clause is required — "
       "a channel with no join decision accepts every client that can open a socket"))
   nil)
-
-(defn- channel-handle-in-body (on-clauses)
-  "The macro-time `handle-in` body: one `match` arm per `(on \"name\" (params socket) …)`,
-  keyed by the client's event name, falling through to `[:noreply in-socket]` — an
-  unrecognised event is a no-op rather than an error, matching `deflive`'s `on`."
-  (cons 'match
-    (cons 'in-event
-      (append (map on-clauses
-                (fn (c)
-                  (let (ev-name (first (rest c))
-                        args (first (rest (rest c)))
-                        body (rest (rest (rest c))))
-                    (list ev-name
-                      (list 'let
-                        (list (first args) 'in-params (first (rest args)) 'in-socket)
-                        (cons 'do body))))))
-        (list (list '_ (vector :noreply 'in-socket)))))))
 
 (defmacro defchannel (& clauses)
   "Define a channel module — the topic-socket counterpart of `deflive`.
@@ -658,52 +622,34 @@
 
   Expands to `join` / `handle-in` / `handle-info` / `handle-out` / `terminate` plus a
   `live-channel-spec` thunk, which `(channel pattern module)` in a router registers."
-  (let (join-clause (channel-clause 'join clauses)
-        on-clauses (channel-clauses 'on clauses)
-        info-clause (channel-clause 'handle-info clauses)
-        out-clause (channel-clause 'handle-out clauses)
-        terminate-clause (channel-clause 'terminate clauses)
-        _ (require-join-clause join-clause)
-        join-defn (list 'defn 'join (first (rest join-clause)) (cons 'do (rest (rest join-clause))))
-        handle-in-defn (list 'defn
-                         'handle-in
-                         (list 'in-event 'in-params 'in-socket)
-                         (channel-handle-in-body on-clauses))
-        ; Absent → keep the socket and do nothing, so a channel that doesn't opt in simply
-        ; ignores whatever reaches its process.
-        handle-info-defn (if info-clause
-                           (list 'defn
-                             'handle-info
-                             (first (rest info-clause))
-                             (cons 'do (rest (rest info-clause))))
-                           (list 'defn
-                             'handle-info
-                             (list 'info-msg 'info-socket)
-                             (vector :noreply 'info-socket)))
-        ; Absent → push the broadcast through unchanged, which is what a client joining a
-        ; topic asked for. The clause exists to filter or rewrite (drop your own message,
-        ; redact a field for this viewer) — Phoenix's handle_out.
-        handle-out-defn (if out-clause
-                          (list 'defn
-                            'handle-out
-                            (first (rest out-clause))
-                            (cons 'do (rest (rest out-clause))))
-                          (list 'defn
-                            'handle-out
-                            (list 'out-event 'out-payload 'out-socket)
-                            (vector :push 'out-event 'out-payload 'out-socket)))
-        terminate-defn (if terminate-clause
-                         (list 'defn
-                           'terminate
-                           (first (rest terminate-clause))
-                           (cons 'do (rest (rest terminate-clause))))
-                         (list 'defn 'terminate (list 'term-reason 'term-socket) nil)))
+  (let (clause (fn (tag) (macro/clause "defchannel" tag clauses))
+        join-clause (clause 'join)
+        _ (require-join-clause join-clause))
     (list 'do
-      join-defn
-      handle-in-defn
-      handle-info-defn
-      handle-out-defn
-      terminate-defn
+      (list 'defn 'join (first (rest join-clause)) (cons 'do (rest (rest join-clause))))
+      (list 'defn
+        'handle-in
+        (list 'in-event 'in-params 'in-socket)
+        ;; an unrecognised event is a no-op rather than an error, matching `deflive`'s `on`
+        (macro/dispatch-match 'in-event
+          (macro/clauses 'on clauses)
+          'in-params
+          'in-socket
+          (vector :noreply 'in-socket)))
+      ; Absent → keep the socket and do nothing, so a channel that doesn't opt in simply
+      ; ignores whatever reaches its process.
+      (macro/optional-defn (clause 'handle-info)
+        'handle-info
+        (list 'info-msg 'info-socket)
+        (vector :noreply 'info-socket))
+      ; Absent → push the broadcast through unchanged, which is what a client joining a
+      ; topic asked for. The clause exists to filter or rewrite (drop your own message,
+      ; redact a field for this viewer) — Phoenix's handle_out.
+      (macro/optional-defn (clause 'handle-out)
+        'handle-out
+        (list 'out-event 'out-payload 'out-socket)
+        (vector :push 'out-event 'out-payload 'out-socket))
+      (macro/optional-defn (clause 'terminate) 'terminate (list 'term-reason 'term-socket) nil)
       ;; Positional, in `channel-spec`'s declared field order — change one and change the
       ;; other. A 0-arg thunk, so a hot reload is picked up by re-resolving the names.
       (list 'defn

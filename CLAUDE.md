@@ -143,6 +143,10 @@ src/
                       (Encode/json-decode), send-msg/close-socket, the push queue, the idle
                       watchdog, send-info (out-of-band → handle-info), and `recv` — the one
                       read step ([:text]/[:binary]/[:control]/[:closed])
+    macro-helpers.blsp — macro-time expansion deflive, deflive-component and defchannel
+                      share: clause/clauses (duplicate → error), dispatch-match for `on`,
+                      tick-match (literal intervals only), optional-defn, render-expr +
+                      compile-render (the static/dynamic split with its opaque fallback)
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
     component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
                       render-slot (its own static/dynamic split, so a component diffs
