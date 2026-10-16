@@ -184,7 +184,7 @@
   "The distinct declared methods of every route whose *path* matches `segments`
   (regardless of HTTP method) — the raw material for a 405 `Allow` header."
   (seq/distinct (map (seq/filter routes (fn (r) (match-path (get r :pattern) segments)))
-          (fn (r) (get r :method)))))
+                  (fn (r) (get r :method)))))
 
 (defn allow-header (methods)
   "The `Allow` header value for a path serving `methods`: the declared methods, plus

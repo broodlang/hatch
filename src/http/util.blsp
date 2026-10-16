@@ -89,7 +89,9 @@
         (lenient-decode-loop characters
           (+ index 1)
           total
-          (fold (seq (string/->bytes character)) accumulated (fn (bytes-so-far b) (cons b bytes-so-far))))))))
+          (fold (seq (string/->bytes character))
+            accumulated
+            (fn (bytes-so-far b) (cons b bytes-so-far))))))))
 
 ;; ---- query-string parser ----
 

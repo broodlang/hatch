@@ -34,7 +34,8 @@
   ; format-response returns an ADR-139 iolist of `bytes` leaves. Flattened, a multibyte body
   ; is single-encoded (not doubled) and Content-Length matches the bytes actually sent.
   (test "flattens to a bytes value"
-    (assert= (bytes? (bytes/concat (format-response {:status 200 :body "em dash — arrow → done"}))) true))
+    (assert= (bytes? (bytes/concat (format-response {:status 200 :body "em dash — arrow → done"})))
+      true))
   (test "the body round-trips through UTF-8 decoding back to the original text"
     (let (out (format-response {:status 200 :body "em dash — arrow →"}))
       (assert= (includes? (rtext out) "em dash — arrow →") true)))
@@ -119,7 +120,9 @@
   (test "a normal value is unchanged"
     (assert= (format-header [:content-type "text/html"]) "Content-Type: text/html\r\n"))
   (test "an injected redirect Location does not become its own header line"
-    (let (r (rtext (format-response {:status 302 :headers {:location "/ok\r\nSet-Cookie: x=1"} :body ""})))
+    (let (r (rtext (format-response {:status 302
+                                     :headers {:location "/ok\r\nSet-Cookie: x=1"}
+                                     :body ""})))
       ; the bytes survive inside the Location value, but never after a CRLF (a new header)
       (assert= (includes? r "\r\nSet-Cookie:") false))))
 

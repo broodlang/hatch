@@ -1,4 +1,7 @@
-(defmodule web-static-test (:use web/static) (:use web/conn) (:use test)
+(defmodule web-static-test
+  (:use web/static)
+  (:use web/conn)
+  (:use test)
   ; strong-etag — the tag web/static computes
   (:use web/http-cache))
 

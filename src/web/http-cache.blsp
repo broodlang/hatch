@@ -273,4 +273,3 @@
           [:not-modified (not-modified-response tagged tag)]
           [:send tagged]))
       [:send resp])))
-

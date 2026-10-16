@@ -214,4 +214,3 @@
     (assert= false (not-modified? (inm "\"other\"") "\"abc\""))
     (assert= false (not-modified? (inm "\"abcd\"") "\"abc\""))
     (assert= false (not-modified? {:headers {}} "\"abc\""))))
-
