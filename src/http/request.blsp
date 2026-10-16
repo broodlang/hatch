@@ -203,7 +203,9 @@
   (hatch/http/request/parse-hex \"1f\") ;=> 31
   (hatch/http/request/parse-hex \"-5\") ;=> nil"
   (if (and (> (string/length s) 0) (= (string/span s 0 *hex-digits*) (string/length s)))
-    (string/->number s 16)
+    ;; `int?` narrows what the checker sees: a radix parse is typed `number | failure`, and the
+    ;; digit check above is what makes it an int
+    (let (value (string/->number s 16)) (if (int? value) value nil))
     nil))
 
 (def- *digits* "0123456789")
