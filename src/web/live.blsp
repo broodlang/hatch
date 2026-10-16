@@ -18,8 +18,10 @@
   (:alias web/component)
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
-  ; start — the live registries run under a supervisor (docs/robustness.md)
-  (:alias supervisor)
+  ; ensure-supervised — the reload registry runs under a supervisor (docs/robustness.md)
+  (:alias web/registry)
+  ; global-name / register / unmatched-message — the load-time path → view table
+  (:alias web/route-table)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
 
@@ -113,25 +115,6 @@
 ; a beat left over from a view it has since navigated away from. Steady regardless of
 ; client traffic, and no hand-rolled monitor/receive loop to maintain — see `start-tickers`.
 
-; ---- named singleton processes ----
-; The reload registry below is "get-or-spawn a process registered under a name".
-
-(defn- live-ensure (nm)
-  "Resolve registry `nm` — the supervised child (started by the `defonce` below). If it's
-  absent (supervisor never started, or torn down), (re)start the supervisor — idempotent
-  via its `:name` — and wait through the brief async-start / restart window. In normal
-  operation the first `whereis` hits, so nothing competes with the supervisor's child."
-  (or (proc/whereis nm)
-    (do
-      (start-live-registries)
-      (live-await nm 60)
-      ;; Raise rather than answer nil — same reason as `web/registry/ensure-supervised`:
-      ;; `live-register` hands the result straight to `send`, which then
-      ;; fails describing the wrong thing.
-      (or (proc/whereis nm)
-        (error "live-ensure: " nm " did not register within the start window")))))
-(sig live-ensure (any -> pid))
-
 ; ---- live-view registry: lets a hot reload push a fresh render to open sessions ----
 ; Hot reload already rebinds the view's globals (docs/shared-code.md); we just need
 ; to signal each open connection that code changed so it re-renders. A small process
@@ -146,10 +129,22 @@
     ([:reload] (dolist (p pids) (send p [:reload])) (live-registry-loop pids))
     ([:reload-css] (dolist (p pids) (send p [:reload-css])) (live-registry-loop pids))))
 
+(def- reload-registry-children
+  [{:id :hatch-live
+    :name :hatch-live
+    :restart :permanent
+    :start (fn () (spawn (live-registry-loop nil)))}])
+
 (defn- live-registry ()
-  "The reload-registry pid — the supervised `:hatch-live` (see `start-live-registries`),
-  waiting through a restart window; lazily spawned only if no supervisor is running."
-  (live-ensure :hatch-live))
+  "The reload-registry pid — the supervised `:hatch-live`, started (idempotently, via the
+  supervisor's `:name`) on first use or after a teardown, waiting through the async-start
+  window. The route table is deliberately NOT here: it is a global (`*live-routes*`), because
+  a supervisor cannot carry load-time state across a startup image."
+  (web/registry/ensure-supervised :hatch-live-sup reload-registry-children :hatch-live))
+
+; Start the supervised reload registry at module load, so it owns its name before any
+; session registers. `defonce` + the supervisor `:name` make this safe under hot reload.
+(defonce *live-registries* (live-registry))
 
 (defn- live-register (pid) (send (live-registry) [:register pid]) nil)
 
@@ -699,12 +694,12 @@
     ; component beat in the outgoing table (`web/component/cancel-ticks`) before it drains the
     ; mailbox, so no stale beat survives into the next view. A beat for an id that is no longer
     ; mounted is a no-op in `apply-tick`.
-    ([:tick-component cid ms] (if (session-view-mounted? view)
-                                (do
-                                  (try
-                                    (web/component/apply-tick (session-view-components view) cid ms)
-                                    (catch e (live-handler-error "tick-component" cid e nil)))
-                                  (push-update sock view buf "diff" (session-view-model view)))
+    ([:tick-component cid ms] (if (and (session-view-mounted? view)
+                                    (try
+                                      (web/component/apply-tick (session-view-components view)
+                                        cid ms)
+                                      (catch e (live-handler-error "tick-component" cid e true))))
+                                (push-update sock view buf "diff" (session-view-model view))
                                 (session-recv sock view buf)))
     ([:reload]
       (if (session-view-mounted? view)
@@ -994,66 +989,22 @@
 
 ; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
 ; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
-; server's single ws-handler (`live-dispatcher`) looks the path up per connection.
-;
-; The table is a GLOBAL, not a process, and that is load-bearing rather than a style call.
-; Globals are shared across green processes, so a process bought nothing on that front —
-; and it lost on two others. A process dies: this table used to be mirrored to a vault,
-; monitored, re-pulled on restart and supervised, a Tier-3 apparatus that existed only to
-; recover state that a global never loses. And a process does not survive a **startup
-; image** (ADR-218): an imaged boot re-runs no module top-level, so `(live …)` never
-; re-registered, while `live-ensure` happily spawned a fresh EMPTY registry — every live
-; view answered its WebSocket upgrade by closing the socket, and the client sat in a
-; reconnect loop showing `brood-disconnected`. The first run of a project worked and the
-; second did not, which is the signature of state kept somewhere the image cannot follow.
-; A global's value travels in the image with the module that defines it, so the routes an
-; imaged boot restores are exactly the ones the imaged load registered.
-;
-; `defonce` (not `def`) so hot-reloading THIS module keeps the routes an app already
-; registered; `%swap-registry!` because a plain `def` inside a function is not how a global
-; is updated, and the kernel op is atomic against a concurrent registration.
+; server's single ws-handler (`live-dispatcher`) looks the path up per connection. A global
+; rather than a process, so it survives a startup image — see web/route-table. `defonce`, so
+; hot-reloading THIS module keeps the routes an app already registered.
 
 (defonce *live-routes* {})
 
-; The name `def` actually BINDS `*live-routes*` under — the loading module's namespace and,
-; because hatch ships as a package, its prefix too: `hatch/web/live/*live-routes*`. The CAS
-; below needs that exact symbol, and neither spelling a literal would give is it. A bare
-; `*live-routes*` names a ROOT global that does not exist, so the compare-and-swap can never
-; succeed and `%registry-swap!` retries forever — a hang, not an error. A hand-written
-; `web/live/*live-routes*` misses the package prefix and quietly registers into a SECOND,
-; unread global. `reflect/current-ns` is evaluated here, at load, where it is the module being
-; loaded — the same trick `defonce` itself uses to find the binding its `bound?` must test.
-(def- live-routes-global-name
-  (let (ns (reflect/current-ns))
-    ;; nil means this module was loaded at root, where the bare name IS the binding.
-    (if (nil? ns) (quote *live-routes*) (symbol (str (->string ns) "/*live-routes*")))))
+(def- live-routes-global-name (web/route-table/global-name (reflect/current-ns) "*live-routes*"))
 
-(defn- live-await (nm tries)
-  "Block until `nm` is registered (the supervisor starts children asynchronously), so the
-  caller can rely on the registries being up. Gives up after `tries` × 5ms."
-  (cond
-    (proc/whereis nm) :ok
-    (<= tries 0) :ok
-    else (do (sleep 5) (live-await nm (- tries 1)))))
-
-(defn start-live-registries ()
-  "Start the live reload registry under a supervisor and block until it's up. Idempotent —
-  reload-stable via the supervisor's `:name`, so a hot reload returns the existing one.
-  Called once at module load by the `defonce`.
-
-  The route table is deliberately NOT here: it is a global (`*live-routes*`), because a
-  supervisor cannot carry load-time state across a startup image."
-  (let (reload {:id :hatch-live
-                :name :hatch-live
-                :restart :permanent
-                :start (fn () (spawn (live-registry-loop nil)))}
-        sup (supervisor/start [reload] {:name :hatch-live-sup :strategy :one-for-one}))
-    (live-await :hatch-live 60)
-    sup))
-
-; Start the supervised reload registry at module load, so it owns its name before any
-; session registers. `defonce` + the supervisor `:name` make this safe under hot reload.
-(defonce *live-registries* (start-live-registries))
+(def- *unrouted-wording*
+  {:tag "live"
+   :empty-lead "no live view at"
+   :table "route table"
+   :clause "live"
+   :scope "Every live view will fail this way, not just this one."
+   :miss-lead "no live view registered at"
+   :known "registered paths"})
 
 (defn register-live (path spec-fn session)
   "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`,
@@ -1061,10 +1012,10 @@
   same group can live-navigate between each other; crossing groups forces a full
   reload — the auth boundary. `(live path module …)` calls this at load; idempotent,
   so a hot reload just re-puts. Returns nil."
-  (%registry-swap! live-routes-global-name
+  (web/route-table/register live-routes-global-name
     (fn () *live-routes*)
-    (fn (m) (assoc m path {:spec spec-fn :session session})))
-  nil)
+    path
+    {:spec spec-fn :session session}))
 
 (defn lookup-live (path)
   "The registry entry `{:spec :session}` for `path`, or nil if no live view is there."
@@ -1079,32 +1030,11 @@
       req-path)))
 
 (defn unrouted-live-message (req-path known)
-  "Why a live upgrade at `req-path` cannot be served, given the `known` registered paths.
-
-  Pure, and separate from the logging for the reason `web/audit` splits its rules from its
-  `warn-…!` wrappers: the wording is the whole value of a diagnostic, so it is the part a
-  test should be able to hold.
-
-  The two cases look identical from a browser — the socket closes, the client reconnects,
-  the page sits on `brood-disconnected` — and could not be further apart. An EMPTY table
-  means no `(live …)` clause ever ran, so every view is broken, not this one. A populated
-  table means this path is simply not in it, and the useful answer is the paths that are."
-  (if (empty? known)
-    (str "[live] no live view at "
-      (pr-str req-path)
-      " — and the route table is EMPTY, so no `(live …)` clause has registered at all. Either the router module never loaded, or its load-time registrations were lost. Every live view will fail this way, not just this one.")
-    (str "[live] no live view registered at "
-      (pr-str req-path)
-      " — registered paths: "
-      (pr-str (vec (sort known))))))
-
-(defn- warn-unrouted-live! (req-path)
-  "Log `unrouted-live-message` before the dispatcher closes an unroutable upgrade. A no-op
-  outside dev. The miss used to be silent — no log line anywhere named a cause, which is
-  what made an empty route table cost a day to find."
-  (when (web/audit/dev?)
-    (log/warn (unrouted-live-message req-path (keys *live-routes*))))
-  nil)
+  "Why a live upgrade at `req-path` cannot be served, given the `known` registered paths —
+  an empty table (no `(live …)` clause ever ran, so every view is broken) told apart from a
+  path that simply is not in it. Pure, so the wording is testable; see
+  `web/route-table/unmatched-message`."
+  (web/route-table/unmatched-message *unrouted-wording* req-path known))
 
 (defn live-dispatcher ()
   "The server's single ws-handler: route each `/live/ws<path>` upgrade to the live view
@@ -1117,7 +1047,10 @@
     (let (entry (lookup-live (live-ws-path (get request :path))))
       (if entry
         (start-session sock request entry)
-        (do (warn-unrouted-live! (get request :path)) (tcp/close sock))))))
+        (do
+          (web/route-table/warn-unmatched (unrouted-live-message (get request :path)
+                                            (keys *live-routes*)))
+          (tcp/close sock))))))
 
 ; ---- the LiveModule behaviour ----
 ; The contract a live-view module satisfies — exactly what `deflive` generates.

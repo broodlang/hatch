@@ -1,0 +1,75 @@
+(defmodule web/route-table
+  "The load-time route tables behind hatch's two socket dispatchers: web/live's path → view
+  table and web/channel's topic pattern → channel table.
+
+  Both are written once at load, by the router's `(live …)` and `(channel …)` clauses, and
+  both are GLOBALS rather than processes, for a reason that is load-bearing rather than a
+  style call: a process does not survive a **startup image** (ADR-218). An imaged boot re-runs
+  no module top-level, so a registry process came back empty — every live view answered its
+  upgrade by closing the socket, and every join answered \"no such channel\" — on the second
+  run of an app that worked on the first. A global's value travels in the image with the
+  module that defines it.
+
+  This module holds what the two tables have in common: finding the exact symbol the owning
+  `defonce` bound, updating it atomically, and the diagnostic for a miss.")
+
+(defn global-name (namespace base)
+  "The symbol a `defonce` of `base` (e.g. `\"*live-routes*\"`) actually binds, given the
+  loading module's `namespace` — call it at load with `(reflect/current-ns)`, where that is the
+  module being loaded.
+
+  Neither spelling a literal would give is right. A bare `*live-routes*` names a ROOT global
+  that does not exist, so the compare-and-swap in `register` can never succeed and retries
+  forever — a hang, not an error. A hand-written `web/live/*live-routes*` misses hatch's package
+  prefix and quietly registers into a SECOND, unread global.
+
+  (hatch/web/route-table/global-name nil \"*t*\") ;=> '*t*
+  (hatch/web/route-table/global-name 'hatch/web/live \"*t*\") ;=> 'hatch/web/live/*t*"
+  ;; nil means the module was loaded at root, where the bare name IS the binding.
+  (if (nil? namespace) (symbol base) (symbol (str (->string namespace) "/" base))))
+
+(defn register (table-name current key entry)
+  "Put `entry` under `key` in the global named `table-name` (from `global-name`), atomically
+  against a concurrent registration. `current` is a 0-arg thunk reading the table, from the
+  module that owns it. Idempotent, so a hot reload just re-puts. Returns nil."
+  (%registry-swap! table-name current (fn (table) (assoc table key entry)))
+  nil)
+
+(defn unmatched-message (wording key known)
+  "Why `key` matched nothing, given the `known` registered keys. `wording` supplies the nouns:
+  `:tag`, `:empty-lead`, `:table`, `:clause`, `:scope`, `:miss-lead`, `:known`.
+
+  The two cases look identical from a client — the socket closes or the join is refused — and
+  could not be further apart. An EMPTY table means no clause ever ran, so everything is broken,
+  not this one. A populated table means this key is simply not in it, and the useful answer is
+  the keys that are."
+  (if (empty? known)
+    (str "["
+      (get wording :tag)
+      "] "
+      (get wording :empty-lead)
+      " "
+      (pr-str key)
+      " — and the "
+      (get wording :table)
+      " is EMPTY, so no `("
+      (get wording :clause)
+      " …)` clause has registered at all. Either the router module never loaded, or its load-time registrations were lost. "
+      (get wording :scope))
+    (str "["
+      (get wording :tag)
+      "] "
+      (get wording :miss-lead)
+      " "
+      (pr-str key)
+      " — "
+      (get wording :known)
+      ": "
+      (pr-str (vec (sort known))))))
+
+(defn warn-unmatched (message)
+  "Log `message` (an `unmatched-message`) in dev; a no-op elsewhere. The miss used to be
+  silent — no log line anywhere named a cause, which is what made an empty route table cost a
+  day to find."
+  (when (web/audit/dev?) (log/warn message))
+  nil)

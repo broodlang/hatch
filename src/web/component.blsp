@@ -330,13 +330,16 @@
   — a component written before ticks existed has none, and a missing hook must not be a
   crashing session. Mirrors `apply-update`: the parent's own model is untouched, and the
   session re-renders afterwards so the component's fresh state reaches the wire as its own
-  inner-slot diff."
+  inner-slot diff.
+
+  Returns true when a tick ran, false for the no-op cases — a beat for no mounted component has
+  nothing for the session to render, and one can still land just after `cancel-ticks`, which
+  races an in-flight fire."
   (let (entry (table/get components-table cid))
-    (when entry
+    (if entry
       (let (spec ((get entry :spec-thunk))
             tick (component-spec-handle-tick spec))
-        (when tick
-          (table/put components-table
-            cid
-            (with-state entry (tick ms (get entry :state))))))))
-  nil)
+        (if tick
+          (do (table/put components-table cid (with-state entry (tick ms (get entry :state)))) true)
+          false))
+      false)))

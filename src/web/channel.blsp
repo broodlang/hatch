@@ -58,6 +58,8 @@
   ; the same keepalive/reaper, so a channel socket is protected from a black-holed peer for free
   (:alias web/socket)
   (:alias web/pubsub)
+  ; global-name / register / unmatched-message — the load-time pattern → channel table
+  (:alias web/route-table)
   ; clause / dispatch-match / optional-defn — defchannel's expansion, shared with deflive
   (:alias web/macro-helpers :as macro)
   ; bundled-source / bundled-js-handler — serve brood_channel.js straight from the package
@@ -204,31 +206,32 @@
 
 ; ---- the channel registry: pattern → spec thunk ----
 ;
-; A global, for the reason web/live's route table is one: the table is written once at load
-; by the router's `(channel …)` clauses, and load-time state must live somewhere a startup
-; image (ADR-218) can carry it. A process cannot — an imaged boot re-runs no module
-; top-level, so nothing would re-register, and every join would answer "no channel" on the
-; second run of an app that worked on the first. Globals are shared across green processes,
-; so the registry process was buying nothing here that a map does not.
+; A global written once at load by the router's `(channel …)` clauses, for the reason
+; web/live's route table is one: load-time state must live somewhere a startup image
+; (ADR-218) can carry it — see web/route-table.
 
 (defonce *channel-routes* {})
 
-; The symbol `def` binds this under — module namespace plus hatch's package prefix. The CAS
-; in `register-channel` needs that exact name; see the same note in `web/live`, where a bare
-; name spins forever and a hand-qualified one writes to a global nothing reads.
 (def- channel-routes-global-name
-  (let (ns (reflect/current-ns))
-    ;; nil means loaded at root, where the bare name IS the binding (see web/live).
-    (if (nil? ns) (quote *channel-routes*) (symbol (str (->string ns) "/*channel-routes*")))))
+  (web/route-table/global-name (reflect/current-ns) "*channel-routes*"))
+
+(def- *unjoinable-wording*
+  {:tag "channel"
+   :empty-lead "no channel for topic"
+   :table "channel table"
+   :clause "channel"
+   :scope "Every join will fail this way, not just this one."
+   :miss-lead "no channel matches topic"
+   :known "registered patterns"})
 
 (defn register-channel (pattern spec-fn)
   "Register channel `spec-fn` (a 0-arg spec thunk) for topics matching `pattern`. The
   router's `(channel pattern module)` clause calls this at load; idempotent, so a hot reload
   just re-puts. Returns nil."
-  (%registry-swap! channel-routes-global-name
+  (web/route-table/register channel-routes-global-name
     (fn () *channel-routes*)
-    (fn (m) (assoc m pattern {:spec spec-fn :pattern pattern})))
-  nil)
+    pattern
+    {:spec spec-fn :pattern pattern}))
 
 (defn channel-table ()
   "A snapshot of the `pattern → entry` table (mostly for tests and diagnostics)."
@@ -236,26 +239,17 @@
 
 (defn unjoinable-channel-message (topic known)
   "Why `topic` cannot be joined, given the `known` registered patterns. Pure, so the wording
-  is testable — see `web/live/unrouted-live-message`, which this mirrors deliberately.
+  is testable — see `web/route-table/unmatched-message`.
 
   The client is told `no such channel` either way, and that is right for a client: it must
   not learn which topics exist. A developer needs the opposite. An EMPTY table means no
   `(channel …)` clause ever ran, so every join fails rather than this one — the same shape
   the 0.21.1 image bug took, and the sentence that identifies it."
-  (if (empty? known)
-    (str "[channel] no channel for topic "
-      (pr-str topic)
-      " — and the channel table is EMPTY, so no `(channel …)` clause has registered at all. Either the router module never loaded, or its load-time registrations were lost. Every join will fail this way, not just this one.")
-    (str "[channel] no channel matches topic "
-      (pr-str topic)
-      " — registered patterns: "
-      (pr-str (vec (sort known))))))
+  (web/route-table/unmatched-message *unjoinable-wording* topic known))
 
 (defn- warn-unjoinable-channel! (topic)
   "Log `unjoinable-channel-message` when a join finds no channel. Dev only."
-  (when (web/audit/dev?)
-    (log/warn (unjoinable-channel-message topic (keys *channel-routes*))))
-  nil)
+  (web/route-table/warn-unmatched (unjoinable-channel-message topic (keys *channel-routes*))))
 
 (defn lookup-channel (topic)
   "The registry entry `{:spec :pattern}` serving `topic`, or nil if no channel covers it."

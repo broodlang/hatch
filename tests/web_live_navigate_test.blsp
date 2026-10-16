@@ -146,7 +146,8 @@
       (web/component/render-slot 'web-live-navigate-test live-component-spec {"id" "x"} components)
       (assert= (> (beats-within 60) 0) true)
       (web/component/cancel-ticks components)
-      (queued-beats)
+      ;; `timer/cancel` races a beat already in flight, so let one land before counting
+      (beats-within 30)
       (assert= (beats-within 80) 0)))
   :isolated (test "an update keeps the handles, so a component that changed state can still be stopped"
     (let (components (table/new))
@@ -155,5 +156,6 @@
       (web/component/apply-tick components "y" 20)
       (assert= (count (get (table/get components "y") :tick-handles)) 1)
       (web/component/cancel-ticks components)
-      (queued-beats)
+      ;; `timer/cancel` races a beat already in flight, so let one land before counting
+      (beats-within 30)
       (assert= (beats-within 80) 0))))
