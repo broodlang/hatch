@@ -127,7 +127,8 @@ SHA1 but bad if reused. **Fix applied:** carry the sequence as a list and branch
 per-index `char-at` — left as-is for now; small frames. Noted for #16.)
 
 ### 15. Misc
-- `util.blsp hex-char->int`: bad hex digit `%ZZ` → byte 0 (lenient). Acceptable; noted.
+- `util.blsp url-decode`: a bad escape `%ZZ` used to decode to byte 0. FIXED — it now passes
+  through raw (std `url/percent-decode`, with a lenient fallback for what std refuses).
 - Thread-per-connection (1 OS reader thread / conn) scales to hundreds, not tens of
   thousands. Tied to #1 (and a future writer thread).
 

@@ -34,52 +34,62 @@
           ;; trailing whitespace is rare enough not to be worth a backwards scan of its own
           else (string/trim s))))))
 
-(defn hex-char->int (c)
-  "Convert a single hex digit character to its integer value (0–15)."
-  (let (code (string/char->int c))
-    (cond
-      (and (>= code 48) (<= code 57)) (- code 48)
-      (and (>= code 65) (<= code 70)) (- code 55)
-      (and (>= code 97) (<= code 102)) (- code 87)
-      else 0)))
-
 ;; ---- URL decode ----
 
 (defn url-decode (s)
-  "Percent-decode a URL-encoded string, correctly handling multi-byte UTF-8 sequences.
+  "Percent-decode a URL-encoded string, with `+` read as a space (the form/query convention).
 
   (hatch/http/util/url-decode \"a%20b%2Bc\") ;=> \"a b+c\"
+  (hatch/http/util/url-decode \"a%zzb\") ;=> \"a%zzb\"
 
-  A `%`-escape can decode to an invalid UTF-8 byte sequence (`%ff`, `%c0`, `%e0%80`, …),
-  on which `utf8-bytes->string` throws — and `parse-query` runs this on every request's
-  query outside any try, so an unguarded throw crashes the worker with no response (a
-  trivially scriptable DoS). Catch it and fall back to the raw input rather than crash.
+  Never raises, because `parse-query` runs it on every request's query outside any try and
+  an unguarded throw would crash the worker with no response. Well-formed input is
+  `url/percent-decode`'s. Input it refuses is decoded leniently instead:
+
+  - an escape that is not `%` + two hex digits (`a%zzb`, a trailing `100%`) passes through
+    as the raw characters, rather than being guessed at;
+  - escapes that decode to bytes which are not UTF-8 (`%ff`, `%c0`) leave the whole input
+    as it arrived — there is no text to hand back.
 
   A string with no `%` and no `+` decodes to ITSELF, and almost every one is: a path segment
-  like `hatch` or `packages`, an ordinary query value. The decoder walks character by
-  character over a list of one-character strings, then reverses, vectorises and re-encodes —
-  13.6us for a five-character segment, paid per path param, per query param and per segment of
-  a splat route, on every request. One `string/span-until` says whether any of that is needed.
-
-  Provably the same answer: with no `%` and no `+`, every branch of `url-decode-acc` copies the
-  character's own bytes through unchanged, so the reassembled string is the input."
+  like `hatch` or `packages`, an ordinary query value — paid per path param, per query param
+  and per segment of a splat route, on every request. One `string/span-until` says whether any
+  decoding is needed."
   (if (= (string/span-until s 0 "%+") (string/length s))
     s
-    (try
-      (string/bytes-> (vec (reverse (url-decode-acc (string/->list s) nil))))
-      (catch _e s))))
+    (let (spaced (string/replace s "+" " ")
+          decoded (url/percent-decode spaced))
+      (if (failure? decoded)
+        (lenient-percent-decode s spaced)
+        decoded))))
 
-(defn- url-decode-acc (chars acc)
-  (match chars
-    (nil acc)
-    (("%" h l & rest) (url-decode-acc rest
-                        (cons (+ (* (hex-char->int h) 16) (hex-char->int l)) acc)))
-    (("+" & rest) (url-decode-acc rest (cons 32 acc)))
-    ((c & rest) (let (cp (string/char->int c))
-                  (if (< cp 128)
-                    (url-decode-acc rest (cons cp acc))
-                    (url-decode-acc rest
-                      (fold (seq (string/->bytes c)) acc (fn (a b) (cons b a)))))))))
+(defn- lenient-percent-decode (raw spaced)
+  "`spaced` decoded with every well-formed `%XX` escape replaced by its byte and every other
+  character kept as its own UTF-8 bytes; `raw` when those bytes are not UTF-8."
+  (let (characters (into [] (string/->list spaced)))
+    ;; `string/bytes->` raises on bytes that are not UTF-8, and that is the only way it can fail
+    ;; here: the loop yields ints 0-255.
+    (try
+      (string/bytes-> (bytes (lenient-decode-loop characters 0 (count characters) nil)))
+      (catch _e raw))))
+
+(defn- lenient-decode-loop (characters index total accumulated)
+  (if (>= index total)
+    (reverse accumulated)
+    (let (character (nth characters index)
+          escaped (if (and (= character "%") (< (+ index 2) total))
+                    (encoding/hex-decode-bytes (str (nth characters (+ index 1))
+                                                 (nth characters (+ index 2))))
+                    nil))
+      (if (bytes? escaped)
+        (lenient-decode-loop characters
+          (+ index 3)
+          total
+          (cons (bytes/at escaped 0) accumulated))
+        (lenient-decode-loop characters
+          (+ index 1)
+          total
+          (fold (seq (string/->bytes character)) accumulated (fn (bytes-so-far b) (cons b bytes-so-far))))))))
 
 ;; ---- query-string parser ----
 

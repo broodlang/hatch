@@ -10,14 +10,6 @@
     (assert= (content-type-base {:content-type "  Application/JSON ; q=1"}) "application/json"))
   (test "absent → empty string" (assert= (content-type-base {}) "")))
 
-(describe "hex-char->int"
-  (test "digits" (assert= (hex-char->int "0") 0))
-  (test "nine" (assert= (hex-char->int "9") 9))
-  (test "upper-A" (assert= (hex-char->int "A") 10))
-  (test "upper-F" (assert= (hex-char->int "F") 15))
-  (test "lower-a" (assert= (hex-char->int "a") 10))
-  (test "lower-f" (assert= (hex-char->int "f") 15)))
-
 (describe "url-decode"
   (test "plain string" (assert= (url-decode "hello") "hello"))
   (test "plus to space" (assert= (url-decode "hello+world") "hello world"))
@@ -38,7 +30,7 @@
   (test "a truncated escape is kept literally"
     (assert= (url-decode "100%") "100%")
     (assert= (url-decode "a%4") "a%4"))
-  (test "an escape with non-hex digits" (assert= (url-decode "a%zzb") "a\x00b")))
+  (test "an escape with non-hex digits passes through raw, not as a NUL byte" (assert= (url-decode "a%zzb") "a%zzb")))
 
 (describe "parse-query"
   (test "single pair" (assert= (parse-query "name=Alice") {"name" "Alice"}))
