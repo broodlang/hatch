@@ -177,7 +177,10 @@ src/
                       can only fire an event the markup actually wires up
     compress.blsp   — coding negotiation (brotli over gzip) + the encoders web/endpoint uses
     cache.blsp      — fragment + whole-page caching: fetch (no expiry) / fetch-ttl (bounded
-                      staleness); cluster-aware invalidation via web/cluster
+                      staleness); cluster-aware invalidation via web/cluster; compressed bodies
+    http-cache.blsp — what a response tells downstream caches: strong-etag/etag-for,
+                      not-modified?, conditional (304), Cache-Control constructors,
+                      html-freshness, merge-vary, forbid-transform
     ratelimit.blsp  — token-bucket plug with four seams (:key-fn/:skip?/:cost/:store, the
                       last a BucketStore ability); network-key buckets IPv6 by /64
     logger.blsp     — HTTP access log: the [:hatch :request :stop] telemetry http/server

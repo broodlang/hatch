@@ -42,7 +42,7 @@ trade-offs behind them — is archived in
 | Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) |
 | Live views | `web/live` `web/component` `web/pubsub` `web/presence` `web/registry` |
 | Forms & uploads | `web/form` `web/upload` |
-| Production | `web/compress` `web/cache` `web/ratelimit` `web/logger` `web/metrics` `web/dashboard` `web/stream` `web/assets` `web/application` `web/cluster` `web/env` `web/repo` |
+| Production | `web/compress` `web/cache` `web/http-cache` `web/ratelimit` `web/logger` `web/metrics` `web/dashboard` `web/stream` `web/assets` `web/application` `web/cluster` `web/env` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
 `http/server`'s request-head read is `tcp/read-until` (brood ≥ 0.3.11), so the delimiter

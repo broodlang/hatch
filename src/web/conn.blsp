@@ -377,8 +377,8 @@
   body the client's decoder rejects, reporting a syntax error instead of the message.
 
   `:cache` in `opts` sets `Cache-Control`. There is no default, deliberately: a JSON response
-  is public and cacheable (`cache/public-for`) or it is per-user and must not be
-  (`cache/no-store`), and only the handler knows which. A read whose freshness nobody
+  is public and cacheable (`http-cache/public-for`) or it is per-user and must not be
+  (`http-cache/no-store`), and only the handler knows which. A read whose freshness nobody
   declared is one every client and proxy has to guess about."
   (let (typed (put-resp-header conn :content-type "application/json")
         cache (get opts :cache)

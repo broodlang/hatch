@@ -48,7 +48,10 @@
   ;; for every app rather than an `accepts-gzip?` per app that matches the literal "gzip"
   ;; and serves a br-only client uncompressed.
   (:alias web/compress :as compress)
-  ;; conditional / etag-for — the validator that makes a mandated revalidation cheap
+  ;; conditional / merge-vary / html-freshness / forbid-transform — what the response tells the
+  ;; caches downstream of it
+  (:alias web/http-cache :as http-cache)
+  ;; compressed — the compressed-body cache an unchanged page is encoded through once
   (:alias web/cache :as cache)
   ;; ensure (dev: install + build + watch) / prepare (prod boot: fingerprint + precompress)
   (:alias web/assets)
@@ -130,7 +133,7 @@
   the flat default map — plus `no-transform` on anything carrying a validator.
 
   `no-transform` rides here because this is the last step every response passes through, so
-  the directive describes the bytes actually going out. See `web/cache/forbid-transform`:
+  the directive describes the bytes actually going out. See `web/http-cache/forbid-transform`:
   hatch has already negotiated and tagged the representation, so an intermediary re-encoding
   it can only invalidate the tag. `:no-transform false` opts out."
   (let (secured-resp (hsts-header conn
@@ -138,14 +141,14 @@
                        (get config :hsts *default-hsts*)))
     (if (= (get config :no-transform) false)
       secured-resp
-      (cache/forbid-transform secured-resp))))
+      (http-cache/forbid-transform secured-resp))))
 
 (sig secured (any map any any -> map))
 
 (defn- as-response (v)
   "`v` as a response map.
 
-  `cache/conditional` answers one in both arms of its result, but that result is a pair the
+  `http-cache/conditional` answers one in both arms of its result, but that result is a pair the
   checker cannot see into — so the response arrives at `secured` widened, and `secured` has to
   `assoc` onto it. Narrowing once here is cheaper than declaring every function downstream,
   and the `{}` fallback is unreachable: both arms carry a map."
@@ -194,10 +197,10 @@
         :headers
           (assoc headers
             :content-encoding coding
-            ;; `cache/merge-vary`, not a substring test — an existing `accept-encoding` in
+            ;; `http-cache/merge-vary`, not a substring test — an existing `accept-encoding` in
             ;; any casing but the one being added fails a naive match and the token goes out
             ;; twice.
-            :vary (cache/merge-vary (get headers :vary) "Accept-Encoding")))
+            :vary (http-cache/merge-vary (get headers :vary) "Accept-Encoding")))
       resp)))
 
 (defn finish (conn resp config)
@@ -214,13 +217,13 @@
   chose to send after its own `Accept-Encoding` negotiation. Compressing here would change
   the representation and leave that tag describing bytes no longer going out — so a client
   holding the gzip copy, revalidating with `Accept-Encoding: br`, would be answered 304 and
-  render gzip as br. `cache/conditional` already declines to re-tag such a response; until
+  render gzip as br. `http-cache/conditional` already declines to re-tag such a response; until
   now the compressor did not decline to re-encode it, and half a rule is not one."
   (let (compress-opts (get config :compress {})
         headers (get config :security-headers *default-security-headers*)
         coding (compress/chosen-encoding conn)
         pre-tagged? (not (nil? (get (get resp :headers {}) :etag))))
-    (match (cache/conditional conn resp coding)
+    (match (http-cache/conditional conn resp coding)
       ([:not-modified not-modified] (secured conn (as-response not-modified) config headers))
       ([:send validated] (secured conn
                            (let (response (as-response validated))
@@ -233,11 +236,11 @@
 (defn freshen (conn resp config)
   "Apply the app's dynamic-HTML freshness policy, if it has one.
 
-  `:freshness` is passed straight to `web/cache/html-freshness`, which holds the conditions
+  `:freshness` is passed straight to `web/http-cache/html-freshness`, which holds the conditions
   (GET/HEAD, 200, no `Set-Cookie`, HTML only) and fails closed on anything it cannot read.
   Omit it and a response keeps whatever `Cache-Control` its handler set."
   (let (freshness (get config :freshness))
-    (if freshness (cache/html-freshness conn resp freshness) resp)))
+    (if freshness (http-cache/html-freshness conn resp freshness) resp)))
 
 ;; ---- failures ---------------------------------------------------------------
 
@@ -419,7 +422,7 @@
                            killed and the request answered 504.
     `:errors`            — `web/errors` opts (`:render`, `:meta`) for themed error pages, or
                            `false` to pass framework error bodies through untouched.
-    `:freshness`         — `web/cache/html-freshness` opts for dynamic HTML
+    `:freshness`         — `web/http-cache/html-freshness` opts for dynamic HTML
                            (`{:max-age 60 :stale-for 600}`). Omitted: no policy applied.
     `:security-headers`  — merged under whatever a handler set (default
                            `*default-security-headers*`); `{}` for none.

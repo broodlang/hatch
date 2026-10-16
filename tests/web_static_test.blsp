@@ -1,4 +1,6 @@
-(defmodule web-static-test (:use web/static) (:use web/conn) (:use test))
+(defmodule web-static-test (:use web/static) (:use web/conn) (:use test)
+  ; strong-etag — the tag web/static computes
+  (:use web/http-cache))
 
 (defn conn-with (params &optional (headers {}))
   (build {:method "GET" :path "/static" :query "" :params params :headers headers :body ""}))
@@ -52,12 +54,6 @@
           conn (conn-with {"path" "nope.css"}))
       (assert= (get (h conn) :status) 404))))
 
-(describe "etag"
-  (test "quoted, stable, content-addressed"
-    (assert= (= (etag "hello") (etag "hello")) true)
-    (assert= (string/starts-with? (etag "hello") "\"") true)
-    (assert= (not (= (etag "hello") (etag "world"))) true)))
-
 (describe "cached-etag"
   (test "matches a direct hash, reuses it, and re-tags after the file changes"
     (let (dir "/tmp/hatch-etag-test"
@@ -65,19 +61,15 @@
           f (str dir "/a.txt")
           _ (file/spit f "hello")
           t1 (cached-etag f "hello"))
-      (assert= t1 (etag "hello"))
+      (assert= t1 (strong-etag "hello"))
       ; unchanged file → same tag (served from the cache)
       (assert= (cached-etag f "hello") t1)
       ; content changes (size differs → stat differs) → recomputed tag
       (file/spit f "different content, longer")
       (let (t2 (cached-etag f "different content, longer"))
         (assert= (= t2 t1) false)
-        (assert= t2 (etag "different content, longer")))
+        (assert= t2 (strong-etag "different content, longer")))
       (file/rm f))))
-
-(describe "prod?"
-  (test "false by default (dev is the zero-config default)"
-    (assert= (prod?) false)))
 
 (describe "fingerprint-shaped?"
   (test "name.<hash>.ext is shaped"
@@ -163,7 +155,7 @@
       (assert= (get h :accept-ranges) "bytes")
       (assert= (string/blank? (get h :etag)) false)))
   (test "matching If-None-Match → bodyless 304"
-    (let (tag (etag "body{}")
+    (let (tag (strong-etag "body{}")
           resp (serve-body (conn-with {} {:if-none-match tag}) "text/css" "body{}" "app.css"))
       (assert= (get resp :status) 304)
       (assert= (get resp :resp-body) "")
@@ -380,7 +372,7 @@
   ;; A 304 has no body, so the headers describing one have nothing to say — but `Vary` does,
   ;; because the stored response it refreshes varies by encoding (RFC 9110 §15.4.5).
   (test "a 304 carries its validators and Vary, and nothing about a body"
-    (let (tag (etag "0123456789")
+    (let (tag (strong-etag "0123456789")
           h (headers-of (serve-body (conn-with {} {:if-none-match tag})
                           "text/plain" "0123456789" "f.txt")))
       (assert= (get h :vary) "Accept-Encoding")

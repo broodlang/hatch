@@ -52,7 +52,7 @@
         (get \"/sitemap.xml\" (seo/sitemap-handler *site* app-router--routes {}))
         (get \"/widgets\"     widgets/index))"
   (:use web/conn)
-  (:alias web/cache)
+  (:alias web/http-cache)
   (:alias web/template)
   ; present? — one "is this worth emitting?" predicate, shared with web/mcp
   (:use web/template :only [present?]))
@@ -204,7 +204,7 @@
   a crawler fetches it before every crawl, so leaving its freshness undefined means every
   one of those is a full round trip for a file that changes when the app is redeployed."
   (fn (conn)
-    (text-resp (put-resp-header conn :cache-control (web/cache/public-for (get opts :max-age 3600)))
+    (text-resp (put-resp-header conn :cache-control (web/http-cache/public-for (get opts :max-age 3600)))
       (robots-text site opts))))
 
 ;; ---- llms.txt ---------------------------------------------------------------
@@ -332,7 +332,7 @@
   (fn (conn)
     (let (data (if (fn? content) (content) content))
       (text-resp (put-resp-header conn
-                   :cache-control (web/cache/public-for (get opts :max-age 3600)))
+                   :cache-control (web/http-cache/public-for (get opts :max-age 3600)))
         (llms-text site data)))))
 
 ;; ---- sitemap.xml ------------------------------------------------------------
@@ -485,6 +485,6 @@
     (send-resp (-> conn
                  (put-resp-header :content-type "application/xml; charset=utf-8")
                  (put-resp-header :cache-control
-                   (web/cache/public-for (get opts :max-age 3600))))
+                   (web/http-cache/public-for (get opts :max-age 3600))))
       200
       (sitemap-xml site (sitemap-entries routes opts)))))

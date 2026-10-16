@@ -457,10 +457,10 @@
   ;; Narrow on purpose: with no validator there is nothing for a transformation to
   ;; invalidate, so there is nothing to forbid.
   (test "a response with no validator is left alone"
-    (assert= (get (web/cache/forbid-transform {:status 200 :headers {} :body "x"}) :headers)
+    (assert= (get (web/http-cache/forbid-transform {:status 200 :headers {} :body "x"}) :headers)
       {}))
 
   (test "and the directive is never added twice"
-    (let (once (web/cache/forbid-transform {:status 200 :headers {:etag "\"t\""} :body "x"})
-          twice (web/cache/forbid-transform once))
+    (let (once (web/http-cache/forbid-transform {:status 200 :headers {:etag "\"t\""} :body "x"})
+          twice (web/http-cache/forbid-transform once))
       (assert= (get (get twice :headers) :cache-control) "no-transform"))))

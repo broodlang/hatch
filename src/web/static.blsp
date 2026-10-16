@@ -22,8 +22,8 @@
   (:alias http/util)
   ; dev? / prod? — the one place $HATCH_ENV is read
   (:alias web/env)
-  ; not-modified? — the one implementation of RFC 9110 §13.1.2 If-None-Match matching
-  (:alias web/cache)
+  ; not-modified? / strong-etag — the one If-None-Match rule (RFC 9110 §13.1.2) and the one tag
+  (:alias web/http-cache)
   ; accepts? — the Accept-Encoding predicate the endpoint negotiates with
   (:alias web/compress))
 
@@ -107,25 +107,7 @@
                http/util/url-decode))
     (if (empty? (seq/filter segs unsafe-segment?)) segs nil)))
 
-; ---- environment ----
-
-(defn prod? ()
-  "True unless $HATCH_ENV names the dev environment (the zero-config default) — `web/env/prod?`,
-  re-exported here so the static layer can pick its cache policy without the app threading an
-  env flag through every call."
-  (web/env/prod?))
-
 ; ---- caching ----
-
-(defn etag (body)
-  "A strong ETag for a text `body`: a quoted SHA-256 prefix. Content-addressed, so it changes
-  iff the bytes change — no filesystem mtime needed, and identical across server restarts and
-  replicas (unlike an inode/mtime tag), so a client's cached copy validates everywhere."
-  (str "\"" (string/substring (hash/sha256 body) 0 16) "\""))
-
-(defn bytes-etag-hash (body)
-  "A strong ETag for a binary (`bytes`) body — same quoted-SHA-256-prefix shape as `etag`."
-  (str "\"" (string/substring (hash/sha256-bytes body) 0 16) "\""))
 
 ; A process-shared cache (Brood's ETS) of `path → {:mtime :size :etag}`, so a hot asset is
 ; hashed once, not on every request. Lives for the runtime; lock-free concurrent reads (a
@@ -149,11 +131,11 @@
 
 (defn cached-etag (path body)
   "The cached strong ETag for a text file `body` at `path` (see `cached-etag-via`)."
-  (cached-etag-via path (fn () (etag body))))
+  (cached-etag-via path (fn () (web/http-cache/strong-etag body))))
 
 (defn cached-bytes-etag (path body)
   "The cached strong ETag for a binary (`bytes`) file `body` at `path`."
-  (cached-etag-via path (fn () (bytes-etag-hash body))))
+  (cached-etag-via path (fn () (web/http-cache/strong-etag body))))
 
 (defn fingerprint-shaped? (path)
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
@@ -202,7 +184,7 @@
   cheap because the ETag turns an unchanged asset into a bodyless 304. In dev, always
   `no-cache`, so an edited asset is never masked by a stale copy (and the manifest is never
   read — `prod?` short-circuits)."
-  (if (and (prod?) (fingerprinted? path dir))
+  (if (and (web/env/prod?) (fingerprinted? path dir))
     "public, max-age=31536000, immutable"
     "no-cache"))
 
@@ -248,12 +230,12 @@
   "True if the request's `If-None-Match` lists `tag` (or is the `*` wildcard) — i.e. the
   client already holds this exact version, so we can answer 304 instead of resending it.
 
-  `web/cache/not-modified?` is the one implementation of the rule, for files and for dynamic
+  `web/http-cache/not-modified?` is the one implementation of the rule, for files and for dynamic
   responses alike. This module had its own, and the two had already drifted: on `\"a\", *` and
   on a malformed `W/ \"abc\"` they disagreed about whether to send a 304. Two readings of one
   RFC paragraph is exactly the shape that drifts, and a wrongly-issued 304 leaves a client on
   a stale copy."
-  (web/cache/not-modified? conn tag))
+  (web/http-cache/not-modified? conn tag))
 
 (defn range-int (s)
   "The non-negative integer `s` denotes, or nil if `s` isn't a plain run of digits. We
@@ -345,7 +327,7 @@
   byte ranges (`Range` → 206/416, else a full 200). `path`/`dir` only steer the cache policy
   (fingerprinted? consults `dir`'s manifest); `path` may be a bare filename. `tag` lets a
   caller pass a precomputed (e.g. cached) ETag; nil computes one from `body`."
-  (let (tag (or tag (etag body))
+  (let (tag (or tag (web/http-cache/strong-etag body))
         cc (cache-control path dir))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
@@ -573,7 +555,7 @@
   name from the build manifest — immutable, so the client caches it forever; in dev (or on a
   manifest miss), the plain name, which `serve` revalidates each load. Link assets by logical
   name and get the right caching in both environments."
-  (let (name (if (prod?) (get (load-manifest dir) logical logical) logical))
+  (let (name (if (web/env/prod?) (get (load-manifest dir) logical logical) logical))
     (str "/" dir "/" name)))
 
 (defn file-text (logical &optional (dir "static"))
