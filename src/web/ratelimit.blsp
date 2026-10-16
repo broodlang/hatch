@@ -16,6 +16,7 @@
     :burst    — capacity, and so the largest instantaneous burst (default `:rate`)
     :cost     — tokens a request spends: a number, or `(fn (conn) -> number)` (default 1)
     :key-fn   — `(fn (conn) -> key)` choosing the bucket (default `client-key`)
+    :name     — which limiter the bucket belongs to (default: its `:rate`/`:per`/`:burst`)
     :skip?    — `(fn (conn) -> bool)`; true exempts the request entirely (default none)
     :store    — where buckets live (default `in-memory-store`)
     :on-limit — `(fn (conn retry-after-seconds) -> conn)` for a custom 429 (default `limited`)
@@ -339,6 +340,19 @@
   (let (rate (get opts :rate 60))
     {:rate rate :per (get opts :per 60000) :burst (get opts :burst rate)}))
 
+(defn bucket-key (opts key)
+  "The bucket a store spends from: `key` (the client, from `:key-fn`) within one limiter.
+
+  A bucket keyed by the client alone is shared by every limiter in the app — a login form at
+  20/min and an API at 300/min draining one bucket, each refilling it at its own rate. So
+  the key carries the limiter: its `:name` when given, else its `:rate`/`:per`/`:burst`. Two
+  limiters with the same numbers and no `:name` therefore share a bucket; name them to keep
+  them apart."
+  (let (config (bucket-config opts)
+        limiter (get opts
+                  :name (str (get config :rate) "/" (get config :per) "/" (get config :burst))))
+    (str limiter ":" key)))
+
 (defn rate-limit (&optional (opts {}))
   "Plug factory: returns a plug that token-bucket rate-limits a request. Under the limit the
   conn passes through; over it, the conn is halted with a 429 and a `Retry-After`.
@@ -360,7 +374,7 @@
               ;; parameter can charge for it (a page size, a batch length) instead of
               ;; pretending every request costs the same.
               spent (if (fn? cost) (cost conn) cost))
-          (match (take-tokens store key spent config (os/now))
+          (match (take-tokens store (bucket-key opts key) spent config (os/now))
             (:ok (do (bump :allowed) conn))
             ([:deny retry-ms] (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
                                 (bump :denied)

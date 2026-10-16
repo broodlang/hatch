@@ -178,7 +178,7 @@
     (let (calls (table/new)
           plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "k")}))
       (assert= (conn/halted? (plug (conn-from {}))) false)
-      (assert= (table/get calls :key) "k")))
+      (assert= (table/get calls :key) "60/60000/60:k")))
 
   (test "a store that denies halts the conn with a 429, exactly as the default does"
     (let (plug (rate-limit {:store (recording-store (table/new) [:deny 5000])}))
@@ -214,7 +214,7 @@
     (let (calls (table/new)
           plug (rate-limit {:store (recording-store calls :ok) :key-fn (fn (_c) "by-record")}))
       (assert= (conn/halted? (plug (conn-from {}))) false)
-      (assert= (table/get calls :key) "by-record")))
+      (assert= (table/get calls :key) "60/60000/60:by-record")))
 
   (test "a denying store halts with a 429 like any other"
     (let (plug (rate-limit {:store (recording-store (table/new) [:deny 3000])}))
@@ -229,8 +229,8 @@
           b (table/new))
       ((rate-limit {:store (recording-store a :ok) :key-fn (fn (_c) "a")}) (conn-from {}))
       ((rate-limit {:store (recording-store b :ok) :key-fn (fn (_c) "b")}) (conn-from {}))
-      (assert= (table/get a :key) "a")
-      (assert= (table/get b :key) "b")))
+      (assert= (table/get a :key) "60/60000/60:a")
+      (assert= (table/get b :key) "60/60000/60:b")))
 
   (test "the default store is one of these, not a map"
     (is (record? in-memory-store))
@@ -337,3 +337,24 @@
                                        :headers {:x-forwarded-for "[2001:db8::1]:5000"}
                                        :body ""}))
       "2001:0db8:0000:0000::/64")))
+
+; :isolated — the shared :hatch-ratelimit singleton again; the addresses are this test's own.
+(describe "each limiter has its own buckets"
+  :isolated (test "a client that used up one limiter still has another's allowance"
+    (let (strict (rate-limit {:rate 1 :per 100000 :burst 1})
+          generous (rate-limit {:rate 5 :per 100000 :burst 5})
+          request (conn-from {:fly-client-ip "198.51.100.71"}))
+      (is (not (conn/halted? (strict request))))
+      (is (conn/halted? (strict request)))
+      ;; before buckets carried the limiter, this was the drained bucket refilled at 5/window
+      (is (not (conn/halted? (generous request))))))
+  :isolated (test "limiters with the same numbers share a bucket unless they are named"
+    (let (request (conn-from {:fly-client-ip "198.51.100.72"})
+          first-form (rate-limit {:rate 1 :per 100000 :burst 1 :name "first-form"})
+          second-form (rate-limit {:rate 1 :per 100000 :burst 1 :name "second-form"}))
+      (is (not (conn/halted? (first-form request))))
+      (is (conn/halted? (first-form request)))
+      (is (not (conn/halted? (second-form request))))))
+  (test "the bucket key names the limiter, then the client"
+    (assert= (bucket-key {:rate 20 :per 60000} "203.0.113.9") "20/60000/20:203.0.113.9")
+    (assert= (bucket-key {:name "login"} "203.0.113.9") "login:203.0.113.9")))
