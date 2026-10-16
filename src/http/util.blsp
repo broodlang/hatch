@@ -1,5 +1,6 @@
 (defmodule http/util
-  "HTTP utility functions: URL decoding, query-string + body parsing, status codes.")
+  "HTTP utility functions: URL decoding, query-string parsing, Content-Type and
+  Accept-Encoding reading.")
 
 ;; ---- hex helpers ----
 
@@ -194,30 +195,6 @@
     (includes? accept-encoding coding)
     (not (coding-refused? accept-encoding coding))))
 
-(defn parse-body-params (headers body)
-  "Parse a request `body` into a string→value params map based on its Content-Type:
-  `application/x-www-form-urlencoded` is parsed like a query string, `application/json`
-  yields the top-level object's fields (keys stringified to match query/form params).
-  Any other type — or an empty/malformed body — yields `{}`; the raw bytes stay on the
-  conn as `:body`. multipart/form-data is not parsed yet (file uploads, Tier 2)."
-  (if (string/blank? body)
-    {}
-    (let (ct (content-type-base headers))
-      (cond
-        (= ct "application/x-www-form-urlencoded") (parse-query body)
-        (= ct "application/json") (json-body-params body)
-        else {}))))
-
-(defn json-body-params (body)
-  "Params from a JSON request `body`. Only a top-level JSON object contributes params; its
-  keys are stringified — deeply, including nested objects — so the result reads like query/
-  form params throughout (json-parse yields keyword keys). A non-object body or a parse error
-  yields `{}` (a malformed body is ignored, not fatal)."
-  (try
-    (let (parsed (json/decode body))
-      (if (map? parsed) (stringify-keys parsed) {}))
-    (catch _e {})))
-
 (defn stringify-keys (v)
   "Recursively replace every map key with its string name, descending through map values
   and vectors — so a parsed JSON body is string-keyed all the way down."
@@ -234,51 +211,3 @@
 ;; them — so each truthiness test on a field read from a request body or a session reads as
 ;; testing a possible failure. `any` is the honest claim: it is whatever came in.
 (sig stringify-keys (any -> any))
-
-;; ---- status codes ----
-
-(defn status-text (code)
-  "Return the HTTP reason phrase for a numeric status code.
-
-  (hatch/http/util/status-text 404) ;=> \"Not Found\""
-  (match code
-    (100 "Continue")
-    (101 "Switching Protocols")
-    (200 "OK")
-    (201 "Created")
-    (202 "Accepted")
-    (204 "No Content")
-    (206 "Partial Content")
-    (301 "Moved Permanently")
-    (302 "Found")
-    (303 "See Other")
-    (304 "Not Modified")
-    (307 "Temporary Redirect")
-    (308 "Permanent Redirect")
-    (400 "Bad Request")
-    (401 "Unauthorized")
-    (403 "Forbidden")
-    (404 "Not Found")
-    (405 "Method Not Allowed")
-    (406 "Not Acceptable")
-    (408 "Request Timeout")
-    (409 "Conflict")
-    (410 "Gone")
-    (411 "Length Required")
-    (412 "Precondition Failed")
-    (413 "Payload Too Large")
-    (414 "URI Too Long")
-    (415 "Unsupported Media Type")
-    (416 "Range Not Satisfiable")
-    (422 "Unprocessable Entity")
-    (428 "Precondition Required")
-    (429 "Too Many Requests")
-    (431 "Request Header Fields Too Large")
-    (451 "Unavailable For Legal Reasons")
-    (500 "Internal Server Error")
-    (501 "Not Implemented")
-    (502 "Bad Gateway")
-    (503 "Service Unavailable")
-    (504 "Gateway Timeout")
-    (505 "HTTP Version Not Supported")
-    (_ "Unknown")))

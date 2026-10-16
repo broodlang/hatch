@@ -1,6 +1,6 @@
 (defmodule web/conn
   "Request/response context value — the Conn."
-  ; parse-body-params / content-type-param — body parsing
+  ; parse-query / content-type-base / content-type-param / stringify-keys — body parsing
   (:use http/util)
   ; parse — multipart/form-data (file upload) body parsing
   (:use http/multipart))
@@ -105,6 +105,31 @@
     (let (mp (http/multipart/parse body-bytes (content-type-param headers "boundary")))
       {:params (get mp :fields) :files (get mp :files)})
     {:params (parse-body-params headers body-text) :files {}}))
+
+(defn parse-body-params (headers body)
+  "Parse a request `body` into a string→value params map based on its Content-Type:
+  `application/x-www-form-urlencoded` is parsed like a query string, `application/json`
+  yields the top-level object's fields (keys stringified to match query/form params).
+  Any other type — or an empty/malformed body — yields `{}`; the raw bytes stay on the
+  conn as `:body`. A `multipart/form-data` body never reaches this: `parse-conn-body` hands it
+  to `http/multipart/parse`, which splits its file parts into `:files`."
+  (if (string/blank? body)
+    {}
+    (let (ct (content-type-base headers))
+      (cond
+        (= ct "application/x-www-form-urlencoded") (parse-query body)
+        (= ct "application/json") (json-body-params body)
+        else {}))))
+
+(defn- json-body-params (body)
+  "Params from a JSON request `body`. Only a top-level JSON object contributes params; its
+  keys are stringified — deeply, including nested objects — so the result reads like query/
+  form params throughout (json-parse yields keyword keys). A non-object body or a parse error
+  yields `{}` (a malformed body is ignored, not fatal)."
+  (try
+    (let (parsed (json/decode body))
+      (if (map? parsed) (stringify-keys parsed) {}))
+    (catch _e {})))
 
 (defn parse-cookies (headers)
   "Parse the request `Cookie` header into a string→string map. Values are taken verbatim

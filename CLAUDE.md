@@ -88,10 +88,10 @@ The demo (`../hatch-demo/src/web/routes.blsp`) serves:
 ```
 src/
   http/
-    util.blsp       — URL decode, query parse, status codes
+    util.blsp       — URL decode, query parse, Content-Type + Accept-Encoding reads
     request.blsp    — HTTP/1.1 parser (pipelining-safe)
     multipart.blsp  — multipart/form-data parser (in-memory + spooled-to-disk uploads)
-    response.blsp   — response serializer + helpers
+    response.blsp   — response serializer, status reason phrases, chunked encoders
     server.blsp     — TCP listener/worker; WS upgrade detection
     websocket.blsp  — RFC 6455 handshake, frame codec, and recv-frame — the socket reader
                       both socket actors (web/live, web/channel) park in, which hands back
