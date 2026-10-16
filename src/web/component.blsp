@@ -5,8 +5,8 @@
   on-mount-guard stay parent concerns.
 
   State lives in the session's per-connection component table (a `table` — Brood's ETS —
-  created once at connect time and carried across live-navigate, alongside the session's
-  socket watchdog), keyed by the string `\"id\"` the parent's `assigns` map supplies.
+  one per mounted view: created when the session connects and replaced on every live-navigate,
+  its components' beats cancelled with it), keyed by the string `\"id\"` the parent's `assigns` map supplies.
   `mount` runs once, the first time an id is seen; a parent re-render that keeps the same
   id does *not* re-run it — `web/component/send-update` pushes new state into a running
   component from anywhere (a sibling event, a PubSub handler, a parent tick) and triggers
@@ -173,11 +173,35 @@
 ; so `:module` (a plain symbol, stable across the round-trip) is what render-slot actually
 ; compares to tell "the same component" from "a different module reusing this id".
 
-(defn component-entry (module spec-thunk state)
+(defn component-entry (module spec-thunk state &optional (tick-handles []))
   "One components-table entry: the module tag (compared to detect an id collision — see
   render-slot), the spec-thunk (to call mount/render/handle-event by name each time,
-  hot-reload-friendly), and the component's current state."
-  {:module module :spec-thunk spec-thunk :state state})
+  hot-reload-friendly), the component's current state, and the timer handles of its own
+  `tick` beats (so `cancel-ticks` can stop them when the table is torn down)."
+  {:module module :spec-thunk spec-thunk :state state :tick-handles tick-handles})
+
+(defn- with-state (entry state)
+  "`entry` with its state replaced — and everything else, the tick handles included, kept.
+  Rebuilding an entry through `component-entry` at every update dropped the handles, which is
+  how a beat became impossible to cancel."
+  (assoc entry :state state))
+
+(defn- cancel-entry-ticks (entry)
+  ;; a fold, not `dolist`: `dolist` is list-only and runs its body once, with nil, over an
+  ;; EMPTY vector — which is what a component with no `tick` clause holds
+  (fold (or (and entry (get entry :tick-handles)) []) nil (fn (_ handle) (timer/cancel handle) nil))
+  nil)
+
+(defn cancel-ticks (components-table)
+  "Cancel every component beat started for `components-table` — the session calls this when
+  it tears a view down (a live-navigate away, or the socket closing).
+
+  Without it a component's timers outlived the table they were started for: after a navigate
+  the beats kept arriving for ids no table held, each one costing a re-render and a diff frame
+  for the rest of the connection, and navigating back mounted the component again and doubled
+  them. A timer is bounded by the session process, not by the view, so the view has to stop it."
+  (fold (table/snapshot components-table) nil (fn (_ pair) (cancel-entry-ticks (nth pair 1))))
+  nil)
 
 ; ---- render-slot: called from a parent's render-dynamic for a (component …) hole ----
 
@@ -185,10 +209,9 @@
   "The component's current state for this id, mounting it on first sight. Shared by both
   render entry points below.
 
-  Ids aren't namespaced per parent view — the components table is session-wide, and persists
-  across live-navigate. If a stored entry's `:module` doesn't match this call's (two different
-  component modules reused the same id string, or a different view swapped in via
-  live-navigate happens to reuse it), that's not the same component: treat it as unmounted and
+  Ids aren't namespaced per parent — the components table belongs to the whole mounted view. If
+  a stored entry's `:module` doesn't match this call's (two different component modules reused
+  the same id string), that's not the same component: cancel its beats, treat it as unmounted and
   mount fresh rather than rendering a foreign module's state through this one's `render`."
   (let (id (get assigns "id")
         entry (table/get components-table id)
@@ -196,29 +219,30 @@
     (if same-component?
       (get entry :state)
       (let (initial ((component-spec-mount (spec-thunk)) id assigns))
-        (table/put components-table id (component-entry module spec-thunk initial))
-        (start-component-ticks id (spec-thunk))
+        ;; a foreign entry under this id is being replaced, and its beats with it
+        (cancel-entry-ticks entry)
+        (table/put components-table
+          id
+          (component-entry module spec-thunk initial (start-component-ticks id (spec-thunk))))
         initial))))
 
 (defn- start-component-ticks (id spec)
   "Start one interval timer per `(tick ms …)` this component declares, posting
-  `[:tick-component id ms]` to the session on each beat.
+  `[:tick-component id ms]` to the session on each beat. Returns the timer handles, which the
+  entry keeps so `cancel-ticks` can stop them.
 
   At MOUNT, because that is the one moment a component is known to be new: `render-slot` runs
   inside the session process on every re-render, and starting a timer there would add one per
-  render. `timer/send-interval` monitors its target, so these die with the session and cannot
-  outlive it.
+  render.
 
-  What they CAN outlive is the component being on screen. A component whose `(if …)` turns
-  false keeps its state and its beat, and each beat then produces a diff for a slot nobody is
-  rendering — wasted work, not wrong output, and bounded by the session's own lifetime. That
-  is the same shape as `send-update` to a component that is no longer rendered, which has
-  always been a no-op rather than an error, and it is why this is a tick and not a general
-  scheduler: a component that needs to stop beating should stop being rendered AND the session
-  should end, or the parent should own the timer."
-  (dolist (ms (or (component-spec-ticks spec) []))
-    (timer/send-interval ms (self) [:tick-component id ms]))
-  nil)
+  A beat CAN outlive the component being on screen. A component whose `(if …)` turns false
+  keeps its state and its beat, and each beat then produces a diff for a slot nobody is
+  rendering — wasted work, not wrong output. That is the same shape as `send-update` to a
+  component that is no longer rendered, which has always been a no-op rather than an error. It
+  does not outlive the VIEW: the session cancels every beat in the table when it navigates
+  away or closes (`cancel-ticks`)."
+  (mapv (or (component-spec-ticks spec) [])
+    (fn (ms) (timer/send-interval ms (self) [:tick-component id ms]))))
 
 (defn wrapper-statics (id statics)
   "`statics` with the component's `[:div {:data-cid id} …]` wrapper folded into its first and
@@ -298,7 +322,7 @@
             new-state (try
                         ((component-spec-handle-event (spec-thunk)) name params (get entry :state))
                         (catch _ (get entry :state))))
-        (table/put components-table cid (component-entry (get entry :module) spec-thunk new-state)))))
+        (table/put components-table cid (with-state entry new-state)))))
   nil)
 
 ; ---- send-update: push new state into a running component from anywhere ----
@@ -311,9 +335,7 @@
     (when entry
       (table/put components-table
         cid
-        (component-entry (get entry :module)
-          (get entry :spec-thunk)
-          (merge (get entry :state) changes)))))
+        (with-state entry (merge (get entry :state) changes)))))
   nil)
 
 (defn send-update (session cid changes)
@@ -341,7 +363,5 @@
         (when tick
           (table/put components-table
             cid
-            (component-entry (get entry :module)
-              (get entry :spec-thunk)
-              (tick ms (get entry :state))))))))
+            (with-state entry (tick ms (get entry :state))))))))
   nil)

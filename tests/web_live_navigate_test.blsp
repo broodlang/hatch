@@ -1,0 +1,159 @@
+;; A live session end to end across a live-navigate: what the outgoing view leaves behind.
+;;
+;; The case that motivated this file is a component's own `tick`. Its timers were started at
+;; mount and their handles thrown away, so a navigate — which drops the component table — left
+;; them beating into the session for the rest of the connection: every beat ran
+;; `:tick-component` against a table that no longer held the id, re-rendered the NEW view and
+;; sent a diff frame for it. Navigating back mounted the component again and doubled them.
+;; Nothing raised; the symptom is frames that should not exist, so the test counts frames.
+(defmodule web-live-navigate-test
+  (:use web/live)
+  (:use http/websocket)
+  (:use test))
+
+;; A hand-built component spec — a plain map reads through `component-spec`'s accessors — so
+;; this module can hold a `deflive` too. It beats every 20ms and counts.
+(defn beat-mount (id assigns) {:n 0})
+(defn beat-render (state) [:span {} (str (get state :n))])
+(defn beat-handle-event (name params state) state)
+(defn beat-handle-tick (ms state) (assoc state :n (+ 1 (get state :n))))
+(defn live-component-spec ()
+  {:mount beat-mount
+   :render beat-render
+   :handle-event beat-handle-event
+   :handle-tick beat-handle-tick
+   :ticks [20]})
+
+;; View A: embeds the beating component.
+(deflive
+  (mount (params) {:title "a"})
+  (render (model)
+    [:div {} [:h1 {} (get model :title)] (component web-live-navigate-test {"id" "beat"})]))
+
+;; View B: a hand-built spec with nothing in it that beats.
+(defn- b-spec ()
+  {:mount (fn (params) {})
+   :render (fn (model &optional _components) [:p {} "b"])
+   :render-static ["<p>b</p>"]
+   :render-dynamic (fn (model &optional _components) [])
+   :handle-event (fn (name params model) model)
+   :handle-tick (fn (key model) model)
+   :handle-info (fn (message model) model)
+   :unmount (fn (model) nil)
+   :mount-guard (fn (conn) nil)
+   :handle-params (fn (params model) model)
+   :ticks []})
+
+(register-live "/navigate-test-b" b-spec nil)
+(register-live "/navigate-test-a" live-spec nil)
+
+(defn masked-text-frame (s)
+  "A masked client text frame (mask key zero, so the payload is the plaintext); < 126 bytes."
+  (let (b (string/->bytes s))
+    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+
+(defn- split-frame (buf)
+  "`[text remainder]` once `buf` holds a whole unmasked server frame, else nil."
+  (if (< (count buf) 2)
+    nil
+    (let (len7 (bytes/at buf 1)
+          header (if (= len7 126) 4 2)
+          len (if (= len7 126) (+ (* 256 (bytes/at buf 2)) (bytes/at buf 3)) len7))
+      (if (< (count buf) (+ header len))
+        nil
+        [(string/bytes-> (bytes/slice buf header (+ header len)))
+          (bytes/slice buf (+ header len) (count buf))]))))
+
+(defn next-frame (sock buf wait-ms)
+  "`[text remainder]` for the next server frame, or `:timeout` / `:closed`."
+  (let (split (split-frame buf))
+    (if split
+      split
+      (receive
+        ([:tcp ^sock chunk] (next-frame sock (bytes/concat buf chunk) wait-ms))
+        ([:tcp-closed ^sock] :closed)
+        (after wait-ms :timeout)))))
+
+(defn count-frames (sock buf wait-ms seen)
+  "How many server frames arrive before `wait-ms` passes with none — stopping at five, which
+  is already the answer, rather than reading a frame every beat until the suite times out."
+  (if (>= seen 5)
+    seen
+    (match (next-frame sock buf wait-ms)
+      ([_text remainder] (count-frames sock remainder wait-ms (+ seen 1)))
+      (_ seen))))
+(defn open-session (path)
+  "A real live session for the view registered at `path`; returns `[client listener]`."
+  (let (listener (tcp/listen "127.0.0.1" 0)
+        port (or (tcp/local-port listener) (error "test: the listener reported no local port")))
+    (let (client (tcp/connect "127.0.0.1" port)
+          server (receive ([:tcp-accept ^listener accepted] accepted) (after 5000 :timeout)))
+      (tcp/set-binary server true)
+      (tcp/set-binary client true)
+      (let (request {:method "GET"
+                     :path (str "/live/ws" path)
+                     :query ""
+                     :params {}
+                     :headers {}
+                     :body ""}
+            entry (lookup-live path)
+            pid (spawn (receive ([:go] (start-session server request entry)))))
+        (tcp/controlling-process server pid)
+        (send pid [:go])
+        [client listener]))))
+
+(defn- expect-frame (client buf)
+  (match (next-frame client buf 5000)
+    ([text remainder] [text remainder])
+    (other (error "test: expected a server frame, got " (->string other)))))
+
+(describe "a live-navigate stops the outgoing view's component beats"
+  :isolated (test "no frame reaches the client for a component the session navigated away from"
+    (let ([client listener] (open-session "/navigate-test-a"))
+      (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+      (let ([join-text after-join] (expect-frame client (bytes [])))
+        (assert= (includes? join-text "\"join\"") true)
+        ;; the component is beating: its diffs arrive while the session sits on view A
+        (let ([beat-text after-beat] (expect-frame client after-join))
+          (assert= (includes? beat-text "\"diff\"") true)
+          (tcp/send client
+            (masked-text-frame "{\"event\":\"navigate\",\"path\":\"/navigate-test-b\"}"))
+          ;; skip any beat already in flight until B's join render arrives
+          (letrec (until-join (fn (buf)
+                                (let ([text remainder] (expect-frame client buf))
+                                  (if (includes? text "\"join\"") remainder (until-join remainder)))))
+            (let (after-navigate (until-join after-beat))
+              ;; Before the fix a diff frame arrived every 20ms here, forever.
+              (assert= (count-frames client after-navigate 150 0) 0)))))
+      (tcp/close client)
+      (tcp/close listener))))
+
+;; ---- the same contract, without a socket ----
+
+(defn- queued-beats (&optional (seen 0))
+  "How many `[:tick-component …]` beats are already in this process's mailbox, draining them."
+  (receive ([:tick-component _ _] (queued-beats (+ seen 1))) (after 0 seen)))
+
+(defn- beats-within (wait-ms)
+  "Wait `wait-ms`, then drain and count the beats that arrived meanwhile."
+  (sleep wait-ms)
+  (queued-beats))
+
+(describe "web/component/cancel-ticks"
+  :isolated (test "stops every beat the table's components started"
+    (let (components (table/new))
+      ;; mounting here starts the 20ms beat, aimed at this process
+      (web/component/render-slot 'web-live-navigate-test live-component-spec {"id" "x"} components)
+      (assert= (> (beats-within 60) 0) true)
+      (web/component/cancel-ticks components)
+      (queued-beats)
+      (assert= (beats-within 80) 0)))
+  :isolated (test "an update keeps the handles, so a component that changed state can still be stopped"
+    (let (components (table/new))
+      (web/component/render-slot 'web-live-navigate-test live-component-spec {"id" "y"} components)
+      (web/component/apply-update components "y" {:n 5})
+      (web/component/apply-tick components "y" 20)
+      (assert= (count (get (table/get components "y") :tick-handles)) 1)
+      (web/component/cancel-ticks components)
+      (queued-beats)
+      (assert= (beats-within 80) 0))))

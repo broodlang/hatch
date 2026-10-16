@@ -628,11 +628,15 @@
   Wrapped whole: a render that throws here has already been reported by the real render beside
   it, and an audit is the last thing that should be able to end a session."
   (when (web/audit/dev?)
-    (check-allow :discarded-catch
-      (try
-        (web/audit/warn-live-markup! (web/template/render ((view-spec-render spec) model
-                                                            (table/new))))
-        (catch _ nil))))
+    (let (scratch (table/new))
+      (check-allow :discarded-catch
+        (try
+          (web/audit/warn-live-markup! (web/template/render ((view-spec-render spec) model scratch)))
+          (catch _ nil)))
+      ;; Mounting into the scratch table starts each component's own beats, aimed at this
+      ;; session — stop them, or every dev join leaks a set of timers nothing can cancel.
+      (check-allow :discarded-catch
+        (try (do (web/component/cancel-ticks scratch) (table/drop scratch)) (catch _ nil)))))
   nil)
 
 (defn push-full (sock view buf)
@@ -765,6 +769,8 @@
   (live-unregister (self))
   (check-allow :discarded-catch
     (try (web/upload/cleanup (session-view-model view)) (catch _ nil)))
+  (check-allow :discarded-catch
+    (try (web/component/cancel-ticks (session-view-components view)) (catch _ nil)))
   (check-allow :discarded-catch (try (table/drop (session-view-components view)) (catch _ nil)))
   (close-socket sock))
 
@@ -962,11 +968,10 @@
     ; computing its own changes rather than being handed them — and like it, the parent's model
     ; is untouched, so what reaches the wire is the component's own inner-slot diff.
     ;
-    ; NOT generation-stamped, unlike a view's `[:tick ms gen]`. A view's tickers are killed and
-    ; restarted across live-navigate, so a stale beat must be recognised and dropped; the
-    ; components table is session-wide and survives navigation by design, so a component's beat
-    ; is still meant for it. A beat for an id that is no longer mounted is a no-op in
-    ; `apply-tick`.
+    ; NOT generation-stamped, unlike a view's `[:tick ms gen]`: a navigate cancels every
+    ; component beat in the outgoing table (`web/component/cancel-ticks`) before it drains the
+    ; mailbox, so no stale beat survives into the next view. A beat for an id that is no longer
+    ; mounted is a no-op in `apply-tick`.
     ([:tick-component cid ms] (if (session-view-mounted? view)
                                 (do
                                   (try
@@ -1182,6 +1187,12 @@
                                    ((view-spec-unmount (session-view-spec view)) (session-view-model view))
                                    (catch e (live-handler-error "unmount" :unmount e nil)))
                         _ (stop-tickers (session-view-ticker-pids view))
+                        ; and the old components' own beats, before the drain below, so no beat can
+                        ; land after it for a table that is about to be dropped
+                        _beats (check-allow :discarded-catch
+                                 (try
+                                   (web/component/cancel-ticks (session-view-components view))
+                                   (catch _ nil)))
                         ; barrier the pubsub/presence registries so every broadcast queued before
                         ; the old view's unsubscribe (run in unmount above) has landed here, THEN
                         ; drop those stale out-of-band messages so none reaches the new view.

@@ -86,3 +86,13 @@
         "<i>3</i>")
       ;; the pre-split fallback branch render-slot depends on: no statics means "render whole"
       (assert= (web/component/component-spec-render-static spec) nil))))
+
+;; A component with no `tick` clause starts no timer. It used to start one anyway: the beats
+;; were started with `dolist` over the spec's interval vector, and `dolist` over an EMPTY
+;; vector runs its body once with nil — so every tickless mount spawned a nil-interval timer
+;; process that never fired and lived as long as the session.
+(describe "a component without ticks"
+  (test "keeps no timer handles"
+    (let (t (table/new))
+      (render-slot 'web-component-test live-component-spec {"id" "quiet"} t)
+      (assert= (get (table/get t "quiet") :tick-handles) []))))
