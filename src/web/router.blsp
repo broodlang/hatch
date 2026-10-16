@@ -157,6 +157,15 @@
                      (seq/filter routes
                        (fn (r) (or (dynamic-first? r) (= (first-seg r) seg)))))))}))
 
+(defn routes-of (table)
+  "The routes of a route `table`, in declaration order — what `defrouter` defines as
+  `<router-name>--routes`, which is an [[index-routes]] index rather than a list, or a plain
+  list of `{:method :pattern :handler}` maps built by hand.
+
+  The index is this module's business; a reader of the table (a sitemap, a route listing) asks
+  here instead of knowing that `:all` holds the original list."
+  (if (and (map? table) (contains? table :all)) (get table :all) table))
+
 (defn- candidates (routes segments)
   "The routes worth trying for `segments`. `routes` may be an index (from
   [[index-routes]]) or a plain list, which is tried whole — so a caller that builds a table
