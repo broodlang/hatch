@@ -23,8 +23,8 @@
   a locally-published broadcast is replicated once per peer (see `pubsub-fanout-remote`).
   With no node started, `(node/list)` is empty and the replication is a no-op, so a single-node
   app behaves exactly as before."
-  ; send-info — deliver a payload to a subscribed session
-  (:use web/live)
+  ; send-info — deliver a payload to a subscribed session (or channel socket)
+  (:use web/socket :only [send-info])
   ; ensure-supervised / vault-loop / pull-snapshot / mirror — supervised durable registry;
   ; watch-vault / rewatch-vault / monitor-each / hold-monitor / release-monitor — the
   ; monitor + vault bookkeeping every registry on this scaffolding needs, in one place

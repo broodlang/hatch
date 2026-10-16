@@ -43,6 +43,8 @@
   ; view-spec-* / component-spec-* — the drivers below read a spec through its accessors, so
   ; a mistyped field is an undefined function rather than a nil that silently does nothing
   (:alias web/live)
+  ; json-decode — a recorded push is decoded with the wire codec the session encoded it with
+  (:alias web/socket)
   (:alias web/component)
   (:alias web/template))
 ; ---- synthetic conns -------------------------------------------------------
@@ -515,7 +517,7 @@
     (if (nil? raw)
       {}
       (let (decoded (check-allow :discarded-catch
-                      (try (web/live/json-decode (->string raw)) (catch _ nil))))
+                      (try (web/socket/json-decode (->string raw)) (catch _ nil))))
         (if (map? decoded) decoded {})))))
 
 ;; Which attributes a driver will fire, in the order the client would find them. `data-event`

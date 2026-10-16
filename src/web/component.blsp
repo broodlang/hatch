@@ -53,6 +53,8 @@
   ; compile-parts / component-slot / slot->html — the component's own static/dynamic split
   ; and the tagged slot value the parent diffs it as
   (:alias web/parts)
+  ; send-safely — send-update's delivery, shared with send-info
+  (:alias web/socket)
   ; send-interval — a component's own tick, started at mount (see start-component-ticks)
   (:alias timer))
 
@@ -342,9 +344,9 @@
   "Merge `changes` into component `cid`'s stored state within `session` (a live session
   pid) and trigger a re-render — the mechanism that lets code *outside* a component's own
   event handlers (a sibling event, a PubSub broadcast, a parent tick) push fresh data into
-  it. Sending to an already-dead session is swallowed — see `web/live/send-safely`, which
+  it. Sending to an already-dead session is swallowed — see `web/socket/send-safely`, which
   `send-info` also builds on."
-  (live/send-safely session [:update-component cid changes]))
+  (web/socket/send-safely session [:update-component cid changes]))
 
 (defn apply-tick (components-table cid ms)
   "Run component `cid`'s own `handle-tick` for interval `ms` over its stored state and store

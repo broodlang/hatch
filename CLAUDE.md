@@ -138,8 +138,11 @@ src/
                       subscribed to the same topic both hear them
     live.blsp       — deflive macro (mount/render/on/tick/handle-info/unmount), session actor,
                       live-conn (the connection's read-only Conn, bound per session),
-                      live-route dispatch, JSON codec, send-info (out-of-band → handle-info),
-                      page-chrome
+                      live-route dispatch, page-chrome
+    socket.blsp     — the plumbing web/live and web/channel share: the JSON wire codec
+                      (Encode/json-decode), send-msg/close-socket, the push queue, the idle
+                      watchdog, send-info (out-of-band → handle-info), and `recv` — the one
+                      read step ([:text]/[:binary]/[:control]/[:closed])
     parts.blsp      — static/dynamic render split (minimal-diff wire protocol); compile-parts
     component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
                       render-slot (its own static/dynamic split, so a component diffs

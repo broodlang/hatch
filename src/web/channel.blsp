@@ -52,14 +52,11 @@
 
   There is no `deflive`-style model here and nothing is rendered: `socket` carries the
   topic, the connection's read-only Conn, and whatever `assign` has put in its assigns."
-  ; text-frame / pong-frame / recv-frame — the shared codec and socket reader (the same one
-  ; web/live's session actor runs; see http/websocket's `recv-frame`)
-  (:use http/websocket)
-  ; encode / json-decode — ONE wire codec for the whole WebSocket layer, so an app that
-  ; writes `(impl Encode app/money …)` has it apply to a channel push and a live diff alike.
-  ; idle-watchdog — the keepalive/reaper is the socket's, not the view's, so a channel
-  ; socket gets the same protection from a black-holed peer for free.
-  (:alias web/live)
+  ; recv / send-msg / queue-push / close-socket / start-watchdog / json-decode — the socket
+  ; plumbing web/live's session runs too: ONE wire codec for the whole WebSocket layer (so an
+  ; app's `(impl JsonEncode app/money …)` applies to a channel push and a live diff alike), and
+  ; the same keepalive/reaper, so a channel socket is protected from a black-holed peer for free
+  (:alias web/socket)
   (:alias web/pubsub)
   (:alias web/registry)
   ; bundled-source / bundled-js-handler — serve brood_channel.js straight from the package
@@ -155,7 +152,7 @@
   (hatch/web/channel/parse-client-frame (string/->bytes \"7\")) ;=> {:topic \"\" :event \"\" :payload {} :ref nil}
   (hatch/web/channel/parse-client-frame (string/->bytes \"{\\\"topic\\\":\\\"r\\\",\\\"event\\\":\\\"e\\\"}\")) ;=> {:topic \"r\" :event \"e\" :payload {} :ref nil}"
   (let (decoded (check-allow :discarded-catch
-                  (try (web/live/json-decode (string/bytes-> payload)) (catch _ nil)))
+                  (try (web/socket/json-decode (string/bytes-> payload)) (catch _ nil)))
         msg (if (map? decoded) decoded {})
         raw (get msg "payload" {}))
     ;; `:topic` and `:event` are coerced to STRINGS, not passed through. `{"topic":7}` is
@@ -167,12 +164,6 @@
      :event (->string (get msg "event" ""))
      :payload (if (map? raw) raw {})
      :ref (get msg "ref" nil)}))
-
-(defn- send-frame (sock frame)
-  "Encode `frame` and write it as a text frame. False if the write failed — a peer that
-  vanished mid-write ends the socket cleanly rather than crashing the worker."
-  (check-allow :discarded-catch
-    (try (do (tcp/send sock (text-frame (web/live/encode frame))) true) (catch _ false))))
 
 (defn- reply-frame (topic ref status payload)
   "A reply to the client frame that carried `ref`. A frame with no `ref` gets no reply — the
@@ -300,8 +291,7 @@
   It posts to `(self)`, which is the socket process, because handlers run there and the
   socket process is the connection's sole writer; the loop flushes the queue before it blocks
   for the next frame. Returns nil."
-  (send (self) [:ch-push (message (channel-socket-topic socket) event payload)])
-  nil)
+  (web/socket/queue-push (message (channel-socket-topic socket) event payload)))
 
 ; ---- the socket actor ----
 
@@ -314,15 +304,6 @@
     {:count 1}
     {:phase phase :topic topic :error (error-message e)})
   fallback)
-
-(defn- flush-pushes (sock)
-  "Drain every `[:ch-push frame]` a just-run handler queued (via `push`) and write each.
-  Non-blocking, so it pulls only pushes and leaves frames, broadcasts and control messages
-  where they are — the same shape as web/live's `flush-effects`, and run at the same point:
-  right after a handler returns, before the loop blocks for the next client frame."
-  (receive
-    ([:ch-push frame] (do (send-frame sock frame) (flush-pushes sock)))
-    (after 0 nil)))
 
 (defn- leave-topic (topic joined reason)
   "Run `topic`'s `terminate`, drop its pubsub subscription, and return `joined` without it."
@@ -344,14 +325,9 @@
   belt-and-braces — the registry monitors its subscribers and reaps this pid anyway — but
   `terminate` is the channel's own cleanup hook and only this path can run it."
   (fold (vec (keys joined)) joined (fn (acc topic) (leave-topic topic acc reason)))
-  ;; A Close frame before the fd goes, as web/live does. Without it the browser sees the
-  ;; connection vanish rather than end, treats it as a failure, and reconnects on its backoff
-  ;; — so a client the connect guard refused comes back roughly every second, forever, each
-  ;; attempt costing a full upgrade and a `web/conn/build`. Saying no properly is what stops
-  ;; it asking again.
-  (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
-  (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
-  nil)
+  ;; `close-socket` sends a Close frame before the fd goes, so a client the connect guard
+  ;; refused is told no rather than reconnecting on its backoff forever.
+  (web/socket/close-socket sock))
 
 (defn- apply-result (sock topic ref result joined)
   "Fold one handler result into the joined table, sending whatever reply it asked for.
@@ -361,19 +337,20 @@
   returns a bare socket, or nil, must not take the connection down."
   (match result
     ([:reply payload socket] (do
-                               (when ref (send-frame sock (reply-frame topic ref "ok" payload)))
+                               (when ref
+                                 (web/socket/send-msg sock (reply-frame topic ref "ok" payload)))
                                (assoc joined topic (assoc (get joined topic) :socket socket))))
     ([:noreply socket] (do
-                         (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                         (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
                          (assoc joined topic (assoc (get joined topic) :socket socket))))
     ([:stop reason socket] (do
-                             (when ref (send-frame sock (reply-frame topic ref "ok" {})))
-                             (send-frame sock
+                             (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+                             (web/socket/send-msg sock
                                {:topic topic :event "close" :payload {:reason reason}})
                              (leave-topic topic
                                (assoc joined topic (assoc (get joined topic) :socket socket))
                                reason)))
-    (_ (do (when ref (send-frame sock (reply-frame topic ref "ok" {}))) joined))))
+    (_ (do (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {}))) joined))))
 
 ;; How many topics one connection may hold at once. A client chooses its own topics, and each
 ;; join costs a map entry plus a pubsub subscription on every node — so without a ceiling one
@@ -387,12 +364,12 @@
     (contains? joined topic)
       (do
         (when ref
-          (send-frame sock (reply-frame topic ref "error" {:reason "already joined"})))
+          (web/socket/send-msg sock (reply-frame topic ref "error" {:reason "already joined"})))
         joined)
     (>= (count joined) *max-topics-per-socket*)
       (do
         (when ref
-          (send-frame sock (reply-frame topic ref "error" {:reason "too many topics"})))
+          (web/socket/send-msg sock (reply-frame topic ref "error" {:reason "too many topics"})))
         joined)
     else
     ;; The LOOKUP is inside the guard too, not just the `join` callback.
@@ -413,7 +390,7 @@
           (do
             (warn-unjoinable-channel! topic)
             (when ref
-              (send-frame sock (reply-frame topic ref "error" {:reason "no such channel"})))
+              (web/socket/send-msg sock (reply-frame topic ref "error" {:reason "no such channel"})))
             joined)
           (let (spec (try
                        ((get entry :spec))
@@ -430,37 +407,41 @@
               ; has agreed to the join, so a refused join leaves no subscription behind.
               ([:ok socket2] (do
                                (pubsub/subscribe topic)
-                               (when ref (send-frame sock (reply-frame topic ref "ok" {})))
+                               (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
                                (assoc joined topic {:spec spec :socket socket2})))
               ([:ok payload socket2] (do
                                        (pubsub/subscribe topic)
                                        (when ref
-                                         (send-frame sock (reply-frame topic ref "ok" payload)))
+                                         (web/socket/send-msg sock
+                                           (reply-frame topic ref "ok" payload)))
                                        (assoc joined topic {:spec spec :socket socket2})))
               ([:error payload] (do
                                   (when ref
-                                    (send-frame sock (reply-frame topic ref "error" payload)))
+                                    (web/socket/send-msg sock
+                                      (reply-frame topic ref "error" payload)))
                                   joined))
               ;; A join that answers something else has not said yes, and the safe reading of
               ;; "not yes" on an authorization decision is no.
               (_ (do
                    (when ref
-                     (send-frame sock (reply-frame topic ref "error" {:reason "join refused"})))
+                     (web/socket/send-msg sock
+                       (reply-frame topic ref "error" {:reason "join refused"})))
                    joined))))))))
 
-(defn- socket-dispatch (sock conn joined buf payload watchdog)
+(defn- socket-dispatch (sock conn joined payload)
   "Decode one client frame and route it: `join`/`leave` are the socket's own vocabulary,
-  anything else is an event for that topic's `handle-in`."
+  anything else is an event for that topic's `handle-in`. Returns the joined table to carry on
+  with."
   (let (frame (parse-client-frame payload)
         topic (get frame :topic)
         event (get frame :event)
         ref (get frame :ref)
         params (get frame :payload))
     (match event
-      ("join" (socket-loop sock conn (do-join sock conn joined topic ref params) buf watchdog))
+      ("join" (do-join sock conn joined topic ref params))
       ("leave" (do
-                 (when ref (send-frame sock (reply-frame topic ref "ok" {})))
-                 (socket-loop sock conn (leave-topic topic joined :left) buf watchdog)))
+                 (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+                 (leave-topic topic joined :left)))
       (_
         (let (entry (get joined topic))
           (if (nil? entry)
@@ -469,13 +450,13 @@
             ; after a leave is ordinary, not hostile.
             (do
               (when ref
-                (send-frame sock (reply-frame topic ref "error" {:reason "not joined"})))
-              (socket-loop sock conn joined buf watchdog))
+                (web/socket/send-msg sock (reply-frame topic ref "error" {:reason "not joined"})))
+              joined)
             (let (socket (get entry :socket)
                   result (try
                            ((channel-spec-handle-in (get entry :spec)) event params socket)
                            (catch e (channel-error "in" topic e [:noreply socket]))))
-              (socket-loop sock conn (apply-result sock topic ref result joined) buf watchdog))))))))
+              (apply-result sock topic ref result joined))))))))
 
 (defn- handle-out-of-band (sock joined msg)
   "Route one `[:info payload]` message. A payload carrying a `:topic` this socket has joined
@@ -522,63 +503,43 @@
                      (catch e (channel-error "out" topic e [:noreply socket]))))
         (match result
           ([:push event payload socket2] (do
-                                           (send-frame sock (message topic event payload))
+                                           (web/socket/send-msg sock (message topic event payload))
                                            (assoc joined topic (assoc entry :socket socket2))))
           ([:noreply socket2] (assoc joined topic (assoc entry :socket socket2)))
           (_ joined))))))
 
-(defn- socket-control (sock conn joined buf msg watchdog)
-  "One non-socket message delivered to the socket process. An unrecognised one is dropped
-  rather than left in the mailbox — see the same note on web/live's `session-control`."
+(defn- socket-control (sock joined msg)
+  "One non-socket message delivered to the socket process; returns the joined table. An
+  unrecognised one is dropped rather than left in the mailbox — see the same note on
+  web/live's `session-control`. (The watchdog's keepalive and reap never get here:
+  `web/socket/recv` handles both.)"
   (match msg
-    ; the idle watchdog asks us — the sole writer — to emit a keepalive ping
-    ([:ws-send _ frame] (if (check-allow :discarded-catch
-                              (try (do (tcp/send sock frame) true) (catch _ false)))
-                          (socket-loop sock conn joined buf watchdog)
-                          (shutdown sock joined :closed)))
-    ; An out-of-band message, delivered by `web/live/send-info` — which is what web/pubsub
+    ; An out-of-band message, delivered by `web/socket/send-info` — which is what web/pubsub
     ; broadcasts arrive as, and what a timer or any other process holding this pid should
     ; use. A payload naming a topic this socket has joined is a broadcast for that channel;
     ; anything else goes to `handle-info`.
-    ([:info payload] (socket-loop sock conn (handle-out-of-band sock joined payload) buf watchdog))
-    ; the watchdog reaped a silent peer
-    ([:reap] (shutdown sock joined :reaped))
-    (_ (socket-loop sock conn joined buf watchdog))))
-
-(defn- kick (watchdog)
-  "Tell the idle watchdog that a client frame arrived, resetting its ping/idle timer. A no-op
-  without one, so the loop can be driven directly in a test."
-  (when watchdog (send watchdog [:alive]))
-  nil)
+    ([:info payload] (handle-out-of-band sock joined payload))
+    (_ joined)))
 
 (defn- socket-loop (sock conn joined buf watchdog)
-  "The per-connection event loop: flush queued pushes, block for the next message, route it.
+  "The per-connection event loop, and the one place the socket is read or closed: block for
+  the next message (`web/socket/recv` flushes queued pushes first, answers pings, kicks the
+  watchdog on every client frame and reports its reap), route it, carry the joined table on.
 
-  **Every frame from the client kicks the watchdog alive**, and that is not housekeeping. The
-  watchdog resets only on `[:alive]`, and a browser's automatic pong arrives here as an
-  ordinary opcode-10 frame — so without this a socket carrying traffic every second is reaped
-  on exactly the same schedule as a dead one: two unanswered pings after connect and gone. The
-  JS client reconnects and rejoins, so the symptom is a silent drop-and-rejoin cycle every
-  ninety seconds rather than an outage, which is the harder thing to notice. `web/live` does
-  the same through `kick-watchdog`."
-  (flush-pushes sock)
-  (match (recv-frame sock buf)
-    ([:ok 8 _ _] (shutdown sock joined :closed))
-    ;; `remainder`, NOT `buf` — see the same arm in web/live's `session-recv`. Re-entering
-    ;; with the buffer the ping came out of re-parses that same ping forever.
-    ([:ok 9 payload remainder] (kick watchdog)
-      (if (check-allow :discarded-catch
-            (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
-        (socket-loop sock conn joined remainder watchdog)
-        (shutdown sock joined :closed)))
-    ([:ok 1 payload remainder] (kick watchdog)
-      (socket-dispatch sock conn joined remainder payload watchdog))
-    ; any other opcode (a pong, a binary frame) — channels are a JSON protocol, so this is
-    ; liveness and nothing more, which is exactly what the watchdog needs to hear
-    ([:ok _ _ remainder] (kick watchdog) (socket-loop sock conn joined remainder watchdog))
-    ([:other msg buf2] (socket-control sock conn joined buf2 msg watchdog))
-    ([:closed] (shutdown sock joined :closed))
-    ([:error _] (shutdown sock joined :protocol-error))))
+  A binary frame is liveness and nothing more — channels are a JSON protocol."
+  (match (web/socket/recv sock buf watchdog)
+    ([:text payload remainder] (socket-loop sock
+                                 conn
+                                 (socket-dispatch sock conn joined payload)
+                                 remainder
+                                 watchdog))
+    ([:binary _ remainder] (socket-loop sock conn joined remainder watchdog))
+    ([:control msg remainder] (socket-loop sock
+                                conn
+                                (socket-control sock joined msg)
+                                remainder
+                                watchdog))
+    ([:closed reason] (shutdown sock joined reason))))
 
 (defn start-socket (sock request &optional (connect nil))
   "Run a channel socket on a freshly-upgraded connection. `connect`, if given, is a
@@ -599,13 +560,11 @@
     (if refused
       ;; Close frame first, for the reason `shutdown` gives: a refused client that sees the
       ;; connection vanish rather than end reconnects on its backoff, forever.
-      (do
-        (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
-        (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil))))
-      ;; `(self)` here and not inside the spawn — see web/live/start-watchdog for why that
+      (web/socket/close-socket sock)
+      ;; `(self)` here and not inside the spawn — see web/socket/start-watchdog for why that
       ;; distinction is the whole difference between a watchdog and a decoration.
       (let (socket-pid (self)
-            watchdog (web/live/start-watchdog socket-pid sock))
+            watchdog (web/socket/start-watchdog socket-pid sock))
         (socket-loop sock conn {} (bytes []) watchdog)))))
 
 (def *channel-ws-prefix* "/channel/ws")

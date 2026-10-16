@@ -12,6 +12,8 @@
   ; channel socket works with it unchanged
   (:alias web/presence)
   (:use http/websocket)
+  ; *ws-ping-ms* — the watchdog interval the end-to-end case shortens
+  (:alias web/socket)
   (:use test))
 
 ;; ---- topic patterns --------------------------------------------------------
@@ -427,7 +429,7 @@
 ;; two unanswered pings after connect and gone. The JS client reconnects and rejoins, so the
 ;; symptom is a silent ninety-second drop-and-rejoin cycle, not an outage.
 
-(def default-channel-ping-ms web/live/*ws-ping-ms*)
+(def default-channel-ping-ms web/socket/*ws-ping-ms*)
 
 (defn read-opcode (sock buf deadline)
   "The opcode of the next complete server frame, `:closed`, or `:timeout`."
@@ -458,7 +460,7 @@
     (register-channel "e2e:*" (fn () (live-channel-spec)))
     ;; 60ms: the watchdog reaps after three intervals with no `[:alive]`, so 10 rounds at a
     ;; 40ms gap covers well past the point a socket that failed to kick would already be gone.
-    (def web/live/*ws-ping-ms* 60)
+    (def web/socket/*ws-ping-ms* 60)
     (let (outcome (with-socket
                     (fn (client)
                       (tcp/send client
@@ -473,7 +475,7 @@
                         (masked-text-frame "{\"topic\":\"e2e:busy\",\"event\":\"echo\",\"payload\":{\"text\":\"last\"},\"ref\":\"z\"}"))
                       (read-opcode client (bytes []) 2000))))
       (assert= outcome 1))
-    (def web/live/*ws-ping-ms* default-channel-ping-ms)))
+    (def web/socket/*ws-ping-ms* default-channel-ping-ms)))
 
 ;; ---- presence over a channel socket ----------------------------------------
 ;;

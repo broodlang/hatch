@@ -1,7 +1,8 @@
-; defability / impl (value dispatch, ability)
 (defmodule web/live
   "LiveBrood: per-session WebSocket actor + deflive macro."
-  (:use http/websocket)
+  ; recv / send-msg / queue-push / close-socket / start-watchdog / encode / json-decode — the
+  ; socket plumbing this session shares with web/channel's topic socket
+  (:use web/socket)
   (:use web/template)
   ; parse-file — the (template …) clause's BML→Hiccup compiler
   (:use web/bml)
@@ -9,158 +10,17 @@
   (:use web/parts)
   ; build — a read-only Conn from the WS upgrade request, for on-mount-guard
   (:use web/conn)
-  ; defability Encode / impl — value dispatch for JSON wire encoding (ability, ADR)
-  ; apply-update / dispatch-event — this module's own session runtime calls these
-  ; fully-qualified (web/component/…); declaring the dependency here — rather than
-  ; relying entirely on deflive-expanded consumers to have loaded it — means it
-  ; resolves even for a hand-built LiveModule spec that never goes through the deflive
-  ; macro. web/component itself :alias web/live — Brood tolerates the mutual reference
-  ; fine (verified empirically), so this isn't a load-order hazard.
+  ; apply-update / dispatch-event / apply-tick / cancel-ticks — this module's own session
+  ; runtime calls these fully-qualified (web/component/…); declaring the dependency here —
+  ; rather than relying entirely on deflive-expanded consumers to have loaded it — means it
+  ; resolves even for a hand-built LiveModule spec that never goes through the deflive macro.
   (:alias web/component)
   ; serve-body — serve brood_live.js through the static cache pipeline (ETag/304/nosniff)
   (:alias web/static)
   ; start — the live registries run under a supervisor (docs/robustness.md)
   (:alias supervisor)
-  ; ->json — the stdlib `JsonEncode` ability, which `Encode`'s fallback delegates to, so an
-  ; app writes ONE impl for both the HTTP JSON body and the live wire (see below); decode —
-  ; the inbound half, which used to be a hand-rolled parser here
-  (:alias json)
-  ; stringify-keys — a decoded frame is string-keyed, like every other param map in hatch
-  (:alias http/util)
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
-; ---- JSON encode via the Encode protocol -----------------------------------
-; What used to be one closed `(cond …)` on `type-of` is now an open protocol: each
-; type has its own impl, and an app can add `(impl Encode :instant …)` for its
-; own types without touching the framework. `encode` dispatches on the value's type.
-
-(def *json-hex* "0123456789abcdef")
-
-(defn- json-esc-control (cp)
-  "The JSON escape for a C0 control codepoint `cp` (0x00–0x1F): the named short form where one
-  exists, else `\\u00XX`."
-  (cond
-    (= cp 8) "\\b"
-    (= cp 9) "\\t"
-    (= cp 10) "\\n"
-    (= cp 12) "\\f"
-    (= cp 13) "\\r"
-    else
-      (str "\\u00"
-        (string/char-at *json-hex* (math/quot cp 16))
-        (string/char-at *json-hex* (math/mod cp 16)))))
-
-; Every character JSON must escape: backslash (92), quote (34), and every C0 control
-; (U+0000–U+001F). Built once, as character SETs for `string/span-until`. The controls are
-; separated out because they are far rarer than a quote — HTML in a live diff is full of
-; `class="…"` and holds a control character essentially never.
-(def *json-control-chars* (string/codepoints-> (into [] (range 0 32))))
-(def *json-escape-chars* (string/codepoints-> (append [92 34] (into [] (range 0 32)))))
-
-(defn- json-clean? (s chars)
-  "True when `s` contains no character from the set `chars` — one native scan."
-  (= (string/span-until s 0 chars) (string/length s)))
-
-(defn json-str (s)
-  "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control
-  (U+0000–U+001F) — the named short forms (\\b \\t \\n \\f \\r) or `\\u00XX`. RFC 8259 requires
-  all chars < U+0020 to be escaped; emitting a raw control (a backspace/ESC/NUL pasted into
-  user text) makes the frame's JSON invalid, and the client's `JSON.parse` then silently drops
-  the whole frame — a per-field server↔client desync with no error surfaced.
-
-  Almost no string contains any of them, and the escaping path costs the same either way: two
-  `string/replace` passes, then a fold over all 32 control codepoints, each allocating a
-  `bytes`, decoding it to a string, and running ANOTHER full `string/replace` over the
-  accumulator. Thirty-four passes over the string to change nothing — 87.8us for a ten-
-  character string, and this runs on every string field of every live-view frame.
-
-  `string/span-until` asks whether any escapable character is present in one native scan, and
-  a second scan asks specifically about the controls. Three tiers, because the middle one is
-  what real traffic looks like: a rendered HTML diff is full of `class=\"…\"` and so needs the
-  two `string/replace` passes, but holds a C0 control essentially never — and it is the fold
-  over all 32 of those, not the replaces, that costs 87us. The full path is unchanged and
-  still runs whenever a control really is present."
-  (cond
-    (json-clean? s *json-escape-chars*) (str "\"" s "\"")
-    (json-clean? s *json-control-chars*)
-      (str "\""
-        (-> s
-          (string/replace "\\" "\\\\")
-          (string/replace "\"" "\\\""))
-        "\"")
-    else
-      (str "\""
-        (fold (range 32)
-          (-> s
-            (string/replace "\\" "\\\\")
-            (string/replace "\"" "\\\""))
-          (fn (acc cp) (string/replace acc (string/bytes-> (bytes [cp])) (json-esc-control cp))))
-        "\"")))
-
-(defability Encode
-  "JSON-encode a value to its wire string."
-  (encode [v] :-> string))
-
-(impl Encode :nil (encode [_] "null"))
-(impl Encode :bool (encode [b] (if b "true" "false")))
-(impl Encode :int (encode [n] (str n)))
-(impl Encode :float (encode [n] (str n)))
-(impl Encode :string (encode [s] (json-str s)))
-(impl Encode :vector (encode [v] (str "[" (string/join (map v encode) ",") "]")))
-(impl Encode :pair (encode [v] (str "[" (string/join (map v encode) ",") "]")))
-(impl Encode :map (encode [m] (str "{" (string/join (map (%map-pairs m) encode-entry) ",") "}")))
-;; Keywords, symbols, pids — and an app's own records, via the stdlib ability.
-;;
-;; Hatch encodes JSON in two places: `json/encode` for an HTTP body (`web/conn/json-resp`),
-;; the session cookie and `web/seo`'s JSON-LD, and this `Encode` for the live wire, which
-;; exists for the reasons above it — a `:default` (`json/encode` has none and raises on an
-;; unknown kind, which on a socket means a dropped frame rather than a 500) and the
-;; three-tier `json-str`.
-;;
-;; Two encoders is fine. Two *extension points* was not: `(impl JsonEncode app/money …)`
-;; got `"$2.50"` in a JSON response and `"#<money …>"` in a live push, and the fix was to
-;; find and implement a hatch-private ability the app had no reason to know about. A record
-;; with no impl still falls here (dispatch drops a record straight to `:default`, never to
-;; `:map`), so nothing that worked before changes — this only stops the wire from ignoring
-;; an impl the app already wrote.
-(impl Encode
-  :default (encode [v] (if (satisfies? 'JsonEncode v) (json/->json v) (json-str (str v)))))
-(defn- encode-entry (kv)
-  (let ([k val] kv)
-    (str (json-str (if (keyword? k) (->string k) (str k))) ":" (encode val))))
-
-; ---- JSON decode (for incoming WS messages) ----
-
-;; `json/decode` plus one deep keyword→string pass, and nothing else.
-;;
-;; This used to be a hand-written recursive-descent parser — nineteen functions, 175 lines —
-;; written to route around two brood quadratics on a large inbound frame: `string/char-at`
-;; scanning codepoints, and per-item append copying the accumulator. Both were real, and the
-;; parser was a large improvement on what preceded it.
-;;
-;; They are not real any more, and the hand-rolled version is now the slow one. Measured on
-;; the two frames a session actually sees — a tiny event and a 48 KB paste — `json/decode`
-;; plus `stringify-keys` runs 2.4x and 4.2x faster respectively, INCLUDING the stringify pass.
-;; So the parser was 175 lines of code, its own escape and number handling, and its own bugs,
-;; to be several times slower than the function next to it.
-;;
-;; The keys must be strings, not the keywords `json/decode` yields: a view's `on` handler
-;; reads `(get params "value")`, the same spelling a query or form param uses, and that
-;; contract predates the wire protocol.
-;;
-;; **Malformed input now rejects the whole frame rather than degrading in place.** The old
-;; parser answered U+FFFD for a lone surrogate or bad `\uXXXX`, and nil for a number token
-;; like `-` or `1.2.3`, so a hand-crafted frame decoded partially and the session acted on
-;; what survived. `json/decode` raises, `parse-client-frame` already catches it, and the frame
-;; is ignored. The safety property is the one the old comments claimed — a crafted frame
-;; cannot crash the session — reached by refusing the frame instead of guessing at it, which
-;; is the better answer for input arriving off an untrusted socket.
-(defn json-decode (s)
-  "Parse a JSON string into a Brood value, with object keys as STRINGS (matching query/form
-  params). Raises on malformed input; callers on the socket path catch it and drop the frame.
-
-  (hatch/web/live/json-decode \"{\\\"a\\\":[1,2]}\") ;=> {\"a\" [1 2]}"
-  (http/util/stringify-keys (json/decode s)))
 
 ; ---- the view spec ----
 ;
@@ -244,21 +104,6 @@
     nil ; dynamics
     nil ; render-model
     nil)) ; client-sfp
-; ---- wire protocol messages ----
-
-(defn send-msg (sock msg-map)
-  "Encode `msg-map` as JSON and send it as a WebSocket text frame. Returns true on
-  success, false if the write failed — a peer that vanished mid-write (broken pipe)
-  then ends the session cleanly instead of crashing the worker with an uncaught error."
-  (check-allow :discarded-catch
-    (try (do (tcp/send sock (text-frame (encode msg-map))) true) (catch _ false))))
-
-;; The frame reader itself is `http/websocket/recv-frame` (shared with web/channel's socket
-;; actor). It answers `[:other msg buf]` for anything in the mailbox that isn't socket bytes,
-;; and `session-recv` below matches those out — so the session's control vocabulary (ticks,
-;; out-of-band info, component pushes, reload signals, the watchdog's reap) is written once
-;; there rather than mirrored into the reader's own receive arms, which is what it was.
-
 ; ---- ticker: a steady server-side tick, independent of client traffic ----
 ; A `tick` interval is a native `timer/send-interval` timer (Erlang parity, prelude): a tiny
 ; green process on the scheduler's timer wheel that posts `[:tick ms gen]` to the session
@@ -266,61 +111,6 @@
 ; beat so a session with several tickers can tell which fired; `gen` lets the session drop
 ; a beat left over from a view it has since navigated away from. Steady regardless of
 ; client traffic, and no hand-rolled monitor/receive loop to maintain — see `start-tickers`.
-
-; ---- idle watchdog: keepalive ping + reap dead/idle connections ----
-
-(def *ws-ping-ms*
-  ; How long with no client frame before the watchdog pings (and, after a couple of
-  ; unanswered pings, closes). A live browser auto-pongs a ping, which resets the timer,
-  ; so an open-but-idle tab stays connected; a dead/black-hole peer is reaped.
-  30000)
-
-(defn start-watchdog (session sock)
-  "Spawn the idle watchdog for `session` and return its pid.
-
-  **`session` is a parameter, and that is the point of this function existing.** `spawn`
-  evaluates its expression in the CHILD process, so `(spawn (idle-watchdog (self) sock 0))` —
-  which is how this was written, and reads perfectly — hands the watchdog its OWN pid. It then
-  monitors itself, and its `[:ws-send …]` ping and its `[:reap]` go to its own mailbox, where
-  its `receive` has no arm for either and selective receive leaves them. The result is a
-  watchdog that runs forever, resets on `[:alive]`, and does nothing: no keepalive ever reaches
-  the client, and a black-holed peer is never reaped — so a half-open connection pins a session
-  process and an fd indefinitely, which is the exact thing this is for.
-
-  Nothing raises and nothing looks wrong. Taking the pid as an argument makes it the caller's
-  `(self)`, evaluated where `self` means the session."
-  (spawn (idle-watchdog session sock 0)))
-
-(defn idle-watchdog (session sock misses)
-  "Per-session keepalive + idle reaper. Every `*ws-ping-ms*` with no client frame, ask the
-  session to send a ping (the session is the sole socket writer — we never write here);
-  browsers auto-pong, which resets us via `[:alive]`. After a couple of unanswered pings,
-  close the socket so a dead or silently-idle peer can't pin a reader thread + a parked
-  green process forever. Monitors the session ONCE here, then loops — re-monitoring on every
-  `[:alive]` (one per client frame) would stack watchers on the session pid without bound."
-  (monitor session)
-  (idle-watchdog-loop session sock misses))
-
-(defn- idle-watchdog-loop (session sock misses)
-  (receive
-    ([:alive] (idle-watchdog-loop session sock 0))
-    ([:down _ _ _] nil)
-    (after *ws-ping-ms*
-      (if (>= misses 2)
-        ; two pings unanswered → peer is gone. Ask the SESSION to reap rather than closing the
-        ; fd from here: the session is the sole socket owner, and it's parked reading, so `[:reap]`
-        ; wakes it → close-session (registry + component cleanup + socket close). Then stop.
-        (send session [:reap])
-        (do
-          (send session [:ws-send sock (ping-frame)])
-          (idle-watchdog-loop session sock (+ misses 1)))))))
-
-(defn kick-watchdog (view)
-  "Tell this session's idle watchdog that a client frame arrived — resets its ping/idle
-  timer. A no-op if the session has no watchdog (e.g. in a unit test)."
-  (let (w (session-view-watchdog view))
-    (when w (send w [:alive])))
-  nil)
 
 ; ---- named singleton processes ----
 ; The reload registry below is "get-or-spawn a process registered under a name".
@@ -431,30 +221,13 @@
   attach a `Set-Cookie` to, so nothing written onto this Conn can reach the client. Read
   from it (see `web/csrf/live-token`); don't try to mutate the session through it."
   *live-conn*)
-
-(defn send-safely (pid msg)
-  "Send `msg` to `pid`, swallowing a failure — the shared delivery guarantee behind
-  `send-info` and `web/component/send-update`: a fan-out caller (a PubSub/Presence
-  registry looping over subscribers) must not crash because one of them just vanished —
-  the registry's monitor cleans the stale pid up moments later anyway."
-  (check-allow :discarded-catch (try (send pid msg) (catch _ nil)))
-  nil)
-
-(defn send-info (session payload)
-  "Deliver an out-of-band `payload` to a live `session` process; it arrives at the view's
-  `handle-info`, which returns a new model and triggers a re-render. This is the delivery
-  primitive PubSub/Presence (and one-off timers) build on. `session` is a live session pid
-  — the value `(self)` has inside a running session, e.g. captured in `mount` to subscribe.
-  Sending to an already-dead session is swallowed — see `send-safely`."
-  (send-safely session [:info payload]))
-
 ; ---- handler-initiated effects (push event / navigate / redirect) ----
 ; A view handler (`on`/`tick`/`handle-info`) returns the next model — the declarative path.
 ; But some things are imperative: "after save, go to /thanks", "on this event, focus a
 ; field". These helpers let a handler queue a one-off message to the client alongside its
 ; model update. They run in the session process (handlers are called there), so they just
-; post `[:push-effect …]` to `(self)`; the session flushes the queue to the socket right
-; after pushing the model diff (see `flush-effects`). The handler still returns a model, so
+; queue a push to `(self)` (`web/socket/queue-push`); the session flushes the queue right
+; after pushing the model diff (see `web/socket/recv`). The handler still returns a model, so
 ; nothing about the model-in/model-out contract or the diffing changes.
 
 (defn js (commands)
@@ -487,7 +260,7 @@
   "From inside a live handler, tell the client to dispatch a `brood:event` CustomEvent
   (`detail = {name, payload}`). App JS listens for it — the escape hatch for client effects a
   re-render can't express (focus a field, start an animation, call into a JS lib)."
-  (send (self) [:push-effect {:event "push" :name name :payload payload}])
+  (queue-push {:event "push" :name name :payload payload})
   nil)
 
 (defn push-title (title)
@@ -513,31 +286,21 @@
 
   A live-navigate to another view sets the new view's title from its own mount page, so this
   is for a title that changes *within* a view."
-  (send (self) [:push-effect {:event "title" :title title}])
+  (queue-push {:event "title" :title title})
   nil)
 
 (defn push-navigate (path)
   "From inside a live handler, navigate the client to `path` over the live socket — the
   server-initiated equivalent of the user clicking a `data-nav` link (a live view morphs in
   place, a non-live path falls back to a full load), with the address bar updated."
-  (send (self) [:push-effect {:event "nav" :path path :sfp nil}])
+  (queue-push {:event "nav" :path path :sfp nil})
   nil)
 
 (defn push-redirect (url)
   "From inside a live handler, force the client to do a full page load to `url` (leaving the
   live socket) — e.g. after logout, or to cross a live-session/auth boundary."
-  (send (self) [:push-effect {:event "redirect" :path url :sfp nil}])
+  (queue-push {:event "redirect" :path url :sfp nil})
   nil)
-
-(defn flush-effects (sock)
-  "Drain every `[:push-effect …]` the just-run handler queued to this session (via
-  `push-event`/`push-navigate`/`push-redirect`) and send each to the client. Non-blocking
-  (`after 0`): it only pulls push-effect messages, leaving frames/ticks/info untouched, and
-  returns the moment none remain. Run at the top of `session-recv`, so effects go out right
-  after the model diff and before the session blocks for the next client frame."
-  (receive
-    ([:push-effect msg] (do (send-msg sock msg) (flush-effects sock)))
-    (after 0 nil)))
 
 (defn- live-handler-error (phase key e fallback)
   "A view lifecycle handler (`phase` = \"event\"/\"tick\"/\"info\"/\"unmount\", `key` its
@@ -595,7 +358,7 @@
   (when (web/streams/holds-streams? model)
     (let (ids (web/streams/pending-deletes model))
       (when (not (empty? ids))
-        (send (self) [:push-effect {:event "stream-delete" :ids (vec ids)}]))))
+        (queue-push {:event "stream-delete" :ids (vec ids)}))))
   model)
 
 (defn- flush-streams (view)
@@ -750,13 +513,6 @@
               (session-recv sock view buf)
               (close-session sock view))))))))
 
-(defn close-socket (sock)
-  "Send a close frame and close the TCP socket. Best-effort throughout — the peer may
-  already be gone (a broken pipe), so a failed write here is never itself an error."
-  (check-allow :discarded-catch (try (tcp/send sock (close-frame)) (catch _ nil)))
-  (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
-  nil)
-
 (defn close-session (sock view)
   "Drop out of the reload registry, delete any half-finished upload spools, free the session's
   live component table (web/component), and close the socket.
@@ -818,44 +574,19 @@
     (after 0 nil)))
 
 (defn session-recv (sock view buf)
-  ; Flush any effects the last handler queued (push-event/navigate/redirect) before we block
-  ; for the next frame — so they reach the client right after that handler's model diff.
-  (flush-effects sock)
-  (match (recv-frame sock buf)
-    ; client close
-    ([:ok 8 _ _] (close-session sock view))
-    ; ping → pong (any client frame also kicks the idle watchdog alive). The pong send
-    ; is best-effort: a failed write means the peer is gone, so end the session.
-    ;
-    ; `remainder`, NOT `buf`. `recv-frame` answers from the buffer without touching the
-    ; socket, so re-entering with the buffer the ping came out of re-parses that same ping
-    ; forever: a pong per iteration, a core pinned, and the loop never reaching a `receive`
-    ; — so `[:reap]` and every out-of-band message pile up unread while `kick-watchdog`
-    ; fires each time round, disarming the one thing that would have reaped it. A client
-    ; writing `[text][ping]` in one TCP segment is enough, since the text arm threads its
-    ; remainder here. Every sibling arm already threads it; this one did not.
-    ([:ok 9 payload remainder] (kick-watchdog view)
-      (if (check-allow :discarded-catch
-            (try (do (tcp/send sock (pong-frame payload)) true) (catch _ false)))
-        (session-recv sock view remainder)
-        (close-session sock view)))
-    ; client message
-    ([:ok 1 payload remainder] (kick-watchdog view) (session-dispatch sock view remainder payload))
+  ;; `web/socket/recv` flushes the effects the last handler queued (push-event/navigate/
+  ;; redirect) before it blocks, so they reach the client right after that handler's diff;
+  ;; and it answers pings, keepalive writes and the watchdog's reap itself.
+  (match (recv sock buf (session-view-watchdog view))
+    ([:text payload remainder] (session-dispatch sock view remainder payload))
     ; a binary frame: one chunk of a live upload. Binary is the whole reason this arm exists —
     ; a file sent as JSON has to be base64'd, which costs a third more bytes on the wire and a
     ; decode per chunk, for a transport that already carries bytes natively.
-    ([:ok 2 payload remainder] (kick-watchdog view) (session-chunk sock view remainder payload))
-    ; other opcodes (e.g. a pong, opcode 0xA) — ignored, but still client liveness
-    ([:ok _ _ remainder] (kick-watchdog view) (session-recv sock view remainder))
+    ([:binary payload remainder] (session-chunk sock view remainder payload))
     ; anything in the mailbox that isn't socket bytes — a tick, an out-of-band message, a
-    ; reload signal, the watchdog. `recv-frame` hands it back untouched with the bytes read
-    ; so far; this session's own vocabulary is in `session-control`.
-    ([:other msg buf2] (session-control sock view buf2 msg))
-    ; the peer already closed the TCP connection (no WS close frame) — same cleanup as
-    ; close-session (registry + the session's component table), its socket-write calls are
-    ; already best-effort/try-caught so they're harmless to make on an already-dead socket
-    ([:closed] (close-session sock view) nil)
-    ([:error _] (close-session sock view))))
+    ; reload signal; this session's own vocabulary is in `session-control`
+    ([:control msg remainder] (session-control sock view remainder msg))
+    ([:closed _] (close-session sock view))))
 
 (defn parse-chunk-frame (payload)
   "Split an upload chunk frame into `[ref bytes]`, or nil if it is malformed.
@@ -908,11 +639,6 @@
   it where it lay; a stray send from app code therefore grew the session's mailbox for the
   life of the connection with nothing to see."
   (match msg
-    ; the idle watchdog asks the session — the sole socket writer — to emit a keepalive ping
-    ([:ws-send _ frame] (if (check-allow :discarded-catch
-                              (try (do (tcp/send sock frame) true) (catch _ false)))
-                          (session-recv sock view buf)
-                          (close-session sock view)))
     ; A generation-stamped beat. Drop it if it's from a view we've navigated away from
     ; (its ticker was killed, but this beat was already in the mailbox) — otherwise it'd
     ; fire the new view's handle-tick with the old view's interval key.
@@ -993,8 +719,6 @@
     ([:reload-css] (if (send-msg sock {:event "reload-css"})
                      (session-recv sock view buf)
                      (close-session sock view)))
-    ; the idle watchdog reaped a dead/silent peer — clean up + close the socket (we own it)
-    ([:reap] (close-session sock view))
     (_ (session-recv sock view buf))))
 
 (defn parse-client-frame (payload)
@@ -1116,12 +840,10 @@
                                           e
                                           [(session-view-model view) (list)]))))
                          (let ([next-model refs] result)
-                           (send (self)
-                             [:push-effect
-                               {:event "upload-ready"
-                                :name upload-name
-                                :offer (get frame :offer)
-                                :refs (vec refs)}])
+                           (queue-push {:event "upload-ready"
+                                        :name upload-name
+                                        :offer (get frame :offer)
+                                        :refs (vec refs)})
                            (push-update sock view buf "diff" next-model)))))
       ("upload-done" (if (not (session-view-mounted? view))
                        (session-recv sock view buf)

@@ -3,6 +3,8 @@
 (defmodule web-live-test
   (:use web/live)
   (:use-internals web/live)
+  ; json-str / encode / json-decode / send-info — the wire codec and delivery, now web/socket's
+  (:use web/socket)
   (:use web/template)
   (:use web/conn)
   (:use test))
@@ -507,7 +509,7 @@
   (test "the effect encodes with the key the client branches on"
     (web/live/push-title "Tab")
     (receive
-      ([:push-effect msg] (let (json (web/live/encode msg))
+      ([:push-effect msg] (let (json (web/socket/encode msg))
                             (is (includes? json "\"event\":\"title\""))
                             (is (includes? json "\"title\":\"Tab\""))))
       (after 500 (is false)))))
