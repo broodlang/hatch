@@ -1,6 +1,7 @@
 (defmodule http-spool-test
   (:alias http/server)
   (:alias http/request)
+  (:alias http/response)
   (:use web/conn)
   (:use test))
 
@@ -151,3 +152,127 @@
         (assert= (get info :title) "hello world")
         (assert= (get info :filename) "pic.png")
         (assert= (get info :bytes) [137 80 78 71 13 10 0 255 60 62])))))
+
+;; ---- a chunked body over the threshold moves to disk (a `git push` arrives chunked) ----
+
+(defn chunked-post (path pieces)
+  "A chunked POST to `path` whose body is `pieces` (a vector of bytes), one chunk each."
+  (bytes/concat (append [(b (str "POST "
+                              path
+                              " HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"))]
+                  (append (into [] (map pieces (fn (piece) (bytes/concat (response/chunk piece)))))
+                    [(response/last-chunk)]))))
+
+(defn spool-report-handler (reporter)
+  (fn (request)
+    (let (conn (build request))
+      (send reporter
+        [:seen
+          {:spooled (spooled? conn)
+           :length (get request :body-length)
+           :bytes (if (spooled? conn)
+                    (into [] (seq (file/slurp-bytes (body-file conn))))
+                    (into [] (seq (string/->bytes (get conn :body)))))}])
+      (conn->response (send-resp conn 200 "ok")))))
+
+(describe "chunked body spooled to disk"
+  (test "a chunked body past :spool-threshold reaches the handler as :body-file, byte-for-byte"
+    (let (me (self)
+          port 24834
+          _sup (server/start port
+                 (spool-report-handler me)
+                 nil
+                 {:spool-threshold 8 :spool-dir "/tmp"})
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
+      ; 20 bytes in three chunks, with 0xFF and CRLFs inside the data
+      (tcp/send client
+        (chunked-post "/push"
+          [(bytes [137 80 78 71 13 10 0]) (bytes [255 1 2 3 4 5 6]) (bytes [7 8 9 10 254 253])]))
+      (let (info (receive ([:seen d] d) (after 5000 :timeout))
+            _ (drain client ""))
+        (tcp/close client)
+        (server/stop port)
+        (assert= (get info :spooled) true)
+        (assert= (get info :length) 20)
+        (assert= (get info :bytes) (into [] (seq raw-body))))))
+  (test "a chunked body under the threshold stays in memory"
+    (let (me (self)
+          port 24835
+          _sup (server/start port
+                 (spool-report-handler me)
+                 nil
+                 {:spool-threshold 1000 :spool-dir "/tmp"})
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
+      (tcp/send client (chunked-post "/push" [(b "hel") (b "lo")]))
+      (let (info (receive ([:seen d] d) (after 5000 :timeout))
+            _ (drain client ""))
+        (tcp/close client)
+        (server/stop port)
+        (assert= (get info :spooled) false)
+        (assert= (get info :bytes) (into [] (seq (b "hello")))))))
+  (test "a spooled chunked body past :max-request-bytes answers 413"
+    (let (me (self)
+          port 24836
+          _sup (server/start port
+                 (spool-report-handler me)
+                 nil
+                 {:spool-threshold 4 :max-request-bytes 12 :spool-dir "/tmp"})
+          client (tcp/connect "127.0.0.1" port))
+      (tcp/set-binary client true)
+      (tcp/send client (chunked-post "/push" [(b "0123456") (b "789abcdef")]))
+      (let (resp (drain client ""))
+        (tcp/close client)
+        (server/stop port)
+        (assert= (string/starts-with? resp "HTTP/1.1 413") true)))))
+
+;; ---- :body-limits — one route takes bodies the rest of the site refuses ----
+
+(describe ":body-limits"
+  (test "a route's raised cap admits its body while every other path keeps the listener's"
+    (let (me (self)
+          port 24837
+          _sup (server/start port
+                 (spool-report-handler me)
+                 nil
+                 {:max-request-bytes 2048
+                  :spool-threshold 8
+                  :spool-dir "/tmp"
+                  :body-limits (fn (head)
+                                 (if (string/starts-with? (get head :path) "/git/")
+                                   {:max-request-bytes 100000}
+                                   nil))})
+          big (bytes/concat (into [] (repeat 3 (b (string/repeat "x" 1000))))))
+      ; the git path takes 3000 bytes
+      (let (client (tcp/connect "127.0.0.1" port))
+        (tcp/set-binary client true)
+        (tcp/send client (chunked-post "/git/push" [big]))
+        (let (info (receive ([:seen d] d) (after 5000 :timeout))
+              _ (drain client ""))
+          (tcp/close client)
+          (assert= (get info :length) 3000)))
+      ; any other path still refuses it
+      (let (client (tcp/connect "127.0.0.1" port))
+        (tcp/set-binary client true)
+        (tcp/send client (chunked-post "/other" [big]))
+        (let (resp (drain client ""))
+          (tcp/close client)
+          (server/stop port)
+          (assert= (string/starts-with? resp "HTTP/1.1 413") true))))))
+
+(describe "request-config"
+  (test "only the three body limits can be overridden"
+    (let (config {:max-request-bytes 10
+                  :tls nil
+                  :body-limits (fn (head)
+                                 {:max-request-bytes 99 :spool-threshold 5 :tls {:cert "c"}})}
+          applied (server/request-config config {:path "/"}))
+      (assert= (get applied :max-request-bytes) 99)
+      (assert= (get applied :spool-threshold) 5)
+      (assert= (get applied :tls) nil)))
+  (test "nil from :body-limits keeps the listener's limits"
+    (assert= (get (server/request-config {:max-request-bytes 10 :body-limits (fn (head) nil)}
+                    {:path "/"})
+               :max-request-bytes)
+      10)))

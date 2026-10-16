@@ -46,6 +46,13 @@
 ;   :spool-dir         — directory for spool temp files (default "/tmp"); each spooled
 ;                        request writes one `hatch-upload-<token>` file, deleted after the
 ;                        handler returns unless it moved it (see web/conn `save-body`)
+;   :body-limits       — nil (default) or `(fn (head) -> map-or-nil)`: per-request overrides of
+;                        :max-request-bytes, :body-timeout-ms and :spool-threshold, decided from
+;                        the parsed head BEFORE any body byte is read. This is how one route (a
+;                        `git push` endpoint, a large-upload API) takes bodies far bigger than
+;                        the rest of the site without raising the cap for every URL. Returning
+;                        nil keeps the listener's limits. The head itself is still bounded by
+;                        the listener's :max-request-bytes.
 ;   :progress-interval-ms — minimum gap between `[:hatch :upload :progress]` telemetry events
 ;                        while reading one body (default 250). Only requests carrying an
 ;                        `?upload_token=` query param report progress at all, so this costs
@@ -62,7 +69,25 @@
    :check-origin true
    :spool-threshold nil
    :spool-dir "/tmp"
+   :body-limits nil
    :progress-interval-ms 250})
+
+(def- *body-limit-keys* [:max-request-bytes :body-timeout-ms :spool-threshold])
+
+(defn request-config (config head)
+  "The limits that apply to the request whose parsed `head` this is: the listener's `config`
+  with whatever its `:body-limits` function returns for that head merged over it. Only
+  :max-request-bytes, :body-timeout-ms and :spool-threshold can be overridden; any other key the
+  function returns is ignored, so a route cannot switch off TLS or the origin check by accident.
+
+  (hatch/http/server/request-config {:max-request-bytes 10} {:path \"/\"}) ;=> {:max-request-bytes 10}"
+  (let (limits-fn (get config :body-limits)
+        limits (if (nil? limits-fn) nil (limits-fn head)))
+    (if (map? limits)
+      (reduce *body-limit-keys*
+        config
+        (fn (acc key) (if (contains? limits key) (assoc acc key (get limits key)) acc)))
+      config)))
 
 (defn supervisor-name (port)
   "The registered name of the supervisor for the listener on `port` — port-derived so
@@ -324,29 +349,39 @@ port) still returns and lets the caller fail on its own terms."
   "Dispatch a request whose head is fully buffered in `buf`. Parses the head ONCE, then routes
   the body to the right reader — spool to disk / O(n) in-memory drain / incremental de-chunk —
   so no path re-buffers the body. A body that already landed whole (and every WebSocket upgrade)
-  falls through to `dispatch-complete`; malformed framing answers 400."
+  falls through to `dispatch-complete`; malformed framing answers 400.
+
+  The limits each body reader enforces are `request-config`'s: the listener's, with the route's
+  `:body-limits` override applied, decided here from the head before any body byte is read."
   (match (try-parse-head-bytes buf)
     ([:head head body-start clen]
-      (cond
-        ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
-        ; in memory); the handler gets `:body-file` instead of `:body`. Off by default.
-        (spool-body? config head clen ws-handler)
-          (do
-            (maybe-continue sock head)
-            (spool-begin sock handler ws-handler config buf head body-start clen))
-        ; Body still arriving over several reads → drain by length in O(n) (collect reads in a
-        ; list, join once) rather than re-`str`ing the whole buffer per read.
-        (partial-body? buf head body-start clen ws-handler)
-          (do
-            (maybe-continue sock head)
-            (buffered-begin sock handler ws-handler config buf head body-start clen))
-        ; Body already complete/empty (or a WebSocket upgrade) → parse it whole and run it.
-        else (dispatch-complete sock handler ws-handler config buf)))
+      (let (config (request-config config head))
+        (cond
+          ; Large non-chunked body over :spool-threshold → stream to a temp file (never held whole
+          ; in memory); the handler gets `:body-file` instead of `:body`. Off by default.
+          (spool-body? config head clen ws-handler)
+            (do
+              (maybe-continue sock head)
+              (spool-begin sock handler ws-handler config buf head body-start clen))
+          ; Body still arriving over several reads → drain by length in O(n) (collect reads in a
+          ; list, join once) rather than re-`str`ing the whole buffer per read.
+          (partial-body? buf head body-start clen ws-handler)
+            (do
+              (maybe-continue sock head)
+              (buffered-begin sock handler ws-handler config buf head body-start clen))
+          ; Body already complete/empty (or a WebSocket upgrade) → parse it whole and run it.
+          else (dispatch-complete sock handler ws-handler config buf))))
     ; Chunked body → decode incrementally (only the newly-arrived bytes each read) instead of
-    ; re-de-chunking the whole buffer on every read.
+    ; re-de-chunking the whole buffer on every read. Past :spool-threshold it moves to disk.
     ([:chunked head body-start] (do
                                   (maybe-continue sock head)
-                                  (chunked-begin sock handler ws-handler config buf head body-start)))
+                                  (chunked-begin sock
+                                    handler
+                                    ws-handler
+                                    (request-config config head)
+                                    buf
+                                    head
+                                    body-start)))
     ; Malformed framing → 400 (mirrors `try-parse`'s :error path).
     ([:error msg] (bad-request-close sock msg))
     ; tcp/read-until only returns a head once the terminator has landed, so :incomplete
@@ -624,37 +659,60 @@ port) still returns and lets the caller fail on its own terms."
   is its size bound). Bounds the idle wait AND the total body time (both slow-loris → 408);
   `deadline` is the absolute epoch-ms the whole body must arrive by."
   (match (dechunk-step-bytes pending 0 decoded dlen)
-    ([:ok body remainder] (dispatch-buffered sock
-                            handler
-                            ws-handler
-                            config
-                            (assoc head :body body)
-                            remainder))
+    ; The whole body was already here. It is still held to the same bounds as one that arrives
+    ; over many reads: over the cap is a 413, and over :spool-threshold it goes to disk, so a
+    ; handler sees the same `:body-file` however the bytes happened to be split across reads.
+    ([:ok body remainder] (cond
+                            (> (count body) (get config :max-request-bytes))
+                              (do
+                                (tcp/send sock
+                                  (format-response {:status 413
+                                                    :body "<h1>413 Payload Too Large</h1>"}))
+                                (tcp/close sock))
+                            (chunked-spool? config head (count body) ws-handler)
+                              (let (path (spool-path config))
+                                (spool-append path body)
+                                (spool-dispatch sock handler config head path (count body)))
+                            else
+                              (dispatch-buffered sock
+                                handler
+                                ws-handler
+                                config
+                                (assoc head :body body)
+                                remainder)))
     ([:error msg] (bad-request-close sock msg))
-    ([:more tail decoded dlen] (if (> (+ dlen (count tail)) (get config :max-request-bytes))
-                                 (do
-                                   (tcp/send sock
-                                     (format-response {:status 413
-                                                       :body "<h1>413 Payload Too Large</h1>"}))
-                                   (tcp/close sock))
-                                 (receive
-                                   ([:tcp ^sock chunk] (chunked-drain sock
-                                                         handler
-                                                         ws-handler
-                                                         config
-                                                         head
-                                                         (bytes/concat [tail chunk])
-                                                         decoded
-                                                         dlen
-                                                         deadline))
-                                   ([:tcp-closed ^sock] nil)
-                                   (after (math/min (get config :read-timeout-ms)
-                                            (math/max 1 (- deadline (os/now))))
-                                     (do
-                                       (tcp/send sock
-                                         (format-response {:status 408
-                                                           :body "<h1>408 Request Timeout</h1>"}))
-                                       (tcp/close sock))))))))
+    ([:more tail decoded dlen]
+      (cond
+        (> (+ dlen (count tail)) (get config :max-request-bytes))
+          (do
+            (tcp/send sock
+              (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+            (tcp/close sock))
+        ; Past :spool-threshold a chunked body moves to disk, like a
+        ; Content-Length body does: a `git push` arrives chunked and can
+        ; be hundreds of megabytes, which must never sit in memory.
+        (chunked-spool? config head dlen ws-handler)
+          (let (path (spool-path config))
+            (spool-append path (bytes/concat (reverse decoded)))
+            (chunked-spool-drain sock
+              handler config head path tail dlen deadline))
+        else
+          (receive
+            ([:tcp ^sock chunk] (chunked-drain sock
+                                  handler
+                                  ws-handler
+                                  config
+                                  head
+                                  (bytes/concat [tail chunk])
+                                  decoded
+                                  dlen
+                                  deadline))
+            ([:tcp-closed ^sock] nil)
+            (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
+              (do
+                (tcp/send sock
+                  (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+                (tcp/close sock))))))))
 
 ; ---- large-body streaming to disk (opt-in via :spool-threshold) ----
 
@@ -749,6 +807,58 @@ port) still returns and lets the caller fail on its own terms."
     (file/spit-bytes-append path piece)
     (catch e (do (spool-cleanup path) (error (str "spool write failed: " (error-message e)))))))
 
+(defn chunked-spool? (config head decoded-bytes ws-handler)
+  "True when a chunked body has decoded past :spool-threshold and should continue on disk. The
+  chunked counterpart of `spool-body?`: a chunked body has no Content-Length to decide by up
+  front, so the decision is made once the decoded size crosses the threshold."
+  (let (thr (get config :spool-threshold))
+    (and (not (nil? thr))
+      (> decoded-bytes thr)
+      (body-method? (get head :method))
+      (not (and ws-handler (upgrade-request? head))))))
+
+(defn- chunked-spool-drain (sock handler config head path pending written deadline)
+  "Keep de-chunking a body that has moved to disk: decode whatever chunks `pending` holds, append
+  them to `path`, and read more until the terminating 0-size chunk, then dispatch as a spooled
+  request. `written` is the decoded byte count already on disk. The same bounds as every other
+  body reader apply — :max-request-bytes on the decoded size, the idle and total body timeouts —
+  and a stalled, closed or malformed body deletes the partial spool."
+  (match (dechunk-step-bytes pending 0 (list) 0)
+    ([:ok body _remainder]
+      (do
+        ; a spooled request always closes, so a pipelined remainder is dropped
+        (spool-append path body)
+        (spool-dispatch sock handler config head path (+ written (count body)))))
+    ([:error msg] (do (spool-cleanup path) (bad-request-close sock msg)))
+    ([:more tail decoded dlen] (let (written2 (+ written dlen))
+                                 (when (> dlen 0)
+                                   (spool-append path (bytes/concat (reverse decoded))))
+                                 (if (> (+ written2 (count tail)) (get config :max-request-bytes))
+                                   (do
+                                     (spool-cleanup path)
+                                     (tcp/send sock
+                                       (format-response {:status 413
+                                                         :body "<h1>413 Payload Too Large</h1>"}))
+                                     (tcp/close sock))
+                                   (receive
+                                     ([:tcp ^sock chunk] (chunked-spool-drain sock
+                                                           handler
+                                                           config
+                                                           head
+                                                           path
+                                                           (bytes/concat [tail chunk])
+                                                           written2
+                                                           deadline))
+                                     ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
+                                     (after (math/min (get config :read-timeout-ms)
+                                              (math/max 1 (- deadline (os/now))))
+                                       (do
+                                         (spool-cleanup path)
+                                         (tcp/send sock
+                                           (format-response {:status 408
+                                                             :body "<h1>408 Request Timeout</h1>"}))
+                                         (tcp/close sock)))))))))
+
 (defn- spool-dispatch (sock handler config head path clen)
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and
   remove the temp file unless the handler moved it. A spooled request always closes the
@@ -777,9 +887,14 @@ port) still returns and lets the caller fail on its own terms."
        :status (get response :status 200)
        ;; the matched route pattern when a router set one — see web/router/dispatch
        :route (get response :route)})
-    (tcp/send sock (format-response response (= (get head :method) "HEAD")))
-    (spool-cleanup path)
-    (tcp/close sock)))
+    ; A streamed answer to a spooled request (a `git push` reporting back) is sent chunked
+    ; exactly as on the buffered path; `stream-response` closes the socket itself.
+    (if (get response :stream)
+      (stream-response sock request response)
+      (do
+        (tcp/send sock (format-response response (= (get head :method) "HEAD")))
+        (tcp/close sock)))
+    (spool-cleanup path)))
 
 (defn keep-alive? (request response)
   "True if the connection should be reused for another request. Either side signalling
