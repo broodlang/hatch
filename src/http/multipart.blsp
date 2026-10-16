@@ -98,7 +98,7 @@
     (if (< i 0)
       nil
       (let (start (+ i (string/length needle))
-            end (index-of-from disposition "\"" start))
+            end (index-of disposition "\"" start))
         (if (= end -1) nil (string/substring disposition start end))))))
 
 (defn param-name-char? (c)
@@ -113,16 +113,11 @@
 (defn- cd-param-find (s needle from)
   "Index of `needle` in `s` at/after `from` where it starts a parameter — i.e. at the string
   start or preceded by a non-name char (so `name=\"` inside `filename=\"` is skipped) — or -1."
-  (let (i (index-of-from s needle from))
+  (let (i (index-of s needle from))
     (cond
       (< i 0) -1
       (or (= i 0) (not (param-name-char? (string/char-at s (- i 1))))) i
       else (cd-param-find s needle (+ i 1)))))
-
-(defn index-of-from (s needle from)
-  "Index of `needle` in `s` at or after `from`, or -1."
-  (let (i (index-of (string/substring s from (string/length s)) needle))
-    (if (= i -1) -1 (+ from i))))
 
 (defn add-part (acc part)
   "Route a parsed part into `:fields` (no filename → a text field, decoded to a string) or
