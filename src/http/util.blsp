@@ -42,11 +42,6 @@
       (and (>= code 97) (<= code 102)) (- code 87)
       else 0)))
 
-(defn hex-str->bytes (hex)
-  "Convert a lowercase hex string (e.g. \"deadbeef\") to a list of byte ints."
-  (map (partition (string/->list hex) 2)
-    (fn (pair) (+ (* (hex-char->int (first pair)) 16) (hex-char->int (first (rest pair)))))))
-
 ;; ---- URL decode ----
 
 (defn url-decode (s)
@@ -102,23 +97,6 @@
             (assoc m
               (url-decode (string/substring pair 0 eq))
                 (url-decode (string/substring pair (+ eq 1) (string/length pair))))))))))
-
-;; ---- carrier <-> bytes (byte-faithful request bodies) ----
-; The server reads connections in binary mode and accumulates the request as a *carrier*
-; string — one codepoint (0-255) per wire byte — so the text-based request parser stays
-; byte-correct while the body survives intact (a binary upload isn't UTF-8-lossily mangled).
-; These recover the real bytes / decoded text of the parsed body at the conn boundary.
-
-(defn carrier->bytes (carrier)
-  "Convert a byte-faithful carrier string (one codepoint 0-255 per byte) to a `bytes` value —
-  the inverse of websocket/bytes->carrier. Recovers the raw request-body bytes (e.g. a file
-  upload) from the parsed carrier body."
-  (bytes (map (string/->list carrier) string/char->int)))
-
-;; `carrier->text` used to sit here — the decode `web/conn` did on a body the old parser
-;; handed over as a carrier string. The parser has been bytes-native since ADR-141, so `build`
-;; decodes the `bytes` directly and nothing has called this since. `carrier->bytes` above stays:
-;; the parser cross-check in `http_request_bytes_test` still needs it to compare the two.
 
 (defn crlf-at? (b i)
   "True if the two bytes at index `i` of `b` are CR LF. False — not an error — when `i` or

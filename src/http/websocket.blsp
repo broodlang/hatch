@@ -1,64 +1,7 @@
 (defmodule http/websocket
-  "WebSocket (RFC 6455) handshake, frame encoder, and frame parser."
-  (:use http/base64))
+  "WebSocket (RFC 6455) handshake, frame encoder, and frame parser.")
 
 (def *ws-magic* "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-
-; Lookup table: position n holds the 1-char string for byte value n.
-; Brood \xHH literals are single bytes; this covers all 256 values.
-(def *byte-table*
-  (str "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
-    "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
-    "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f"
-    "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f"
-    "\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f"
-    "\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f"
-    "\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f"
-    "\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f"
-    "\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f"
-    "\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f"
-    "\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf"
-    "\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf"
-    "\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf"
-    "\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf"
-    "\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef"
-    "\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"))
-
-; Precomputed once: position n holds the 1-char carrier string for byte value n — the same
-; values `char-at *byte-table*` would return, but materialized into 256 shared objects.
-; `byte->char` reads from this vector rather than `char-at`-ing the table on every call: a
-; `char-at` on the (multibyte) table returns a fresh view string each time, and joining tens
-; of thousands of those into one frame body blows up super-linearly (a >64 KB render could
-; allocate gigabytes and OOM the session). Joining references to 256 shared strings is linear.
-(def *byte-strs* (mapv (range 256) (fn (n) (string/char-at *byte-table* n))))
-
-(defn byte->char (n)
-  "Convert byte value 0-255 to a 1-char string."
-  (nth *byte-strs* n))
-
-(defn bytes->carrier (b)
-  "A `bytes` value → the Latin-1 byte-string carrier (one codepoint 0–255 per byte).
-  A binary-mode socket/subprocess now delivers inbound data as a first-class `bytes`
-  value; convert it here at the receive boundary so the existing string-based readers
-  (frame parser, request reader) keep working unchanged.
-
-  `string/codepoints->` IS this mapping — byte 0-255 is Latin-1 codepoint 0-255 — in one
-  native call. It used to map every byte through `byte->char` and join the results, which the
-  comment above `*byte-strs*` describes going to some length to keep merely linear. One call
-  beats a linear one: 1453us to 107us on a 4 KiB chunk, 13.6x, and this runs on every inbound
-  chunk, which can be 64 KB. Verified identical."
-  (string/codepoints-> (seq b)))
-
-(defn carrier-byte-at (s i)
-  "Return the byte value at position `i` of `s` — a byte-string carrier (the inbound
-  frame/request parser's form) or a first-class `bytes` value (an outbound frame).
-
-  `bytes/at`, not `get`: both are O(1), but `get` is the generic collection accessor and
-  dispatches on the collection kind every call — 1.40us against `bytes/at`'s 0.31us, and this
-  is called per byte by the frame readers."
-  (if (bytes? s)
-    (bytes/at s i)
-    (string/char->int (string/char-at s i))))
 
 ; ---- handshake ----
 
@@ -67,7 +10,8 @@
   The example is RFC 6455 §1.3's reference vector.
 
   (hatch/http/websocket/accept-key \"dGhlIHNhbXBsZSBub25jZQ==\") ;=> \"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\""
-  (encode-sha1 (hash/sha1 (str (string/trim client-key) *ws-magic*))))
+  (encoding/base64-encode-bytes
+    (hash/sha1-raw (string/->bytes (str (string/trim client-key) *ws-magic*)))))
 
 (defn upgrade-response (key)
   "Build the 101 Switching Protocols response for a WebSocket upgrade request."
@@ -124,21 +68,6 @@
 ; payload is UTF-8-encoded exactly once (`string/->bytes`), and the header bytes go
 ; out as-is.
 
-(defn utf8-byte-string (s)
-  "UTF-8-encode `s` into a byte string: one codepoint (0–255) per UTF-8 byte. Goes
-  through `bytes->list` before `map` — `bytes`' `rest` reallocates the remaining bytes
-  on every call, so mapping straight over a `bytes` value is O(n²) (RSS on a 70 KB
-  payload: ~230MB at 20 KB, extrapolating past the 1GB process cap by 70 KB); routing
-  through a list first keeps this O(n)."
-  (string/join (map (seq (string/->bytes s)) byte->char) ""))
-
-(defn byte-string->utf8 (s)
-  "Decode a byte string (one codepoint 0–255 per byte) holding UTF-8 back into text.
-  `string->codepoints` reads all codepoints in one O(n) pass — indexing a byte string with
-  `char-at`/`carrier-byte-at` per position is O(i) (codepoints ≥ 0x80 are multibyte), so the old
-  per-index walk was O(n²) on every inbound frame payload."
-  (string/bytes-> (bytes (string/->codepoints s))))
-
 ; Each frame is described as an *iolist* (ADR-139) — a nested list of byte ints and
 ; `bytes` values — and flattened exactly once by `bytes-concat`. The length fields go
 ; through the prelude's `int->bytes` (big-endian, fixed width) rather than a hand-rolled
@@ -184,7 +113,7 @@
 
 ; The inbound frame parser is bytes-native (ADR-141): `buf` is a `bytes` value delivered by the
 ; binary-mode socket, and a frame's payload/remainder are `bytes` — no Latin-1 carrier-string
-; hop, and `carrier-byte-at`/`bytes-uint`/`subbytes` index it in O(1). The masking key and length fields
+; hop, and `bytes/at`/`bytes/uint`/`bytes/slice` index it in O(1). The masking key and length fields
 ; are read with ADR-140 bit-syntax helpers (`bytes-uint`).
 (defn parse-frame (buf)
   "Parse one complete WebSocket *message* from the `bytes` `buf`, reassembling a fragmented
@@ -201,14 +130,14 @@
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
-    ([:ok fin opcode payload math/rem]
+    ([:ok fin opcode payload remainder]
       (cond
         ; control frames are never fragmented — deliver standalone
-        (control-opcode? opcode) [:ok opcode payload math/rem]
+        (control-opcode? opcode) [:ok opcode payload remainder]
         ; a complete (FIN) data frame is the whole message
-        (= fin 1) [:ok opcode payload math/rem]
+        (= fin 1) [:ok opcode payload remainder]
         ; otherwise it's the head of a fragmented message — gather continuations
-        else (reassemble math/rem opcode (list payload) (count payload) maxf maxm)))))
+        else (reassemble remainder opcode (list payload) (count payload) maxf maxm)))))
 
 (defn reassemble (buf msg-opcode pieces acclen maxf maxm)
   "Accumulate continuation frames (opcode 0) until the FIN frame, capping the total at `maxm`.
@@ -218,7 +147,7 @@
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
-    ([:ok fin opcode payload math/rem] (cond
+    ([:ok fin opcode payload remainder] (cond
                                          (not (= opcode 0))
                                            [:error "websocket: expected continuation frame"]
                                          (> (+ acclen (count payload)) maxm)
@@ -227,9 +156,9 @@
                                            [:ok
                                              msg-opcode
                                              (bytes/concat (reverse (cons payload pieces)))
-                                             math/rem]
+                                             remainder]
                                          else
-                                           (reassemble math/rem
+                                           (reassemble remainder
                                              msg-opcode
                                              (cons payload pieces)
                                              (+ acclen (count payload))
@@ -245,8 +174,8 @@
   (let (buflen (count buf))
     (if (< buflen 2)
       [:incomplete]
-      (let (byte0 (carrier-byte-at buf 0)
-            byte1 (carrier-byte-at buf 1)
+      (let (byte0 (bytes/at buf 0)
+            byte1 (bytes/at buf 1)
             fin (bit/shift-right byte0 7)
             rsv (bit/and (bit/shift-right byte0 4) 7)
             opcode (bit/and byte0 15)
@@ -338,7 +267,7 @@
   (let (buflen (count buf))
     (if (< buflen 2)
       nil
-      (let (byte1 (carrier-byte-at buf 1)
+      (let (byte1 (bytes/at buf 1)
             masked (bit/shift-right byte1 7)
             plen7 (bit/and byte1 127))
         (cond

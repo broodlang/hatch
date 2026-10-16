@@ -1,7 +1,7 @@
 (defmodule http-server-test
   ; server/start, server/stop
   (:alias http/server)
-  ; parse-frame, byte->char
+  ; parse-frame
   (:use http/websocket)
   (:use test))
 
@@ -19,13 +19,6 @@
 ; deliberately does NOT call `tcp/set-binary` itself, so a frame with a high byte is
 ; delivered byte-faithfully ONLY because the upgrade path already switched to binary.
 ; Revert the fix and `read-one-frame` sees U+FFFD → `:incomplete` → times out.
-
-(defn carrier->bytes (carrier)
-  "A byte-string carrier (one codepoint 0-255 per byte) → a `bytes` value, so a client frame
-  reaches the wire intact. tcp/send UTF-8-encodes a string leaf (ADR-141), which would mangle
-  every byte >= 0x80 (the 0x81 header, the mask, a high payload byte); a `bytes` value is sent
-  verbatim — the same reason the server builds its frames as `bytes`."
-  (bytes (map (string/->list carrier) string/char->int)))
 
 (defn read-one-frame (sock buf)
   "Block until one complete WebSocket frame is buffered; return its decoded payload,
@@ -70,13 +63,7 @@
 (defn masked-byte-frame (b)
   "A single-byte-payload masked client text frame carrying byte `b` (mask key all
   zeros, so the masked payload byte equals `b`): 0x81, 0x80|1, 00 00 00 00, b."
-  (str (byte->char 129)
-    (byte->char 129)
-    (byte->char 0)
-    (byte->char 0)
-    (byte->char 0)
-    (byte->char 0)
-    (byte->char b)))
+  (bytes [129 129 0 0 0 0 b]))
 
 (describe "websocket upgrade sets binary mode before the handler reads"
   ; One server, started and stopped within the test. Fixed obscure port; the handler
@@ -88,7 +75,7 @@
                  (fn (_req) {:status 200 :headers {} :body "ok"})
                  (echo-one-frame me))
           client (ws-client-connect port)
-          _send (tcp/send client (carrier->bytes (masked-byte-frame 255)))
+          _send (tcp/send client (masked-byte-frame 255))
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp/close client)
       (server/stop port)
@@ -228,10 +215,8 @@
 
 ; A masked client frame (zero mask key → payload bytes unchanged); fin 0/1, payload ≤125.
 (defn ws-frame (fin opcode payload)
-  (str (byte->char (+ (* fin 128) opcode))
-    (byte->char (+ 128 (string/length payload)))
-    "\x00\x00\x00\x00"
-    payload))
+  (let (body (string/->bytes payload))
+    (bytes/concat [(+ (* fin 128) opcode) (+ 128 (count body)) 0 0 0 0 body])))
 
 ; Tier-2 end-to-end: a fragmented client message is reassembled across the real socket.
 ; Before reassembly, the server read loop saw only the first fragment ("Hel") and dropped
@@ -245,9 +230,7 @@
                  (echo-one-frame me))
           client (ws-client-connect port)
           _send (tcp/send client
-                  (carrier->bytes (str (ws-frame 0 1 "Hel")
-                                    (ws-frame 0 0 "lo ")
-                                    (ws-frame 1 0 "world"))))
+                  (bytes/concat [(ws-frame 0 1 "Hel") (ws-frame 0 0 "lo ") (ws-frame 1 0 "world")]))
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp/close client)
       (server/stop port)

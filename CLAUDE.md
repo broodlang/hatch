@@ -89,7 +89,6 @@ The demo (`../hatch-demo/src/web/routes.blsp`) serves:
 src/
   http/
     util.blsp       — URL decode, query parse, status codes
-    base64.blsp     — base64 encode (RFC 4648)
     request.blsp    — HTTP/1.1 parser (pipelining-safe)
     multipart.blsp  — multipart/form-data parser (in-memory + spooled-to-disk uploads)
     response.blsp   — response serializer + helpers

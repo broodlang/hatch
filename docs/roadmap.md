@@ -37,7 +37,7 @@ trade-offs behind them — is archived in
 
 | Layer | Modules |
 |---|---|
-| HTTP/1.1 + WebSocket | `http/request` `http/response` `http/server` `http/websocket` `http/multipart` `http/util` `http/base64` |
+| HTTP/1.1 + WebSocket | `http/request` `http/response` `http/server` `http/websocket` `http/multipart` `http/util` |
 | Request pipeline | `web/endpoint` `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` `web/oidc` `web/errors` |
 | Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) |
 | Live views | `web/live` `web/component` `web/pubsub` `web/presence` `web/registry` |
