@@ -232,7 +232,7 @@
 (describe "routes-of"
   (test "an indexed table answers its routes in declaration order"
     (let (routes [{:method "GET" :pattern ["b"] :handler nil}
-                  {:method "GET" :pattern ["a"] :handler nil}])
+                   {:method "GET" :pattern ["a"] :handler nil}])
       (assert= (apply vector (routes-of (index-routes routes))) routes)))
   (test "a hand-built list is already the routes"
     (let (routes [{:method "GET" :pattern [] :handler nil}])

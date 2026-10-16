@@ -7,9 +7,9 @@
   sanitized (no `..`/`.`/backslash segments) and resolved under `root` (relative to
   the working directory). A miss or a traversal attempt yields a 404.
 
-  Text assets (JS, CSS, HTML, SVG, JSON) are read as strings with `slurp`; binary assets
-  (images, fonts, video, wasm, …) are read byte-faithfully with `slurp-bytes` and served as
-  raw `bytes`, so they reach the wire uncorrupted (`text-mime?` picks the path per media type).
+  Every file is read byte-faithfully with `slurp-bytes` and served as raw `bytes` — text and
+  binary alike — so it reaches the wire exactly as it sits on disk; the MIME table only names
+  the `Content-Type`.
 
   Every response goes through `serve-body`: a strong content ETag (so an unchanged asset
   revalidates to a bodyless 304), `X-Content-Type-Options: nosniff`, `Accept-Ranges` with
@@ -41,7 +41,7 @@
    "xml" "application/xml"
    "svg" "image/svg+xml"
    "webmanifest" "application/manifest+json"
-   ; binary types — served byte-faithfully via slurp-bytes (see `text-mime?`/`serve-binary`)
+   ; binary types
    "png" "image/png"
    "jpg" "image/jpeg"
    "jpeg" "image/jpeg"
@@ -64,22 +64,21 @@
    "zip" "application/zip"
    "gz" "application/gzip"})
 
-(defn text-mime? (mime)
-  "True if `mime` is a text media type — served with `slurp` as a string. Everything else
-  (images, fonts, video, an unknown octet-stream) is read byte-faithfully with `slurp-bytes`
-  and served as raw `bytes`, so binary assets aren't UTF-8-mangled."
-  (or (string/starts-with? mime "text/")
-    (= mime "application/json")
-    (= mime "application/xml")
-    (= mime "application/manifest+json")
-    (= mime "image/svg+xml")))
-
 (defn extension (path)
   "The lowercase file extension of `path` (after the last dot of the last segment),
   or \"\" when there's no extension."
   (let (seg (last (string/split path "/"))
         parts (string/split seg "."))
     (if (> (count parts) 1) (string/lower (last parts)) "")))
+
+(defn text-mime? (mime)
+  "True if `mime` is a text media type — what `web/assets` precompresses. (Serving no longer
+  asks: every file is read as `bytes`.)"
+  (or (string/starts-with? mime "text/")
+    (= mime "application/json")
+    (= mime "application/xml")
+    (= mime "application/manifest+json")
+    (= mime "image/svg+xml")))
 
 (defn mime-type (path)
   "Content-Type for `path`, chosen by extension; `application/octet-stream` if unknown."
@@ -114,28 +113,19 @@
 ; registry process would funnel every read through one mailbox).
 (def *etag-cache* (table/new))
 
-(defn- cached-etag-via (path fresh-fn)
-  "The ETag for `path`, reusing the cached hash while the file's mtime+size are unchanged and
-  recomputing it (via `fresh-fn`, called only on a miss) after an edit. One `file-stat` (a
-  cheap syscall) replaces hashing the whole body on every hit. Shared by the text and binary
-  paths — they differ only in how the fresh tag is hashed."
+(defn cached-etag (path body)
+  "The cached strong ETag for the file `body` (a string or `bytes`) at `path`: the hash is
+  reused while the file's mtime+size are unchanged and recomputed after an edit. One
+  `file/stat` (a cheap syscall) replaces hashing the whole body on every hit."
   (let (st (file/stat path))
     (if (nil? st)
-      (fresh-fn)
+      (web/http-cache/strong-etag body)
       (let (hit (table/get *etag-cache* path))
         (if (and hit (= (get hit :mtime) (get st :mtime)) (= (get hit :size) (get st :size)))
           (get hit :etag)
-          (let (tag (fresh-fn))
+          (let (tag (web/http-cache/strong-etag body))
             (table/put *etag-cache* path {:mtime (get st :mtime) :size (get st :size) :etag tag})
             tag))))))
-
-(defn cached-etag (path body)
-  "The cached strong ETag for a text file `body` at `path` (see `cached-etag-via`)."
-  (cached-etag-via path (fn () (web/http-cache/strong-etag body))))
-
-(defn cached-bytes-etag (path body)
-  "The cached strong ETag for a binary (`bytes`) file `body` at `path`."
-  (cached-etag-via path (fn () (web/http-cache/strong-etag body))))
 
 (defn fingerprint-shaped? (path)
   "True if `path`'s basename *looks* content-fingerprinted — `name.<8+ hex>.ext`, the shape
@@ -291,54 +281,51 @@
                         else [a (math/min b (- len 1))])
                       nil))))))))))
 
-(defn serve-range (conn content-type body tag cc len)
-  "Honour a `Range` request when we safely can. Byte ranges are byte offsets, but the body
-  is a string and a slice that splits a multibyte char can't be re-formed — so we only range
-  ASCII-clean bodies (byte length == char length), where a codepoint substring IS the byte
-  slice. Otherwise (and for multi-range) we ignore the Range and the caller sends a full 200,
-  which the spec explicitly allows. Returns a 206/416 conn, or nil to mean 'serve the whole
-  body'."
-  (if (not (= (string/length body) len))
-    ; multibyte body — can't slice by byte safely; let the caller send 200
-    nil
-    (let (r (parse-range (get (conn-headers conn) :range) len))
-      (cond
-        (nil? r) nil
-        (= r :unsatisfiable)
+(defn serve-range (conn content-type body tag cc)
+  "Honour a `Range` request against `body` (a string or `bytes`): a 206 with the requested
+  bytes, a 416 for an unsatisfiable range, or nil (no or garbled `Range`, or a multi-range) to
+  mean 'send the whole body', which the spec allows.
+
+  Ranges are byte offsets, so a string body is ranged over its UTF-8 bytes — any range,
+  including one that splits a multibyte character, which is the client's to reassemble. The
+  206 body is always `bytes`."
+  (let (raw (if (bytes? body) body (string/->bytes body))
+        len (count raw)
+        r (parse-range (get (conn-headers conn) :range) len))
+    (cond
+      (nil? r) nil
+      (= r :unsatisfiable)
+        (send-resp (with-resp-headers conn
+                     (assoc (rangeable-headers content-type tag cc)
+                       :content-range (str "bytes */" len)))
+          416 "")
+      else
+      ;; floored: byte offsets are integral by construction, but they arrive by
+      ;; destructuring a vector, which widens them to `number`
+        (let ([start-raw end-raw] r
+              start (math/floor start-raw)
+              end (math/floor end-raw))
           (send-resp (with-resp-headers conn
                        (assoc (rangeable-headers content-type tag cc)
-                         :content-range (str "bytes */" len)))
-            416 "")
-        else
-        ;; floored: byte offsets are integral by construction, but they arrive by
-        ;; destructuring a vector, which widens them to `number`
-          (let ([start-raw end-raw] r
-                start (math/floor start-raw)
-                end (math/floor end-raw))
-            (send-resp (with-resp-headers conn
-                         (assoc (rangeable-headers content-type tag cc)
-                           :content-range (str "bytes " start "-" end "/" len)))
-              206
-              (string/substring body start (+ end 1))))))))
+                         :content-range (str "bytes " start "-" end "/" len)))
+            206
+            (bytes/slice raw start (+ end 1)))))))
 
 (defn serve-body (conn content-type body path &optional (dir "static") (tag nil))
-  "Send `body` as a cacheable static asset: a content ETag (with `If-None-Match` → 304),
-  an env- and fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and best-effort
-  byte ranges (`Range` → 206/416, else a full 200). `path`/`dir` only steer the cache policy
-  (fingerprinted? consults `dir`'s manifest); `path` may be a bare filename. `tag` lets a
-  caller pass a precomputed (e.g. cached) ETag; nil computes one from `body`."
+  "Send `body` — a string or `bytes` — as a cacheable static asset: a content ETag (with
+  `If-None-Match` → 304), an env- and fingerprint-aware Cache-Control, `nosniff`,
+  `Accept-Ranges`, and byte ranges (`Range` → 206/416, else a full 200 carrying `body` as
+  given). `path`/`dir` only steer the cache policy (fingerprinted? consults `dir`'s
+  manifest); `path` may be a bare filename. `tag` lets a caller pass a precomputed (e.g.
+  cached) ETag; nil computes one from `body`."
   (let (tag (or tag (web/http-cache/strong-etag body))
         cc (cache-control path dir))
     (cond
       (if-none-match? conn tag) (not-modified conn tag cc)
       else
-      ;; The byte length is computed ONLY for a request that actually sent `Range`.
-      ;; `(count (string/->bytes body))` UTF-8-encodes the whole body — a full copy of the
-      ;; asset — and `serve-range` needs it only to decide whether a byte slice is safe and
-      ;; to parse the header. Almost no request carries `Range`, so almost every one was
-      ;; paying to encode a 150 KB stylesheet in order to conclude it was not ranging.
-        (or (and (get (conn-headers conn) :range)
-              (serve-range conn content-type body tag cc (count (string/->bytes body))))
+      ;; A string body is encoded to bytes ONLY for a request that actually sent `Range`:
+      ;; `string/->bytes` copies the whole asset, and almost no request ranges.
+        (or (and (get (conn-headers conn) :range) (serve-range conn content-type body tag cc))
           (send-resp (with-resp-headers conn (rangeable-headers content-type tag cc))
             200 body)))))
 
@@ -395,7 +382,7 @@
             sibling (nth variant 1)
             body (check-allow :discarded-catch (try (file/slurp-bytes sibling) (catch _ nil))))
         (when body
-          (let (tag (cached-bytes-etag sibling body)
+          (let (tag (cached-etag sibling body)
                 cc (cache-control path root))
             (if (if-none-match? conn tag)
               (not-modified conn tag cc)
@@ -427,59 +414,20 @@
           (let (fresh (and (get (conn-headers conn) :if-none-match) (fresh-cached-etag path)))
             (if (and fresh (if-none-match? conn fresh))
               (not-modified conn fresh (cache-control path root))
-              ; text types are read as a string (file/slurp); everything else (images, fonts,
-              ; video, an unknown octet-stream) is read byte-faithfully as `bytes`
-              (if (text-mime? (mime-type path))
-                (serve-text conn path root)
-                (serve-binary conn path root)))))))))
+              (serve-file conn path root))))))))
 
-(defn serve-text (conn path root)
-  "Serve a text asset at `path`: read as a UTF-8 string and hand to `serve-body`."
-  (let (body (check-allow :discarded-catch (try (file/slurp path) (catch _ nil))))
-    (if (nil? body)
-      (not-found-resp conn)
-      (serve-body conn (mime-type path) body path root (cached-etag path body)))))
+(defn serve-file (conn path root)
+  "Serve the file at `path`, read byte-faithfully as `bytes` whatever its type, through
+  `serve-body`; 404 when it cannot be read.
 
-(defn serve-binary (conn path root)
-  "Serve a binary asset at `path`: read the raw bytes (byte-faithful, never UTF-8-mangled) and
-  hand to `serve-binary-body`."
+  Bytes for text too. The bytes ARE the file — a stylesheet's identity is what is on disk,
+  not a decode of it — so the ETag is the same one a UTF-8 read would hash, a `Range`
+  slices exactly what was asked, and a text file that is not valid UTF-8 is served rather
+  than refused."
   (let (body (check-allow :discarded-catch (try (file/slurp-bytes path) (catch _ nil))))
     (if (nil? body)
       (not-found-resp conn)
-      (serve-binary-body conn (mime-type path) body path root (cached-bytes-etag path body)))))
-
-(defn serve-binary-body (conn content-type body path dir tag)
-  "Send a `bytes` body as a cacheable static asset: content ETag (with `If-None-Match` → 304),
-  env/fingerprint-aware Cache-Control, `nosniff`, `Accept-Ranges`, and byte ranges (`Range` →
-  206/416, else a full 200). Byte ranges are trivially correct on `bytes` (no multibyte
-  carve-out the text path needs), so any range is honoured."
-  (let (cc (cache-control path dir)
-        len (count body))
-    (cond
-      (if-none-match? conn tag) (not-modified conn tag cc)
-      else
-        (or (serve-bytes-range conn content-type body tag cc len)
-          (send-resp (with-resp-headers conn (rangeable-headers content-type tag cc))
-            200 body)))))
-
-(defn serve-bytes-range (conn content-type body tag cc len)
-  "Honour a `Range` request against a `bytes` body: a 206 with the sliced bytes, a 416 for an
-  unsatisfiable range, or nil (no/garbled Range) to mean 'send the whole body'."
-  (let (r (parse-range (get (conn-headers conn) :range) len))
-    (cond
-      (nil? r) nil
-      (= r :unsatisfiable)
-        (send-resp (with-resp-headers conn
-                     (assoc (rangeable-headers content-type tag cc)
-                       :content-range (str "bytes */" len)))
-          416 "")
-      else
-        (let ([start end] r)
-          (send-resp (with-resp-headers conn
-                       (assoc (rangeable-headers content-type tag cc)
-                         :content-range (str "bytes " start "-" end "/" len)))
-            206
-            (bytes/slice body start (+ end 1)))))))
+      (serve-body conn (mime-type path) body path root (cached-etag path body)))))
 
 (defn handler (root &optional (capture "path"))
   "A conn handler that serves files under `root` from a splat route. `capture` is the
