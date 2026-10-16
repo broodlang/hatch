@@ -3,8 +3,8 @@
 (defmodule web-live-test
   (:use web/live)
   (:use-internals web/live)
-  ; json-str / encode / json-decode / send-info — the wire codec and delivery, now web/socket's
-  (:use web/socket)
+  ; json-str / json-decode / send-info — the wire codec and delivery, now web/socket's
+  (:use web/socket :only [json-str json-decode send-info])
   (:use web/template)
   (:use web/conn)
   (:use test))
@@ -443,7 +443,7 @@
       ;; field is always present — so a `(get view :generation 0)` style default would not
       ;; have fired and every beat would have been discarded as stale.
       (assert= (session-view-generation view) 0)
-      (assert= (session-view-ticker-pids view) (list))
+      (assert= (session-view-ticker-handles view) (list))
       (assert= (session-view-model view) nil)
       (assert= (session-view-dynamics view) nil)))
 

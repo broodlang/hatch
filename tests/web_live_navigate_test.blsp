@@ -159,3 +159,61 @@
       ;; `timer/cancel` races a beat already in flight, so let one land before counting
       (beats-within 30)
       (assert= (beats-within 80) 0))))
+
+;; ---- nothing but `join` runs before the view is mounted ----
+;;
+;; Mount waits for the client's `join`. Before the loop owned that gate, `event` and `patch`
+;; frames went straight to their handlers: a frame before `join` ran `handle-event` over a nil
+;; model and then rendered — pushing a join frame built from whatever the handler made of nil.
+
+(defn- read-all-frames (client buf wait-ms seen)
+  "Every server frame text that arrives before `wait-ms` passes with none (at most five)."
+  (if (>= (count seen) 5)
+    seen
+    (match (next-frame client buf wait-ms)
+      ([text remainder] (read-all-frames client remainder wait-ms (conj seen text)))
+      (_ seen))))
+
+(describe "a frame before join"
+  :isolated (test "an event or a patch is ignored, and the session still joins afterwards"
+    (let ([client listener] (open-session "/navigate-test-b"))
+      (tcp/send client (masked-text-frame "{\"event\":\"event\",\"name\":\"x\",\"params\":{}}"))
+      (tcp/send client (masked-text-frame "{\"event\":\"patch\",\"params\":{\"p\":\"1\"}}"))
+      (assert= (read-all-frames client (bytes []) 150 []) [])
+      (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+      (let ([join-text _] (expect-frame client (bytes [])))
+        (assert= (includes? join-text "\"join\"") true))
+      (tcp/close client)
+      (tcp/close listener))))
+
+;; ---- a raising mount on navigate is reported ----
+
+(defn- read-until-closed (client buf)
+  "Read server frames until the server hangs up (`:closed`) or goes quiet (`:timeout`)."
+  (match (next-frame client buf 2000)
+    ([_text remainder] (read-until-closed client remainder))
+    (other other)))
+
+(defn- raising-spec ()
+  (assoc (b-spec) :mount (fn (params) (error "mount blew up"))))
+
+(register-live "/navigate-test-raises" raising-spec nil)
+
+(describe "a live-navigate into a view whose mount raises"
+  :isolated (test "emits [:hatch :live :exception] for the mount and ends the session"
+    (telemetry/start)
+    (let (me (self))
+      (telemetry/attach :navigate-test-mount
+        [:hatch :live :exception]
+        (fn (_event _measurements metadata) (send me [:live-exception (get metadata :phase)]))))
+    (let ([client listener] (open-session "/navigate-test-b"))
+      (tcp/send client (masked-text-frame "{\"event\":\"join\",\"params\":{}}"))
+      (expect-frame client (bytes []))
+      (tcp/send client
+        (masked-text-frame "{\"event\":\"navigate\",\"path\":\"/navigate-test-raises\"}"))
+      (assert= (receive ([:live-exception "mount"] :reported) (after 5000 :silent)) :reported)
+      ;; the old view is already gone, so the session closes rather than limping on without one
+      (assert= (read-until-closed client (bytes [])) :closed)
+      (tcp/close client)
+      (tcp/close listener))
+    (telemetry/detach :navigate-test-mount)))

@@ -92,7 +92,7 @@ Without these the server is trivially exhausted by a single bad client.
   Verified end-to-end (`curl -k` → 200, live mounts, themed errors).
 - **Supervise the live registries** — ✅ `:hatch-live` (the hot-reload registry: the open
   session pids a `[:reload]` fans out to) runs under a `:one-for-one` supervisor
-  (`:hatch-live-sup`), started once at `web/live` load. `live-ensure` self-heals: it
+  (`:hatch-live-sup`), started once at `web/live` load. `web/registry/ensure-supervised` self-heals: it
   (re)starts the supervisor on demand if it isn't running.
 
   The **route** table used to be supervised here too, mirrored to a `:hatch-live-routes-vault`
