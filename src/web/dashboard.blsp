@@ -24,13 +24,8 @@
   (:alias node)
   (:alias web/template)
   (:alias json)
-  ; call / remote-nodes / machine-label — the page for another machine is this page evaluated
-  ; there
-  (:alias web/cluster)
-  ; query-encode — pin a page to a machine with `?node=`
-  (:alias url)
-  ; the peer-label cache
-  (:alias table))
+  ; picker / render-on / self-node? — the page for another machine is this page evaluated there
+  (:alias web/cluster))
 
 ; Captured when this module loads, which is boot — the counters below are all "since this
 ; process started", and without this the numbers have no denominator.
@@ -219,12 +214,12 @@
 
 (defn page (title &optional (opts {}))
   "The dashboard as an HTML string, from a snapshot of the current metrics — of this
-  process, or of the machine `opts` `:node` names, rendered there (`render-on`)
+  process, or of the machine `opts` `:node` names, rendered there (`web/cluster/render-on`)
   and carrying a picker of every machine when there is more than one. `opts`
   `:refresh-ms` adds `refresh-script`, so the page keeps itself current."
   (if (web/cluster/self-node? (get opts :node))
     (local-page title opts)
-    (render-on (get opts :node)
+    (web/cluster/render-on (get opts :node)
       (fn () (web/dashboard/local-page title opts))
       (fn (message) (local-page title (assoc opts :notice message))))))
 
@@ -247,7 +242,7 @@
                              {}
                              [:div
                                {:class "wrap"}
-                               [:h1 {} title (picker (get opts :node))]
+                               [:h1 {} title (web/cluster/picker (get opts :node))]
                                (if (get opts :notice) [:p {:class "err"} (get opts :notice)] "")
                                [:div
                                  {:class "cards"}
@@ -296,91 +291,14 @@
 (defn handler (&optional (opts {}))
   "A conn handler serving the dashboard. `:title` names the page; `:refresh-ms` makes it
   keep itself current (see `refresh-script`). In a cluster a request naming no machine is
-  redirected to `?node=` this one (`pinned`), so the view never flips.
+  redirected to `?node=` this one (`web/cluster/pinned`), so the view never flips.
 
   Never cached: it reports the state of this process at this moment, and a stored copy is a
   stale answer to the only question anyone asks it."
   (let (title (get opts :title "Hatch metrics"))
     (fn (conn)
-      (or (pinned conn)
+      (or (web/cluster/pinned conn)
         (-> conn
           (put-resp-header :cache-control "no-store")
           (put-resp-header :content-type "text/html; charset=utf-8")
           (send-resp 200 (page title (assoc opts :node (param conn "node")))))))))
-
-;; ---- the machine picker -------------------------------------------------------
-;;
-;; Every operational page in a cluster wants to say which machine it shows and to let the
-;; reader pick another. Discovery and the remote call are web/cluster's; this is the page half.
-
-;; Labels are asked of the peer once a minute, not per render: a page that refreshes every
-;; few seconds must not cost a round trip per peer per tick.
-(def- *labels* (table/new))
-(def *label-ttl-ms* 60000)
-
-(defn- peer-label (nm)
-  (let (key (str nm)
-        now (os/now)
-        stored (table/get *labels* key))
-    (if (and stored (> (get stored :expires) now))
-      (get stored :label)
-      (let (answer (web/cluster/call nm (fn () (web/cluster/machine-label)) 2000)
-            label (if (= (first answer) :ok) (second answer) (str nm)))
-        (table/put *labels* key {:label label :expires (+ now *label-ttl-ms*)})
-        label))))
-
-(defn nodes ()
-  "This node and every connected peer, this one first, each as `{:node :label :self?}` —
-  what a machine picker lists. A runtime that is not a node answers itself alone."
-  (cons {:node (node/name) :label (web/cluster/machine-label) :self? true}
-    (map (web/cluster/remote-nodes) (fn (peer) {:node peer :label (peer-label peer) :self? false}))))
-
-(defn picker (selected &optional (param "node"))
-  "A `<select>` of `nodes` that navigates to the same page with `?<param>=<node>` on change
-  — the machine picker every operational page carries when there is more than one machine.
-  `selected` is the query value (a string) or nil for this node. Hiccup; renders nothing
-  for a single node."
-  (let (all (nodes))
-    (if (< (count all) 2)
-      ""
-      [:select
-        {:class "picker"
-         :onchange "var u=new URL(location.href);u.searchParams.set(this.name,this.value);location.href=u.toString()"
-         :name param}
-        (map all
-          (fn (entry)
-            (let (value (str (get entry :node))
-                  chosen (if (nil? selected) (get entry :self?) (= selected value)))
-              [:option
-                (if chosen {:value value :selected "selected"} {:value value})
-                (get entry :label)])))])))
-
-(defn render-on (nm thunk fallback)
-  "`web/cluster/call`, for a page: the HTML `thunk` renders on `nm`, or `(fallback message)` when it
-  cannot be had — usually this process's own page with the message as a notice, so the
-  picker is still there to choose again. What makes a page cluster-aware in a few lines:
-  a page function is pure over its process, so evaluating it on the peer IS the peer's
-  page."
-  (let (result (web/cluster/call nm thunk))
-    (if (= (first result) :ok)
-      (second result)
-      (fallback (second result)))))
-
-(defn pinned (conn &optional (param "node"))
-  "For an operational page in a cluster: nil when the request already names a machine (or
-  there is only one), else a redirect to the same URL with `?<param>=` this node — so the
-  view is pinned to the machine that first answered.
-
-  Without this a page with no `?node=` shows whichever machine the platform's load balancer
-  picked for THAT request, and a page that refreshes itself every few seconds flips between
-  machines — the numbers change under the reader for no reason they can see, and the picker
-  flips with them (hive, 2026-09-16). One redirect on the first request, and every link and
-  every refresh from then on says which machine it means."
-  (let (chosen (web/conn/param conn param))
-    (when (and (nil? chosen) (> (count (web/cluster/remote-nodes)) 0))
-      (let (query (get conn :query)
-            pin (url/query-encode {param (str (node/name))})
-            target (str (get conn :path)
-                     "?"
-                     (if (or (nil? query) (= query "")) pin (str query "&" pin))))
-        (web/conn/redirect-resp conn target)))))

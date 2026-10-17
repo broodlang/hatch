@@ -3,7 +3,8 @@
 ;; by hive's /dev pages in production.
 (defmodule web-cluster-call-test
   (:use test)
-  (:alias web/cluster))
+  (:alias web/cluster)
+  (:alias web/template))
 
 (describe "call"
   (test "on this node the thunk just runs"
@@ -22,3 +23,36 @@
     (is (web/cluster/self-node? :local))
     (is (web/cluster/self-node? (node/name)))
     (is (not (web/cluster/self-node? "hive@[fdaa::1]")))))
+
+(describe "nodes and the picker"
+  (test "a lone runtime lists itself and renders no picker"
+    (let (all (web/cluster/nodes))
+      (assert= 1 (count all))
+      (is (get (first all) :self?))
+      (is (string? (get (first all) :label))))
+    (assert= "" (web/cluster/picker nil))))
+
+(describe "render-on"
+  (test "the fallback gets the reason, escaped by the caller's renderer"
+    (assert= "<p>web/cluster/call: &lt;x&gt; is not a connected peer</p>"
+      (web/template/render [:p
+                             {}
+                             (web/cluster/render-on "<x>" (fn () "never") (fn (message) message))]))))
+
+(describe "pinned"
+  (test "on a lone runtime nothing is pinned"
+    (assert= nil
+      (web/cluster/pinned (web/conn/build {:method "GET"
+                                           :path "/dev/metrics"
+                                           :query ""
+                                           :params {}
+                                           :headers {}
+                                           :body ""}))))
+  (test "a request that already names a machine is left alone"
+    (assert= nil
+      (web/cluster/pinned (web/conn/build {:method "GET"
+                                           :path "/x"
+                                           :query "node=a"
+                                           :params {"node" "a"}
+                                           :headers {}
+                                           :body ""})))))
