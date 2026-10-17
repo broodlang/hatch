@@ -15,8 +15,7 @@ ordinary model key; and a **client** ([docs](docs/client.md)) with hooks for
 imperative JavaScript, debounce/throttle, and bindings for any DOM event.
 
 Hatch is a **library package**. The framework lives in `src/` (`http/` +
-`web/`); a full example app lives in the sibling project
-[`hatch-demo`](https://github.com/broodlang/hatch-demo), which depends on Hatch.
+`web/`); `nest new myapp --template hatch` scaffolds a full app that uses it.
 
 ## Usage
 
@@ -55,8 +54,7 @@ and error pages in your own layout:
    :errors    {:render my-error-page}})
 ```
 
-See `docs/web-framework-design.md` for the design rationale and `hatch-demo`
-for worked examples (presence, forms, uploads, pubsub).
+See `docs/web-framework-design.md` for the design rationale.
 
 ## Publishing
 

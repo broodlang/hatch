@@ -10,17 +10,16 @@ See `docs/web-framework-design.md` for the full design rationale.
 ---
 
 Hatch is a **library package**: `src/` holds only the framework (`http/` +
-`web/`). The demo app lives in a separate sibling project, `../hatch-demo`,
-which depends on a **published** Hatch (`[hatch :version "^0.16.1"]`) — so the
-demo is also our proof that Hatch installs and loads as a real package, from the
-registry, the way anyone else gets it. Keep it that way: a `:git` pin there buys
-nothing the registry does not, and quietly retires the only test of that path.
+`web/`). Its consumers live in sibling projects: hive (`../hive`), which pins
+hatch by git commit, and the packages that render pages with it (`../mail`,
+`../observe-local`). Grep all of them before removing or moving public API —
+`nest check` in each, against your hatch, reports what a change leaves unbound.
 
-**When you change hatch, the demo cannot see it until you release.** For local
+**When you change hatch, hive cannot see it until you move its pin.** For local
 co-development swap the dep to `[hatch :path "../hatch"]` and re-run `nest
 fetch`; `../hive` documents the same swap in its own `project.blsp`. Put the
-pin back before committing either — hive's Dockerfile builds from its git ref,
-and a `:path` dep there is a broken deploy.
+pin back before committing — hive's Dockerfile builds from its git ref, and a
+`:path` dep there is a broken deploy.
 
 New apps are scaffolded with `nest new myapp --template hatch` (a full
 Postgres-backed app) or `--template web-api` (a minimal JSON API, no live layer).
@@ -41,47 +40,7 @@ nest docs          # generate the HTML API site into doc/ (gitignored)
 # cannot run these; they are plain node with no dependencies. See docs/client.md.
 node tests/js/timing_test.js   # the debounce/throttle decision
 node --check static/brood_live.js
-
-# In ../hatch-demo/ (the demo app, consumes a published Hatch):
-nest fetch         # resolve deps → project.lock.blsp (after a dep or version change)
-nest test          # loads `main`, exercising the dep end-to-end
-nest run           # start the demo server ($HATCH_PORT, default 5000)
-
-# Browser tests — they live in ../hatch-demo, because hatch is a library with
-# nothing to drive. CI only; nothing in the app needs npm. The job warms the
-# startup image BEFORE the suite deliberately: a fresh runner always boots cold,
-# and the 0.21.1 bug was invisible on a cold boot.
-npm run test:browser         # 21 tests: bindings, streams, socket uploads, channels
 ```
-
-The demo (`../hatch-demo/src/web/routes.blsp`) serves:
-- `GET /` — home page (plain)
-- `GET /page-inline`, `GET /page-template` — plain pages (inline Hiccup vs `.bml`)
-- `GET /counter`, `GET /counter-inline` — live counter (events + tickers)
-- `GET /signup` — live form with as-you-type validation (web/form)
-- `GET /room` — PubSub demo: `broadcast-from` + an optimistic local update (not just
-  plain `broadcast`)
-- `GET /presence` — Presence demo (live who's-here roster)
-- `GET /reorder` — keyed DOM morphing + live-patch (`?highlight=` via `handle-params`,
-  no remount — the rotation tick keeps running across it)
-- `GET /dashboard` — gated by `on-mount-guard` (redirects to `/account` until the session
-  has a name); embeds three LiveComponents (`web/component`): two independent
-  `like-button` instances (inline render) + one `counter-widget` rendered from a `.bml`
-  template
-- `GET`/`POST /account` — form body params + signed session + flash (PRG); `save`
-  validates with `web/form` (`max-length?`)
-- `GET`/`POST /messages`, `GET /messages/:id` — Postgres-backed message board; `create`
-  validates with `web/form` (`required?`, `matches-pattern?`); `:id` is the demo's one
-  named-path-param route; the form's second button posts via `fetch` with the CSRF token
-  as an `X-CSRF-Token` header instead of the hidden field
-- `GET /uploads` — multipart upload (in-memory + spooled-to-disk), stored in Postgres as
-  `bytea` and served back byte-faithfully; `GET /csrf-token` — CSRF bootstrap for clients
-  that can't be handed a token in their HTML (a live view has no Conn in `render`)
-- `GET /upload-progress` — live upload progress (web/upload): the bar is fed by the server
-  as it reads a multipart POST on a *different* connection, tied to the live session by an
-  `?upload_token=`
-- `GET /dev` — Basic-auth-gated diagnostics; `GET /slow` — slow-request logging demo
-- `GET /static/*` — static assets (+ `/static/brood_live.js`, the live client)
 
 ## Source layout
 

@@ -92,7 +92,7 @@ load, as usual.
 
 ## Tailwind v4 + daisyUI recipe (no npm)
 
-This is exactly what the demo (`../hatch-demo`) uses. The Tailwind v4 standalone CLI is
+This is what hive (`../hive`) uses. The Tailwind v4 standalone CLI is
 a single prebuilt binary — the same thing Phoenix's `tailwind` Hex package wraps — so
 there's no Node/npm in your workflow.
 
@@ -225,4 +225,4 @@ Nothing in the framework changes. Examples:
 
 `web/test` drives handlers and live views as plain functions — no server, no socket —
 including assertions about the rendered markup (e.g. that daisyUI classes are present).
-See the `web/test` module doc and `../hatch-demo/tests/web/views/`.
+See the `web/test` module doc.
