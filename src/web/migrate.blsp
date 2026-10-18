@@ -4,7 +4,7 @@
 
     (defn main (& arguments)
       (if (= (first arguments) \"migrate\")
-        (os/exit (web/migrate/run (pg/adaptor) (config/db-opts) migrations/all db/schemas
+        (system/halt (web/migrate/run (pg/adaptor) (config/db-opts) migrations/all db/schemas
                    (rest arguments)))
         (serve …)))
 
