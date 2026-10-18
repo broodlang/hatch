@@ -64,7 +64,9 @@
   "True if the submitted token is present and matches the session token (constant-time)."
   (let (want (token conn)
         got (submitted-token conn))
-    (and want got (constant-time-equal? (string/->bytes want) (string/->bytes got)))))
+    ;; a JSON body can send any type as the token: only a string is one, and anything else
+    ;; is a 403, not a type error and a 500
+    (and want (string? got) (constant-time-equal? (string/->bytes want) (string/->bytes got)))))
 
 (defn reject (conn)
   "A halted 403 for a missing/invalid CSRF token."
@@ -79,7 +81,8 @@
     (ensure-token conn)
     ; unsafe method: validate only — a passing request already carries the token, and a
     ; failing one is rejected without minting, so a 403 never sets a fresh session cookie
-    (if (token-ok? conn) conn (reject conn))))
+    ; — and the body is parsed once here, so the token can be read and the route reuses it
+    (let (parsed (parse-body conn)) (if (token-ok? parsed) parsed (reject parsed)))))
 
 (defn csrf-input (conn)
   "A hidden form field carrying the session's CSRF token — drop it inside every POST form:

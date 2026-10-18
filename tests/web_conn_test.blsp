@@ -325,3 +325,30 @@
     (assert= (parse-body-params {:content-type "text/plain"} "hello") {}))
   (test "empty body → no params"
     (assert= (parse-body-params {:content-type "application/json"} "") {})))
+
+(describe "typed params"
+  (defn json-conn (body)
+    (build {:method "POST"
+            :path "/x"
+            :query "page=3"
+            :params {"page" "3"}
+            :headers {:content-type "application/json"}
+            :body body}))
+  (test "whole-number takes a string or a JSON integer, and nothing else"
+    (assert= (whole-number "42") 42)
+    (assert= (whole-number 42) 42)
+    (assert= (whole-number "4.5") nil)
+    (assert= (whole-number "-1") nil)
+    (assert= (whole-number "abc") nil)
+    (assert= (whole-number "9007199254740993") nil)
+    (assert= (whole-number 4.0) nil)
+    (assert= (whole-number ["1"]) nil)
+    (assert= (whole-number nil) nil))
+  (test "a JSON body's number, array or object where a string was meant is not a 500"
+    (let (conn (json-conn "{\"id\":5,\"name\":[\"ada\"],\"q\":{\"a\":1}}"))
+      (assert= (whole-number-param conn "id") 5)
+      (assert= (whole-number-param conn "page") 3)
+      (assert= (whole-number-param conn "name" 1) 1)
+      (assert= (string-param conn "name") nil)
+      (assert= (string-param conn "q" "") "")
+      (assert= (string-param conn "page") "3"))))

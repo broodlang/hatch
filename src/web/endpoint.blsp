@@ -381,7 +381,9 @@
     (error "web/endpoint/adapter: :router is required (a defrouter function)"))
   (let (static (static-options config))
     (fn (request)
-      (let (conn (web/conn/build request))
+      ;; unparsed: the body is parsed by the route that takes the request, after its plugs and
+      ;; inside the deadline below — a 404, an asset or a refused request never pays for it
+      (let (conn (web/conn/build-unparsed request))
         (or (if static (static-answer conn config static) nil)
           (finish conn (freshen conn (dispatch conn config) config) config))))))
 

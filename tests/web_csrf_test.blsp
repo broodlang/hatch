@@ -77,3 +77,25 @@
     (let (conn (session/put-session (fresh "GET" {}) "_csrf" "abc")
           node (csrf-input conn))
       (assert= node [:input {:type "hidden" :name "_csrf_token" :value "abc"}]))))
+
+(describe "protect-from-forgery with a JSON body"
+  (defn json-post (token-json)
+    (let (conn ((session/fetch-session (session/cookie-store secret {})) (build-unparsed {:method "POST"
+                                                                                          :path "/x"
+                                                                                          :query ""
+                                                                                          :params {}
+                                                                                          :headers {:content-type "application/json"}
+                                                                                          :body (str "{\"_csrf_token\":"
+                                                                                                  token-json
+                                                                                                  "}")})))
+      conn))
+  (test "a token that is not a string is a 403, not a type error"
+    (assert= (get (protect-from-forgery (json-post "1")) :status) 403)
+    (assert= (get (protect-from-forgery (json-post "[\"x\"]")) :status) 403)
+    (assert= (get (protect-from-forgery (json-post "{\"a\":1}")) :status) 403))
+  (test "the right token in an unparsed JSON body passes, and the conn comes back parsed"
+    (let (conn (ensure-token (json-post "\"\"")))
+      (let (with-token (assoc conn :body (str "{\"_csrf_token\":\"" (token conn) "\"}"))
+            passed (protect-from-forgery with-token))
+        (assert= (halted? passed) false)
+        (assert= (conn-body-parsed? passed) true)))))

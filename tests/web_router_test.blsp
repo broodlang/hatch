@@ -237,3 +237,53 @@
   (test "a hand-built list is already the routes"
     (let (routes [{:method "GET" :pattern [] :handler nil}])
       (assert= (routes-of routes) routes))))
+
+;; The endpoint builds a conn with its body unparsed; the route that takes the request parses
+;; it — after its `through` plugs — so a 404, an asset or a refused request never pays for it.
+(defn unparsed-post (path content-type body)
+  (build-unparsed {:method "POST"
+                   :path path
+                   :query "q=1"
+                   :params {"q" "1"}
+                   :headers {:content-type content-type}
+                   :body body}))
+
+(defn body-seen-plug (conn)
+  ;; what a plug finds before the handler: the raw params untouched, `param` still answers
+  (assign conn :seen (str (contains? (conn-params conn) "name") "/" (param conn "name"))))
+
+(describe "a request body is parsed by the route that takes it"
+  (defrouter body-router
+    (post "/echo/:id"
+      (fn (conn)
+        (html-resp conn (str (param conn "name") " " (param conn "id") " " (param conn "q")))))
+    (through [body-seen-plug]
+      (post "/plugged"
+        (fn (conn) (html-resp conn (str (get-assign conn :seen) " " (param conn "name")))))))
+
+  (test "the handler sees the body's params, the path's winning over the body's"
+    (assert= (get (body-router (unparsed-post "/echo/7"
+                                 "application/json" "{\"name\":\"ada\",\"id\":\"9\"}"))
+               :resp-body)
+      "ada 7 1"))
+  (test "a plug before the handler finds the body unparsed, and param still reads it"
+    (assert= (get (body-router (unparsed-post "/plugged"
+                                 "application/x-www-form-urlencoded" "name=grace"))
+               :resp-body)
+      "false/grace grace"))
+  (test "build-unparsed leaves the body for later; parse-body parses once"
+    (let (conn (unparsed-post "/x" "application/json" "{\"name\":\"ada\"}"))
+      (assert= (conn-params conn) {"q" "1"})
+      (assert= (conn-body-parsed? conn) false)
+      (let (parsed (parse-body conn))
+        (assert= (conn-params parsed) {"q" "1" "name" "ada"})
+        (assert= (conn-body-params parsed) {"name" "ada"})
+        (assert= (conn-body-parsed? parsed) true)
+        (assert= (parse-body parsed) parsed))))
+  (test "a JSON body over the cap is not decoded into params, but arrives whole"
+    (let (big (str "{\"name\":\"" (string/repeat "a" (+ *json-params-max-bytes* 1)) "\"}")
+          parsed (parse-body (unparsed-post "/x" "application/json" big)))
+      (assert= (conn-params parsed) {"q" "1"})
+      (assert= (conn-body parsed) big)))
+  (test "a map written out as a conn keeps the params it says"
+    (assert= (param {:params {"a" "1"}} "a") "1")))

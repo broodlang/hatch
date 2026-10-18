@@ -458,6 +458,15 @@
       :session (assoc sess *flash-key* (assoc flash key message))
       :session-changed? true)))
 
+(defn flash-redirect (conn kind message path)
+  "`conn` with a one-shot `kind` flash (`\"info\"`, `\"error\"`) carrying `message`, answered
+  with a redirect to `path` — the post/redirect/get step every form ends in; the flash shows
+  once, on the page the redirect lands on. `conn` first, so it threads: `(-> conn (login-user
+  user) (flash-redirect \"info\" \"Logged in.\" \"/settings\"))`."
+  (-> conn
+    (put-flash kind message)
+    (redirect-resp path)))
+
 (defn get-flash (conn key &optional (default nil))
   "Read a flash message by `key` for this request (placed there by fetch-flash)."
   (get (or (conn-flash conn) {}) key default))

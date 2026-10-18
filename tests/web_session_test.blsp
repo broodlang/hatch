@@ -385,3 +385,16 @@
       (assert= (get-session (fetch store raw) "who") "ada")
       (let (loaded (put-session (fetch store raw) "who" "grace"))
         (assert= (get-session (fetch store loaded) "who") "grace")))))
+
+(describe "flash-redirect"
+  (test "a one-shot flash and a redirect to the path"
+    (let (conn (web/session/flash-redirect (web/conn/build {:method "POST"
+                                                            :path "/x"
+                                                            :query ""
+                                                            :params {}
+                                                            :headers {}
+                                                            :body ""})
+                 "info" "Saved." "/settings"))
+      (assert= (get conn :status) 302)
+      (assert= (get (get conn :resp-headers) :location) "/settings")
+      (assert= (get (get (get conn :session) web/session/*flash-key*) "info") "Saved."))))

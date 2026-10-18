@@ -30,15 +30,23 @@
   (method path
     query scheme params body-params files body-file headers body body-bytes cookies assigns status
     resp-body resp-headers resp-cookies before-send halted? route stream session session-store
-    session-changed? flash))
+    session-changed? flash path-params body-parsed?))
 
 (impl Display
   web/conn/conn
   (->string [connection]
     (str "#<conn " (conn-method connection) " " (conn-path connection) ">")))
 
+;; The most a JSON body may be for `parse-body` to decode it into params. json/decode costs
+;; about 5us a byte in Brood, so the 8 MB a body may be cost tens of seconds of one core —
+;; and the body is the attacker's. A larger JSON body still arrives whole as `:body` /
+;; `:body-bytes` for a handler that decodes it itself, as a spooled body does.
+(def *json-params-max-bytes* 16384)
+
 (defn build (request)
-  "Construct a Conn from a raw parsed request map. `:params` merges the request's query
+  "Construct a Conn from a raw parsed request map, its body parsed (see `parse-body`) — the
+  conn a test or a direct caller wants. The endpoint builds with `build-unparsed`, so a
+  request no route takes never pays for parsing its body. `:params` merges the request's query
   params (already parsed by http/request) with any form/JSON body params, body winning on
   a key clash; the router later merges path params on top. Request cookies are parsed from
   the `Cookie` header into `:cookies`.
@@ -53,6 +61,13 @@
   empty `:body` and a `:body-file` path instead; the conn carries `:body-file` through, and the
   handler persists it zero-copy with `save-body` or parses it on demand with
   `parse-upload-file` (never loading it into memory otherwise)."
+  (parse-body (build-unparsed request)))
+
+(defn build-unparsed (request)
+  "Construct a Conn from a raw parsed request map with its body NOT yet parsed: `:params`
+  holds the query params, and `parse-body` adds the form / JSON / multipart ones. What the
+  endpoint builds, so a body is parsed only for a request a route takes — after that route's
+  `through` plugs (a rate limit) and inside its deadline — never for a 404 or an asset."
   (let (headers (get request :headers {})
         query-params (get request :params {})
         raw (get request :body "")
@@ -60,8 +75,7 @@
         ; the empty string "" — coerce either to bytes, then decode text for form/JSON handlers.
         body-bytes (if (bytes? raw) raw (string/->bytes raw))
         body-text (check-allow :discarded-catch (try (string/bytes-> body-bytes) (catch _e "")))
-        parsed (parse-conn-body headers body-text body-bytes)
-        body-params (get parsed :params))
+        body-params {})
     ;; Positional, in the record's declared order — the one construction site in the
     ;; framework, so the ordering is checked here once rather than trusted everywhere.
     ;;
@@ -75,9 +89,9 @@
       (get request :query)
       ;; stamped by http/server from its own `:tls` config — see `request-scheme`
       (get request :scheme)
-      (into query-params body-params)
+      query-params
       body-params
-      (get parsed :files)
+      {} ; files — filled by parse-body
       (get request :body-file)
       headers
       body-text
@@ -95,16 +109,40 @@
       {} ; session — replaced by fetch-session
       nil ; session-store
       false ; session-changed?
-      {}))) ; flash — replaced by fetch-flash
+      {} ; flash — replaced by fetch-flash
+      {} ; path-params — set by the router
+      false))) ; body-parsed? — set by parse-body
+(defn parse-body (conn)
+  "`conn` with its request body parsed into params — form, JSON (up to
+  `*json-params-max-bytes*`) and multipart fields, with file parts in `:files` — the body's
+  values winning over the query's and the route's path params over both. Parses once: a
+  parsed conn comes back as it is, so a plug that needs a body value (CSRF) and the route
+  share one parse."
+  ;; a conn written out as a map in a test, with no `:body-parsed?`, already says its params
+  (if (or (conn-body-parsed? conn) (not (contains? conn :body-parsed?)))
+    conn
+    (let (parsed (parse-conn-body (conn-headers conn) (conn-body conn) (conn-body-bytes conn))
+          body-params (get parsed :params))
+      (assoc conn
+        :params (into (into (or (conn-params conn) {}) body-params) (or (conn-path-params conn) {}))
+        :body-params body-params
+        :files (get parsed :files)
+        :body-parsed? true))))
+(sig parse-body (map -> map))
+
 (defn parse-conn-body (headers body-text body-bytes)
   "Parse the request body into `{:params <string→value> :files <name→file-map>}`.
   `multipart/form-data` splits file parts out into `:files` (raw bytes) and merges its text
   fields into `:params`; `x-www-form-urlencoded`/JSON parse into `:params` (from the decoded
   text) as before; any other type contributes nothing."
-  (if (= (content-type-base headers) "multipart/form-data")
-    (let (mp (http/multipart/parse body-bytes (content-type-param headers "boundary")))
-      {:params (get mp :fields) :files (get mp :files)})
-    {:params (parse-body-params headers body-text) :files {}}))
+  (cond
+    (and (= (content-type-base headers) "application/json")
+      (> (count body-bytes) *json-params-max-bytes*))
+      {:params {} :files {}}
+    (= (content-type-base headers) "multipart/form-data")
+      (let (mp (http/multipart/parse body-bytes (content-type-param headers "boundary")))
+        {:params (get mp :fields) :files (get mp :files)})
+    :else {:params (parse-body-params headers body-text) :files {}}))
 
 (defn parse-body-params (headers body)
   "Parse a request `body` into a string→value params map based on its Content-Type:
@@ -177,14 +215,50 @@
   (or (conn-halted? conn) false))
 
 (defn param (conn key)
-  "Get a request param by string key."
-  (get (conn-params conn) key))
+  "Get a request param by string key — query, body or path. On a conn whose body is not yet
+  parsed (a plug that runs before its route's handler) the body is parsed for the lookup."
+  (get (conn-params (parse-body conn)) key))
 
 (defn body-param (conn key)
   "Get a request param that came from the request *body* (form/JSON) by string key — not the
   query string. Use this where a query-string value must not be honored, e.g. a CSRF token
   (which leaks via Referer/logs/history if accepted from the URL)."
-  (get (or (conn-body-params conn) {}) key))
+  (get (or (conn-body-params (parse-body conn)) {}) key))
+
+;; ---- typed params ---------------------------------------------------------------
+;; A JSON body's values keep their JSON types — `{"page": 5}`, `{"q": ["a"]}` — while a handler
+;; written against forms expects a string, and the gap was a 500: `(string/->number 5)` raises.
+;; These answer the type asked for, or nil, whatever the client sent.
+
+;; The largest whole number a parameter may name: 2^53, past which a float can no longer tell
+;; neighbours apart, and well inside what a `bigint` column holds.
+(def *largest-whole-number* 9007199254740992)
+
+(defn string-param (conn key &optional (fallback nil))
+  "The `key` param when it is a string — from the query, the body or the path — else
+  `fallback`: a JSON number, array or object where a string was meant is not one."
+  (let (value (param conn key))
+    (if (string? value) value fallback)))
+
+(defn whole-number (raw)
+  "`raw` as a whole number from 0 to 2^53, or nil for anything else — a fraction, a
+  negative, junk, a number too large for the database, nil, or a value that is not a string
+  or an integer at all. A string is parsed; a JSON integer is taken as it is.
+
+  `int?`, not truthiness: `string/->number` answers a FAILURE for text that is not a
+  number, and a failure is truthy — unguarded, `/settings/tokens/abc/delete` reached a query
+  with it and came back a 500."
+  (let (parsed (cond
+                 (int? raw) raw
+                 (string? raw) (string/->number raw)
+                 :else nil))
+    (if (and (int? parsed) (>= parsed 0) (<= parsed *largest-whole-number*)) parsed nil)))
+
+(defn whole-number-param (conn key &optional (fallback nil))
+  "The `key` param as a whole number (see `whole-number`), or `fallback` when it is absent
+  or is not one."
+  (let (value (whole-number (param conn key)))
+    (if (nil? value) fallback value)))
 
 (defn files (conn)
   "The uploaded files from a multipart/form-data request: `{name → {:filename :content-type
