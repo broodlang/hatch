@@ -21,4 +21,14 @@
     (assert= (web/migrate/run nil {} migrations [users-with-handle] ["gen" "users-handle"]) 0))
   (test "gen without a name, or an unknown command, is the usage and 1"
     (assert= (web/migrate/run nil {} migrations [users] ["gen"]) 1)
-    (assert= (web/migrate/run nil {} migrations [users] ["frobnicate"]) 1)))
+    (assert= (web/migrate/run nil {} migrations [users] ["frobnicate"]) 1))
+  ;; A deploy's release command shows only what the process prints: a failure is one line
+  ;; and exit 1, not an exception out of `main`.
+  (test "a command that fails is 1, not a raise"
+    (assert= (web/migrate/run nil {} (conj migrations (first migrations)) [users] ["check"]) 1))
+  ;; Refused before any database is opened (the adaptor here is nil): `down --to` with its
+  ;; version missing must not become a plain `down`, which rolls back the newest migration.
+  (test "a --to or --step without a whole number is refused"
+    (assert= (web/migrate/run nil {} migrations [users] ["down" "--to"]) 1)
+    (assert= (web/migrate/run nil {} migrations [users] ["down" "--step" "two"]) 1)
+    (assert= (web/migrate/run nil {} migrations [users] ["up" "--to" "1.5"]) 1)))
