@@ -115,15 +115,18 @@ src/
     component.blsp  — LiveComponents: deflive-component macro (mount/render/on/tick),
                       render-slot (its own static/dynamic split, so a component diffs
                       independently), send-update, apply-tick
-    form.blsp       — validate/rules → [:ok params]/[:error {field message}]; built-in
-                      validators (required?/email?/min-length?/max-length?/matches-pattern?);
-                      error-for/field-class template helpers
+    form.blsp       — forms over store changesets: value (what an input shows, as typed),
+                      error-for/field-class/errors?, email?/validate-email
     registry.blsp   — supervised, vault-backed named registries (pubsub, presence, cache,
                       ratelimit — all reach it bare, via `(:use web/registry)`)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
     presence.blsp   — who-is-here tracking (track/roster) with auto-leave on disconnect
     application.blsp — canonical app entry point: default-logger-opts + start (logger + children + park)
-    repo.blsp       — open a store repo, migrate schemas, warm up the pool (web/repo/start)
+    repo.blsp       — open a store repo, run (dev) or verify (prod) its versioned
+                      migrations, warm up the pool (web/repo/start)
+    migrate.blsp    — the app's `migrate` commands (up/down/status/pending/sql/check/gen),
+                      one function its main hands argv to; Fly runs `<app> migrate` as
+                      the release_command
     assets.blsp     — build-step-agnostic bundler glue (watch/build/install); CSS hot-reload
     upload.blsp     — getting a file from a browser here, two ways. Over the live socket:
                       (allow name opts) at a model key, binary chunks spooled to disk,

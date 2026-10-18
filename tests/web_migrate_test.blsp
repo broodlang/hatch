@@ -1,0 +1,24 @@
+;; The migration commands that need no database: check and gen read the migrations as data.
+(defmodule web-migrate-test
+  (:use test)
+  (:alias web/migrate))
+
+(def- migrations
+  [{:version 20260101000000
+    :name "users"
+    :up [[:create-table :users {:primary-key :id :fields {:id :serial :email :text}}]]}])
+
+(def- users {:table :users :primary-key :id :fields {:id :serial :email :text}})
+
+(def- users-with-handle (assoc users :fields (assoc (get users :fields) :handle :text)))
+
+(describe "web/migrate/run"
+  (test "check is 0 when the migrations build the schemas"
+    (assert= (web/migrate/run nil {} migrations [users] ["check"]) 0))
+  (test "check is 1 when a schema moved without a migration"
+    (assert= (web/migrate/run nil {} migrations [users-with-handle] ["check"]) 1))
+  (test "gen prints the migration and succeeds"
+    (assert= (web/migrate/run nil {} migrations [users-with-handle] ["gen" "users-handle"]) 0))
+  (test "gen without a name, or an unknown command, is the usage and 1"
+    (assert= (web/migrate/run nil {} migrations [users] ["gen"]) 1)
+    (assert= (web/migrate/run nil {} migrations [users] ["frobnicate"]) 1)))

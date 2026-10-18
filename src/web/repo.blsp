@@ -1,36 +1,75 @@
 (defmodule web/repo
-  "Framework helper: open a store repo, run schema migrations, and warm up the pool.
+  "Framework helper: open a store repo, bring its migrations up to date (or check that
+  they are), and warm up the pool.
 
   Intended to be called once at startup from your app's `main`:
 
-    (def *repo* (web/repo/start (pg/adaptor) opts [user-schema post-schema]))
+    (def *repo* (web/repo/start (pg/adaptor) opts migrations/all))
 
-  `start` returns the repo handle; store it as a module global and pass it (or
-  a thin wrapper around it) to your route handlers."
-  (:alias repo))
+  `migrations/all` is the app's vector of store migrations (see store's `migration`
+  module). What boot does with them is `:migrations`, in the optional fourth argument:
+
+  - `:run` — apply what is pending, under the migration lock. The default in dev, so a
+    fresh checkout's `nest run` builds its own database.
+  - `:verify` — apply nothing; refuse to start while any is pending. The default outside
+    dev: a deploy migrates ONCE, before its machines start (`<app> migrate` as Fly's
+    `release_command`), rather than on every machine's boot path — where DDL blocks
+    writes on a table while health checks wait, and two machines race each other.
+  - `:skip` — neither (a process that only reads, or a test that migrates itself).
+
+  `start` returns the repo handle; store it as a module global and pass it (or a thin
+  wrapper around it) to your route handlers."
+  (:alias repo)
+  (:alias migration)
+  (:alias web/env)
+  (:alias log))
 
 ; Upper bound (ms) on waiting for a single warmup probe to answer. A probe that never
 ; replies (its worker was killed, or the connection wedged) can't pin startup past this.
 (def *warmup-timeout-ms* 5000)
 
-(defn start (adaptor opts schemas)
-  "Open a repo over `adaptor` with `opts`, migrate every schema in `schemas`, then fire a
-  warmup query on every pool connection in parallel so the first HTTP request pays no
-  cold-start cost. Returns the repo handle.
+(defn default-mode ()
+  "`:run` in dev, `:verify` everywhere else (see the module doc)."
+  (if (web/env/dev?) :run :verify))
 
-  Fails the boot loudly instead of returning a dead handle: a migration error is re-raised
-  with context, and if *every* warmup probe fails (database unreachable or rejecting queries)
-  `start` raises rather than hand back a pool that only errors on the first real request.
-  Warmup collection is bounded by `*warmup-timeout-ms*` so a wedged connection can't hang
-  startup forever."
+(defn start (adaptor opts migrations &optional (config {}))
+  "Open a repo over `adaptor` with `opts`, run or verify `migrations` (`:migrations` in
+  `config`: `:run`, `:verify` or `:skip`, default `default-mode`), then fire a warmup query
+  on every pool connection in parallel so the first HTTP request pays no cold-start cost.
+  Returns the repo handle.
+
+  Fails the boot loudly instead of returning a dead handle: a migration error — or, under
+  `:verify`, a pending migration — is raised with context, and if *every* warmup probe
+  fails (database unreachable or rejecting queries) `start` raises rather than hand back a
+  pool that only errors on the first real request. Warmup collection is bounded by
+  `*warmup-timeout-ms*` so a wedged connection can't hang startup forever."
   (let (r (repo/open adaptor opts)
         size (get opts :size 5))
-    (doseq (s schemas)
-      (try
-        (repo/migrate r s)
-        (catch e (error "web/repo: migration failed: " (error-message e)))))
+    (bring-up r migrations (get config :migrations (default-mode)))
     (warmup r size)
     r))
+
+(defn bring-up (r migrations mode)
+  "Run, verify or skip `migrations` on repo `r` according to `mode`."
+  (case mode
+    :run
+      (let (applied (try
+                      (migration/migrate r migrations {:log (fn (line) (log/info line))})
+                      (catch e
+                        (error "web/repo: migration failed: "
+                          (if (map? e) (get e :message (pr-str e)) (error-message e))))))
+        (when (not (empty? applied))
+          (log/info (str "web/repo: applied " (count applied) " migration(s)"))))
+    :verify
+      (let (pending (migration/pending r migrations))
+        (when (not (empty? pending))
+          (error "web/repo: "
+            (count pending)
+            " migration(s) pending ("
+            (string/join (map pending (fn (m) (str (get m :version) " " (get m :name)))) ", ")
+            ") — run the app's `migrate` command before starting it")))
+    :skip (migration/validate migrations)
+    (error "web/repo: :migrations is :run, :verify or :skip, not " (pr-str mode))))
 
 (defn warmup (r size)
   "Fire `size` parallel `SELECT 1` probes across the pool and wait for their results. Raises
@@ -41,7 +80,7 @@
                (send parent
                  [:warmed
                    (check-allow :discarded-catch
-                     (try (do (repo/exec r "SELECT 1" []) true) (catch _ false)))]))))
+                     (try (repo/ping r) (catch _ false)))]))))
     (when (and (> size 0) (= (warmup-collect size 0) 0))
       (error "web/repo: warmup failed on every connection — the database is unreachable or "
         "rejecting queries; refusing to start with a dead pool"))))
