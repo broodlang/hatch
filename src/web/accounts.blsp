@@ -1,0 +1,548 @@
+(defmodule web/accounts
+  "Accounts for a hatch app: users signing up and in with an email and a password, the
+  one-shot tokens an email carries (confirmation, password reset), long-lived API tokens,
+  and who is signed in on a conn. Modelled on Phoenix's phx.gen.auth, as a module rather
+  than generated code, so a fix lands in every app that uses it.
+
+  The app owns its database and its pages; this module owns the rules. Hand it the repo
+  once at boot, and put its three tables into the app's schemas:
+
+    (web/accounts/configure {:repo db/conn
+                             :token-scopes [\"packages:publish\"]
+                             :token-lifetime-env \"APP_TOKEN_TTL_DAYS\"})
+
+    (def schemas [… (web/accounts/users-schema) web/accounts/api-tokens-schema
+                  web/accounts/user-tokens-schema])
+
+  `:repo` is a zero-argument function answering the repo to run on, called per query, so
+  an app whose queries follow a transaction it has open (`db/conn`) keeps this module's
+  queries inside it too. `:token-scopes` is what an API token may be limited to.
+  `:token-lifetime-env` names the variable holding how many days a new API token lasts
+  (unset: forever).
+
+  Passwords are pbkdf2-HMAC-SHA256 hashed: 600k iterations, a per-user random salt, stored
+  as `pbkdf2$<iters>$<salt>$<hash>`, the KDF run on the offload pool so it never blocks a
+  scheduler worker. Every token, email or API, is random, shown once, and stored only as
+  its sha256, so a database leak hands out nothing that signs anyone in.
+
+  Sessions are hatch's signed cookies (`web/session`): `login-user` puts the user's id and
+  SESSION VERSION in, and `current-user` refuses a cookie whose version is behind the row.
+  A password change or reset bumps the version, which is how a stateless cookie gets
+  \"signed out everywhere\"."
+  (:alias repo)
+  (:alias query)
+  (:alias changeset)
+  (:alias hash)
+  (:alias encoding)
+  (:alias web/form)
+  (:alias web/env)
+  (:alias web/session))
+
+;; ---- configuration ----------------------------------------------------------
+
+(def *settings* nil)
+
+(def- *setting-keys* [:repo :token-scopes :token-lifetime-env])
+
+(defn configure (settings)
+  "Make `settings` the ones every function here uses — once, at boot, before a request
+  can arrive (see the module doc for the keys). An unknown key is refused rather than
+  ignored: a misspelt `:token-scope` would otherwise leave every token with no scopes."
+  (let (unknown (seq/filter (keys settings) (fn (key) (not (includes? *setting-keys* key)))))
+    (cond
+      (not (empty? unknown)) (error "web/accounts/configure: unknown setting: " (first unknown))
+      (not (fn? (get settings :repo)))
+        (error "web/accounts/configure: :repo must be a function answering the repo")
+      :else (do (def *settings* (merge {:token-scopes []} settings)) nil))))
+
+(defn- setting (key)
+  (if (nil? *settings*)
+    (error "web/accounts: not configured — call web/accounts/configure at boot")
+    (get *settings* key)))
+
+;; The transaction `transaction` has open in THIS process, so a query inside it runs on it.
+(defdyn *transaction* nil)
+
+(defn- conn ()
+  "The repo a query runs on: this module's open transaction, else the app's repo."
+  (or *transaction* ((setting :repo))))
+
+(defn- transaction (f)
+  "Run `(f)` with every query here inside one transaction (a savepoint inside the app's)."
+  (repo/transaction (conn) (fn (tx) (binding (*transaction* tx) (f)))))
+
+;; ---- schemas ----------------------------------------------------------------
+
+(defn users-schema (&optional (extra {}))
+  "The `users` table, with the app's own columns and indexes added from `extra`
+  (`{:fields {…} :indexes […]}`) — a handle, say. A column it needs on insert is passed
+  to `sign-up` in its `fields`."
+  {:table :users
+   :primary-key :id
+   :fields (merge
+             {:id :serial
+              :email :text
+              :hashed_password :text
+              :confirmed_at :bigint
+              ;; Bumped whenever every existing session for this user must stop
+              ;; working — a password change or reset. Sessions are signed COOKIES
+              ;; with no server-side store, so there is nothing to delete; the version
+              ;; is carried in the cookie and compared on each request. NULL on rows
+              ;; that predate it, read as 0.
+              :session_version :integer
+              :inserted_at :bigint
+              :updated_at :bigint}
+             (get extra :fields {}))
+   :indexes (into [{:columns [:email] :unique true :name "users_email_idx"}]
+              (get extra :indexes []))})
+
+;; `token_hash` is the sha256 of the raw token — the raw token is shown once at creation
+;; and never stored. `scopes` is comma-separated, from the configured `:token-scopes`;
+;; NULL (a token from before scopes) is all of them.
+(def api-tokens-schema
+  {:table :api_tokens
+   :primary-key :id
+   :fields {:id :serial
+            :user_id :integer
+            :name :text
+            :token_hash :text
+            :scopes :text
+            :expires_at :bigint
+            :last_used_at :bigint
+            :inserted_at :bigint}
+   :indexes [{:columns [:token_hash] :unique true :name "api_tokens_hash_idx"}]})
+
+;; The one-shot tokens an EMAIL carries, kept apart from `api_tokens`, which are credentials
+;; a person keeps. `context` names the flow (`"confirm"` / `"reset_password"`), and one row
+;; per (context, hash) means the same raw value could never name a confirmation AND a reset.
+;; `sent_to` is the address it went to, so a token stops working if the account's email
+;; changes underneath it. Expiry is by `inserted_at` against a per-context TTL.
+(def user-tokens-schema
+  {:table :user_tokens
+   :primary-key :id
+   :fields {:id :serial
+            :user_id :integer
+            :context :text
+            :token_hash :text
+            :sent_to :text
+            :inserted_at :bigint}
+   :indexes [{:columns [:context :token_hash] :unique true :name "user_tokens_context_hash_idx"}
+              {:columns [:user_id] :name "user_tokens_user_idx"}]})
+
+;; ---- password hashing -------------------------------------------------------
+
+(def *pbkdf2-iterations* 600000)
+(def *token-bytes* 32)
+(def *min-password-length* 8)
+
+;; A well-formed hash of no real password — `authenticate` verifies against it when the
+;; email is unknown, so a missing account and a wrong password cost the same (no
+;; user-enumeration by timing). The digest never matches a real password.
+(def *dummy-hash*
+  "pbkdf2$600000$0000000000000000000000000000000000000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000")
+
+(defn hash-password (password)
+  "A storable password hash: `pbkdf2$<iters>$<salt-hex>$<hash-hex>`."
+  (let (salt (rand/token 16))
+    (str "pbkdf2$" *pbkdf2-iterations* "$" salt "$" (pbkdf2 password salt *pbkdf2-iterations*))))
+
+(defn pbkdf2 (password salt iterations)
+  "Hex of the pbkdf2-HMAC-SHA256 derivation of `password` with `salt`, run on the
+  offload pool (the 600k-iteration KDF must not block a scheduler worker)."
+  (encoding/hex-encode-bytes (offload %pbkdf2-sha256-bytes
+                               (string/->bytes password)
+                               (string/->bytes salt)
+                               iterations
+                               32)))
+
+(defn verify-password (password stored)
+  "True when `password` matches the `stored` hash — re-derives with the stored salt and
+  iterations and compares digests timing-safely. A stored value of any other shape is
+  simply not a match: it is attacker-influenced input, so it must not raise."
+  (match (string/split (if (string? stored) stored "") "$")
+    (("pbkdf2" iterations-text salt want)
+      ;; `int?`, not truthiness: a junk iteration field parses to a TRUTHY failure, which
+      ;; would reach `pbkdf2` as a count and raise instead of failing to verify.
+      (let (iterations (string/->number iterations-text))
+        (and (int? iterations)
+          (string? password)
+          (secure-equal? want (pbkdf2 password salt iterations)))))
+    (_ false)))
+
+(defn secure-equal? (a b)
+  "Timing-safe string equality (compare fixed-length sha256 digests)."
+  (= (hash/sha256 a) (hash/sha256 b)))
+
+;; ---- registration / login ---------------------------------------------------
+
+;; The one message every refused sign-up gets, so it never says which addresses exist.
+(def *sign-up-refused* "we couldn't create an account with those details")
+
+(def- *credential-types* {:email :text :password :text :password_confirmation :text})
+
+(defn sign-up (email password &optional (fields {}))
+  "Register a new user. Returns `[:ok user]` or `[:error message]`. `fields` are the app's
+  own columns for the row (see `users-schema`), already checked by the app.
+
+  A taken address is refused with the SAME message as a failed insert, so the answer never
+  says which addresses have an account (login is likewise generic). The account starts
+  unconfirmed; the caller sends the link `confirmation-token` mints, and `confirm-user`
+  stamps `confirmed_at` when it is followed."
+  (let (email (normalize-email email)
+        form (-> (changeset/cast {}
+                   {:email email :password password}
+                   [:email :password]
+                   *credential-types*)
+               (changeset/validate-required [:email] {:message "enter a valid email address"})
+               (web/form/validate-email :email "enter a valid email address")
+               (validate-new-password :password "password")))
+    (cond
+      (not (changeset/valid? form)) [:error (first-error form)]
+      ;; The cheap check first, so an address already taken costs no KDF run. It is not the
+      ;; guarantee — two sign-ups can both pass it — the unique index below is.
+      (user-by-email email) [:error *sign-up-refused*]
+      :else
+        (let (now-ms (os/now)
+              row (-> (changeset/change {}
+                        (merge fields
+                          {:email email
+                           :hashed_password (hash-password password)
+                           :inserted_at now-ms
+                           :updated_at now-ms}))
+                    (changeset/unique-constraint :email {:name "users_email_idx"})))
+          (match (repo/insert-changeset (conn) row {:table :users})
+            ([:ok user] [:ok user])
+            ([:error _] [:error *sign-up-refused*]))))))
+
+(defn- validate-new-password (cs field label)
+  "`field` must be at least `*min-password-length*` characters, said with `label`."
+  (changeset/validate-length cs
+    field
+    {:min *min-password-length*
+     :message (str label " must be at least " *min-password-length* " characters")}))
+
+(defn- first-error (cs)
+  "The first error a changeset recorded, as the one-line message these flows return."
+  (let (entry (first (changeset/errors cs)))
+    (first (get (changeset/error-messages cs) (first entry)))))
+
+(defn authenticate (email password)
+  "`[:ok user]` when the credentials match, else `[:error message]`. Runs the KDF even for
+  an unknown email (against `*dummy-hash*`) so timing can't enumerate accounts."
+  (let (user (user-by-email email)
+        stored (if user (get user :hashed_password) *dummy-hash*)
+        ok (verify-password password stored))
+    (if (and ok user)
+      [:ok user]
+      [:error "invalid email or password"])))
+
+(defn change-password (user current-password new-password)
+  "Change `user`'s password. Returns `[:ok user']` or `[:error message]`.
+
+  The CURRENT password is required. A session cookie alone must not be enough: a stolen
+  session would otherwise become a stolen account, permanently, with the real owner locked
+  out.
+
+  On success the session version is bumped, which signs every other session out — the
+  point of changing a password after a suspected compromise is that the other party stops
+  being signed in. The caller re-issues the current session (`login-user` with the
+  returned user) so the person doing it stays put."
+  (let (form (when user
+               (-> (changeset/cast {} {:password new-password} [:password] *credential-types*)
+                 (changeset/validate-required [:password]
+                   {:message (str "new password must be at least "
+                               *min-password-length* " characters")})
+                 (validate-new-password :password "new password")
+                 (changeset/validate-exclusion :password
+                   [current-password]
+                   {:message "new password must differ from the current one"}))))
+    (cond
+      (nil? user) [:error "you must be signed in"]
+      (not (verify-password current-password (get user :hashed_password)))
+        [:error "current password is incorrect"]
+      (not (changeset/valid? form)) [:error (first-error form)]
+      :else (set-password user new-password))))
+
+(defn- set-password (user new-password)
+  "Store `new-password` for `user` and bump the session version, which signs every other
+  session out; `[:ok user']` at the new version. The hash and the version move together: a
+  password change that left existing sessions working would tell a user they had locked an
+  intruder out while the intruder stayed signed in."
+  (let (next-version (+ (session-version user) 1))
+    (repo/update (conn)
+      :users {:hashed_password (hash-password new-password)
+       :session_version next-version
+       :updated_at (os/now)}
+      [:= :id (get user :id)]
+      {:returning :none})
+    [:ok (assoc user :session_version next-version)]))
+
+(defn session-version (user)
+  "`user`'s session version, 0 for a row that predates the column."
+  (let (version (and user (get user :session_version)))
+    (if (int? version) version 0)))
+
+;; ---- who is signed in -------------------------------------------------------
+
+(defn current-user (conn)
+  "The signed-in user, or nil: the session's `user_id`, loaded, provided the cookie's
+  session version is the row's. A cookie issued before a password change or reset is
+  behind the row, and reads as signed out."
+  (let (id (web/session/get-session conn "user_id"))
+    (if (nil? id)
+      nil
+      (let (found (user id))
+        (when (and found (= (session-version-of conn) (session-version found))) found)))))
+
+(defn session-version-of (conn)
+  "The session version this request's cookie carries; 0 for a cookie without one, the same
+  value a row that predates the column reports."
+  (let (version (web/session/get-session conn "sv"))
+    (if (int? version) version 0)))
+
+(defn login-user (conn user)
+  "Put `user` into the session, at the user's current session version."
+  (-> conn
+    (web/session/put-session "user_id" (get user :id))
+    (web/session/put-session "sv" (session-version user))))
+
+;; ---- email tokens: confirmation and password reset ---------------------------
+;;
+;; The tokens a LINK carries. Each is random, stored only as its sha256 (`user_tokens`),
+;; and bound to one context so a confirmation token can never reset a password. They
+;; expire by age rather than by a stored date: the TTL is a property of the flow, and a row
+;; carries only when it was minted.
+
+(def *confirm-context* "confirm")
+(def *reset-context* "reset_password")
+(def *confirm-ttl-ms* (* 7 86400000)) ; a week — the link sits in an inbox until it is read
+(def *reset-ttl-ms* 86400000) ; a day — asked for on purpose, acted on soon
+;; How soon another link of the same kind may be minted for the same account. The request
+;; forms are unauthenticated and throttled only per client address, so without this a
+;; handful of addresses could fill one person's inbox with valid links all day and grow the
+;; table a row per request. Five minutes is longer than a mail round trip and shorter than
+;; anyone's patience with a link in the spam folder.
+(def *email-token-cooldown-ms* 300000)
+
+(defn confirmed? (user)
+  "True when `user` has confirmed the address the account was registered with."
+  (int? (and user (get user :confirmed_at))))
+
+(defn mint-email-token (user context ttl-ms)
+  "A fresh token for `user` in `context`, RAW — the value a link carries, never stored.
+  Only its hash is kept, with the address it is about to be sent to. Nil, and nothing
+  minted, while a token of this kind minted within `*email-token-cooldown-ms*` still
+  stands: the earlier link is the one to use.
+
+  Rows older than `ttl-ms` are purged on the way — the only other thing that deletes a
+  token is a successful confirm or reset, and a link nobody followed would otherwise stay
+  in the table forever."
+  (let (now (os/now)
+        latest (repo/one (conn)
+                 (-> (query/from :user_tokens)
+                   (query/where {:user_id (get user :id) :context context})
+                   (query/order-by :inserted_at :desc)
+                   (query/limit 1))))
+    (repo/delete (conn) :user_tokens [:and [:= :context context] [:< :inserted_at (- now ttl-ms)]])
+    (if (and latest
+          (int? (get latest :inserted_at))
+          (< (- now (get latest :inserted_at)) *email-token-cooldown-ms*))
+      nil
+      (let (raw (rand/token *token-bytes*))
+        (repo/insert (conn)
+          :user_tokens {:user_id (get user :id)
+           :context context
+           :token_hash (hash/sha256 raw)
+           :sent_to (get user :email)
+           :inserted_at now}
+          {:returning :none})
+        raw))))
+
+(defn confirmation-token (user)
+  "A raw confirmation token for `user`, or nil when there is nothing to send: the account
+  is already confirmed, or a link went out within the cooldown."
+  (if (confirmed? user) nil (mint-email-token user *confirm-context* *confirm-ttl-ms*)))
+
+(defn reset-token (user)
+  "A raw password-reset token for `user`, or nil when a link went out within the cooldown."
+  (mint-email-token user *reset-context* *reset-ttl-ms*))
+
+(defn user-for-email-token (raw context ttl-ms)
+  "The user a raw token in `context` still stands for, or nil — unknown, older than
+  `ttl-ms`, or sent to an address the account no longer has.
+
+  The last check is what `sent_to` is for: a token is a claim about an ADDRESS, and if the
+  account's address has changed since the link went out, whoever holds the link holds the
+  old inbox, not the account."
+  (let (row (if (string? raw)
+              (repo/one (conn)
+                (-> (query/from :user_tokens)
+                  (query/where {:context context :token_hash (hash/sha256 raw)})))
+              nil))
+    (cond
+      (nil? row) nil
+      (email-token-expired? row ttl-ms) nil
+      :else
+        (let (found (user (get row :user_id)))
+          (when (and found (= (get found :email) (get row :sent_to))) found)))))
+
+(defn email-token-expired? (row ttl-ms)
+  "True when `row` was minted more than `ttl-ms` ago. A row with no stamp is expired: an
+  age that cannot be read is not one to trust."
+  (let (minted (get row :inserted_at))
+    (or (not (int? minted)) (> (os/now) (+ minted ttl-ms)))))
+
+(defn confirm-user (raw)
+  "Confirm the account a raw confirmation token stands for. Returns `[:ok user]` with
+  `confirmed_at` set, or `[:error message]` for a link that is unknown, expired or used —
+  one message for all three, since a link that no longer works has one remedy: ask for
+  another. Every confirmation link the account had is used up by this one."
+  (let (found (user-for-email-token raw *confirm-context* *confirm-ttl-ms*))
+    (if (nil? found)
+      [:error "that confirmation link is invalid or has expired"]
+      (let (id (get found :id)
+            now-ms (os/now))
+        ;; once: a row already confirmed keeps its first date
+        (repo/update (conn)
+          :users {:confirmed_at now-ms :updated_at now-ms}
+          [:and [:= :id id] [:is-nil :confirmed_at]]
+          {:returning :none})
+        (repo/delete (conn) :user_tokens {:user_id id :context *confirm-context*})
+        [:ok (user id)]))))
+
+(defn user-for-reset-token (raw)
+  "The user a raw password-reset token still stands for, or nil."
+  (user-for-email-token raw *reset-context* *reset-ttl-ms*))
+
+(defn reset-password (user new-password confirmation)
+  "Set `user`'s password from a reset link. Returns `[:ok user']` or `[:error message]`.
+
+  No current password — that is the point of a reset — so the new one is asked for twice
+  instead. Bumps the session version, so every session the account had stops working (the
+  reason someone resets a password is usually that someone else may have it), and deletes
+  EVERY email token the account holds: the reset link that got us here, any earlier ones,
+  and any confirmation link still sitting in the inbox the old password may have guarded.
+
+  API tokens are NOT revoked. A reset is most often a forgotten password, and revoking
+  every laptop's token for that would be a cost paid by the common case; the app's flash
+  can say where to revoke them when the reset was a lockout instead."
+  (let (form (-> (changeset/cast {}
+                   {:password new-password :password_confirmation confirmation}
+                   [:password]
+                   *credential-types*)
+               (changeset/validate-required [:password]
+                 {:message (str "password must be at least " *min-password-length* " characters")})
+               (validate-new-password :password "password")
+               (changeset/validate-confirmation :password
+                 {:message "the two passwords do not match"})))
+    (cond
+      (nil? user) [:error "that reset link is invalid or has expired"]
+      (not (changeset/valid? form)) [:error (first-error form)]
+      ;; One transaction: a new password whose old reset links still worked would be a
+      ;; reset that could be undone by whoever else holds one.
+      :else
+        (transaction (fn ()
+                       (let (outcome (set-password user new-password))
+                         (repo/delete (conn) :user_tokens [:= :user_id (get user :id)])
+                         outcome))))))
+
+;; ---- API tokens -------------------------------------------------------------
+
+(defn token-scope-names ()
+  "Every scope an API token may carry here: the configured `:token-scopes`."
+  (setting :token-scopes))
+
+(defn mint-token (user-id name &optional (requested nil))
+  "Create an API token for `user-id`, limited to the scopes in `requested` (each one of
+  `token-scope-names`; unknown ones are dropped; nil means all). Returns `[raw-token row]`
+  — the RAW token is shown to the caller once and never stored (only its sha256). It
+  expires after `token-lifetime-ms` when a lifetime is configured, so it can be rotated on
+  a schedule rather than living forever; `user-for-token` enforces the expiry."
+  (let (raw (rand/token *token-bytes*)
+        lifetime (token-lifetime-ms)
+        every-scope (token-scope-names)
+        scopes (if (nil? requested)
+                 every-scope
+                 (into [] (seq/filter every-scope (fn (scope) (includes? requested scope)))))
+        now-ms (os/now))
+    [raw
+      (repo/insert (conn)
+        :api_tokens {:user_id user-id
+         :name (if (or (nil? name) (= name "")) "token" name)
+         :token_hash (hash/sha256 raw)
+         :scopes (string/join scopes ",")
+         :expires_at (if lifetime (+ now-ms lifetime) nil)
+         :last_used_at nil
+         :inserted_at now-ms})]))
+
+(defn token-scopes (row)
+  "The scopes on a token row, as a vector; every scope for a token minted before scopes."
+  (let (stored (get row :scopes))
+    (if (nil? stored)
+      (token-scope-names)
+      (into [] (seq/filter (string/split stored ",") (fn (scope) (not (= scope ""))))))))
+
+(defn token-allows? (user scope)
+  "Whether the request `user` came from may do `scope`: always for a signed-in session (no
+  token), otherwise only when the token carries it."
+  (let (scopes (get user :token_scopes))
+    (or (nil? scopes) (includes? scopes scope))))
+
+(defn token-lifetime-ms ()
+  "How long a freshly minted token stays valid, in ms — whole days from the variable
+  `:token-lifetime-env` names, or nil (no expiry) when there is none or it is unset, blank
+  or not a positive whole number."
+  (let (variable (setting :token-lifetime-env)
+        days (if (string? variable) (web/env/positive-integer variable) nil))
+    (if days (* days 86400000) nil)))
+
+(defn user-for-token (raw-token)
+  "The user a raw API token authenticates, carrying the token's scopes as `:token_scopes`
+  (`token-allows?`), or nil — unknown, expired, or no token at all. Records last-used."
+  (let (row (if (string? raw-token)
+              (repo/one (conn)
+                (-> (query/from :api_tokens) (query/where {:token_hash (hash/sha256 raw-token)})))
+              nil))
+    (cond
+      (nil? row) nil
+      (token-expired? row) nil
+      :else
+        (do
+          (repo/update (conn)
+            :api_tokens {:last_used_at (os/now)}
+            [:= :id (get row :id)]
+            {:returning :none})
+          (let (found (user (get row :user_id)))
+            (if (nil? found) nil (assoc found :token_scopes (token-scopes row))))))))
+
+(defn token-expired? (row)
+  "True when the token `row` has an expiry and it has passed."
+  (let (expires (get row :expires_at))
+    (and (int? expires) (> (os/now) expires))))
+
+(defn tokens (user-id)
+  "`user-id`'s API tokens, newest first — metadata only, never the hash."
+  (repo/all (conn)
+    (-> (query/from :api_tokens)
+      (query/select [:id :user_id :name :scopes :expires_at :last_used_at :inserted_at])
+      (query/where {:user_id user-id})
+      (query/order-by :inserted_at :desc))))
+
+(defn revoke-token (id user-id)
+  "Delete `user-id`'s token `id`. Scoped to the owner, so one user cannot revoke
+  another's: a token that is not theirs is left alone."
+  (repo/delete (conn) :api_tokens {:id id :user_id user-id}))
+
+;; ---- users ------------------------------------------------------------------
+
+(defn normalize-email (email)
+  "Lower-cased, trimmed email (nil-safe)."
+  (if (string? email) (string/lower (string/trim email)) ""))
+
+(defn user (id)
+  "The user with `id`, or nil."
+  (repo/one (conn) (-> (query/from :users) (query/where {:id id}))))
+
+(defn user-by-email (email)
+  "The user with `email` (normalised the way sign-up stores it), or nil."
+  (repo/one (conn) (-> (query/from :users) (query/where {:email (normalize-email email)}))))

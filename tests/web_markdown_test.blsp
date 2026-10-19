@@ -1,0 +1,125 @@
+;; web/markdown — the boundary where Markdown someone else wrote becomes a page the site
+;; serves.
+(defmodule web-markdown-test
+  (:use test)
+  (:use web/markdown))
+
+;; A README is a public upload rendered into a page served to everyone. The renderer escapes
+;; markup; the LINKS are checked here, because that is the page's boundary and the
+;; renderer is a dependency — a security property of this page should not arrive from
+;; a version bump.
+(describe "README links cannot execute"
+  (test "an executing scheme is replaced, in any casing"
+    (for (url ["javascript:alert(1)"
+                "JaVaScRiPt:alert(1)" "JAVASCRIPT:x" "vbscript:x" "data:text/html,x"
+                "DATA:text/html,x" "  javascript:x"])
+      (is (unsafe-link? url))))
+
+  (test "ordinary links are not"
+    (for (url ["https://example.com"
+                "http://example.com" "/relative" "#anchor" "mailto:a@b.com" "ftp://example.com"])
+      (is (not (unsafe-link? url)))))
+
+  (test "the rewrite replaces the href and leaves the rest of the document alone"
+    (assert= "<p><a href=\"#\">x</a></p>"
+      (neutralise-links "<p><a href=\"javascript:alert(1)\">x</a></p>"))
+    (assert= "<p><a href=\"#\">x</a></p>"
+      (neutralise-links "<p><a href=\"JaVaScRiPt:alert(1)\">x</a></p>"))
+    ;; An ordinary external link keeps its href and now also carries the user-content rel —
+    ;; see "README links leaving the site are marked as user content" below.
+    (assert= "<p><a href=\"https://ok.example\" rel=\"nofollow ugc noopener\">x</a></p>"
+      (neutralise-links "<p><a href=\"https://ok.example\">x</a></p>")))
+
+  (test "several links in one document are each checked"
+    (assert= "<a href=\"#\">a</a><a href=\"/ok\">b</a><a href=\"#\">c</a>"
+      (neutralise-links "<a href=\"javascript:1\">a</a><a href=\"/ok\">b</a><a href=\"vbscript:2\">c</a>")))
+
+  (test "a document with no links is unchanged"
+    (assert= "<p>hello</p>" (neutralise-links "<p>hello</p>")))
+
+  ;; End to end through the renderer this page actually uses.
+  (test "a README carrying one renders inert"
+    (let (html (safe-html "[click](JaVaScRiPt:alert(1))"))
+      (is (includes? html "href=\"#\""))
+      (is (not (includes? html "JaVaScRiPt")))))
+
+  (test "and markup in a README is still escaped"
+    (let (html (safe-html "<script>alert(1)</script>"))
+      (is (not (includes? html "<script>")))
+      (is (includes? html "&lt;script&gt;")))))
+
+;; A README is a package author's writing, rendered into a page this site serves — so every
+;; link in it is user-generated content the site would otherwise vouch for. Publishing must not
+;; be a way to buy links off this domain.
+(describe "README links leaving the site are marked as user content"
+  (test "an external link gets nofollow, ugc and noopener"
+    (let (html (neutralise-links "<p><a href=\"https://example.com/x\">x</a></p>"))
+      (is (includes? html "rel=\"nofollow ugc noopener\""))
+      ;; and the href itself is untouched
+      (is (includes? html "href=\"https://example.com/x\""))))
+
+  (test "a relative link is not external and is left alone"
+    (for (href ["/packages/clutch" "#anchor" "docs/guide.md"])
+      (let (html (neutralise-links (str "<a href=\"" href "\">x</a>")))
+        (is (not (includes? html "nofollow"))))))
+
+  (test "mailto is not an external web link"
+    (is (not (includes? (neutralise-links "<a href=\"mailto:a@b.com\">x</a>") "nofollow"))))
+
+  (test "the site's own absolute URLs are not foreign links"
+    ;; An author who writes out the full URL of a package page should not have it treated
+    ;; as someone else's domain.
+    (let (html (neutralise-links "<a href=\"https://example.com/packages/clutch\">x</a>"
+                 {:site-url "https://example.com"}))
+      (is (not (includes? html "nofollow")))))
+
+  (test "a host that only STARTS with the site's is foreign"
+    (for (href ["https://example.com.attacker.net/x" "https://example.community"])
+      (is (includes? (neutralise-links (str "<a href=\"" href "\">x</a>")
+                       {:site-url "https://example.com"})
+            "nofollow"))))
+
+  (test "the site with a path, query, fragment or trailing slash is the site"
+    (for (href ["https://EXAMPLE.com"
+                 "https://example.com/" "https://example.com?q" "https://example.com#a"])
+      (is (= "" (link-rel href "https://example.com/")))))
+
+  (test "without a site URL every absolute link is external"
+    (is (includes? (link-rel "https://example.com/x") "nofollow")))
+
+  (test "a neutralised executing scheme still gets the rel treatment off its `#`"
+    ;; `#` is not external, so no rel — what matters is that the two passes compose without
+    ;; producing a malformed tag.
+    (let (html (neutralise-links "<a href=\"javascript:alert(1)\">x</a>"))
+      (assert= html "<a href=\"#\">x</a>")))
+
+  (test "the rewrite leaves the rest of the tag and the document intact"
+    (assert= (neutralise-links "<p>before <a href=\"https://e.com\" title=\"t\">x</a> after</p>")
+      "<p>before <a href=\"https://e.com\" rel=\"nofollow ugc noopener\" title=\"t\">x</a> after</p>"))
+
+  (test "several links are each handled independently"
+    (let (html (neutralise-links "<a href=\"https://a.com\">a</a><a href=\"/b\">b</a><a href=\"https://c.com\">c</a>"))
+      ;; two external, one relative: splitting on the marker yields one more piece than
+      ;; there are occurrences
+      (assert= 3 (count (string/split html "rel=\"nofollow ugc noopener\""))))))
+
+;; The changelog is the toolchain's own writing: it is checked like any other text, but its
+;; links are not user content.
+(describe "writing the project vouches for"
+  (test "keeps its external links unmarked"
+    (let (html (safe-html "[GitHub](https://github.com/x/y)" {:user-content? false}))
+      (is (includes? html "href=\"https://github.com/x/y\""))
+      (is (not (includes? html "nofollow")))))
+
+  (test "still has executing links neutralised"
+    (is (includes? (safe-html "[x](JaVaScRiPt:alert(1))" {:user-content? false}) "href=\"#\""))))
+
+(describe "inline-html"
+  (test "one line renders without its paragraph"
+    (assert= "a <code>b</code> <strong>c</strong>" (inline-html "a `b` **c**")))
+
+  (test "and is still escaped"
+    (assert= "&lt;b&gt;" (inline-html "<b>")))
+
+  (test "empty text is empty"
+    (assert= "" (inline-html ""))))

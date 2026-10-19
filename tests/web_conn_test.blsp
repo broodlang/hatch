@@ -352,3 +352,20 @@
       (assert= (string-param conn "name") nil)
       (assert= (string-param conn "q" "") "")
       (assert= (string-param conn "page") "3"))))
+
+(describe "body-bytes"
+  (test "an in-memory body"
+    (assert= "a=1"
+      (string/bytes-> (body-bytes (build {:method "POST" :path "/" :headers {} :body "a=1"})))))
+  (test "no body is empty bytes, not nil"
+    (assert= 0 (bytes/length (body-bytes (build {:method "GET" :path "/" :headers {} :body ""})))))
+  (test "a spooled body is read back from its file"
+    (let (path (str "/tmp/hatch-body-bytes-" (rand/token 6)))
+      (file/spit path "spooled")
+      (assert= "spooled"
+        (string/bytes-> (body-bytes (build {:method "POST"
+                                            :path "/"
+                                            :headers {}
+                                            :body ""
+                                            :body-file path}))))
+      (file/rm path))))

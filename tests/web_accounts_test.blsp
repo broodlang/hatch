@@ -1,0 +1,187 @@
+;; web/accounts without a database: the rules that need none, and — over a fake adaptor that
+;; records each statement — what the database is asked. The apps' Postgres suites run the
+;; same module against real tables.
+(defmodule web-accounts-test
+  (:use test)
+  (:use web/accounts)
+  (:alias repo)
+  (:alias web/conn)
+  (:alias web/session))
+
+;; Tests run concurrently and the configuration is global, so the fake answers per process:
+;; each statement is sent to the process that ran it as `[:sql text params]`, and answers
+;; the rows that process queued with `answer` (none queued: no rows).
+(def- *fake-repo*
+  (repo/open {:start-pool (fn (_) :pool)
+              :stop-pool (fn (_) nil)
+              :exec (fn (_ sql params)
+                      (send (self) [:sql sql params])
+                      (receive ([:rows rows] rows) (after 0 [])))}
+    {}))
+
+(configure {:repo (fn () *fake-repo*) :token-scopes ["read" "write"]})
+
+(defn- answer (rows)
+  "Queue `rows` as the answer to this process's next statement."
+  (send (self) [:rows rows]))
+
+(defn- statements (acc)
+  (receive ([:sql sql params] (statements (cons [sql params] acc))) (after 50 (reverse acc))))
+(describe "configure"
+  (test "refuses a setting it does not know"
+    (assert-error (configure {:repo (fn () nil) :token-scope ["read"]})))
+  (test "refuses a repo that is not a function"
+    (assert-error (configure {:repo :pool})))
+  (test "the scopes are what was configured"
+    (answer [])
+    (assert= ["read" "write"] (token-scope-names))))
+
+(describe "passwords"
+  (test "a hash verifies its own password and no other"
+    (let (stored (hash-password "correct horse"))
+      (is (string/starts-with? stored "pbkdf2$600000$"))
+      (is (verify-password "correct horse" stored))
+      (is (not (verify-password "correct horsf" stored)))))
+  (test "a stored value of another shape is not a match, and does not raise"
+    (for (stored ["" "pbkdf2$x$salt$want" "md5$abc" "pbkdf2$1$a" nil 42])
+      (is (not (verify-password "p" stored)))))
+  (test "the dummy hash matches nothing"
+    (is (not (verify-password "" *dummy-hash*)))))
+
+(describe "sign-up refuses before the database"
+  (test "an address that is not one"
+    (answer [])
+    (assert= [:error "enter a valid email address"] (sign-up "not-an-address" "longenough"))
+    (assert= [:error "enter a valid email address"] (sign-up "a b@example.com" "longenough"))
+    (is (empty? (statements ()))))
+  (test "a short password"
+    (answer [])
+    (assert= [:error "password must be at least 8 characters"] (sign-up "a@example.com" "short"))
+    (is (empty? (statements ()))))
+  (test "a taken address with the generic message"
+    (answer [{:id 1 :email "a@example.com"}])
+    (assert= [:error *sign-up-refused*] (sign-up " A@Example.com " "longenough"))
+    (let ([_ params] (first (statements ())))
+      (assert= "a@example.com" (first params)))))
+
+(describe "authenticate"
+  (test "an unknown address is the same answer as a wrong password"
+    (answer [])
+    (assert= [:error "invalid email or password"] (authenticate "nobody@example.com" "whatever"))))
+
+(describe "sessions"
+  (test "a version is 0 for a row without one"
+    (assert= 0 (session-version {:id 1}))
+    (assert= 0 (session-version nil))
+    (assert= 3 (session-version {:session_version 3})))
+  (test "a cookie behind the row is signed out"
+    (answer [{:id 7 :session_version 2}])
+    (let (conn (web/conn/build {:method "GET" :path "/" :headers {} :body ""})
+          stale (-> conn (web/session/put-session "user_id" 7) (web/session/put-session "sv" 1))
+          fresh (login-user conn {:id 7 :session_version 2}))
+      (assert= nil (current-user stale))
+      (answer [{:id 7 :session_version 2}])
+      (assert= 7 (get (current-user fresh) :id))
+      (assert= nil (current-user conn)))))
+
+(describe "API tokens"
+  (test "a mint keeps only the configured scopes asked for"
+    (answer [{:id 1}])
+    (mint-token 1 "laptop" ["write" "admin"])
+    (let ([sql params] (first (statements ())))
+      (is (string/starts-with? sql "INSERT INTO"))
+      (is (includes? params "write"))
+      (is (not (includes? params "read,write")))))
+  (test "nil asks for every scope"
+    (answer [{:id 1}])
+    (mint-token 1 "")
+    (let ([_ params] (first (statements ())))
+      (is (includes? params "read,write"))
+      (is (includes? params "token"))))
+  (test "a row's scopes, and every one for a row from before scopes"
+    (answer [])
+    (assert= ["write"] (token-scopes {:scopes "write"}))
+    (assert= [] (token-scopes {:scopes ""}))
+    (assert= ["read" "write"] (token-scopes {:scopes nil})))
+  (test "a session may do anything, a token only what it carries"
+    (is (token-allows? {:id 1} "write"))
+    (is (token-allows? {:token_scopes ["write"]} "write"))
+    (is (not (token-allows? {:token_scopes ["read"]} "write"))))
+  (test "no lifetime without a variable"
+    (answer [])
+    (assert= nil (token-lifetime-ms)))
+  (test "an expiry in the past is expired, none is not"
+    (is (token-expired? {:expires_at 1}))
+    (is (not (token-expired? {:expires_at nil})))
+    (is (not (token-expired? {:expires_at (+ (os/now) 60000)}))))
+  (test "a missing or non-string token never reaches the database"
+    (answer [{:id 1}])
+    (assert= nil (user-for-token nil))
+    (assert= nil (user-for-token 42))
+    (is (empty? (statements ())))))
+
+(describe "email tokens"
+  (test "an unreadable or old stamp is expired"
+    (is (email-token-expired? {:inserted_at nil} 1000))
+    (is (email-token-expired? {:inserted_at 1} 1000))
+    (is (not (email-token-expired? {:inserted_at (os/now)} 60000))))
+  (test "a confirmed account is sent no confirmation"
+    (answer [])
+    (assert= nil (confirmation-token {:id 1 :confirmed_at 5}))
+    (is (empty? (statements ()))))
+  (test "a reset with mismatched passwords changes nothing"
+    (answer [])
+    (assert= [:error "the two passwords do not match"]
+      (reset-password {:id 1} "longenough" "longenougH"))
+    (is (empty? (statements ())))))
+
+(describe "validation before the database"
+  (test "a bad address and a short password say so, address first"
+    (assert= [:error "enter a valid email address"] (sign-up "nope" "short")))
+  (test "a reset needs a long password, typed twice, and a user"
+    (assert= [:error "password must be at least 8 characters"]
+      (reset-password {:id 1} "short" "short"))
+    (assert= [:error "that reset link is invalid or has expired"] (reset-password nil "x" "x")))
+  (test "an address is normalised the way it is stored"
+    (assert= "ada@example.com" (normalize-email "  Ada@Example.com "))
+    (assert= "" (normalize-email nil)))
+  (test "each hash uses a fresh random salt"
+    (is (not (= (hash-password "same") (hash-password "same"))))))
+
+;; A password change that left other sessions working would tell a user they had locked an
+;; intruder out while the intruder stayed signed in.
+(describe "change-password"
+  (defn- fake-user (password)
+    {:id 1 :email "a@b.com" :hashed_password (hash-password password) :session_version 3})
+
+  (test "the current password is required — a session alone is not enough"
+    (match (change-password (fake-user "correct-horse") "wrong-one" "newpassword1")
+      ([:error message] (is (includes? message "current password")))
+      (_ (is false))))
+
+  (test "a short new password is refused"
+    (match (change-password (fake-user "correct-horse") "correct-horse" "short")
+      ([:error message] (is (includes? message "at least")))
+      (_ (is false))))
+
+  (test "the new password must differ from the current one"
+    (match (change-password (fake-user "correct-horse") "correct-horse" "correct-horse")
+      ([:error message] (is (includes? message "differ")))
+      (_ (is false))))
+
+  (test "a change bumps the version and stores a new hash"
+    (match (change-password (fake-user "correct-horse") "correct-horse" "battery-staple")
+      ([:ok changed] (assert= 4 (get changed :session_version))
+        (let ([sql params] (first (statements ())))
+          (is (string/starts-with? sql "UPDATE"))
+          (is (includes? params 4))))
+      (other (is (= other :ok)))))
+
+  (test "no user is an error, not a crash"
+    (match (change-password nil "a" "bbbbbbbbbb")
+      ([:error _] (is true))
+      (_ (is false))))
+
+  ;; A non-integer must not compare equal to a cookie's 0 by accident.
+  (test "a non-integer session version reads as 0 rather than being trusted"
+    (assert= 0 (session-version {:id 1 :session_version "9"}))))

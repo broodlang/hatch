@@ -1,0 +1,114 @@
+(defmodule web/markdown
+  "Markdown rendered into a page an app serves: std `markdown/->html` (every value
+  escaped), then a check of every link. A README, a project's files, a changelog — the
+  boundary where text becomes a page is this one function, not one per view.
+
+  `opts`, for each function that takes them:
+
+  - `:user-content?` (default true) — the text was written by someone other than the
+    site, so every link leaving the site is marked `nofollow ugc noopener` (`link-rel`).
+    False for writing the site vouches for, such as its own changelog.
+  - `:site-url` — the site's own origin (`https://example.com`). A link to it is not
+    external, so an author who writes the full URL of one of the site's pages does not
+    have it treated as a foreign link. Without it, every absolute `http(s)` link is."
+  (:alias markdown))
+
+(defn safe-html (text &optional (opts {}))
+  "`text` (Markdown) as HTML, with every executing link scheme neutralised. A render
+  failure degrades to nothing rather than to a broken page.
+
+  The renderer escapes markup, and the links are checked here rather than relying on it
+  to. This is where an upload becomes a page served to everyone, and the renderer is part
+  of the toolchain: at one point it refused `javascript:` but not `JaVaScRiPt:`, because it
+  compared the scheme as written while a browser matches it case-insensitively. A security
+  property of the page should not arrive, or leave, with a version bump."
+  (check-allow :discarded-catch
+    (try (neutralise-links (markdown/->html text) opts) (catch _ ""))))
+
+(defn inline-html (text &optional (opts {}))
+  "`text` (one line of Markdown) as inline HTML — `safe-html` without the paragraph it
+  would otherwise be wrapped in, for a title or a heading's tail. A line that renders as
+  something other than one paragraph (a list marker, a heading) is left as rendered."
+  (let (html (safe-html text opts)
+        end (- (string/length html) 4))
+    (if (and (string/starts-with? html "<p>")
+          (string/ends-with? html "</p>")
+          (>= end 3)
+          (< (index-of (string/substring html 3 end) "<p>") 0))
+      (string/substring html 3 end)
+      html)))
+
+;; Schemes that execute rather than fetch. A link carrying one runs script with the site's
+;; origin — a signed-in visitor's session — the moment it is clicked.
+(def *unsafe-link-schemes* ["javascript:" "vbscript:" "data:"])
+
+(defn neutralise-links (html &optional (opts {}))
+  "`html` with any `href=\"<executing scheme>…\"` replaced by `href=\"#\"`, and — for user
+  content — each link leaving the site marked as such (`link-rel`).
+
+  Splitting on `href=\"` and rewriting each value is enough here because the input is the
+  renderer's own output — every other `\"` has been escaped to `&quot;` already, so a value
+  ends at the first quote and nothing else in the document looks like one."
+  (let (parts (string/split html "href=\"")
+        user-content? (get opts :user-content? true)
+        site-url (get opts :site-url))
+    (if (< (count parts) 2)
+      html
+      (str (first parts)
+        (apply str
+          (map (rest parts)
+            (fn (part)
+              (let (end (index-of part "\""))
+                (if (< end 0)
+                  (str "href=\"" part)
+                  (let (url (string/substring part 0 end)
+                        tail (string/substring part end (count part)))
+                    (str "href=\""
+                      (if (unsafe-link? url) "#" url)
+                      "\""
+                      (if user-content? (link-rel url site-url) "")
+                      (string/substring tail 1 (count tail)))))))))))))
+
+(def *external-rel* " rel=\"nofollow ugc noopener\"")
+
+(defn link-rel (url &optional (site-url nil))
+  "The `rel` attribute an external link in user content needs, or `\"\"` for anything else.
+
+  User content rendered into a page the site serves makes every link in it something the
+  site vouches for by default. It should not. `nofollow` and `ugc` say so to a search
+  engine: content being publishable is not an endorsement of where it points, and without
+  them publishing is a way to buy links off the site's domain.
+
+  `noopener` is the security half. A link that opens in a new context hands the opened page
+  a `window.opener` reference back to this one, and `noopener` is what severs it.
+
+  Deliberately not applied to the site's own links, which carry a real signal. Only a link
+  that leaves the site, from content someone uploaded."
+  (if (external-url? url site-url) *external-rel* ""))
+
+(defn external-url? (url &optional (site-url nil))
+  "Whether `url` leaves the site: an absolute `http`/`https` URL not under `site-url`.
+
+  A relative link, an anchor, and a `mailto:` are not external. The site's origin has to
+  END where `site-url` does — `https://example.com.attacker.net` starts with
+  `https://example.com` and is somebody else's host."
+  (let (lowered (string/lower (string/trim url)))
+    (and (or (string/starts-with? lowered "http://") (string/starts-with? lowered "https://"))
+      (not (and (string? site-url) (not (= site-url "")) (under-site? lowered site-url))))))
+
+(defn- under-site? (lowered site-url)
+  "Whether the lower-cased `lowered` is `site-url` itself or a path, query or fragment on it."
+  (let (origin (string/lower (if (string/ends-with? site-url "/")
+                               (string/substring site-url 0 (- (string/length site-url) 1))
+                               site-url))
+        length (string/length origin))
+    (and (string/starts-with? lowered origin)
+      (or (= (string/length lowered) length)
+        (includes? ["/" "?" "#"] (string/substring lowered length (+ length 1)))))))
+
+(defn unsafe-link? (url)
+  "Whether `url` names a scheme that executes. Matched lower-cased and after trimming: a
+  browser ignores leading whitespace and the case of a scheme, so a check that does not is
+  a check on the spelling an attacker would not use."
+  (let (lowered (string/lower (string/trim url)))
+    (any? *unsafe-link-schemes* (fn (scheme) (string/starts-with? lowered scheme)))))

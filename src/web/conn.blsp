@@ -280,6 +280,19 @@
   "True if this request's body was streamed to disk rather than buffered in memory."
   (not (nil? (conn-body-file conn))))
 
+(defn body-bytes (conn)
+  "The request body as `bytes`, wherever the server put it: read back from the spool when
+  it was streamed to disk (`spooled?`), else the in-memory `:body-bytes`. Empty bytes for a
+  request with no body, so a caller asks `(= (bytes/length …) 0)` rather than guessing
+  which of nil and empty it gets. Reads a spooled body into memory — to only store one,
+  `save-body` moves the file instead."
+  (let (spool (conn-body-file conn)
+        in-memory (conn-body-bytes conn))
+    (cond
+      (string? spool) (file/slurp-bytes spool)
+      (nil? in-memory) (string/->bytes "")
+      :else in-memory)))
+
 (defn save-body (conn dest)
   "Persist a spooled request body to `dest` by moving the temp spool file — zero-copy (a
   rename, no read-back into memory), which is the point of streaming a large upload to disk.

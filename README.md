@@ -54,6 +54,24 @@ and error pages in your own layout:
    :errors    {:render my-error-page}})
 ```
 
+Accounts are a module, not generated code (`web/accounts`, modelled on phx.gen.auth):
+pbkdf2 passwords, email confirmation and password-reset tokens, scoped API tokens, and
+who is signed in on a conn. Hand it the repo once at boot, add its tables to your
+schemas, and keep your own pages:
+
+```brood
+(web/accounts/configure {:repo db/conn :token-scopes ["api:write"]})
+(def schemas [(web/accounts/users-schema) web/accounts/api-tokens-schema
+              web/accounts/user-tokens-schema])
+
+(web/accounts/sign-up email password)   ; [:ok user] or [:error message]
+(web/accounts/current-user conn)        ; the signed-in user, or nil
+```
+
+Markdown someone else wrote goes through `web/markdown/safe-html`, which escapes it and
+neutralises executing links (`javascript:` in any case) and marks links leaving the site
+`nofollow ugc noopener`.
+
 See `docs/web-framework-design.md` for the design rationale.
 
 ## Publishing
