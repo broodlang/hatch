@@ -150,12 +150,15 @@ src/
                       live-open then live-click/live-change/live-submit/live-has?/live-text,
                       which go through the rendered Hiccup with a CSS-ish selector — so a test
                       can only fire an event the markup actually wires up
-    compress.blsp   — coding negotiation (brotli over gzip) + the encoders web/endpoint uses
+    compress.blsp   — coding negotiation (brotli over gzip, only an encoder the runtime has
+                      — available?, a real call probed once) + the encoders web/endpoint uses
     cache.blsp      — fragment + whole-page caching: fetch (no expiry) / fetch-ttl (bounded
-                      staleness); cluster-aware invalidation via web/cluster; compressed bodies
+                      staleness); cluster-aware invalidation via web/cluster; compressed bodies.
+                      Both stores capped by count AND bytes, dropped whole at either cap
     http-cache.blsp — what a response tells downstream caches: strong-etag/etag-for,
-                      not-modified?, conditional (304), Cache-Control constructors,
-                      html-freshness, merge-vary, forbid-transform
+                      not-modified?, conditional (304), versioned (a 304 from a version the
+                      handler names, before render; weak tag, still compressed),
+                      Cache-Control constructors, html-freshness, merge-vary, forbid-transform
     ratelimit.blsp  — token-bucket plug with four seams (:key-fn/:skip?/:cost/:store, the
                       last a BucketStore ability); network-key buckets IPv6 by /64
     logger.blsp     — HTTP access log: the [:hatch :request :stop] telemetry http/server

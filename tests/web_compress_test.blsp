@@ -58,3 +58,18 @@
     (assert= (answers "gzip;q=0.001") [true true true]))
   (test "no gzip on offer: all three say no"
     (assert= (answers "br") [false false false])))
+
+;; The check this replaced asked whether the wrapper functions were bound — always true — so a
+;; runtime built without brotli negotiated `br` for every browser and raised on every request.
+(describe "available? is a real probe"
+  (test "an unknown coding is never available"
+    (assert= (available? "deflate") false)
+    (assert= (available? nil) false))
+  (test "chosen-encoding never picks a coding the runtime cannot produce"
+    (let (chosen (chosen-encoding (req {:accept-encoding "br, gzip"})))
+      (assert= (or (nil? chosen) (available? chosen)) true)))
+  (test "on a runtime with both encoders, both are available"
+    ;; true of every runtime hatch's CI uses; the probe is what makes the line above hold
+    ;; on one that lacks them
+    (assert= (available? "gzip") true)
+    (assert= (available? "br") true)))

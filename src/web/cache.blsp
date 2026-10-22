@@ -89,9 +89,12 @@
   fragment. NOT for anything user-specific — one entry serves every request, so a value
   that varies per session or per user belongs nowhere near this.
 
-  There is no expiry and no bound. That is deliberate for the intended use — a fixed set of
-  keys, each computed once — and makes it the wrong tool for anything keyed by user input,
-  which would grow without limit."
+  There is no expiry. That is deliberate for the intended use — a fixed set of keys, each
+  computed once — and makes it the wrong tool for anything keyed by user input. It IS
+  bounded, as a backstop rather than a policy: past `*max-fragments*` entries or
+  `*max-fragment-bytes*` of string and byte values, the whole store is dropped and rebuilds on
+  demand (see `keep-fragment`), so a caller that does key it by input costs recomputation, not
+  the machine's memory."
   (if (table/has? *fragments* key)
     (let (stored (table/get *fragments* key))
       (one-policy-per-key key stored false)
@@ -99,7 +102,7 @@
       stored)
     (let (value (build))
       (bump :misses)
-      (table/put *fragments* key value)
+      (keep-fragment key value)
       value)))
 
 (defn fetch-ttl (key ttl-ms build)
@@ -128,8 +131,57 @@
       (do (bump :hits) (ttl-entry-value stored))
       (let (value (build))
         (bump :misses)
-        (table/put *fragments* key (ttl-entry value (+ now ttl-ms)))
+        (keep-fragment key (ttl-entry value (+ now ttl-ms)))
         value))))
+
+;; ---- bounds -----------------------------------------------------------------
+;;
+;; `fetch` was documented as being for a fixed set of keys and was otherwise unbounded, and a
+;; document is not a bound. One caller keying it by a query parameter — a page per search term,
+;; a fragment per id — and the store grows for as long as strangers keep asking, on a machine
+;; with 512 MB in all. So both stores have a count cap AND a byte cap; at either, everything is
+;; dropped, as the compressed store always did: entries are equally cheap to rebuild, the ones
+;; that matter come back on their next request, and nothing has to track recency.
+;;
+;; Bytes are counted for strings (their length) and byte strings; any other value counts only
+;; against the entry cap. The running totals are approximate under concurrency — two misses on
+;; one key can both count it — but every drop resets them, so an error cannot accumulate.
+(def *max-fragments* 1024)
+(def *max-fragment-bytes* (* 16 1024 1024))
+(def *max-compressed-bytes* (* 8 1024 1024))
+
+;; key → the size counted for it, so replacing or invalidating one entry takes back exactly what
+;; it added, without copying the stored value out of the table to measure it again.
+(def- *fragment-sizes* (table/new))
+;; :fragments / :compressed → the bytes each store is holding
+(def- *totals* (table/new))
+
+(defn- size-of (value)
+  "What `value` counts against a byte cap: a string's length, a byte string's, the value inside
+  a `fetch-ttl` wrapper; anything else nothing."
+  (cond
+    (string? value) (string/length value)
+    (bytes? value) (bytes/length value)
+    (ttl-entry? value) (size-of (ttl-entry-value value))
+    else 0))
+
+(defn- keep-fragment (key value)
+  "Store `value` under `key` within the bounds. When adding it would pass either cap the whole
+  store is dropped first; a value bigger than the byte cap on its own is not kept at all — it
+  would only push everything else out and then be dropped itself by the next one."
+  (let (size (size-of value))
+    (when (<= size *max-fragment-bytes*)
+      (let (previous (table/get *fragment-sizes* key 0)
+            new-key? (not (table/has? *fragments* key)))
+        (when (or (and new-key? (>= (table/count *fragments*) *max-fragments*))
+                (> (+ (- (table/get *totals* :fragments 0) previous) size) *max-fragment-bytes*))
+          (local-clear))
+        ;; read again: the drop just above took this key's own count back too
+        (let (counted (table/get *fragment-sizes* key 0))
+          (table/put *fragments* key value)
+          (table/put *fragment-sizes* key size)
+          (table/incr *totals* :fragments (- size counted)))))
+    nil))
 
 ;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
 ;; unknowable: a cache that never hits and a cache that is never asked look identical from
@@ -150,9 +202,16 @@
   (let (hits (counter :hits)
         misses (counter :misses)
         asked (+ hits misses))
-    {:fragments (count (keys (table/snapshot *fragments*)))
-     :compressed (count (compressed-entries))
+    ;; `table/count`, not a count of a snapshot: a snapshot copies every stored value out of
+    ;; the table, megabytes of pages, to count them
+    {:fragments (table/count *fragments*)
+     :max-fragments *max-fragments*
+     :fragment-bytes (table/get *totals* :fragments 0)
+     :max-fragment-bytes *max-fragment-bytes*
+     :compressed (table/count *compressed*)
      :max-compressed *max-compressed*
+     :compressed-bytes (table/get *totals* :compressed 0)
+     :max-compressed-bytes *max-compressed-bytes*
      :hits hits
      :misses misses
      :hit-rate (web/metrics/rate-percent hits asked)
@@ -163,12 +222,19 @@
 
 (defn- local-invalidate (key)
   "Drop one cached fragment on THIS node only — the half a peer's message applies."
-  (table/delete *fragments* key))
+  (let (counted (table/get *fragment-sizes* key 0))
+    (table/delete *fragments* key)
+    (table/delete *fragment-sizes* key)
+    (table/incr *totals* :fragments (- 0 counted))))
 
 (defn- local-clear ()
   "Drop every cached fragment on THIS node only."
   (doseq (key (keys (table/snapshot *fragments*)))
-    (table/delete *fragments* key)))
+    (table/delete *fragments* key))
+  (doseq (key (keys (table/snapshot *fragment-sizes*)))
+    (table/delete *fragment-sizes* key))
+  (table/put *totals* :fragments 0)
+  nil)
 
 (defn invalidate (key)
   "Drop one cached fragment, so the next `fetch` rebuilds it — on every node in the cluster.
@@ -252,6 +318,10 @@
 ;; keyed by that is a leak a stranger drives. At the cap the whole store is dropped rather
 ;; than evicted one by one: entries are large and equally valuable, the pages that matter are
 ;; re-cached on their next request, and the alternative is tracking recency for no benefit.
+;;
+;; Two caps, because the count alone bounds nothing on its own: 64 compressed copies of a
+;; multi-megabyte page are a large share of a 512 MB machine. `*max-compressed-bytes*` (with
+;; the fragment caps, under "bounds") holds the total, whatever the pages weigh.
 (def *max-compressed* 64)
 
 (defn compressed (key build)
@@ -262,14 +332,23 @@
   8.8ms against 0.45ms to hash it, and for a page whose content cannot change between
   requests that work is repeated verbatim every time.
 
+  Bounded by `*max-compressed*` entries and `*max-compressed-bytes*` in all: at either the
+  whole store is dropped, and a body bigger than the byte cap by itself is compressed and
+  returned but not kept.
+
   Do not use this for a response that varies per user: one entry serves everyone."
   (cond
     (table/has? *compressed* key) (table/get *compressed* key)
     else
-      (let (value (build))
-        (when (>= (table/count *compressed*) *max-compressed*)
-          (clear-compressed))
-        (table/put *compressed* key value)
+      (let (value (build)
+            size (size-of value))
+        ;; one body over the cap alone is not kept, so it must not empty the store either
+        (when (<= size *max-compressed-bytes*)
+          (when (or (>= (table/count *compressed*) *max-compressed*)
+                  (> (+ (table/get *totals* :compressed 0) size) *max-compressed-bytes*))
+            (clear-compressed))
+          (table/put *compressed* key value)
+          (table/incr *totals* :compressed size))
         value)))
 
 (defn compressed-entries ()
@@ -279,4 +358,5 @@
 (defn clear-compressed ()
   "Drop every cached compressed body."
   (doseq (key (keys (table/snapshot *compressed*))) (table/delete *compressed* key))
+  (table/put *totals* :compressed 0)
   nil)

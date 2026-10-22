@@ -219,3 +219,54 @@
     (let (look-alike {:value "not a wrapper" :ttl-at 1})
       (assert= (fetch [:policy :e] (fn () look-alike)) look-alike)
       (assert= (fetch [:policy :e] (fn () "rebuilt")) look-alike))))
+
+;; ---- bounds -------------------------------------------------------------------
+;;
+;; `fetch` was "for a fixed set of keys" by documentation only. One caller keying it by request
+;; input and the store grows for as long as strangers ask, on a 512 MB machine.
+;; :isolated — these fill the stores to their caps, which drops everything in them; run in
+;; the shared pool, that drop would land inside a neighbour's fetch-then-assert.
+(describe "bounds"
+  :isolated (test "fetch is bounded by entry count"
+    (clear)
+    (for (i (range (+ *max-fragments* 5)))
+      (fetch [:bound-count i] (fn () i)))
+    (is (<= (get (stats) :fragments) *max-fragments*)))
+
+  :isolated (test "fetch is bounded by bytes"
+    (clear)
+    (let (chunk (string/repeat "x" (math/quot *max-fragment-bytes* 4)))
+      (for (i (range 6))
+        (fetch [:bound-bytes i] (fn () chunk)))
+      (is (<= (get (stats) :fragment-bytes) *max-fragment-bytes*))))
+
+  :isolated (test "a value over the byte cap alone is returned but not kept"
+    (clear)
+    (let (calls (table/new)
+          huge (string/repeat "x" (+ *max-fragment-bytes* 1))
+          build (counting-build calls huge))
+      (assert= (string/length (fetch [:bound-huge] build)) (string/length huge))
+      (fetch [:bound-huge] build)
+      (assert= (table/get calls :n) 2)
+      (assert= (get (stats) :fragment-bytes) 0)))
+
+  :isolated (test "invalidate gives back what an entry counted"
+    (clear)
+    (fetch [:bound-give-back] (fn () (string/repeat "y" 1000)))
+    (assert= (get (stats) :fragment-bytes) 1000)
+    (invalidate [:bound-give-back])
+    (assert= (get (stats) :fragment-bytes) 0))
+
+  :isolated (test "a fetch-ttl refresh replaces its count rather than adding to it"
+    (clear)
+    (fetch-ttl [:bound-ttl] 0 (fn () (string/repeat "z" 500)))
+    (fetch-ttl [:bound-ttl] 0 (fn () (string/repeat "z" 500)))
+    (assert= (get (stats) :fragment-bytes) 500))
+
+  :isolated (test "the compressed store is bounded by bytes too"
+    (clear-compressed)
+    (let (chunk (string/repeat "c" (math/quot *max-compressed-bytes* 4)))
+      (for (i (range 6))
+        (compressed [(str "bound-bytes" i) "br"] (fn () chunk)))
+      (is (<= (get (stats) :compressed-bytes) *max-compressed-bytes*))
+      (is (<= (count (keys (compressed-entries))) 4)))))

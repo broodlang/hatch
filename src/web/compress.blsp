@@ -16,6 +16,24 @@
   ; accepts-encoding? — the one Accept-Encoding predicate, shared with web/static and web/stream
   (:use http/util))
 
+;; Which codings this runtime can produce, probed once at load with a REAL call on each.
+;;
+;; The check this replaces asked whether `zlib/brotli` and `zlib/gzip` were bound, and they
+;; always are: they are Brood wrappers, defined whether or not the native encoder behind them
+;; was built in. So a runtime without brotli would have negotiated `br` for every browser that
+;; offers it — all of them — and raised on every one of those requests. Compressing one byte
+;; asks the question that was meant, once, for microseconds.
+(def- *brotli?* (check-allow :discarded-catch (try (do (zlib/brotli "x") true) (catch _e false))))
+(def- *gzip?* (check-allow :discarded-catch (try (do (zlib/gzip "x") true) (catch _e false))))
+
+(defn available? (coding)
+  "Whether this runtime can encode `coding` (`\"br\"` or `\"gzip\"`) — known from one real call
+  at load, so an encoder the runtime was built without is never negotiated."
+  (cond
+    (= coding "br") *brotli?*
+    (= coding "gzip") *gzip?*
+    else false))
+
 (defn accepts? (conn coding)
   "True if the request's `Accept-Encoding` offers `coding` and does not refuse it with an
   explicit `q=0` weight. A missing header means no compression.
@@ -27,10 +45,15 @@
 (defn chosen-encoding (conn)
   "The content-coding to compress with, preferring brotli (`\"br\"`) over gzip (`\"gzip\"`) when
   the client accepts it — brotli beats gzip on text and every modern browser advertises `br`.
-  Returns nil when the client accepts neither."
+  Returns nil when the client accepts neither, and passes over a coding this runtime cannot
+  produce (`available?`) — so a build without brotli serves gzip, and one without either serves
+  plain bodies, rather than raising on every request.
+
+  `web/endpoint` compresses with this choice and `web/http-cache/versioned` names it in its tag,
+  so the two cannot disagree about which representation went out."
   (cond
-    (accepts? conn "br") "br"
-    (accepts? conn "gzip") "gzip"
+    (and *brotli?* (accepts? conn "br")) "br"
+    (and *gzip?* (accepts? conn "gzip")) "gzip"
     else nil))
 
 (defn encode-body (coding raw)

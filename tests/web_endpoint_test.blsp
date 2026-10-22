@@ -464,3 +464,60 @@
     (let (once (web/http-cache/forbid-transform {:status 200 :headers {:etag "\"t\""} :body "x"})
           twice (web/http-cache/forbid-transform once))
       (assert= (get (get twice :headers) :cache-control) "no-transform"))))
+
+;; ---- versioned pages through the whole pipeline -----------------------------
+;;
+;; The two costs `web/http-cache/versioned` exists to remove: a 304 that still rendered the
+;; whole page to hash it, and a handler-set tag that switched compression off.
+
+(def- versioned-renders (table/new))
+
+(defn- versioned-router (conn)
+  (web/http-cache/versioned conn
+    [:page 1]
+    (fn ()
+      (table/incr versioned-renders (get conn :path))
+      (send-resp conn 200 (str "<!DOCTYPE html><p>" (string/repeat "versioned page " 60) "</p>")))))
+
+(describe "a versioned page"
+  (test "a 304 never renders"
+    (let (config {:router versioned-router}
+          path "/versioned-304"
+          tag (get (get (respond config {:accept-encoding "br"} path) :headers) :etag)
+          resp (respond config {:accept-encoding "br" :if-none-match tag} path))
+      (assert= (get resp :status) 304)
+      (assert= (get resp :body) "")
+      ;; the first request rendered; the revalidation did not
+      (assert= (table/get versioned-renders path 0) 1)))
+
+  (test "it is still compressed, and its tag names the coding"
+    (let (resp (respond {:router versioned-router} {:accept-encoding "gzip"} "/versioned-gzip")
+          headers (get resp :headers))
+      (when (web/compress/available? "gzip")
+        (assert= (get headers :content-encoding) "gzip")
+        (assert= (string/ends-with? (get headers :etag) "-gzip\"") true))
+      (assert= (web/http-cache/versioned-tag? (get headers :etag)) true)))
+
+  (test "a tag earned under one coding does not satisfy another"
+    (let (config {:router versioned-router}
+          path "/versioned-coding"
+          br-tag (get (get (respond config {:accept-encoding "br"} path) :headers) :etag)
+          resp (respond config {:accept-encoding "gzip" :if-none-match br-tag} path))
+      (when (and (web/compress/available? "br") (web/compress/available? "gzip"))
+        (assert= (get resp :status) 200))))
+
+  ;; Keyed by the body's own hash, not the tag: a version that forgot something must never
+  ;; hand one request the compressed copy of another render.
+  (test "its compressed body is cached by the body, not by the version"
+    (let (resp (respond {:router versioned-router} {:accept-encoding "gzip"} "/versioned-key")
+          tag (get (get resp :headers) :etag))
+      (assert= (count (entries-for tag)) 0)))
+
+  (test "an anonymous 304 keeps the public freshness the 200 had"
+    (let (config {:router versioned-router :freshness {:max-age 60 :stale-for 600}}
+          path "/versioned-fresh"
+          first-headers (get (respond config {} path) :headers)
+          second-headers (get (respond config {:if-none-match (get first-headers :etag)} path)
+                           :headers))
+      (assert= (get second-headers :cache-control) (get first-headers :cache-control))
+      (assert= (string/starts-with? (get second-headers :cache-control) "public") true))))

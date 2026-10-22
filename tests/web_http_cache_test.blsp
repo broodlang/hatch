@@ -214,3 +214,160 @@
     (assert= false (not-modified? (inm "\"other\"") "\"abc\""))
     (assert= false (not-modified? (inm "\"abcd\"") "\"abc\""))
     (assert= false (not-modified? {:headers {}} "\"abc\""))))
+
+;; ---- versioned --------------------------------------------------------------
+;;
+;; `conditional` can only answer after the page is rendered, because it hashes the body. A
+;; client that already holds the page is spared the bytes and none of the work — on a small
+;; machine, the expensive half. `versioned` takes its tag from a version the handler names
+;; instead, so a matching request never reaches `render` at all.
+
+(defn- versioned-request (&optional (headers {}) (method "GET") (path "/page") (query ""))
+  (build {:method method :path path :query query :params {} :headers headers :body ""}))
+
+(defn- counted-render (calls conn &optional (status 200))
+  "A `render` that counts its calls in `calls`, so a test can say it was never reached."
+  (fn ()
+    (table/incr calls :n)
+    (send-resp conn status "<p>the page</p>")))
+
+(defn- tag-of (conn) (get (or (conn-resp-headers conn) {}) :etag))
+
+(describe "versioned"
+  (test "a first request renders, and is tagged weak"
+    (let (calls (table/new)
+          conn (versioned-request)
+          out (versioned conn [:rev 1] (counted-render calls conn)))
+      (assert= (table/get calls :n 0) 1)
+      (assert= (conn-status out) 200)
+      (assert= (versioned-tag? (tag-of out)) true)
+      (assert= (string/starts-with? (tag-of out) "W/") true)))
+
+  (test "a request holding the tag is a 304, and render is never called"
+    (let (calls (table/new)
+          tag (tag-of (versioned (versioned-request)
+                        [:rev 1]
+                        (counted-render calls (versioned-request))))
+          asking (versioned-request {:if-none-match tag})
+          out (versioned asking [:rev 1] (counted-render calls asking)))
+      (assert= (conn-status out) 304)
+      (assert= (conn-resp-body out) "")
+      (assert= (tag-of out) tag)
+      ;; once for the first request, never for the second
+      (assert= (table/get calls :n 0) 1)))
+
+  (test "a new version renders again"
+    (let (calls (table/new)
+          tag (tag-of (versioned (versioned-request)
+                        [:rev 1]
+                        (counted-render calls (versioned-request))))
+          asking (versioned-request {:if-none-match tag})
+          out (versioned asking [:rev 2] (counted-render calls asking)))
+      (assert= (conn-status out) 200)
+      (assert= (table/get calls :n 0) 2)
+      (is (not (= (tag-of out) tag)))))
+
+  ;; `*` means "any current representation"; answering it without rendering would answer 304
+  ;; for a page whose render might have been a 404.
+  (test "If-None-Match: * still renders"
+    (let (calls (table/new)
+          asking (versioned-request {:if-none-match "*"})
+          out (versioned asking [:rev 1] (counted-render calls asking)))
+      (assert= (conn-status out) 200)
+      (assert= (table/get calls :n 0) 1)))
+
+  (test "a client sending the tag back weak-prefixed or among others still matches"
+    (let (calls (table/new)
+          tag (tag-of (versioned (versioned-request) :v (counted-render calls (versioned-request))))
+          asking (versioned-request {:if-none-match (str "\"other\", " tag)}))
+      (assert= (conn-status (versioned asking :v (counted-render calls asking))) 304)))
+
+  (test "only GET and HEAD are versioned; a POST is just rendered"
+    (let (calls (table/new)
+          post (versioned-request {:if-none-match "W/\"hv-anything\""} "POST")
+          out (versioned post :v (counted-render calls post)))
+      (assert= (table/get calls :n 0) 1)
+      (assert= (tag-of out) nil)))
+
+  (test "only a 200 is tagged — a redirect or an error passes through untouched"
+    (let (calls (table/new)
+          conn (versioned-request))
+      (assert= (tag-of (versioned conn :v (counted-render calls conn 404))) nil)
+      (assert= (tag-of (versioned conn :v (counted-render calls conn 302))) nil)))
+
+  (test "a handler's own ETag wins"
+    (let (conn (versioned-request)
+          out (versioned conn
+                :v (fn () (send-resp (put-resp-header conn :etag "\"mine\"") 200 "x"))))
+      (assert= (tag-of out) "\"mine\"")))
+
+  (test "both the 200 and the 304 vary on what the tag reads"
+    (let (conn (versioned-request)
+          first-out (versioned conn :v (fn () (send-resp conn 200 "x")))
+          asking (versioned-request {:if-none-match (tag-of first-out)})
+          second-out (versioned asking :v (fn () (send-resp asking 200 "x"))))
+      (doseq (out [first-out second-out])
+        (let (vary (get (conn-resp-headers out) :vary))
+          (assert= (includes? vary "Accept-Encoding") true)
+          (assert= (includes? vary "Cookie") true))))))
+
+;; The tag must change with everything the bytes going out depend on that the handler should
+;; not have to remember — or a 304 hands a client a copy that is not the page it asked for.
+(describe "version-tag"
+  (test "the same request and version give the same tag"
+    (assert= (version-tag (versioned-request) [:rev 1]) (version-tag (versioned-request) [:rev 1])))
+
+  (test "the path and the query are part of it"
+    (is (not (= (version-tag (versioned-request {} "GET" "/a") :v)
+               (version-tag (versioned-request {} "GET" "/b") :v))))
+    (is (not (= (version-tag (versioned-request {} "GET" "/a" "page=1") :v)
+               (version-tag (versioned-request {} "GET" "/a" "page=2") :v)))))
+
+  ;; RFC 9110 §8.8.3: a br body and a gzip body are different representations.
+  (test "the negotiated coding is part of it, and named in it"
+    (let (br (version-tag (versioned-request {:accept-encoding "br"}) :v)
+          gzip (version-tag (versioned-request {:accept-encoding "gzip"}) :v)
+          plain (version-tag (versioned-request {}) :v))
+      (when (web/compress/available? "br")
+        (assert= (string/ends-with? br "-br\"") true))
+      (when (web/compress/available? "gzip")
+        (assert= (string/ends-with? gzip "-gzip\"") true)
+        (is (not (= gzip plain))))))
+
+  ;; A version that forgot the viewer must still never carry one session's copy to another.
+  (test "the session cookie is part of it"
+    (is (not (= (version-tag (versioned-request {:cookie "_hatch_session=alice"}) :v)
+               (version-tag (versioned-request {:cookie "_hatch_session=bob"}) :v))))
+    (is (not (= (version-tag (versioned-request {:cookie "_hatch_session=alice"}) :v)
+               (version-tag (versioned-request {}) :v)))))
+
+  (test "HEAD and GET share a tag — the same representation, without the body"
+    (assert= (version-tag (versioned-request {} "HEAD") :v)
+      (version-tag (versioned-request {} "GET") :v))))
+
+;; Weak comparison on both sides: `versioned` mints a weak tag, and a client may send it back
+;; with or without the prefix.
+(describe "not-modified? with a weak tag of its own"
+  (defn- asking-with (h) {:headers {:if-none-match h}})
+  (test "a weak tag matches itself and its strong twin"
+    (assert= true (not-modified? (asking-with "W/\"abc\"") "W/\"abc\""))
+    (assert= true (not-modified? (asking-with "\"abc\"") "W/\"abc\""))
+    (assert= false (not-modified? (asking-with "W/\"abd\"") "W/\"abc\""))))
+
+;; A versioned 304 stands for the 200 it saved rendering; judged as a bare 304 it would turn
+;; every anonymous reader's public copy private on its first revalidation.
+(describe "html-freshness on a versioned 304"
+  (test "an anonymous versioned 304 gets the 200's public policy"
+    (assert= (string/starts-with? (cc (html-freshness (versioned-request)
+                                        {:status 304
+                                         :headers {:etag "W/\"hv-0123456789abcdef\""}
+                                         :body ""}))
+               "public")
+      true))
+  (test "a 304 with any other tag is still private"
+    (assert= "private, no-cache"
+      (cc (html-freshness (versioned-request) {:status 304 :headers {:etag "\"abc\""} :body ""}))))
+  (test "a signed-in versioned 304 stays private"
+    (assert= "private, no-cache"
+      (cc (html-freshness (versioned-request {:cookie "_hatch_session=abc"})
+            {:status 304 :headers {:etag "W/\"hv-0123456789abcdef\""} :body ""})))))

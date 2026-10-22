@@ -18,6 +18,11 @@
   `conditional` closes that: it hangs a strong ETag on the finished response and turns a
   matching `If-None-Match` into a bodyless 304.
 
+  It hashes the body, though, so the page is still rendered to learn that it need not be
+  sent. `versioned` is the other way in, for a handler that can name what a page shows more
+  cheaply than it can draw it: the tag comes from that name, and a matching request is a 304
+  before `render` is ever called.
+
   **The ETag identifies a REPRESENTATION, not a resource** (RFC 9110 §8.8.3). A gzipped
   body and a brotli body of the same page are different representations, so `etag-for`
   takes the content-coding and suffixes the tag with it. Getting this wrong is how a client
@@ -38,7 +43,14 @@
   ; trim-if-needed — `string/trim` costs 3.14us per call whether or not it finds anything
   (:use http/util)
   ; *default-cookie* — the session cookie whose presence makes a page personal
-  (:alias web/session))
+  (:alias web/session)
+  ; chosen-encoding — the coding web/endpoint will compress with, which a versioned tag names
+  (:alias web/compress)
+  ; load-manifest — the asset fingerprints a page links to, part of what a versioned tag hashes
+  ; (web/static aliases this module too; neither reads the other at load)
+  (:alias web/static)
+  ; text — the release name a deploy may export, for the same tag
+  (:alias web/env))
 
 ;; ---- validators -------------------------------------------------------------
 
@@ -86,13 +98,20 @@
   costs bytes. Strictness is the safe direction here.
 
   This is the one implementation of the rule. `web/static/if-none-match?` calls it, so the
-  file path and the dynamic path cannot drift apart on what counts as a match."
+  file path and the dynamic path cannot drift apart on what counts as a match.
+
+  The comparison is weak on BOTH sides: `tag` may itself be weak (`W/\"…\"`, as `versioned`
+  mints), and is compared by its opaque part like every candidate is."
   (let (header (header conn :if-none-match))
     (and (string? header)
       (let (want (trim-if-needed header))
         (if (= want "*")
           true
-          (includes? (etag-candidates want) tag))))))
+          (includes? (etag-candidates want) (opaque-tag tag)))))))
+
+(defn- opaque-tag (tag)
+  "`tag` without a `W/` prefix — the part weak comparison looks at (RFC 9110 §8.8.3.2)."
+  (if (string/starts-with? tag "W/") (string/substring tag 2 (count tag)) tag))
 
 ;; ---- freshness --------------------------------------------------------------
 
@@ -145,7 +164,8 @@
   `private, no-cache`:
 
   - the method is GET or HEAD (a POST response is not a cache entry)
-  - the status is 200 (a redirect or an error is not the page)
+  - the status is 200 (a redirect or an error is not the page), or a 304 `versioned` answered
+    in place of one
   - the response sets no cookie (a login response must never be shared, and it is a 200 with
     a `Set-Cookie` that would otherwise slip through)
   - the request carries no session cookie (`:cookie`, default `_hatch_session`)
@@ -165,7 +185,14 @@
       (if (not (or (nil? content-type) (includes? content-type "text/html")))
         resp
         (let (public? (and (or (= method "GET") (= method "HEAD"))
-                        (= (get resp :status 200) 200)
+                        ;; A `versioned` 304 stands for the 200 it saved rendering, and the
+                        ;; client refreshes that copy's freshness from it — so it gets the
+                        ;; 200's answer. Judged as a 304 it would be `private, no-cache`, and
+                        ;; every anonymous reader's copy would turn private on its first
+                        ;; revalidation.
+                        (or (= (get resp :status 200) 200)
+                          (and (= (get resp :status) 304)
+                            (versioned-tag? (get headers :etag))))
                         (nil? (get headers :set-cookie))
                         (not (session-cookie? conn cookie-name))))
           (assoc resp
@@ -273,3 +300,167 @@
           [:not-modified (not-modified-response tagged tag)]
           [:send tagged]))
       [:send resp])))
+
+;; ---- versioned pages: a 304 that skips the render ----------------------------
+;;
+;; `conditional` hashes the body, so it can only answer after the page is rendered: a client
+;; that already holds the page is spared the bytes, never the work. On a small shared machine
+;; the work is the expensive half — the reads and the rendering, not the send — so a page whose
+;; content the handler can name more cheaply than it can draw wants its tag from that name.
+
+;; Every tag `versioned` mints starts with this, which is how the endpoint knows the tag
+;; already names the coding it is about to apply (and compresses), and how `html-freshness`
+;; knows a 304 stands for a page. A handler's own tag does not look like this by accident.
+(def *versioned-prefix* "W/\"hv-")
+
+(defn versioned-tag? (tag)
+  "Whether `tag` was minted by `versioned`.
+
+  (hatch/web/http-cache/versioned-tag? \"W/\\\"hv-0123456789abcdef-br\\\"\") ;=> true
+  (hatch/web/http-cache/versioned-tag? \"\\\"0123456789abcdef\\\"\") ;=> false
+  (hatch/web/http-cache/versioned-tag? nil) ;=> false"
+  (and (string? tag) (string/starts-with? tag *versioned-prefix*)))
+
+;; When this copy of the code was loaded. A `def`, so a startup image (ADR-218) carries it and
+;; it changes exactly when the image is rebuilt — the stand-in for a release name when the
+;; deploy exports none. Never wrong, only sometimes pessimistic: two machines that built their
+;; images separately disagree, and a client moving between them is sent the page once more.
+(def- *loaded-at* (str (os/now)))
+
+;; The build identity, worked out once per process: reading the environment and hashing the
+;; manifest per request would be per-request work for a value that cannot change under it.
+(def- *build* (table/new))
+
+(defn- manifest-digest ()
+  "A hash of the asset fingerprint manifest, or \"\" when there is none (dev, or an app with
+  no asset pipeline). Sorted first: a map's order is its hashing's, and this must be the same
+  text for the same manifest on every machine."
+  (let (manifest (web/static/load-manifest))
+    (if (empty? manifest)
+      ""
+      (hash/sha256 (string/join (sort (map manifest
+                                        (fn ([logical fingerprinted])
+                                          (str logical "\t" fingerprinted))))
+                     "\n")))))
+
+(defn- build-identity ()
+  "What a versioned tag must change with when the CODE does: the release (`$HATCH_RELEASE`,
+  else Fly's `$FLY_IMAGE_REF`, else the load stamp) and the asset fingerprints the page links.
+
+  The manifest is needed even with a release name: a deploy that rebuilt only the stylesheet
+  can keep the same image of `src/`, and a page tagged without it would be answered 304 to a
+  client whose copy links a stylesheet the new machine no longer has."
+  (if (table/has? *build* :identity)
+    (table/get *build* :identity)
+    (let (stamp (str (or (web/env/text "HATCH_RELEASE") (web/env/text "FLY_IMAGE_REF") *loaded-at*)
+                  "|"
+                  (manifest-digest)))
+      (table/put *build* :identity stamp)
+      stamp)))
+
+(defn version-tag (conn version)
+  "The weak ETag `versioned` gives this request for `version`.
+
+  Hashed together with everything else the bytes going out depend on that the handler should
+  not have to remember: the path and query (two pages must not share a tag), the coding
+  `web/compress/chosen-encoding` will apply (a br and a gzip body are different
+  representations, RFC 9110 §8.8.3), the session cookie's value (so a 304 can never cross
+  from one session to another, whatever `version` forgot), and the build (`build-identity`).
+  `version` is printed with `pr-str`, which elides nothing, so any data will do."
+  (let (coding (web/compress/chosen-encoding conn)
+        cookie-name web/session/*default-cookie*
+        session (or (get-cookie conn cookie-name)
+                  ;; unparsed cookies: the raw header, so this fails closed exactly as
+                  ;; `session-cookie?` does
+                  (if (session-cookie? conn cookie-name)
+                    (get (or (conn-headers conn) {}) :cookie)
+                    nil))
+        digest (hash/sha256 (pr-str [(conn-path conn)
+                                      (conn-query conn)
+                                      coding
+                                      session
+                                      (build-identity)
+                                      version])))
+    (str *versioned-prefix*
+      (string/substring digest 0 16)
+      (if (nil? coding) "" (str "-" coding))
+      "\"")))
+
+(defn- asked-for? (conn tag)
+  "Whether the request's `If-None-Match` names `tag` itself.
+
+  Not `not-modified?`'s wildcard: `*` means \"any current representation\", and answering it
+  without rendering would answer 304 for a page whose render might have been a 404."
+  (let (header (header conn :if-none-match))
+    (and (string? header)
+      (not (= (trim-if-needed header) "*"))
+      (not-modified? conn tag))))
+
+(defn- with-vary (conn)
+  "`conn` with `Vary: Accept-Encoding, Cookie` merged in — the request headers a versioned tag
+  is computed from, which a cache between here and the reader must key on too."
+  (put-resp-header conn
+    :vary (merge-vary (merge-vary (get (or (conn-resp-headers conn) {}) :vary) "Accept-Encoding")
+      "Cookie")))
+
+(defn versioned (conn version render)
+  "Answer a GET or HEAD from `version` when the client already holds it — a 304 with `render`
+  never called — and otherwise `(render)`, tagged so the next request can be.
+
+  `conn` is the handler's conn; `version` is any data that changes whenever the page would;
+  `render` is a function of no arguments that returns the finished conn, exactly as the
+  handler would have without this.
+
+      (defn project-page (conn)
+        (let (project (projects/find (param conn :id)))
+          (web/http-cache/versioned conn
+            [(get project :updated-at) (current-user-id conn)]
+            (fn () (html-resp conn (render-project project))))))
+
+  **`version` must name everything the page shows that can change**, because a matching tag
+  is answered without looking: whatever it leaves out, the client keeps the old copy of.
+  That means:
+
+  - **who is looking** — the viewer's id and anything about them the page shows (their role,
+    their unread count). hatch adds the session cookie on its own, which keeps one session's
+    copy from another's; it cannot know about a bearer token or a cookie of the app's own.
+  - **every piece of data drawn** — a row's revision or updated-at, a count, the newest id in
+    a list; for a page drawn from several sources, one per source.
+  - **the clock**, if the page shows it: \"3 minutes ago\" goes stale while nothing else
+    changes, so a page with relative times adds a coarse bucket of the time —
+    `(math/quot (os/now) 60000)` for a minute — at the resolution it is willing to be wrong by.
+
+  hatch hashes in the rest: the path and query, the coding the endpoint will compress with,
+  the session cookie, and the build (`$HATCH_RELEASE`, else `$FLY_IMAGE_REF`, else when this
+  code was loaded; plus the asset fingerprint manifest). See `version-tag`.
+
+  **The tag is WEAK** (`W/\"…\"`). It names the version the handler vouches for, not a hash of
+  the bytes, and a page can differ byte-for-byte while being the same version — a fresh
+  CSRF token, a nonce. Claiming byte identity would be a promise hatch cannot check; weak is
+  all `If-None-Match` needs (it compares weakly, RFC 9110 §13.1.2). It still names the coding,
+  so a br, a gzip and a plain copy never share one.
+
+  **It is still compressed.** `web/endpoint` recognises the tag and compresses the page as it
+  would an untagged one — keyed by the body's own hash in the compressed-body cache, so a
+  `version` that forgets something still never serves one request another's bytes. A
+  handler setting its own `ETag` gets no compression at all; this is the way to have both.
+
+  Only a 200 from `render` is tagged; a redirect, an error or a streamed response passes
+  through untouched. A method other than GET or HEAD is just `(render)`. Adds `Vary:
+  Accept-Encoding, Cookie` to both the 200 and the 304, the headers the tag reads. Set a
+  non-HTML response's `Cache-Control` on `conn` BEFORE calling, so the 304 carries it too;
+  an HTML page gets `html-freshness` on both, as the endpoint's `:freshness` says."
+  (let (method (string/upper (or (conn-method conn) "")))
+    (if (not (or (= method "GET") (= method "HEAD")))
+      (render)
+      (let (tag (version-tag conn version))
+        (if (asked-for? conn tag)
+          (-> (with-vary conn) (put-resp-header :etag tag) (send-resp 304 ""))
+          (let (rendered (render))
+            (if (and (record? rendered)
+                  (= (or (get rendered :status) 200) 200)
+                  (nil? (get rendered :stream))
+                  ;; the handler's own tag wins, as every handler-set header does here
+                  (nil? (get (or (get rendered :resp-headers) {}) :etag)))
+              (put-resp-header (with-vary rendered) :etag tag)
+              rendered)))))))

@@ -81,9 +81,9 @@
   {:x-content-type-options "nosniff" ; never MIME-sniff a response into an executable type
    :x-frame-options "DENY" ; clickjacking: most apps are not meant to be framed
    :referrer-policy "strict-origin-when-cross-origin"}) ; don't leak full paths cross-origin
-;; Whether this runtime can compress at all. Probed once at load: the encoders are native, and
-;; a runtime built without them should serve plain bodies rather than raise per request.
-(def- *zlib?* (check-allow :discarded-catch (try (do zlib/gzip zlib/brotli true) (catch _e false))))
+;; Whether this runtime can compress at all is `compress/chosen-encoding`'s question now: it
+;; probes each encoder once with a real call and never negotiates one the runtime lacks, so a
+;; nil coding below covers both "the client accepts none" and "this build has none".
 
 ;; ---- environment ------------------------------------------------------------
 
@@ -180,22 +180,31 @@
   bytes cannot change between requests, compressing is the largest remaining cost and
   produces the same output every time; the ETag identifies those exact bytes and the coding
   names the representation, so together they are the key. Without a tag (nothing worth
-  validating) it compresses per request."
+  validating) it compresses per request.
+
+  A `web/http-cache/versioned` tag is the exception to keying by the tag. It names the
+  version a handler vouched for, not these bytes, and a version that leaves out something the
+  page shows would then hand this render's request the compressed copy of an EARLIER render —
+  someone else's page, or yesterday's. So it is keyed by a hash of the body instead: half a
+  millisecond on a large page against the eight compressing it, and a 200 always carries
+  what its own render produced."
   (let (body (get resp :body)
         headers (get resp :headers {})
         min-bytes (get opts :min-bytes *default-compress-min-bytes*)
         coding (compress/chosen-encoding conn))
-    (if (and *zlib?*
-          coding
+    (if (and coding
           (string? body)
           (>= (string/length body) min-bytes)
           (nil? (get headers :content-encoding)))
       (assoc resp
         :body
           (let (tag (get headers :etag))
-            (if (or (nil? tag) (= tag ""))
-              (compress/encode-body coding body)
-              (cache/compressed [tag coding] (fn () (compress/encode-body coding body)))))
+            (cond
+              (or (nil? tag) (= tag "")) (compress/encode-body coding body)
+              (http-cache/versioned-tag? tag)
+                (cache/compressed [(http-cache/strong-etag body) coding]
+                  (fn () (compress/encode-body coding body)))
+              else (cache/compressed [tag coding] (fn () (compress/encode-body coding body)))))
         :headers
           (assoc headers
             :content-encoding coding
@@ -220,11 +229,18 @@
   the representation and leave that tag describing bytes no longer going out — so a client
   holding the gzip copy, revalidating with `Accept-Encoding: br`, would be answered 304 and
   render gzip as br. `http-cache/conditional` already declines to re-tag such a response; until
-  now the compressor did not decline to re-encode it, and half a rule is not one."
+  now the compressor did not decline to re-encode it, and half a rule is not one.
+
+  Except a `web/http-cache/versioned` tag, which is compressed like an untagged page. That tag
+  was minted for THIS pipeline: it already names the coding `compress/chosen-encoding` picks
+  here, so compressing is what makes the bytes match it, not what breaks the match. Leaving
+  such a page plain — which is what any handler-set tag used to cost — sent a large HTML page
+  uncompressed to every client that did not already hold it."
   (let (compress-opts (get config :compress {})
         headers (get config :security-headers *default-security-headers*)
         coding (compress/chosen-encoding conn)
-        pre-tagged? (not (nil? (get (get resp :headers {}) :etag))))
+        tag (get (get resp :headers {}) :etag)
+        pre-tagged? (and (not (nil? tag)) (not (http-cache/versioned-tag? tag))))
     (match (http-cache/conditional conn resp coding)
       ([:not-modified not-modified] (secured conn (as-response not-modified) config headers))
       ([:send validated] (secured conn
