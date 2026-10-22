@@ -180,7 +180,7 @@
         (let (counted (table/get *fragment-sizes* key 0))
           (table/put *fragments* key value)
           (table/put *fragment-sizes* key size)
-          (table/incr *totals* :fragments (- size counted)))))
+          (table/incr *totals* :fragments (- size (if (int? counted) counted 0))))))
     nil))
 
 ;; Counters, so a dashboard can answer "is this cache doing anything?" — which is otherwise
@@ -225,7 +225,7 @@
   (let (counted (table/get *fragment-sizes* key 0))
     (table/delete *fragments* key)
     (table/delete *fragment-sizes* key)
-    (table/incr *totals* :fragments (- 0 counted))))
+    (table/incr *totals* :fragments (- 0 (if (int? counted) counted 0)))))
 
 (defn- local-clear ()
   "Drop every cached fragment on THIS node only."
