@@ -115,6 +115,19 @@
   "The response conn's body string."
   (or (conn-resp-body resp) ""))
 
+(defn json-body (resp)
+  "The response conn's body decoded as JSON — an object (a map, keyword keys) or an array (a
+  vector). Anything else, a bare scalar or a body that is not JSON, raises with the body, so a
+  test reads the document it expects or fails saying what came back instead."
+  (let (text (body resp)
+        decoded (try
+                  (json/decode text)
+                  (catch e
+                    (error "web/test/json-body: not JSON (" (error-message e) "): " text))))
+    (if (or (map? decoded) (vector? decoded))
+      decoded
+      (error "web/test/json-body: not a JSON object or array: " text))))
+
 (defn resp-header (resp key)
   "A response header by keyword key (e.g. `:content-type`), or nil."
   (get (or (conn-resp-headers resp) {}) key))

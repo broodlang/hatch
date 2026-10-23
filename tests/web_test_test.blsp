@@ -163,3 +163,13 @@
 
   (test "a hand-built spec missing a field reads as nil, as it did when it was a map"
     (assert= (view-spec-ticks {:mount (fn (_p) {})}) nil)))
+
+(describe "json-body"
+  (defn- answering (text) (send-resp (conn-for "GET" "/") 200 text))
+  (test "an object is a map with keyword keys, an array a vector"
+    (assert= (json-body (answering "{\"a\":1}")) {:a 1})
+    (assert= (json-body (answering "[1,2]")) [1 2]))
+  (test "a scalar, or a body that is not JSON, raises with the body"
+    (is (includes? (try (json-body (answering "42")) (catch e (error-message e))) "42"))
+    (is (includes? (try (json-body (answering "not json")) (catch e (error-message e)))
+          "web/test/json-body"))))
