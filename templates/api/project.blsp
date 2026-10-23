@@ -1,0 +1,8 @@
+;; {{name}} — a Hatch JSON API.
+;;
+;; Serves JSON at GET /api/health and GET|POST /api/echo. No live layer, no database.
+(project
+  :name "{{name}}"
+  :version "0.1.0"
+  :dependencies [{{package}}]
+  :format-plugins [hatch])

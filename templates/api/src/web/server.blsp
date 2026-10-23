@@ -1,0 +1,37 @@
+(defmodule web/server
+  "HTTP endpoint: bridges raw requests through the router. Not named `web/endpoint`:
+  that is hatch's module, and a release bundle would load it in place of this one."
+  (:alias http/server)
+  (:alias web/conn)
+  (:alias web/routes)
+  (:alias task))
+
+; Hard deadline per request — kills a wedged handler and returns 504.
+(def *handler-timeout-ms* 30000)
+
+(def json-headers {:content-type "application/json"})
+
+(defn error-json (status message)
+  "A bare JSON error body — no template layer for an API."
+  {:status status
+   :headers json-headers
+   :body (str "{\"error\":\"" message "\"}")})
+
+(defn adapter (request)
+  "Bridge an http/server request through the router to a response, under a timeout."
+  (let (conn (conn/build request)
+        h (task/task (fn () (conn/conn->response (routes/app-router conn)))
+            {:timeout *handler-timeout-ms*}))
+    (receive
+      ([:task-done ^h resp] resp)
+      ([:task-error ^h _msg] (error-json 500 "internal server error"))
+      ([:task-timeout ^h] (error-json 504 "request timed out")))))
+
+(defn port ()
+  "Serve on $HATCH_PORT if set and numeric, else 5000."
+  (let (n (string/->number (or (os/env "HATCH_PORT") "")))
+    (if (failure? n) 5000 n)))
+
+(defn serve ()
+  "Start the HTTP listener on `(port)` — no ws-handler, so no live layer."
+  (server/start (port) adapter))

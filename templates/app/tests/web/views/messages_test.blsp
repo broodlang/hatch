@@ -1,0 +1,14 @@
+;; Pure rendering tests for web/views/messages -- no database needed.
+;; (db/*repo* starts nil at load time; DB functions are only called at request time.)
+(defmodule web-views-messages-test
+  (:use test)
+  (:use web/template :only [render])
+  (:use web/views/messages :only [message-list]))
+
+(describe "message-list"
+  (test "empty state shows invitation"
+    (is (> (index-of (render (message-list (list))) "No messages yet") -1)))
+  (test "renders message name and body"
+    (let (html (render (message-list (list {:id 1 :name "Ada" :body "Hello!"}))))
+      (is (> (index-of html "Ada") -1))
+      (is (> (index-of html "Hello!") -1)))))

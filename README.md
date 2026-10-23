@@ -15,15 +15,15 @@ ordinary model key; and a **client** ([docs](docs/client.md)) with hooks for
 imperative JavaScript, debounce/throttle, and bindings for any DOM event.
 
 Hatch is a **library package**. The framework lives in `src/` (`http/` +
-`web/`); `nest new myapp --template hatch` scaffolds a full app that uses it.
+`web/`); `nest new myapp --from hatch --template app` scaffolds a full app that uses it.
 
 ## Usage
 
-Scaffold a new Hatch app (templates ship with `nest`):
+Scaffold a new Hatch app (the templates ship with hatch, under `templates/`):
 
 ```bash
-nest new myapp --template hatch     # full Postgres-backed app
-nest new myapp --template web-api   # minimal JSON API, no live layer
+nest new myapp --from hatch --template app   # full Postgres-backed app
+nest new myapp --from hatch --template api   # minimal JSON API, no live layer
 ```
 
 A live view is a `deflive` module — `mount` builds the model, `on` folds an

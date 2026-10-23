@@ -1,0 +1,10 @@
+(defmodule web/routes
+  "JSON API routes."
+  (:use web/router)
+  (:alias web/api))
+
+(defrouter app-router
+  (get "/" web/api/index)
+  (get "/api/health" web/api/health)
+  (get "/api/echo" web/api/echo)
+  (post "/api/echo" web/api/echo))

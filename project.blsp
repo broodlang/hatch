@@ -7,6 +7,17 @@
     "A Phoenix/LiveView-inspired web framework for Brood: HTTP + WebSocket server, server-rendered live components, sessions, CSRF, presence, and pubsub. Pure Brood."
   :repository "https://github.com/broodlang/hatch"
   :dependencies [[store :version "^0.6.2"]]
+  ;; Starter projects for `nest new NAME --from hatch --template app|api` (brood ADR-424):
+  ;; plain files under :dir, copied with `{{name}}` (the project's name) and `{{package}}`
+  ;; (the dependency entry that reaches hatch the way --from named it) filled in. Nothing
+  ;; here runs at scaffold time. `templates/` is outside :source-paths, so hatch's own
+  ;; check and format never read the placeholders.
+  :templates
+    {"app" {:dir "templates/app"
+            :about "A Hatch web app with a Postgres-backed message board (live components, forms, store-postgres)."
+            :next ["nest run --main db-setup" "nest run"]}
+     "api" {:dir "templates/api"
+            :about "A minimal Hatch JSON API — no live layer, no database."}}
   ;; Formatter rules for Hatch's macros. A depending project opts in with
   ;; macros correctly. Each entry is head-symbol → how many args ride the head line
   ;; when the form breaks: deflive 0 (every clause on its own line); mount/render 1

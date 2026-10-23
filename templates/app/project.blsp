@@ -1,0 +1,8 @@
+;; {{name}} — a Hatch web application.
+;;
+;; Serves a Postgres-backed message board at GET/POST /messages.
+(project
+  :name "{{name}}"
+  :version "0.1.0"
+  :dependencies [{{package}} [store-postgres :version "^0.8.1"]]
+  :format-plugins [hatch])

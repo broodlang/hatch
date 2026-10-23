@@ -1,0 +1,8 @@
+(defmodule main
+  "Entry point for {{name}}."
+  (:use web/server :only [serve])
+  (:use web/application :only [start default-logger-opts]))
+
+(defn main ()
+  "Start logging, boot the endpoint, and park."
+  (start {:logger (default-logger-opts) :children [(fn () (serve))]}))

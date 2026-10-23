@@ -1,0 +1,22 @@
+(defmodule web/api
+  "JSON API handlers. Each returns a JSON response built from `web/live/encode`
+  (Hatch's wire JSON encoder — maps, vectors, strings, numbers, bools, nil)."
+  (:use web/conn)
+  (:alias web/live))
+
+(defn json (conn value)
+  "Encode `value` to JSON and send it as an application/json 200."
+  (json-resp conn (web/live/encode value)))
+
+(defn index (conn)
+  "GET / — a tiny service descriptor."
+  (json conn {:name "{{name}}" :endpoints ["/api/health" "/api/echo"]}))
+
+(defn health (conn)
+  "GET /api/health — a liveness probe."
+  (json conn {:status "ok"}))
+
+(defn echo (conn)
+  "GET|POST /api/echo — echo the `msg` param back. web/conn merges query and JSON
+  body into :params, so `?msg=hi` and a `{\"msg\":\"hi\"}` body both work."
+  (json conn {:echo (or (param conn "msg") "")}))

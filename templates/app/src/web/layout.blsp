@@ -1,0 +1,39 @@
+(defmodule web/layout
+  "Shared HTML page shell — Tailwind + daisyUI via CDN.
+  `layout` returns plain Hiccup, which web/page renders; `error-page` is the error
+  page's HTML, for hatch's web/endpoint (`:errors {:render …}` in web/server)."
+  (:use web/template :only [html]))
+
+(defn layout (title & children)
+  [:html
+    {:data-theme "light"}
+    [:head
+      {}
+      [:meta {:charset "utf-8"}]
+      [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+      [:title {} title]
+      [:link
+        {:rel "stylesheet"
+         :href "https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css"}]
+      [:script {:src "https://cdn.tailwindcss.com"} ""]]
+    [:body
+      {:class "min-h-screen bg-base-100 text-base-content"}
+      [:div
+        {:class "navbar bg-base-300 shadow-sm sticky top-0 z-50"}
+        [:div
+          {:class "navbar-start"}
+          [:a {:href "/" :class "btn btn-ghost text-xl"} "{{name}}"]]
+        [:div
+          {:class "navbar-end"}
+          [:a {:href "/messages" :class "btn btn-ghost btn-sm"} "Messages"]]]
+      [:main {:class "max-w-2xl mx-auto p-6"} children]]])
+
+(defn error-page (code title blurb)
+  "The page for error `code`, in the shared layout."
+  (html (layout (str code " — " title)
+          [:div
+            {:class "text-center py-16"}
+            [:h1 {:class "text-7xl font-bold text-primary"} (str code)]
+            [:p {:class "text-2xl mt-4 mb-2"} title]
+            [:p {:class "opacity-70 mb-8"} blurb]
+            [:a {:href "/" :class "btn btn-primary"} "Back home"]])))

@@ -1,0 +1,16 @@
+(defmodule web/routes
+  "HTTP routes — session + CSRF protected."
+  (:use web/router)
+  (:alias web/session)
+  (:alias web/csrf))
+
+; Set $SECRET_KEY_BASE in production. Never ship this dev fallback.
+(def session-secret
+  (or (os/env "SECRET_KEY_BASE") "dev-only-insecure-secret-change-me"))
+
+(defrouter app-router
+  (get "/" web/views/home/index)
+  (through [(session/fetch-session (session/cookie-store session-secret {:encrypt true}))
+             session/fetch-flash csrf/protect-from-forgery]
+    (get "/messages" web/views/messages/index)
+    (post "/messages" web/views/messages/create)))

@@ -1,0 +1,19 @@
+(defmodule web/server
+  "The app's endpoint: its configuration of hatch's standard response pipeline
+  (`web/endpoint`: the per-request task and deadline, the crash log, compression,
+  security headers, themed error pages).
+
+  Not named `web/endpoint`: that is hatch's module, and a release bundle would load it
+  in place of this one."
+  (:alias web/endpoint)
+  (:alias web/routes)
+  (:alias web/layout))
+
+(def *config*
+  {:router web/routes/app-router
+   ;; The status table is hatch's; the page around it is the app's.
+   :errors {:render web/layout/error-page}})
+
+(defn serve ()
+  "Start the HTTP listener on $HATCH_PORT, else 5000."
+  (web/endpoint/serve *config*))

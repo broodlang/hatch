@@ -1,0 +1,5 @@
+;; Smoke test: ensure main loads without error.
+(defmodule main-test (:use main) (:use test))
+
+(describe "main"
+  (test "main is callable" (is (fn? main))))

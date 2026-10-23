@@ -1,0 +1,38 @@
+(defmodule db
+  "Database singleton: the shared repo handle and messages schema.
+  Call `(db/start opts)` once from `main`; handlers then use
+  `(db/all-messages)` / `(db/insert-message row)`."
+  (:alias repo)
+  (:alias query)
+  (:alias pg)
+  ;; `web/repo` aliases to `repo` by default, colliding with store's `repo` above —
+  ;; give it an explicit `:as` name.
+  (:alias web/repo :as web-repo))
+
+(def *repo* nil)
+
+(def messages-schema
+  {:table :messages
+   :primary-key :id
+   :fields {:id :serial :name :text :body :text}})
+
+;; The schema history, oldest first: store's versioned migrations. Append one per
+;; change (`migration/generate` writes it from the schema); never edit a deployed one.
+(def migrations
+  [{:version 20260101000000
+    :name "messages"
+    :up [[:create-table
+           :messages {:primary-key :id :fields {:id :serial :name :text :body :text}}]]}])
+
+(defn start (opts)
+  "Open the Postgres pool, apply pending migrations (dev; production only checks), and
+  warm up the connections."
+  (def *repo* (web-repo/start (pg/adaptor) opts migrations)))
+
+(defn all-messages ()
+  "All messages, oldest first (id ASC)."
+  (repo/all *repo* (-> (query/from :messages) (query/order-by :id :asc))))
+
+(defn insert-message (row)
+  "Insert a `{:name ... :body ...}` row; return the inserted row with `:id`."
+  (repo/insert *repo* :messages row))

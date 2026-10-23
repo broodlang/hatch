@@ -1,0 +1,76 @@
+(defmodule web/views/messages
+  "GET /messages — list messages + form. POST /messages — insert + redirect."
+  (:use web/page)
+  (:use web/layout)
+  (:use web/conn)
+  (:alias web/session)
+  (:alias web/csrf)
+  (:alias db))
+
+(defn index (conn)
+  "GET /messages — render the message board."
+  (let (msgs (db/all-messages))
+    (page conn
+      (layout "Messages"
+        [:h1 {:class "text-2xl font-bold mb-4"} "Message board"]
+        (flash-banner conn)
+        (message-list msgs)
+        (new-message-form conn)))))
+
+(defn flash-banner (conn)
+  "One-shot success banner from the flash, or nothing."
+  (let (msg (web/session/get-flash conn "info"))
+    (if (nil? msg) "" [:div {:class "alert alert-success mb-4"} [:span {} msg]])))
+
+(defn message-list (msgs)
+  "Render message cards, or an empty-state prompt."
+  (if (empty? msgs)
+    [:p {:class "opacity-60 mb-6"} "No messages yet -- be the first!"]
+    [:div
+      {:class "space-y-3 mb-6"}
+      (map msgs
+        (fn (m)
+          [:div
+            {:class "card bg-base-200"}
+            [:div
+              {:class "card-body py-3"}
+              [:p {:class "font-semibold"} (get m :name)]
+              [:p {} (get m :body)]]]))]))
+
+(defn new-message-form (conn)
+  "The form to post a new message."
+  [:form
+    {:method "post" :action "/messages" :class "card bg-base-200"}
+    [:div
+      {:class "card-body space-y-3"}
+      [:h2 {:class "card-title"} "Post a message"]
+      (web/csrf/csrf-input conn)
+      [:label {:class "label"} [:span {:class "label-text"} "Name"]]
+      [:input
+        {:name "name"
+         :placeholder "Your name"
+         :class "input input-bordered w-full"}]
+      [:label {:class "label"} [:span {:class "label-text"} "Message"]]
+      [:textarea
+        {:name "body"
+         :rows "3"
+         :placeholder "Say something..."
+         :class "textarea textarea-bordered w-full"}
+        ""]
+      [:div
+        {:class "card-actions"}
+        [:button {:class "btn btn-primary"} "Post"]]]])
+
+(defn create (conn)
+  "POST /messages -- validate, insert into Postgres, and PRG-redirect."
+  (let (name (or (param conn "name") "")
+        body (or (param conn "body") ""))
+    (if (or (string/blank? name) (string/blank? body))
+      (-> conn
+        (web/session/put-flash "info" "Name and message are required.")
+        (redirect-resp "/messages"))
+      (do
+        (db/insert-message {:name name :body body})
+        (-> conn
+          (web/session/put-flash "info" "Message posted!")
+          (redirect-resp "/messages"))))))

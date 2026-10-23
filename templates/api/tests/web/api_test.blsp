@@ -1,0 +1,17 @@
+;; Route tests through the web/test harness — no running server needed.
+(defmodule web-api-test
+  (:use test)
+  (:use web/test)
+  (:alias web/routes))
+
+(describe "api"
+  (test "GET /api/health returns ok"
+    (let (resp (request web/routes/app-router "GET" "/api/health"))
+      (is (= (status resp) 200))
+      (is (body-contains? resp "ok"))))
+  (test "GET /api/echo echoes the msg param"
+    (let (resp (request web/routes/app-router "GET" "/api/echo" {:params {"msg" "hi"}}))
+      (is (= (status resp) 200))
+      (is (body-contains? resp "hi"))))
+  (test "unknown route 404s"
+    (is (= (status (request web/routes/app-router "GET" "/nope")) 404))))

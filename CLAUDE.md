@@ -21,11 +21,13 @@ fetch`; `../hive` documents the same swap in its own `project.blsp`. Put the
 pin back before committing — hive's Dockerfile builds from its git ref, and a
 `:path` dep there is a broken deploy.
 
-New apps are scaffolded with `nest new myapp --template hatch` (a full
-Postgres-backed app) or `--template web-api` (a minimal JSON API, no live layer).
-Those templates live **upstream** in Brood's `std/tool/project.blsp` (`nest new` is a
-thin dispatcher to `project/new-project`), so editing them is a brood-repo change that
-reaches users on the next `make install` of brood — not a hatch-side edit.
+New apps are scaffolded with `nest new myapp --from hatch --template app` (a full
+Postgres-backed app) or `--template api` (a minimal JSON API, no live layer); `--from
+../hatch` uses this checkout instead of the registry. The templates live HERE, as plain
+files under `templates/` declared by `:templates` in `project.blsp` (brood ADR-424):
+`{{name}}` and `{{package}}` are filled in at scaffold time, nothing else is evaluated,
+and `templates/` is outside `:source-paths`, so hatch's own check and format never read
+it. Editing a template is a hatch change that users get with the next hatch release.
 
 ## Running
 

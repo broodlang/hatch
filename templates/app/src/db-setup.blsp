@@ -1,0 +1,11 @@
+(defmodule db-setup
+  "Create the app database if absent, then run schema migrations.
+  Run with: `nest run --main db-setup`"
+  (:alias pg)
+  (:alias db))
+
+(defn main ()
+  (let (o (pg/opts-from-env "{{name}}"))
+    (pg/create-database o)
+    (db/start o)
+    (io/puts "Done. Run `nest run` to start the server.")))

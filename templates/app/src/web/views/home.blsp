@@ -1,0 +1,12 @@
+(defmodule web/views/home
+  "Home page."
+  (:use web/page)
+  (:use web/layout))
+
+(defn index (conn)
+  "GET / — welcome page."
+  (page conn
+    (layout "{{name}}"
+      [:h1 {:class "text-3xl font-bold mb-4"} "Welcome to {{name}}!"]
+      [:p {:class "mb-4 opacity-70"} "A Hatch web app backed by PostgreSQL."]
+      [:a {:href "/messages" :class "btn btn-primary"} "View messages"])))
