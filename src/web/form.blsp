@@ -23,8 +23,12 @@
 
   Validation itself is the changeset's (`changeset/validate-*`), and so is a uniqueness
   check: `changeset/unique-constraint` maps the database's rejection, which is the only
-  check two concurrent requests cannot both pass."
-  (:alias changeset))
+  check two concurrent requests cannot both pass.
+
+  A form only a person should submit carries a `honeypot`, and its handler asks
+  `honeypot-filled?` before doing anything."
+  (:alias changeset)
+  (:alias web/conn))
 
 ; ---- reading a changeset in a template ----
 
@@ -80,3 +84,24 @@
 (defn validate-email (cs field &optional (message "must be a valid email address"))
   "`field`'s change must pass `email?`."
   (changeset/validate cs field email? message))
+
+; ---- a honeypot: a field a person never fills in, and a script does ----
+
+(def *honeypot-field* "website")
+
+(defn honeypot ()
+  "A text field no person sees or fills in — off the page, out of the tab order and hidden from
+  a screen reader — which a script filling every field it finds does fill. Put it inside a
+  form a script should not submit (registering, say) and check `honeypot-filled?` first."
+  [:div
+    {:aria-hidden "true"
+     :style "position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"}
+    [:label
+      {}
+      "Website"
+      [:input {:type "text" :name *honeypot-field* :tabindex "-1" :autocomplete "off"}]]])
+
+(defn honeypot-filled? (conn)
+  "True when the form `conn` submits fills in the `honeypot`: it came from a script. Answer it
+  as the form would be answered, so the script learns nothing, and do nothing."
+  (not (= (string/trim (or (web/conn/param conn *honeypot-field*) "")) "")))

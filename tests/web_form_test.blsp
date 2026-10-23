@@ -1,6 +1,7 @@
 (defmodule web-form-test
   (:use test)
   (:alias web/form)
+  (:alias web/test :as web-test)
   (:alias changeset))
 
 (def- types {:email :text :age :integer})
@@ -51,3 +52,19 @@
   (test "a tab is invalid" (assert= (web/form/email? "a\tb@example.com") false))
   ; a CR/LF must be rejected so a validated address can't inject a mail header
   (test "a CRLF is invalid" (assert= (web/form/email? "ada@example.com\r\nBcc: evil@x.com") false)))
+
+(describe "honeypot"
+  (test "the field is the one honeypot-filled? reads, and hidden from people"
+    (let (field (web/form/honeypot))
+      (assert= (get (second field) :aria-hidden) "true")
+      (assert= (get (second (nth (nth field 2) 3)) :name) web/form/*honeypot-field*)))
+  (test "an empty or blank field is a person; a filled one is a script"
+    (is (not (web/form/honeypot-filled? (web-test/conn-for "POST"
+                                          "/register"
+                                          {:params {"email" "a@b.c"}}))))
+    (is (not (web/form/honeypot-filled? (web-test/conn-for "POST"
+                                          "/register"
+                                          {:params {"website" "  "}}))))
+    (is (web/form/honeypot-filled? (web-test/conn-for "POST"
+                                     "/register"
+                                     {:params {"website" "http://spam.example"}})))))

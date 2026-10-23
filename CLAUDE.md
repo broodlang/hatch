@@ -118,7 +118,10 @@ src/
                       render-slot (its own static/dynamic split, so a component diffs
                       independently), send-update, apply-tick
     form.blsp       — forms over store changesets: value (what an input shows, as typed),
-                      error-for/field-class/errors?, email?/validate-email
+                      error-for/field-class/errors?, email?/validate-email; honeypot +
+                      honeypot-filled? (a field only a script fills in)
+    format.blsp     — values as a page shows them: date/date-time/clock/calendar-date (UTC),
+                      ago-text, month-start/month-days, byte-size, thousands, plural
     registry.blsp   — supervised, vault-backed named registries (pubsub, presence, cache,
                       ratelimit — all reach it bare, via `(:use web/registry)`)
     pubsub.blsp     — topic-based pub/sub (subscribe/broadcast) over live sessions
@@ -163,6 +166,13 @@ src/
                       Cache-Control constructors, html-freshness, merge-vary, forbid-transform
     ratelimit.blsp  — token-bucket plug with four seams (:key-fn/:skip?/:cost/:store, the
                       last a BucketStore ability); network-key buckets IPv6 by /64
+    heavy.blsp      — slots per kind of expensive work per machine (configure :slots);
+                      with-slot answers a full kind with an immediate 503 + Retry-After, never
+                      a queue; a crashed holder gives its slot back, a lost keeper fails open
+    timing.blsp     — where a request's time goes: request (wrap the router) + span (name
+                      the work); a slow request logs its spans, biggest first
+    request-memo.blsp — answers remembered for one GET/HEAD request (remember/keep);
+                      never for a write, never outside a request
     logger.blsp     — HTTP access log: the [:hatch :request :stop] telemetry http/server
                       already emits, as one structured line each (attach-access-log)
     metrics.blsp    — per-route latency histogram + status classes; also the shared counter
