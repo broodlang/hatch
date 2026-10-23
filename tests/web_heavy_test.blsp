@@ -1,0 +1,58 @@
+;; web/heavy — slots for expensive work, a 503 when a kind is full, a slot back when its holder
+;; dies. The keeper is one process per machine, so each test uses kinds of its own.
+(defmodule web-heavy-test
+  (:use test)
+  (:alias web/heavy)
+  (:alias web/test :as web-test))
+
+(web/heavy/configure {:slots {:heavy-test-full 2 :heavy-test-crash 1 :heavy-test-runs 1}
+                      :retry-seconds 7
+                      :message "busy"})
+
+(describe "web/heavy"
+  (test "an unknown setting is refused"
+    (is (includes? (try (web/heavy/configure {:slot {}}) (catch e (error-message e)))
+          "unknown setting")))
+
+  (test "a kind with no configured size has one slot"
+    (assert= (web/heavy/slots :heavy-test-unsized) 1)
+    (assert= (web/heavy/slots :heavy-test-full) 2))
+
+  (test "a full kind is refused at once with a 503 that says when to come back, and a slot comes back"
+    (let (first-slot (web/heavy/take-slot :heavy-test-full)
+          second-slot (web/heavy/take-slot :heavy-test-full))
+      (is (not (nil? first-slot)))
+      (is (not (nil? second-slot)))
+      (assert= (web/heavy/take-slot :heavy-test-full) nil)
+      (let (answer (web/heavy/with-slot (web-test/conn-for "GET" "/search")
+                     :heavy-test-full (fn () (error "should not run"))))
+        (assert= (web-test/status answer) 503)
+        (assert= (web-test/resp-header answer :retry-after) "7")
+        (assert= (web-test/body answer) "busy"))
+      (is (>= (get (web/heavy/refusals) :heavy-test-full) 1))
+      (web/heavy/give-slot :heavy-test-full first-slot)
+      (let (third (web/heavy/take-slot :heavy-test-full))
+        (is (not (nil? third)))
+        (web/heavy/give-slot :heavy-test-full third))
+      (web/heavy/give-slot :heavy-test-full second-slot)))
+
+  (test "with-slot runs the handler and gives the slot back however it ends"
+    (assert= (web/heavy/with-slot (web-test/conn-for "GET" "/x") :heavy-test-runs (fn () :ran))
+      :ran)
+    (is (includes? (try
+                     (web/heavy/with-slot (web-test/conn-for "GET" "/x")
+                       :heavy-test-runs (fn () (error "boom")))
+                     (catch e (error-message e)))
+          "boom"))
+    (let (token (web/heavy/take-slot :heavy-test-runs))
+      (is (not (nil? token)))
+      (web/heavy/give-slot :heavy-test-runs token)))
+
+  (test "a holder that dies gives its slot back"
+    (let (me (self))
+      (spawn (do
+               (send me [:holding (web/heavy/take-slot :heavy-test-crash)])
+               (receive (after 50 nil))))
+      (receive ([:holding _] nil) (after 2000 nil))
+      (receive (after 200 nil))
+      (assert= (get (web/heavy/in-use) :heavy-test-crash 0) 0))))

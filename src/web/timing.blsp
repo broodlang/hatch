@@ -1,0 +1,77 @@
+(defmodule web/timing
+  "Where a request's time goes. `request` runs one with a fresh tally; `span` adds the time a
+  piece of work took to it, by name; a request slower than `*report-ms*` logs its tally, the
+  biggest first. Spans nest, so a parent's time includes its children's. Outside a request (a
+  test, a job) `span` only runs its work.
+
+  Wrap the router once, in the endpoint's `:router`:
+
+    {:router (fn (conn) (web/timing/request conn app-router))}
+
+  and name the work worth seeing where it is done:
+
+    (web/timing/span \"search\" (fn () (search query)))
+
+  A WebSocket upgrade is never reported: its request lasts as long as the socket."
+  (:alias table)
+  (:alias log)
+  (:alias web/conn))
+
+;; A request slower than this says where its time went.
+(def *report-ms* 100)
+
+(defdyn *tally* nil)
+
+(defn span (name work)
+  "`work`'s answer, its time added to the request's tally under `name`."
+  (if (nil? *tally*)
+    (work)
+    (let (started (os/now)
+          answer (work))
+      (table/incr *tally* [name :ms] (- (os/now) started))
+      (table/incr *tally* [name :calls] 1)
+      answer)))
+
+(defn request (conn handler)
+  "`handler`'s answer to `conn`, logging where the time went when it was slow. The tally goes
+  whatever happens, and a report that fails is dropped: timing never costs a request its answer."
+  (let (tally (table/new)
+        started (os/now))
+    (try
+      (binding (*tally* tally) (handler conn))
+      (finally (check-allow :discarded-catch
+                 (try
+                   (let (took (- (os/now) started))
+                     (when (and (>= took *report-ms*) (nil? (web/conn/header conn :upgrade)))
+                       (log/info (summary (get conn :method)
+                                   (get conn :path)
+                                   took
+                                   (table/snapshot tally)))))
+                   (catch _ nil)))
+        (table/drop tally)))))
+
+(defn summary (method path took entries)
+  "The line a slow request logs: its `took` ms, then each span in `entries` (a tally,
+  `{[name :ms] ms [name :calls] calls}`) biggest first, with how many times it ran when more
+  than once.
+
+    (hatch/web/timing/summary \"GET\" \"/a\" 120 {[\"db\" :ms] 80 [\"db\" :calls] 3 [\"render\" :ms] 30 [\"render\" :calls] 1}) ;=> \"timing GET /a 120 ms: db 80 ms ×3, render 30 ms\""
+  (let (names (into [] (set/set (map (keys entries) first)))
+        spans (sort-by (map names
+                         (fn (name) [name (get entries [name :ms]) (get entries [name :calls])]))
+                (fn (entry) (- 0 (second entry)))))
+    (str "timing "
+      method
+      " "
+      path
+      " "
+      took
+      " ms: "
+      (string/join (map spans
+                     (fn (entry)
+                       (str (first entry)
+                         " "
+                         (second entry)
+                         " ms"
+                         (if (> (nth entry 2) 1) (str " ×" (nth entry 2)) ""))))
+        ", "))))

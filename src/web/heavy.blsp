@@ -1,0 +1,135 @@
+(defmodule web/heavy
+  "Slots for the work that costs one machine the most — a search, a diff, a large export.
+  Each kind has a few slots per machine; a request that finds them all taken is answered at
+  once with a 503 and `Retry-After`, never queued, since a queue on a small machine is how a
+  burst of heavy pages becomes an out-of-memory kill for everyone. `web/ratelimit` caps how
+  fast one client may ask; this caps how much expensive work the machine does at once, for
+  everyone together.
+
+  Size the kinds once at boot:
+
+    (web/heavy/configure {:slots {:search 2 :diff 2 :export 1}
+                          :retry-seconds 5
+                          :message \"Busy with other heavy requests; try again shortly.\"})
+
+  and wrap the handlers that do the work:
+
+    (fn (conn) (web/heavy/with-slot conn :search (fn () (search-page conn))))
+
+  A kind missing from `:slots` gets one slot. The slots live in one supervised process per
+  machine (as `web/ratelimit`'s buckets do). A holder is watched, so one that crashes gives
+  its slot back; a keeper that does not answer within a second lets the request through
+  (failing open: a lost slot keeper must not take the pages down)."
+  ; send-resp / put-resp-header — the 503
+  (:use web/conn)
+  ; ensure-supervised — the slots live in a supervised singleton
+  (:use web/registry)
+  ; new-counters / bump-counter / counter-value — refusals, for an admin page
+  (:alias web/metrics))
+
+;; ---- configuration ----------------------------------------------------------
+
+(def *settings*
+  {:slots {}
+   :retry-seconds 5
+   :message "The server is busy with other heavy requests right now; try again shortly."})
+
+(def- *setting-keys* [:slots :retry-seconds :message])
+
+(defn configure (settings)
+  "Merge `settings` over the defaults (see the module doc for the keys) — once, at boot. An
+  unknown key is refused rather than ignored: a misspelt `:slot` would otherwise leave every
+  kind at one slot."
+  (let (unknown (seq/filter (keys settings) (fn (key) (not (includes? *setting-keys* key)))))
+    (if (not (empty? unknown))
+      (error "web/heavy/configure: unknown setting: " (first unknown))
+      (do (def *settings* (merge *settings* settings)) nil))))
+
+(defn slots (kind)
+  "How many requests of `kind` may run at once on this machine."
+  (get (get *settings* :slots) kind 1))
+
+;; ---- the keeper -------------------------------------------------------------
+
+(def- *counters* (web/metrics/new-counters))
+
+(defn- holders-loop (held)
+  "`held` is `{kind {monitor-ref pid}}`. `[:take kind limit from r]` replies `[:take r
+  monitor-ref]` or `[:take r nil]` when `kind` is full; `[:give kind monitor-ref]` frees one;
+  a watched holder's `:down` frees its slot; `[:count from r]` replies with how many each kind
+  holds."
+  (receive
+    ([:take kind limit from r] (let (taken (get held kind {}))
+                                 (if (>= (count taken) limit)
+                                   (do (send from [:take r nil]) (holders-loop held))
+                                   (let (watch (monitor from))
+                                     (send from [:take r watch])
+                                     (holders-loop (assoc held kind (assoc taken watch from)))))))
+    ([:give kind watch] (holders-loop (assoc held kind (dissoc (get held kind {}) watch))))
+    ([:down watch _pid _reason] (holders-loop (into {}
+                                                (map held
+                                                  (fn (entry)
+                                                    [(first entry) (dissoc (second entry) watch)])))))
+    ([:count from r] (do
+                       (send from
+                         [:count
+                           r
+                           (into {} (map held (fn (entry) [(first entry) (count (second entry))])))])
+                       (holders-loop held)))))
+
+(defn- keeper ()
+  (ensure-supervised :hatch-heavy-sup
+    [{:id :hatch-heavy
+      :name :hatch-heavy
+      :restart :permanent
+      :start (fn () (spawn (holders-loop {})))}]
+    :hatch-heavy))
+
+;; ---- taking a slot ----------------------------------------------------------
+
+(defn take-slot (kind)
+  "A slot of `kind` for this process: a token to give back with `give-slot`, `:open` when the
+  keeper did not answer (the work goes ahead unwatched), or nil when every slot is taken."
+  (let (r (ref))
+    (send (keeper) [:take kind (slots kind) (self) r])
+    (receive
+      ([:take ^r watch] watch)
+      (after 1000 :open))))
+
+(defn give-slot (kind token)
+  "Give back the slot `token` (from `take-slot`) holds."
+  (when (and token (not (= token :open)))
+    (send (keeper) [:give kind token]))
+  nil)
+
+(defn in-use ()
+  "How many slots each kind holds now, as `{kind count}`, or nil when the keeper does not
+  answer."
+  (let (r (ref))
+    (send (keeper) [:count (self) r])
+    (receive
+      ([:count ^r counts] counts)
+      (after 1000 nil))))
+
+(defn refusals ()
+  "How many requests found every slot of their kind taken since this machine started, as
+  `{kind count}`, for every configured kind."
+  (into {}
+    (map (keys (get *settings* :slots))
+      (fn (kind) [kind (or (web/metrics/counter-value *counters* kind) 0)]))))
+
+(defn busy-resp (conn)
+  "The 503 a request gets when every slot of its kind is taken."
+  (-> conn
+    (put-resp-header :retry-after (str (get *settings* :retry-seconds)))
+    (put-resp-header :cache-control "no-store")
+    (put-resp-header :content-type "text/plain; charset=utf-8")
+    (send-resp 503 (get *settings* :message))))
+
+(defn with-slot (conn kind handler)
+  "`(handler)` holding a slot of `kind`, given back however it ends; `busy-resp` when every
+  slot is taken."
+  (let (token (take-slot kind))
+    (if (nil? token)
+      (do (web/metrics/bump-counter *counters* kind) (busy-resp conn))
+      (try (handler) (finally (give-slot kind token))))))

@@ -1,0 +1,29 @@
+;; web/timing — a request's spans tallied by name, reported biggest first; outside a request a
+;; span only runs its work.
+(defmodule web-timing-test
+  (:use test)
+  (:alias web/timing)
+  (:alias web/test :as web-test))
+
+(describe "web/timing"
+  (test "outside a request a span only runs its work"
+    (assert= (web/timing/span "work" (fn () 42)) 42))
+
+  (test "inside a request a span answers its work's answer, and so does the request"
+    (assert= (web/timing/request (web-test/conn-for "GET" "/a")
+               (fn (_) (+ (web/timing/span "one" (fn () 1)) (web/timing/span "one" (fn () 2)))))
+      3))
+
+  (test "a request that raises still raises"
+    (is (includes? (try
+                     (web/timing/request (web-test/conn-for "GET" "/a")
+                       (fn (_) (web/timing/span "x" (fn () (error "boom")))))
+                     (catch e (error-message e)))
+          "boom")))
+
+  (test "the summary lists spans biggest first, with a count when one ran more than once"
+    (assert= (web/timing/summary "GET"
+               "/a"
+               120
+               {["render" :ms] 30 ["render" :calls] 1 ["db" :ms] 80 ["db" :calls] 3})
+      "timing GET /a 120 ms: db 80 ms ×3, render 30 ms")))

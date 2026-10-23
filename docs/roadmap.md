@@ -39,10 +39,10 @@ trade-offs behind them — is archived in
 |---|---|
 | HTTP/1.1 + WebSocket | `http/request` `http/response` `http/server` `http/websocket` `http/multipart` `http/util` |
 | Request pipeline | `web/endpoint` `web/conn` `web/router` `web/page` `web/static` `web/session` `web/csrf` `web/auth` `web/oidc` `web/errors` |
-| Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) |
+| Rendering | `web/template` (Hiccup) `web/bml` (`.bml` compiler) `web/parts` (static/dynamic diff split) `web/format` (dates, sizes, counts) |
 | Live views | `web/live` `web/component` `web/pubsub` `web/presence` `web/registry` |
 | Forms & uploads | `web/form` `web/upload` |
-| Production | `web/compress` `web/cache` `web/http-cache` `web/ratelimit` `web/logger` `web/metrics` `web/dashboard` `web/stream` `web/assets` `web/application` `web/cluster` `web/env` `web/repo` |
+| Production | `web/compress` `web/cache` `web/http-cache` `web/ratelimit` `web/heavy` `web/timing` `web/request-memo` `web/logger` `web/metrics` `web/dashboard` `web/stream` `web/assets` `web/application` `web/cluster` `web/env` `web/repo` |
 | Tooling | `web/test`, `nest new --template hatch` / `--template web-api` |
 
 `http/server`'s request-head read is `tcp/read-until` (brood ≥ 0.3.11), so the delimiter

@@ -1,0 +1,38 @@
+;; web/request-memo — answers remembered for one read-only request, never for a write and never
+;; outside a request.
+(defmodule web-request-memo-test
+  (:use test)
+  (:alias web/request-memo :as memo)
+  (:alias web/test :as web-test)
+  (:alias table))
+
+(defn- counting-build (counter answer)
+  (fn () (table/incr counter :builds 1) answer))
+
+(defn- builds-during (method answer)
+  (let (counter (table/new))
+    (memo/request (web-test/conn-for method "/a")
+      (fn (_)
+        (memo/remember :k (counting-build counter answer))
+        (memo/remember :k (counting-build counter answer))))
+    (let (builds (table/get counter :builds))
+      (table/drop counter)
+      builds)))
+
+(describe "web/request-memo"
+  (test "a GET builds an answer once, nil included"
+    (assert= (builds-during "GET" :answer) 1)
+    (assert= (builds-during "GET" nil) 1))
+
+  (test "a write never remembers"
+    (assert= (builds-during "POST" :answer) 2))
+
+  (test "outside a request nothing is remembered"
+    (is (not (memo/active?)))
+    (assert= (memo/keep :k 1) 1)
+    (assert= (memo/remember :k (fn () 2)) 2))
+
+  (test "keep puts an answer worked out elsewhere where remember finds it"
+    (assert= (memo/request (web-test/conn-for "GET" "/a")
+               (fn (_) (memo/keep :k :kept) (memo/remember :k (fn () :built))))
+      :kept)))

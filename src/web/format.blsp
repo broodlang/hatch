@@ -1,0 +1,106 @@
+(defmodule web/format
+  "Values as a page shows them: dates, times, byte sizes, counts. One module, because each of
+  these had been written two or three times across an app's views (and then again in the next
+  app), and the copies had begun to disagree: one page rounded a size through a float, another
+  in integers, and the two wrote a megabyte differently. Sizes are std `humanize`'s. Times are
+  epoch ms, said in UTC."
+  (:alias datetime)
+  (:alias humanize))
+
+(defn pad2 (n)
+  "`n` as at least two digits: `7` → `07`.
+
+  (hatch/web/format/pad2 7) ;=> \"07\"
+  (hatch/web/format/pad2 12) ;=> \"12\""
+  (string/pad-left (str n) 2 "0"))
+
+(defn date (ms)
+  "An epoch-ms time as a `YYYY-MM-DD` date (UTC).
+
+  (hatch/web/format/date 0) ;=> \"1970-01-01\""
+  (datetime/format (datetime/epoch-ms-> ms) "%Y-%m-%d"))
+
+(defn date-time (ms)
+  "An epoch-ms time as `YYYY-MM-DD HH:MM UTC`.
+
+  (hatch/web/format/date-time 0) ;=> \"1970-01-01 00:00 UTC\""
+  (datetime/format (datetime/epoch-ms-> ms) "%Y-%m-%d %H:%M UTC"))
+
+(defn clock (ms)
+  "An epoch-ms time's time of day, `HH:MM` (UTC).
+
+  (hatch/web/format/clock 0) ;=> \"00:00\""
+  (datetime/format (datetime/epoch-ms-> ms) "%H:%M"))
+
+(def *month-names* ["Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"])
+
+(defn calendar-date (ms)
+  "An epoch-ms time as a date the way a person writes it (UTC).
+
+  (hatch/web/format/calendar-date 0) ;=> \"Jan 1, 1970\""
+  (let (date (datetime/->date (datetime/epoch-ms-> ms)))
+    (str (nth *month-names* (- (get date :month) 1)) " " (get date :day) ", " (get date :year))))
+
+(defn month-start (ms)
+  "The epoch-ms start of the UTC month an epoch-ms time falls in.
+
+  (hatch/web/format/month-start 0) ;=> 0
+  (hatch/web/format/month-start 2678400000) ;=> 2678400000
+  (hatch/web/format/month-start 2700000000) ;=> 2678400000"
+  (- ms (+ (* (- (datetime/day (datetime/epoch-ms-> ms)) 1) 86400000) (math/rem ms 86400000))))
+
+(defn month-days (ms)
+  "How many days the UTC month an epoch-ms time falls in has.
+
+  (hatch/web/format/month-days 0) ;=> 31
+  (hatch/web/format/month-days 2700000000) ;=> 28"
+  (let (moment (datetime/epoch-ms-> ms))
+    (datetime/days-in-month (datetime/year moment) (datetime/month moment))))
+
+(defn ago-text (ms)
+  "How long before now epoch-ms `ms` was, the way a person says it (`just now`, `3 hours
+  ago`, `yesterday`); past a month, the `calendar-date`."
+  (let (elapsed (- (os/now) ms)
+        seconds (if (int? elapsed) (math/quot elapsed 1000) 0)
+        counted (fn (n unit) (str (plural n unit) " ago")))
+    (cond
+      (< seconds 60) "just now"
+      (< seconds 3600) (counted (math/quot seconds 60) "minute")
+      (< seconds 86400) (counted (math/quot seconds 3600) "hour")
+      (< seconds 172800) "yesterday"
+      (< seconds 2592000) (counted (math/quot seconds 86400) "day")
+      else (calendar-date ms))))
+
+(defn byte-size (n)
+  "A byte count the way a person reads it (`512 B`, `1.5 KB`, `4.2 MB`); an empty string for
+  anything that is not a whole number, so a missing size shows as nothing.
+
+  (hatch/web/format/byte-size 1536) ;=> \"1.5 KB\"
+  (hatch/web/format/byte-size nil) ;=> \"\""
+  (if (int? n) (humanize/byte-size n) ""))
+
+(defn thousands (n)
+  "A whole number with thousands separators.
+
+  (hatch/web/format/thousands 1234567) ;=> \"1,234,567\"
+  (hatch/web/format/thousands 999) ;=> \"999\""
+  (let (digits (str n)
+        size (count digits)
+        lead (math/rem size 3))
+    (string/join (seq/filter (cons (string/substring digits 0 lead)
+                               (map (range (math/quot size 3))
+                                 (fn (group)
+                                   (string/substring digits
+                                     (+ lead (* group 3))
+                                     (+ lead (* group 3) 3)))))
+                   (fn (part) (not (= part ""))))
+      ",")))
+
+(defn plural (n word &optional (plural-word nil))
+  "`n` and `word`, plural unless `n` is one; `plural-word` when adding an `s` is wrong. The
+  count is grouped by thousands.
+
+  (hatch/web/format/plural 1 \"file\") ;=> \"1 file\"
+  (hatch/web/format/plural 1200 \"change\") ;=> \"1,200 changes\"
+  (hatch/web/format/plural 2 \"entry\" \"entries\") ;=> \"2 entries\""
+  (str (thousands n) " " (if (= n 1) word (or plural-word (str word "s")))))

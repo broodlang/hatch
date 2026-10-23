@@ -1,0 +1,66 @@
+;; web/format — values as the pages show them.
+(defmodule web-format-test
+  (:use test)
+  (:use web/format))
+
+;; 2026-10-15 13:05:09 UTC
+(def *moment* 1792069509000)
+
+(describe "dates and times"
+  (test "pad2 makes two digits"
+    (assert= "07" (pad2 7))
+    (assert= "12" (pad2 12)))
+  (test "a date is YYYY-MM-DD"
+    (assert= "2026-10-15" (date *moment*))
+    (assert= "1970-01-01" (date 0)))
+  (test "a date-time carries the minute and says UTC"
+    (assert= "2026-10-15 13:05 UTC" (date-time *moment*)))
+  (test "a clock is HH:MM"
+    (assert= "13:05" (clock *moment*)))
+  (test "a calendar date is the way a person writes it"
+    (assert= "Oct 15, 2026" (calendar-date *moment*))))
+
+(describe "months"
+  (test "a month starts at its first midnight, UTC, and has its own number of days"
+    (assert= 0 (month-start 0))
+    (assert= 2678400000 (month-start 2678400000))
+    (assert= 2678400000 (month-start 2700000000))
+    ;; 2026-10-01 00:00 UTC
+    (assert= 1790812800000 (month-start *moment*))
+    (assert= 31 (month-days *moment*))
+    (assert= 28 (month-days 2700000000))))
+
+(describe "ago-text"
+  (test "says recent times the way a person does"
+    (let (now (os/now))
+      (assert= "just now" (ago-text now))
+      (assert= "3 minutes ago" (ago-text (- now 180000)))
+      (assert= "1 hour ago" (ago-text (- now 3600000)))
+      (assert= "yesterday" (ago-text (- now 100000000)))
+      (assert= "5 days ago" (ago-text (- now (* 5 86400000))))))
+  (test "past a month, the date"
+    (assert= "Jan 1, 1970" (ago-text 0))))
+
+(describe "byte-size"
+  (test "whole bytes below a kilobyte, one decimal above"
+    (assert= "512 B" (byte-size 512))
+    (assert= "2.0 KB" (byte-size 2048))
+    (assert= "1.5 KB" (byte-size 1536))
+    (assert= "1.0 MB" (byte-size 1048576))
+    (assert= "568.4 MB" (byte-size 596009370)))
+  (test "a size that is not a whole number shows as nothing"
+    (assert= "" (byte-size nil))
+    (assert= "" (byte-size "12"))))
+
+(describe "counts"
+  (test "thousands are grouped"
+    (assert= "0" (thousands 0))
+    (assert= "999" (thousands 999))
+    (assert= "1,000" (thousands 1000))
+    (assert= "82,180" (thousands 82180))
+    (assert= "1,234,567" (thousands 1234567)))
+  (test "plural is singular only for one"
+    (assert= "1 file" (plural 1 "file"))
+    (assert= "0 files" (plural 0 "file"))
+    (assert= "1,200 changes" (plural 1200 "change"))
+    (assert= "2 entries" (plural 2 "entry" "entries"))))

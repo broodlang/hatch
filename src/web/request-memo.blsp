@@ -1,0 +1,49 @@
+(defmodule web/request-memo
+  "Answers remembered for the length of one request that only reads (GET or HEAD): a page asks
+  the same question many times (what role the viewer holds, for every row of a list), and while
+  it is being made the answer cannot change. A request that writes is never remembered for,
+  since what it writes may change the answer; nor is anything outside a request (a test, a job).
+
+  Wrap the router once, in the endpoint's `:router`:
+
+    {:router (fn (conn) (web/request-memo/request conn app-router))}
+
+  and remember where a question is asked:
+
+    (web/request-memo/remember [:role user-id project-id] (fn () (role-of user-id project-id)))"
+  (:alias table))
+
+(defdyn *memo* nil)
+
+(defn remember (key build)
+  "`build`'s answer, remembered under `key` for the rest of this request (nil included)."
+  (if (nil? *memo*)
+    (build)
+    ;; kept wrapped, so a remembered nil is told from nothing remembered
+    (let (kept (table/get *memo* key))
+      (if (not (nil? kept))
+        (first kept)
+        (let (answer (build))
+          (table/put *memo* key [answer])
+          answer)))))
+
+(defn request (conn handler)
+  "`handler`'s answer to `conn`, with answers remembered while it is made when the request only
+  reads. The memory goes however the request ends."
+  (if (not (includes? ["GET" "HEAD"] (get conn :method)))
+    (handler conn)
+    (let (memo (table/new))
+      (try
+        (binding (*memo* memo) (handler conn))
+        (finally (table/drop memo))))))
+
+(defn keep (key value)
+  "Remember `value` under `key` for the rest of this request, when it is one that remembers:
+  for an answer worked out for many keys at once."
+  (when (not (nil? *memo*))
+    (table/put *memo* key [value]))
+  value)
+
+(defn active? ()
+  "Whether this request remembers answers."
+  (not (nil? *memo*)))
