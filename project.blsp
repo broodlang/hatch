@@ -1,12 +1,12 @@
 ;; hatch — a Brood project.
 (project
   :name "hatch"
-  :version "0.30.0"
+  :version "0.30.1"
   :brood ">= 0.42.0"
   :description
     "A Phoenix/LiveView-inspired web framework for Brood: HTTP + WebSocket server, server-rendered live components, sessions, CSRF, presence, and pubsub. Pure Brood."
   :repository "https://github.com/broodlang/hatch"
-  :dependencies [[store :version "^0.6.2"]]
+  :dependencies [[store :version "^0.7.0"]]
   ;; Starter projects for `nest new NAME --from hatch --template app|api` (brood ADR-424):
   ;; plain files under :dir, copied with `{{name}}` (the project's name) and `{{package}}`
   ;; (the dependency entry that reaches hatch the way --from named it) filled in. Nothing
