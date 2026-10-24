@@ -70,6 +70,11 @@
   (test "PATH is set, so `text` reads it back"
     ;; Not an assertion about PATH's contents — only that a reader reaches a real variable.
     (assert= (string? (text "PATH" nil)) true))
+  (test "snapshot maps each variable to its value, nil for an unset one"
+    (let (taken (snapshot ["PATH" "HATCH_NEVER_SET_IN_A_TEST_RUN"]))
+      (assert= (count taken) 2)
+      (assert= (get taken "PATH") (os/env "PATH"))
+      (assert= (get taken "HATCH_NEVER_SET_IN_A_TEST_RUN") nil)))
   (test "the test suite runs in dev, so dev?/prod? agree on that"
     ;; `nest test` sets no HATCH_ENV, which is the zero-config default.
     (assert= (dev?) true)

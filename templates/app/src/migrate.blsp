@@ -1,0 +1,16 @@
+(defmodule migrate
+  "The database commands — store's `migration/command` over this app's database,
+  migrations and schema. `nest run --main migrate -- setup` creates the database and
+  migrates it; `status`, `pending`, `check`, `gen NAME`, `down` and the rest are store's:
+  `nest run --main migrate -- <command>`."
+  (:alias migration)
+  (:alias pg)
+  (:alias db))
+
+(defn main (& arguments)
+  (system/halt
+    (migration/command (pg/adaptor)
+      (pg/opts "{{name}}")
+      db/migrations
+      [db/messages-schema]
+      arguments)))

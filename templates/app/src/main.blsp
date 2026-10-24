@@ -8,5 +8,5 @@
 (defn main ()
   "Start logging, open the DB pool, boot the endpoint, and park."
   (start {:logger (default-logger-opts)
-          :children [(fn () (db/start (pg/opts-from-env "{{name}}")))
+          :children [(fn () (db/start (pg/opts "{{name}}")))
                       (fn () (serve))]}))

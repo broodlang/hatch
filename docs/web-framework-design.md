@@ -1195,7 +1195,7 @@ myapp/
   src/
     main.blsp                   ; logger + DB pool + HTTP endpoint, then park
     db.blsp                     ; the messages schema + CRUD helpers
-    db-setup.blsp               ; `nest run --main db-setup` — create DB + migrate
+    migrate.blsp                ; `nest run --main migrate -- setup` — create DB + migrate
     web/
       endpoint.blsp             ; HTTP listener (router + live-dispatcher), per-request timeout
       errors.blsp               ; themed error pages (500/504/404 …)

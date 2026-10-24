@@ -1,7 +1,7 @@
 ;; hatch — a Brood project.
 (project
   :name "hatch"
-  :version "0.29.0"
+  :version "0.30.0"
   :brood ">= 0.42.0"
   :description
     "A Phoenix/LiveView-inspired web framework for Brood: HTTP + WebSocket server, server-rendered live components, sessions, CSRF, presence, and pubsub. Pure Brood."
@@ -15,7 +15,7 @@
   :templates
     {"app" {:dir "templates/app"
             :about "A Hatch web app with a Postgres-backed message board (live components, forms, store-postgres)."
-            :next ["nest run --main db-setup" "nest run"]}
+            :next ["nest run --main migrate -- setup" "nest run"]}
      "api" {:dir "templates/api"
             :about "A minimal Hatch JSON API — no live layer, no database."}}
   ;; Formatter rules for Hatch's macros. A depending project opts in with
