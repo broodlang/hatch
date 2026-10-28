@@ -30,7 +30,7 @@ A live view is a `deflive` module — `mount` builds the model, `on` folds an
 event into it, and `render` returns the markup. A control binds to an `on`
 clause with `:data-event`:
 
-```brood
+```brood fragment
 (deflive
   (mount (params) {:count 0})
   (on "inc" (params model) (update model :count inc))
@@ -46,7 +46,7 @@ correct — each request in its own process with a deadline, the crash logged,
 an `ETag` computed before the body is compressed, baseline security headers,
 and error pages in your own layout:
 
-```brood
+```brood fragment
 (web/endpoint/serve
   {:router    routes/app-router
    :assets    *assets*
@@ -59,7 +59,7 @@ pbkdf2 passwords, email confirmation and password-reset tokens, scoped API token
 who is signed in on a conn. Hand it the repo once at boot, add its tables to your
 schemas, and keep your own pages:
 
-```brood
+```brood fragment
 (web/accounts/configure {:repo db/conn :token-scopes ["api:write"]})
 (def schemas [(web/accounts/users-schema) web/accounts/api-tokens-schema
               web/accounts/user-tokens-schema])
