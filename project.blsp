@@ -1,8 +1,8 @@
 ;; hatch — a Brood project.
 (project
   :name "hatch"
-  :version "0.30.1"
-  :brood ">= 0.42.0"
+  :version "0.30.2"
+  :brood ">= 0.47.0"
   :description
     "A Phoenix/LiveView-inspired web framework for Brood: HTTP + WebSocket server, server-rendered live components, sessions, CSRF, presence, and pubsub. Pure Brood."
   :repository "https://github.com/broodlang/hatch"
