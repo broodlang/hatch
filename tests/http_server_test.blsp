@@ -183,7 +183,7 @@
   a loaded machine (the worker may not exist yet, so there is nothing to drain)."
   (fn (_req)
     (send reporter [:handler-started])
-    (sleep ms)
+    (proc/sleep ms)
     {:status 200 :headers {} :body "done"}))
 
 (describe "graceful stop lets an in-flight request finish"
@@ -248,7 +248,7 @@
                 (fn (_req) {:status 200 :headers {} :body "ok"})
                 nil
                 {:tls {:cert cert :key key}}))
-      (sleep 100)
+      (proc/sleep 100)
       (server/stop port)
       ;; `(nil? sup)` asserted nothing: `server/start` answers a pid, and a pid is never
       ;; nil, so the old `(assert= (nil? sup) false)` was true by construction. Ask what
@@ -264,7 +264,7 @@
   (cond
     (nil? (proc/whereis nm)) true
     (<= tries 0) false
-    else (do (sleep 10) (wait-unregistered nm (- tries 1)))))
+    else (do (proc/sleep 10) (wait-unregistered nm (- tries 1)))))
 
 (describe "connection workers are supervised and observable"
   (test "a live keep-alive connection shows up as a supervised worker"
@@ -308,7 +308,7 @@
               {:head-timeout-ms 250 :read-timeout-ms 5000})
           sock (tcp/connect "127.0.0.1" port)
           _ (tcp/send sock "GET / HTTP/1.1\r\nHost: localhost\r\n")
-          _ (sleep 150)
+          _ (proc/sleep 150)
           ; Best-effort: the point of this byte is to reset the IDLE timer mid-window and show
           ; the deadline fires anyway. On a loaded machine the 150ms sleep can overshoot the
           ; 250ms deadline, in which case the socket is already closed and this send would
@@ -332,7 +332,7 @@
               {:body-timeout-ms 250 :read-timeout-ms 5000})
           sock (tcp/connect "127.0.0.1" port)
           _ (tcp/send sock "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nAB")
-          _ (sleep 150)
+          _ (proc/sleep 150)
           ; best-effort, same reason as the head-timeout case above
           _ (check-allow :discarded-catch (try (tcp/send sock "C") (catch _e nil)))
           resp (drain sock ""))

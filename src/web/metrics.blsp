@@ -154,21 +154,21 @@
   "Every route's stats, busiest first: `{:route :count :mean :max :p50 :p95 :p99 :ok
   :client-error :server-error}`."
   (apply vector
-    (reverse (sort-by (map (keys (table/snapshot *stats*))
-                        (fn (key)
-                          (let (stat (table/get *stats* key))
-                            {:route key
-                             :count (get stat :count)
-                             :mean (if (= 0 (get stat :count))
-                                     0
-                                     (math/floor (/ (get stat :total) (get stat :count))))
-                             :max (get stat :max)
-                             :p50 (percentile stat 0.5)
-                             :p95 (percentile stat 0.95)
-                             :p99 (percentile stat 0.99)
-                             :ok (get stat :ok)
-                             :client-error (get stat :client-error)
-                             :server-error (get stat :server-error)})))
+    (reverse (seq/sort-by (map (keys (table/snapshot *stats*))
+                            (fn (key)
+                              (let (stat (table/get *stats* key))
+                                {:route key
+                                 :count (get stat :count)
+                                 :mean (if (= 0 (get stat :count))
+                                         0
+                                         (math/floor (/ (get stat :total) (get stat :count))))
+                                 :max (get stat :max)
+                                 :p50 (percentile stat 0.5)
+                                 :p95 (percentile stat 0.95)
+                                 :p99 (percentile stat 0.99)
+                                 :ok (get stat :ok)
+                                 :client-error (get stat :client-error)
+                                 :server-error (get stat :server-error)})))
                (fn (row) (get row :count))))))
 
 (defn totals ()

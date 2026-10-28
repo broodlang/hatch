@@ -134,7 +134,7 @@
 (defn- pubsub-remove (subs topic pid)
   "Remove `pid` from `topic`'s subscriber set, dropping the topic key entirely once it has
   no subscribers left so ephemeral topics don't accumulate in the registry (and its vault)."
-  (let (remaining (disj (get subs topic #{}) pid))
+  (let (remaining (set/disj (get subs topic #{}) pid))
     (if (empty? remaining) (dissoc subs topic) (assoc subs topic remaining))))
 ;; `subs` declared `map`: untyped, `assoc`/`dissoc` answer `vector | map` and the width
 ;; reaches `pubsub-subscribed?` at the call site.
@@ -146,7 +146,7 @@
   (fold (%map-pairs subs)
     {}
     (fn (m kv)
-      (let (remaining (disj (first (rest kv)) pid))
+      (let (remaining (set/disj (first (rest kv)) pid))
         (if (empty? remaining) m (assoc m (first kv) remaining))))))
 
 (defn- pubsub-all-pids (subs)

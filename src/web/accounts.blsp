@@ -149,7 +149,7 @@
 (defn pbkdf2 (password salt iterations)
   "Hex of the pbkdf2-HMAC-SHA256 derivation of `password` with `salt`, run on the
   offload pool (the 600k-iteration KDF must not block a scheduler worker)."
-  (encoding/hex-encode-bytes (offload %pbkdf2-sha256-bytes
+  (encoding/hex-encode-bytes (proc/offload %pbkdf2-sha256-bytes
                                (string/->bytes password)
                                (string/->bytes salt)
                                iterations

@@ -216,7 +216,7 @@
   component that is no longer rendered, which has always been a no-op rather than an error. It
   does not outlive the VIEW: the session cancels every beat in the table when it navigates
   away or closes (`cancel-ticks`)."
-  (mapv (or (component-spec-ticks spec) [])
+  (seq/mapv (or (component-spec-ticks spec) [])
     (fn (ms) (timer/send-interval ms (self) [:tick-component id ms]))))
 
 (defn wrapper-statics (id statics)

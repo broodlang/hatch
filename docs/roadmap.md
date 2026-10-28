@@ -1170,7 +1170,7 @@ were fixed upstream the same day, so these need a brood ≥ the next release.
   One correction to the note above: this was never reachable from `std/`. Every existing
   caller was already correct — `std/protocol.blsp` is CORE (loaded in the prelude with no
   `defmodule`, so `*protocols*` is a root global and its bare swap is right), `editor/face`'s
-  `*faces*` is `defdyn` and therefore ambient, and the rest are written out qualified. The
+  `editor/face/*faces*` is `defdyn` and therefore ambient, and the rest are written out qualified. The
   bug only ever bit module- and package-scoped code, which is hatch. Hatch's own workaround
   stays regardless: it has to keep working on released brood.
 

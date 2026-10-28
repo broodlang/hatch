@@ -42,7 +42,7 @@
       (assert= (get (first (streams/items s)) :hatch/at) 3)))
   (test "several inserts accumulate until the next render"
     (let (s (streams/insert (streams/insert (streams/new :m) (msg "a" "A")) (msg "b" "B")))
-      (assert= (mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"]))))
+      (assert= (seq/mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"]))))
 
 ;; An id is the row's identity in the browser — the DOM id the client morphs against and the
 ;; handle `delete` names. Without one the row can never be updated and never removed; it would
@@ -81,7 +81,7 @@
   (test "replaces the pending items and raises the reset flag"
     (let (s (streams/reset (streams/insert (streams/new :m) (msg "old" "O"))
               [(msg "a" "A") (msg "b" "B")]))
-      (assert= (mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"])
+      (assert= (seq/mapv (streams/items s) (fn (i) (get i :id))) ["a" "b"])
       (assert= (get (streams/container s) :data-update) "stream-reset")))
   (test "an empty reset clears the browser"
     (let (s (streams/reset (streams/new :m)))

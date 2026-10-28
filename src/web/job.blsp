@@ -69,7 +69,7 @@
     (do
       (run-unit name run (first units) index (+ index (count units)))
       (when (not (empty? (rest units)))
-        (sleep pace-ms))
+        (proc/sleep pace-ms))
       (drain-list name (rest units) run pace-ms (+ index 1)))))
 
 (defn start (spec)
@@ -85,7 +85,7 @@
                         :restart :transient
                         :start (fn ()
                                  (spawn (fn ()
-                                          (sleep delay-ms)
+                                          (proc/sleep delay-ms)
                                           (check-allow :discarded-catch
                                             (try (run-now spec) (catch _ nil))))))}]
       {:strategy :one-for-one :max-restarts 3 :max-seconds 60})))

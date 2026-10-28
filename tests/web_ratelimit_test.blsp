@@ -63,7 +63,7 @@
       ; third is throttled
       (assert= (conn/halted? r3) true)
       (assert= (get r3 :status) 429)
-      (assert= (not (nil? (get-in r3 [:resp-headers :retry-after]))) true)))
+      (assert= (not (nil? (map/get-in r3 [:resp-headers :retry-after]))) true)))
   (test "separate keys have separate buckets"
     (let (plug (rate-limit {:rate 1 :per 100000 :burst 1 :key-fn client-key})
           a1 (plug (conn-for "sep-A"))
@@ -186,7 +186,7 @@
         (assert= (conn/halted? out) true)
         (assert= (get out :status) 429)
         ;; 5000ms of deficit, reported to the client in whole seconds
-        (assert= (get-in out [:resp-headers :retry-after]) "5"))))
+        (assert= (map/get-in out [:resp-headers :retry-after]) "5"))))
 
   (test "the store is handed the resolved config, so it need not restate the defaults"
     (let (calls (table/new)
@@ -221,7 +221,7 @@
       (let (out (plug (conn-from {})))
         (assert= (conn/halted? out) true)
         (assert= (get out :status) 429)
-        (assert= (get-in out [:resp-headers :retry-after]) "3"))))
+        (assert= (map/get-in out [:resp-headers :retry-after]) "3"))))
 
   ;; The store carries its state as fields — the point of a record over a closure map.
   (test "two stores of the same type keep their own state"

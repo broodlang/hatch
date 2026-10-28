@@ -296,7 +296,7 @@
     ; sit unread and no reply would come — which is what this asserts, from the outside.
     (let (parent (self)
           child (spawn (send parent [:done (recv-frame :sock (frag-head))])))
-      (sleep 100)
+      (proc/sleep 100)
       (send child [:tcp :sock (frag-tail)])
       (receive
         ([:done result] (match result

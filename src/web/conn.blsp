@@ -188,7 +188,7 @@
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."
-  (assoc-in conn [:assigns key] val))
+  (map/assoc-in conn [:assigns key] val))
 
 (defn get-assign (conn key)
   "Get a value from the conn's assigns map."
@@ -200,7 +200,7 @@
 
 (defn put-resp-header (conn key val)
   "Add a response header."
-  (assoc-in conn [:resp-headers key] val))
+  (map/assoc-in conn [:resp-headers key] val))
 
 (defn put-resp-body (conn body)
   "Set the response body."

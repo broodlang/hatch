@@ -61,7 +61,7 @@
     (let (routes [(make-route "GET" "/" (fn (conn) (html-resp conn "ok")))]
           resp (dispatch routes (conn-for "POST" "/")))
       (assert= (get resp :status) 405)
-      (assert= (get-in resp [:resp-headers :allow]) "GET, HEAD, OPTIONS")))
+      (assert= (map/get-in resp [:resp-headers :allow]) "GET, HEAD, OPTIONS")))
 
   (test "HEAD is served by the GET route"
     (let (routes [(make-route "GET" "/" (fn (conn) (html-resp conn "ok")))]
@@ -73,7 +73,7 @@
                    (make-route "POST" "/" (fn (conn) (html-resp conn "ok")))]
           resp (dispatch routes (conn-for "OPTIONS" "/")))
       (assert= (get resp :status) 204)
-      (assert= (get-in resp [:resp-headers :allow]) "GET, POST, HEAD, OPTIONS")))
+      (assert= (map/get-in resp [:resp-headers :allow]) "GET, POST, HEAD, OPTIONS")))
 
   (test "no matching route returns 404"
     (let (routes [(make-route "GET" "/foo" (fn (conn) (html-resp conn "foo")))]

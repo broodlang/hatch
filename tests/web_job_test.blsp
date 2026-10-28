@@ -77,5 +77,5 @@
                       :units (fn () (error "cannot read units"))
                       :run (fn (_) nil)
                       :delay-ms 10}))
-      (sleep 120)
+      (proc/sleep 120)
       (is (pid? sup)))))

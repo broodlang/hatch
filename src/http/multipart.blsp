@@ -125,9 +125,9 @@
   (let (name (get part :name))
     (cond
       (nil? name) acc
-      (nil? (get part :filename)) (assoc-in acc [:fields name] (part-text (get part :bytes)))
+      (nil? (get part :filename)) (map/assoc-in acc [:fields name] (part-text (get part :bytes)))
       else
-        (assoc-in acc
+        (map/assoc-in acc
           [:files name]
           {:filename (get part :filename)
            :content-type (get part :content-type)

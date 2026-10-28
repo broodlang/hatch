@@ -23,7 +23,7 @@
     (let (conn ((basic-auth "admin" "admin" "Dev") (conn-with-auth (basic "admin" "nope"))))
       (assert= (halted? conn) true)
       (assert= (get conn :status) 401)
-      (assert= (includes? (get-in conn [:resp-headers :www-authenticate]) "Dev") true)))
+      (assert= (includes? (map/get-in conn [:resp-headers :www-authenticate]) "Dev") true)))
 
   (test "missing Authorization header halts with a 401"
     (let (conn ((basic-auth "admin" "admin") (conn-with-auth nil)))
@@ -47,7 +47,7 @@
 
   (test "a realm with a quote/newline can't break the WWW-Authenticate header"
     (let (conn ((basic-auth "admin" "admin" "ev\"il\r\nX-Injected: 1") (conn-with-auth nil))
-          challenge (get-in conn [:resp-headers :www-authenticate]))
+          challenge (map/get-in conn [:resp-headers :www-authenticate]))
       (assert= (includes? challenge "\"") true) ; the syntactic quotes remain
       (assert= (includes? challenge "evil") true) ; the realm text, minus the stray quote
       (assert= (includes? challenge "\r") false)
@@ -108,7 +108,7 @@
     (let (conn ((bearer-auth tokens) (conn-with-auth "Bearer nope")))
       (assert= (halted? conn) true)
       (assert= (get conn :status) 401)
-      (assert= (includes? (get-in conn [:resp-headers :www-authenticate]) "Bearer") true)))
+      (assert= (includes? (map/get-in conn [:resp-headers :www-authenticate]) "Bearer") true)))
 
   (test "a missing header halts too — the lookup is never called with nil"
     (let (conn ((bearer-auth tokens) (conn-with-auth nil)))
@@ -116,13 +116,13 @@
       (assert= (get conn :status) 401)))
 
   (test ":realm labels the challenge"
-    (assert= (includes? (get-in ((bearer-auth tokens {:realm "hive"}) (conn-with-auth nil))
+    (assert= (includes? (map/get-in ((bearer-auth tokens {:realm "hive"}) (conn-with-auth nil))
                           [:resp-headers :www-authenticate])
                "realm=\"hive\"")
       true))
 
   (test "a realm carrying a quote or a newline cannot inject a header"
-    (let (challenge (get-in ((bearer-auth tokens {:realm "a\"b\r\nX: y"}) (conn-with-auth nil))
+    (let (challenge (map/get-in ((bearer-auth tokens {:realm "a\"b\r\nX: y"}) (conn-with-auth nil))
                       [:resp-headers :www-authenticate]))
       (assert= (includes? challenge "\"") true) ; the syntactic quotes remain
       (assert= (includes? challenge "\r") false)
@@ -133,7 +133,7 @@
                   {:body "{\"error\":\"authentication required\"}"
                    :content-type "application/json"}) (conn-with-auth nil)))
       (assert= (get conn :resp-body) "{\"error\":\"authentication required\"}")
-      (assert= (get-in conn [:resp-headers :content-type]) "application/json")))
+      (assert= (map/get-in conn [:resp-headers :content-type]) "application/json")))
 
   (test "a lookup that answers false, not nil, is still a rejection"
     (assert= (halted? ((bearer-auth (fn (_t) false)) (conn-with-auth "Bearer x"))) true)))

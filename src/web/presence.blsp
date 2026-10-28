@@ -243,7 +243,7 @@
   (if (empty? roster)
     (let (node-map (dissoc (get remotes from {}) topic))
       (if (empty? node-map) (dissoc remotes from) (assoc remotes from node-map)))
-    (assoc-in remotes [from topic] roster)))
+    (map/assoc-in remotes [from topic] roster)))
 
 (sig presence-record-remote (map any any any -> map))
 (defn- presence-remote-topics-of (remotes node)

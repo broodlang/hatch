@@ -260,8 +260,8 @@
 
   (hatch/web/live/js [[:toggle \"#menu\"]]) ;=> \"[[\\\"toggle\\\",\\\"#menu\\\"]]\"
   (hatch/web/live/js [[:add-class \"this\" \"open\"]]) ;=> \"[[\\\"add-class\\\",\\\"this\\\",\\\"open\\\"]]\""
-  (encode (mapv commands
-            (fn (command) (mapv command (fn (part) (if (keyword? part) (->string part) part)))))))
+  (encode (seq/mapv commands
+            (fn (command) (seq/mapv command (fn (part) (if (keyword? part) (->string part) part)))))))
 
 (defn push-event (name &optional (payload {}))
   "From inside a live handler, tell the client to dispatch a `brood:event` CustomEvent

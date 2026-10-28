@@ -340,11 +340,11 @@
       (assert= (web/conn/halted? conn) true)
       ;; 301, not 302: a permanent redirect is what transfers the ranking signal
       (assert= (get conn :status) 301)
-      (assert= (get-in conn [:resp-headers :location]) "https://example.com/")))
+      (assert= (map/get-in conn [:resp-headers :location]) "https://example.com/")))
 
   (test "the path and query survive — a redirect that drops them loses the deep links"
     (let (conn ((canonical-host *site*) (conn-for-host "old.example.org" "/packages" "q=json")))
-      (assert= (get-in conn [:resp-headers :location]) "https://example.com/packages?q=json")))
+      (assert= (map/get-in conn [:resp-headers :location]) "https://example.com/packages?q=json")))
 
   (test ":except leaves a host alone — an internal probe must not be sent somewhere it cannot follow"
     (let (conn ((canonical-host *site* {:except ["internal.fly"]}) (conn-for-host "internal.fly")))

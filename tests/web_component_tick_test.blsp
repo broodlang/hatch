@@ -88,9 +88,10 @@
     (let (message (check-allow :discarded-catch
                     (try
                       (do
-                        (macroexpand '(web/component/deflive-component (mount (id assigns) {})
-                                        (render (state) [:p {} "x"])
-                                        (tick *every-second* (state) state)))
+                        (reflect/macroexpand '(web/component/deflive-component (mount (id assigns)
+                                                                                 {})
+                                                (render (state) [:p {} "x"])
+                                                (tick *every-second* (state) state)))
                         "")
                       (catch e (error-message e)))))
       (assert= (includes? message "literal number") true)

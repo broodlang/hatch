@@ -25,8 +25,8 @@
 
 (defn upgrade-request? (request)
   "True if the HTTP request is a WebSocket upgrade."
-  (let (conn (string/lower (get-in request [:headers :connection] ""))
-        upg (string/lower (get-in request [:headers :upgrade] "")))
+  (let (conn (string/lower (map/get-in request [:headers :connection] ""))
+        upg (string/lower (map/get-in request [:headers :upgrade] "")))
     (and (includes? conn "upgrade")
       (= upg "websocket"))))
 
@@ -52,11 +52,11 @@
   (cond
     (= policy false) true
     (or (list? policy) (vector? policy))
-      (let (o (get-in request [:headers :origin]))
+      (let (o (map/get-in request [:headers :origin]))
         (if (nil? o) false (includes? policy o)))
     else
-      (let (o (get-in request [:headers :origin]))
-        (or (nil? o) (= (origin-host o) (get-in request [:headers :host]))))))
+      (let (o (map/get-in request [:headers :origin]))
+        (or (nil? o) (= (origin-host o) (map/get-in request [:headers :host]))))))
 
 ; ---- frame building (server → client, unmasked) ----
 

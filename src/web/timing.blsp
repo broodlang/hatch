@@ -57,8 +57,8 @@
 
     (hatch/web/timing/summary \"GET\" \"/a\" 120 {[\"db\" :ms] 80 [\"db\" :calls] 3 [\"render\" :ms] 30 [\"render\" :calls] 1}) ;=> \"timing GET /a 120 ms: db 80 ms ×3, render 30 ms\""
   (let (names (into [] (set/set (map (keys entries) first)))
-        spans (sort-by (map names
-                         (fn (name) [name (get entries [name :ms]) (get entries [name :calls])]))
+        spans (seq/sort-by (map names
+                             (fn (name) [name (get entries [name :ms]) (get entries [name :calls])]))
                 (fn (entry) (- 0 (second entry)))))
     (str "timing "
       method

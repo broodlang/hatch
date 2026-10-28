@@ -136,7 +136,7 @@
 
 (defn- beats-within (wait-ms)
   "Wait `wait-ms`, then drain and count the beats that arrived meanwhile."
-  (sleep wait-ms)
+  (proc/sleep wait-ms)
   (queued-beats))
 
 (describe "web/component/cancel-ticks"

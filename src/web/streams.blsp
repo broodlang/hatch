@@ -147,7 +147,7 @@
   replacing it rather than by reading it."
   (doseq (item new-items) (require-id item "reset"))
   (stream (stream-name s)
-    (mapv new-items (fn (item) (assoc item :hatch/at -1)))
+    (seq/mapv new-items (fn (item) (assoc item :hatch/at -1)))
     (list)
     true))
 

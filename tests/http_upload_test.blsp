@@ -99,14 +99,14 @@
       (tcp/set-binary client true)
       ; send the head alone first, so it completes before any body byte arrives
       (send-raw client head)
-      (sleep 20)
+      (proc/sleep 20)
       ; then the body in 40 separate 500-byte writes, pausing so each is its own read
       (fold (range 0 40)
         nil
         (fn (_ k)
           (do
             (send-raw client (bytes/slice body-bytes (* k 500) (* (+ k 1) 500)))
-            (sleep 2))))
+            (proc/sleep 2))))
       (let (info (receive ([:body d] d) (after 5000 :timeout)))
         (tcp/close client)
         (server/stop port)
@@ -136,14 +136,14 @@
       (tcp/set-binary client true)
       ; head alone first, so it completes before any chunk arrives
       (send-raw client head)
-      (sleep 20)
+      (proc/sleep 20)
       ; each 10-byte chunk (hex size "a") in its own write, so each is a distinct read
       (fold (range 0 reps)
         nil
         (fn (_ _k)
           (do
             (send-raw client (b (str "a\r\n" part "\r\n")))
-            (sleep 2))))
+            (proc/sleep 2))))
       (send-raw client (b "0\r\n\r\n"))
       (let (info (receive ([:chunked d] d) (after 5000 :timeout)))
         (tcp/close client)

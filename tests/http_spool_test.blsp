@@ -243,7 +243,7 @@
                                  (if (string/starts-with? (get head :path) "/git/")
                                    {:max-request-bytes 100000}
                                    nil))})
-          big (bytes/concat (into [] (repeat 3 (b (string/repeat "x" 1000))))))
+          big (bytes/concat (into [] (seq/repeat 3 (b (string/repeat "x" 1000))))))
       ; the git path takes 3000 bytes
       (let (client (tcp/connect "127.0.0.1" port))
         (tcp/set-binary client true)

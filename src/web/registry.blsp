@@ -21,7 +21,7 @@
   (cond
     (proc/whereis nm) :ok
     (<= tries 0) :ok
-    else (do (sleep 5) (await nm (- tries 1)))))
+    else (do (proc/sleep 5) (await nm (- tries 1)))))
 
 (defn ensure-supervised (sup-name children wait-name)
   "The pid registered as `wait-name`. On first use (or after a teardown) start the supervisor

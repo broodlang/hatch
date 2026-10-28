@@ -285,7 +285,7 @@
   (cond
     (component-form? form) (list 'web/template/raw (component-slot-form-html form))
     (pair? form) (map form rewrite-components)
-    (vector? form) (mapv form rewrite-components)
+    (vector? form) (seq/mapv form rewrite-components)
     else form))
 
 (defn walk (st node)

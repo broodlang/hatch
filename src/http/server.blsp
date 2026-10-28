@@ -107,7 +107,7 @@
 (defn- await-listening (port budget-ms)
   "Return once `port` actually ACCEPTS a connection, or when `budget-ms` run out.
 
-Replaces a fixed `(sleep 50)`. Fifty milliseconds is a guess about how fast the listener
+Replaces a fixed `(proc/sleep 50)`. Fifty milliseconds is a guess about how fast the listener
 binds, and on a loaded machine it is simply wrong: `start` returned before the socket was
 accepting and the caller's first `tcp/connect` got ECONNREFUSED. It surfaced as a CI
 failure in `http_upload_test` and never locally — the guess holds on an idle desktop,
@@ -122,7 +122,7 @@ port) still returns and lets the caller fail on its own terms."
       (let (probe (check-allow :discarded-catch (try (tcp/connect "127.0.0.1" port) (catch _ nil))))
         (if probe
           (do (tcp/close probe) nil)
-          (do (sleep 10) (await-listening port (- budget-ms 10)))))))
+          (do (proc/sleep 10) (await-listening port (- budget-ms 10)))))))
 
 (defn start (port handler &optional (ws-handler nil) (config {}))
   "Start a supervised HTTP listener on `port`, dispatching requests to `handler`.
@@ -179,7 +179,7 @@ port) still returns and lets the caller fail on its own terms."
       (tcp/listen "0.0.0.0" port))
     (catch e
       (if (and (> attempts 1) (includes? (error-message e) "in use"))
-        (do (sleep 10) (bind-retry port (- attempts 1) tls))
+        (do (proc/sleep 10) (bind-retry port (- attempts 1) tls))
         (error (error-message e))))))
 
 (defn drain-and-wait (listener)
@@ -481,7 +481,7 @@ port) still returns and lets the caller fail on its own terms."
     (if (get response :stream)
       (stream-response sock request response)
       (let (ka (keep-alive? request response)
-            response (assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
+            response (map/assoc-in response [:headers :connection] (if ka "keep-alive" "close")))
         (tcp/send sock (format-response response (= (get request :method) "HEAD")))
         (if ka
           (worker-run sock handler ws-handler config remainder)
@@ -493,7 +493,7 @@ port) still returns and lets the caller fail on its own terms."
   chunk. `write` takes a string/`bytes`/iolist. A HEAD request gets the head only. The connection
   always closes afterwards. A mid-stream failure — a client disconnect breaking `tcp/send`, or the
   stream function raising — stops the stream; the socket is closed either way."
-  (let (response (assoc-in response [:headers :connection] "close")
+  (let (response (map/assoc-in response [:headers :connection] "close")
         head? (= (get request :method) "HEAD"))
     (tcp/send sock (format-stream-head response))
     (when (not head?)
@@ -879,7 +879,7 @@ port) still returns and lets the caller fail on its own terms."
                           :path (get request :path)
                           :error (error-message e)})
                        ((get config :error-handler) request (error-message e)))))
-        response (assoc-in response [:headers :connection] "close"))
+        response (map/assoc-in response [:headers :connection] "close"))
     (telemetry/emit [:hatch :request :stop]
       {:duration (- (os/now) t0)}
       {:method (get request :method)
@@ -902,8 +902,8 @@ port) still returns and lets the caller fail on its own terms."
   HTTP/1.1 persists unless closed, HTTP/1.0 closes unless the request opted in with
   `Connection: keep-alive` (RFC 7230 §6.3)."
   (let (version (get request :version "1.1")
-        req-conn (string/lower (get-in request [:headers :connection] ""))
-        resp-conn (string/lower (get-in response [:headers :connection] "")))
+        req-conn (string/lower (map/get-in request [:headers :connection] ""))
+        resp-conn (string/lower (map/get-in response [:headers :connection] "")))
     (cond
       (= resp-conn "close") false
       (= req-conn "close") false

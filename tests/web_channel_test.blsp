@@ -365,7 +365,7 @@
             (masked-text-frame "{\"topic\":\"e2e:r6\",\"event\":\"leave\",\"ref\":\"l\"}"))
           (expect-frame client after-join)
           ; the unsubscribe is sent by the socket process; give the registry a beat to apply it
-          (sleep 50)
+          (proc/sleep 50)
           (assert= (empty? (pubsub/subscribers "e2e:r6")) true))))))
 
 ;; ---- handle-info, and the topic ceiling ------------------------------------
@@ -452,7 +452,7 @@
   (when (> rounds 0)
     (tcp/send client masked-frame)
     (read-opcode client (bytes []) 2000)
-    (sleep gap)
+    (proc/sleep gap)
     (keep-talking client masked-frame (- rounds 1) gap)))
 
 (describe "a socket carrying traffic is not reaped"
@@ -500,7 +500,7 @@
           ; topic — what is under test is that the registry accepts a channel socket's pid and
           ; that the roster reaches it, not which clause calls track
           (web/presence/track "e2e:presence" "tester" {:name "ada"})
-          (sleep 50)
+          (proc/sleep 50)
           ; a roster is a list of {:key :meta}, not a map keyed by key
           (let (entry (seq/find (web/presence/roster "e2e:presence")
                         (fn (e) (= (get e :key) "tester"))))
@@ -511,7 +511,7 @@
           (broadcast-to "e2e:presence" "still-here" {:ok true})
           (assert= (includes? (first (expect-frame client after-join)) "still-here") true)
           (web/presence/untrack "e2e:presence")
-          (sleep 50)
+          (proc/sleep 50)
           (assert= (empty? (web/presence/roster "e2e:presence")) true))))))
 
 ;; ---- an app's own pubsub payload is not a channel broadcast -------------------
