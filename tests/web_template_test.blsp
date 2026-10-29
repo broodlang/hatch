@@ -108,6 +108,15 @@
       true))
   (test "a relative href passes through"
     (assert= (includes? (render [:a {:href "/dashboard"}]) "href=\"/dashboard\"") true))
+  (test "a path, a fragment or a query with a colon in it passes through"
+    (assert= (safe-url "/p/snapshots/blake3:ab") "/p/snapshots/blake3:ab")
+    (assert= (safe-url "#javascript:x") "#javascript:x")
+    (assert= (safe-url "?next=javascript:x") "?next=javascript:x"))
+  (test "a value with no colon passes through, whatever its characters"
+    (assert= (safe-url " page\t1") " page\t1"))
+  (test "a scheme after leading noise is still caught, the fast path aside"
+    (assert= (safe-url "\n\tjavascript:alert(1)") "#")
+    (assert= (safe-url " \rVBScript:x") "#"))
   (test "a legitimate data: image src passes through"
     (assert= (includes? (render [:img {:src "data:image/png;base64,AAAA"}])
                "src=\"data:image/png;base64,AAAA\"")

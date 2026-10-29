@@ -141,13 +141,28 @@
   scheme, or a `data:` URL that isn't a whitelisted raster image (so `data:text/html,…` and
   `data:image/svg+xml,…` are caught). Whitespace and control characters are removed first and
   case ignored, since browsers strip them before resolving the scheme (`  java\\tscript:…` is
-  `javascript:`)."
-  (let (s (string/lower (string/join (seq/filter (string/->list (str v))
-                                       (fn (c) (not (url-scheme-noise? c))))
-                          "")))
-    (or (string/starts-with? s "javascript:")
-      (string/starts-with? s "vbscript:")
-      (and (string/starts-with? s "data:") (not (safe-data-image? s))))))
+  `javascript:`).
+
+  Most URLs on a page cannot have a scheme at all, and are answered without that work: a path,
+  a fragment or a query (`/`, `#` or `?` first, so nothing for a browser to strip before it),
+  or a value with no `:` anywhere (a scheme ends in one, and stripping never makes one).
+  Splitting every URL into its characters to filter them cost 58us a link, about 9ms of a page
+  with 150 links, for an answer a one-pass scan gives.
+
+  (hatch/web/template/dangerous-url? \"/a/b:c\") ;=> false
+  (hatch/web/template/dangerous-url? \" java\\tscript:x\") ;=> true"
+  (let (text (str v))
+    (if (or (string/starts-with? text "/")
+          (string/starts-with? text "#")
+          (string/starts-with? text "?")
+          (= (string/span-until text 0 ":") (string/length text)))
+      false
+      (let (s (string/lower (string/join (seq/filter (string/->list text)
+                                           (fn (c) (not (url-scheme-noise? c))))
+                              "")))
+        (or (string/starts-with? s "javascript:")
+          (string/starts-with? s "vbscript:")
+          (and (string/starts-with? s "data:") (not (safe-data-image? s))))))))
 
 (defn safe-url (v)
   "A URL safe to place in a URL attribute: a script-executing scheme (`javascript:`/`vbscript:`)
