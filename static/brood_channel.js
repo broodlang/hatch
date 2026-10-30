@@ -152,6 +152,13 @@ const BroodChannel = (() => {
     }
 
     _connect() {
+      // A page the browser prerenders (speculation rules, `web/speculation`) is made out of
+      // sight and may never be shown: its socket waits until it is, so a guess holds no
+      // connection and no process on the server.
+      if (typeof document !== "undefined" && document.prerendering) {
+        document.addEventListener("prerenderingchange", () => this._connect(), { once: true });
+        return;
+      }
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       this.socket = new WebSocket(`${proto}//${location.host}${this.path}`);
 
