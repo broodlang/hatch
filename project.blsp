@@ -6,7 +6,7 @@
   :description
     "A Phoenix/LiveView-inspired web framework for Brood: HTTP + WebSocket server, server-rendered live components, sessions, CSRF, presence, and pubsub. Pure Brood."
   :repository "https://github.com/broodlang/hatch"
-  :dependencies [[store :version "^0.8.0"]]
+  :dependencies [[store :version "^0.9.0"]]
   ;; Starter projects for `nest new NAME --from hatch --template app|api` (brood ADR-424):
   ;; plain files under :dir, copied with `{{name}}` (the project's name) and `{{package}}`
   ;; (the dependency entry that reaches hatch the way --from named it) filled in. Nothing
@@ -46,7 +46,10 @@
      unmount 1
      on-mount-guard 1
      on 2
-     tick 2})
+     tick 2
+     ;; store's query macro: the alias and the table on the head line, then a clause a line
+     from 2
+     query/from 2})
 
 ;; To depend on other Brood packages, add a :dependencies vector to the form
 ;; above (ADR-037). Dep names are bare symbols (no quoting):

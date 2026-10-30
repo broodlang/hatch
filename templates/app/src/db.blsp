@@ -1,7 +1,8 @@
 (defmodule db
   "Database singleton: the shared repo handle and messages schema.
   Call `(db/start opts)` once from `main`; handlers then use
-  `(db/all-messages)` / `(db/insert-message row)`."
+  `(db/all-messages)` / `(db/insert-message row)`, and read with `rows`, `row`, `value`,
+  `column`, `exists?` and `row-count` over a `query/from`."
   (:alias repo)
   (:alias query)
   (:alias pg)
@@ -29,9 +30,35 @@
   warm up the connections."
   (def *repo* (web-repo/start (pg/adaptor) opts migrations)))
 
+;; ---- reads: a query, written with `query/from`, run on the pool ----
+
+(defn rows (q)
+  "Every row of `q`, as maps keyed by column."
+  (repo/all *repo* q))
+
+(defn row (q)
+  "The first row of `q`, or nil."
+  (repo/one *repo* q))
+
+(defn value (q)
+  "The one column `q` selects, of its first row, or nil."
+  (repo/value *repo* q))
+
+(defn column (q)
+  "The one column `q` selects, of every row, in order."
+  (repo/column *repo* q))
+
+(defn exists? (q)
+  "Whether `q` has any row."
+  (repo/exists? *repo* q))
+
+(defn row-count (q)
+  "How many rows `q` has, counted by the database."
+  (repo/count-rows *repo* q))
+
 (defn all-messages ()
   "All messages, oldest first (id ASC)."
-  (repo/all *repo* (query/from m :messages :order-by m.id)))
+  (rows (query/from m :messages :order-by m.id)))
 
 (defn insert-message (row)
   "Insert a `{:name ... :body ...}` row; return the inserted row with `:id`."

@@ -4,5 +4,5 @@
 (project
   :name "{{name}}"
   :version "0.1.0"
-  :dependencies [{{package}} [store-postgres :version "^0.9.1"]]
+  :dependencies [{{package}} [store-postgres :version "^0.10.0"]]
   :format-plugins [hatch])

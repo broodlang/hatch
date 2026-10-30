@@ -347,9 +347,8 @@
   in the table forever."
   (let (now (os/now)
         latest (repo/one (conn)
-                 (query/from t
-                   :user_tokens :where
-                   (and (= t.user_id (get user :id)) (= t.context context))
+                 (query/from t :user_tokens
+                   :where (and (= t.user_id (get user :id)) (= t.context context))
                    :order-by (desc t.inserted_at))))
     (repo/delete (conn) :user_tokens [:and [:= :context context] [:< :inserted_at (- now ttl-ms)]])
     (if (and latest
@@ -384,9 +383,8 @@
   old inbox, not the account."
   (let (row (if (string? raw)
               (repo/one (conn)
-                (query/from t
-                  :user_tokens :where
-                  (and (= t.context context) (= t.token_hash (hash/sha256 raw)))))
+                (query/from t :user_tokens
+                  :where (and (= t.context context) (= t.token_hash (hash/sha256 raw)))))
               nil))
     (cond
       (nil? row) nil
@@ -532,9 +530,8 @@
 (defn tokens (user-id)
   "`user-id`'s API tokens, newest first — metadata only, never the hash."
   (repo/all (conn)
-    (query/from t
-      :api_tokens :where
-      (= t.user_id user-id)
+    (query/from t :api_tokens
+      :where (= t.user_id user-id)
       :select [t.id t.user_id t.name t.scopes t.expires_at t.last_used_at t.inserted_at]
       :order-by (desc t.inserted_at))))
 
@@ -562,9 +559,8 @@
   address, oldest first. An address nobody confirms is how a script registers by the hundred;
   on a site open to anyone those accounts otherwise pile up for good."
   (repo/all (conn)
-    (query/from u
-      :users :where
-      (and (nil? u.confirmed_at) (< u.inserted_at cutoff))
+    (query/from u :users
+      :where (and (nil? u.confirmed_at) (< u.inserted_at cutoff))
       :order-by u.id
       :limit limit)))
 
