@@ -40,7 +40,7 @@
 (defrecord money (cents))
 (impl JsonEncode
   web-live-test/money
-  (->json [m] (str "\"$" (math/quot (money-cents m) 100) "." (math/mod (money-cents m) 100) "\"")))
+  (->json (m) (str "\"$" (math/quot (money-cents m) 100) "." (math/mod (money-cents m) 100) "\"")))
 
 (defrecord opaque (x))
 

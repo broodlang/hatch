@@ -80,12 +80,12 @@
 
 (impl Display
   web/channel/channel-socket
-  (->string [s] (str "#<channel-socket " (channel-socket-topic s) ">")))
+  (->string (s) (str "#<channel-socket " (channel-socket-topic s) ">")))
 
 ;; What `defchannel` produces, by the same argument as `web/live/view-spec`.
 (defrecord channel-spec (join handle-in handle-info handle-out terminate))
 
-(impl Display web/channel/channel-spec (->string [_spec] "#<channel-spec>"))
+(impl Display web/channel/channel-spec (->string (_spec) "#<channel-spec>"))
 
 (defn new-socket (topic conn)
   "A fresh socket for `topic` on the connection `conn`, with empty assigns. `join` is handed

@@ -97,16 +97,16 @@
 
 (defability Encode
   "JSON-encode a value to its wire string."
-  (encode [v] :-> string))
+  (encode (v) :-> string))
 
-(impl Encode :nil (encode [_] "null"))
-(impl Encode :bool (encode [b] (if b "true" "false")))
-(impl Encode :int (encode [n] (str n)))
-(impl Encode :float (encode [n] (str n)))
-(impl Encode :string (encode [s] (json-str s)))
-(impl Encode :vector (encode [v] (str "[" (string/join (map v encode) ",") "]")))
-(impl Encode :pair (encode [v] (str "[" (string/join (map v encode) ",") "]")))
-(impl Encode :map (encode [m] (str "{" (string/join (map (%map-pairs m) encode-entry) ",") "}")))
+(impl Encode :nil (encode (_) "null"))
+(impl Encode :bool (encode (b) (if b "true" "false")))
+(impl Encode :int (encode (n) (str n)))
+(impl Encode :float (encode (n) (str n)))
+(impl Encode :string (encode (s) (json-str s)))
+(impl Encode :vector (encode (v) (str "[" (string/join (map v encode) ",") "]")))
+(impl Encode :pair (encode (v) (str "[" (string/join (map v encode) ",") "]")))
+(impl Encode :map (encode (m) (str "{" (string/join (map (%map-pairs m) encode-entry) ",") "}")))
 ;; Keywords, symbols, pids — and an app's own records, via the stdlib ability.
 ;;
 ;; Hatch encodes JSON in two places: `json/encode` for an HTTP body (`web/conn/json-resp`),
@@ -122,7 +122,7 @@
 ;; `:map`), so nothing that worked before changes — this only stops the wire from ignoring
 ;; an impl the app already wrote.
 (impl Encode
-  :default (encode [v] (if (satisfies? 'JsonEncode v) (json/->json v) (json-str (str v)))))
+  :default (encode (v) (if (satisfies? 'JsonEncode v) (json/->json v) (json-str (str v)))))
 (defn- encode-entry (kv)
   (let ([k val] kv)
     (str (json-str (if (keyword? k) (->string k) (str k))) ":" (encode val))))

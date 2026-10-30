@@ -58,7 +58,7 @@
     handle-params
     ticks))
 
-(impl Display web/live/view-spec (->string [_spec] "#<live view-spec>"))
+(impl Display web/live/view-spec (->string (_spec) "#<live view-spec>"))
 
 ; ---- the session view ----
 ;
@@ -84,7 +84,7 @@
 
 (impl Display
   web/live/session-view
-  (->string [view]
+  (->string (view)
     (str "#<live session "
       (if (session-view-mounted? view) "mounted" "unmounted")
       " gen="
@@ -1042,9 +1042,9 @@
 
 (defbehaviour LiveModule
   "A live view: build a model from params, render it, and handle client events."
-  (mount [params])
-  (render [model &optional (live-components (table/new))])
-  (handle-event [name params model]))
+  (mount (params))
+  (render (model &optional (live-components (table/new))))
+  (handle-event (name params model)))
 
 ; ---- deflive macro ----
 

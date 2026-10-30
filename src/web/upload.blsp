@@ -102,7 +102,7 @@
 
 (impl Display
   web/upload/spec
-  (->string [s] (str "#<upload " (->string (spec-name s)) ">")))
+  (->string (s) (str "#<upload " (->string (spec-name s)) ">")))
 
 ;; Identity, not shape — the same argument `web/cache/ttl-entry` and `web/template/raw-node`
 ;; make. `find-upload` scans a model's top-level values looking for uploads, and the model is
@@ -122,7 +122,7 @@
 
 (impl Display
   web/upload/entry
-  (->string [e] (str "#<upload-entry " (entry-client-name e) ">")))
+  (->string (e) (str "#<upload-entry " (entry-client-name e) ">")))
 
 (def *default-max-file-size* 8388608)
 

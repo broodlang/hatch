@@ -98,7 +98,7 @@ one:
 (defrecord pg-store (pool))
 
 (impl BucketStore my-app/pg-store
-  (take-tokens [store key cost config now]
+  (take-tokens (store key cost config now)
     (let (bucket (load-bucket (pg-store-pool store) key)
           outcome (ratelimit/spend bucket config cost now))
       (save-bucket (pg-store-pool store) key (nth outcome 0))

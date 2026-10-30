@@ -44,11 +44,11 @@
 ;; the wrapper map around it.
 (impl Display
   web/template/raw-node
-  (->string [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+  (->string (r) (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (impl Inspect
   web/template/raw-node
-  (inspect [r] (str "#<raw " (pr-str (raw-node-html r)) ">")))
+  (inspect (r) (str "#<raw " (pr-str (raw-node-html r)) ">")))
 
 (defn escape-html (s)
   "Escape HTML special characters: & < > \" '.
@@ -281,9 +281,9 @@
 ;; An impl returns FINAL HTML and owns its own escaping — the same power `raw` has. Pass any
 ;; interpolated user data through `escape-html`.
 (defability Renderable
-  (render-html [self] :-> string (escape-html (str self))))
+  (render-html (self) :-> string (escape-html (str self))))
 
-(impl Renderable web/template/raw-node (render-html [r] (raw-node-html r)))
+(impl Renderable web/template/raw-node (render-html (r) (raw-node-html r)))
 
 (defn render (node)
   "Render a Hiccup node to an HTML string.

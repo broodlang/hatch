@@ -60,17 +60,17 @@
 (defrecord component-spec
   (mount render render-static render-dynamic handle-event handle-tick ticks))
 
-(impl Display web/component/component-spec (->string [_spec] "#<live component-spec>"))
+(impl Display web/component/component-spec (->string (_spec) "#<live component-spec>"))
 
 ; ---- the LiveComponentModule behaviour ----
 
 (defbehaviour LiveComponentModule
   "A live component: build state from an id + assigns, render it, and handle its own
   client events, scoped independently of the parent view."
-  (mount [id assigns])
-  (render [state])
-  (handle-event [name params state])
-  (handle-tick [ms state]))
+  (mount (id assigns))
+  (render (state))
+  (handle-event (name params state))
+  (handle-tick (ms state)))
 
 ; ---- deflive-component macro ----
 

@@ -238,7 +238,7 @@
 ;; needs tearing down.
 (defrecord live-view (spec model))
 
-(impl Display web/test/live-view (->string [_v] "#<live-view>"))
+(impl Display web/test/live-view (->string (_v) "#<live-view>"))
 
 (defn live-open (spec params)
   "Mount `spec` with `params` and return a view to drive. The starting point for every

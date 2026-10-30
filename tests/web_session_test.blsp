@@ -77,10 +77,10 @@
 
 (impl SessionStore
   web-session-test/table-store
-  (session-read [store conn]
+  (session-read (store conn)
     (let (id (get-cookie conn "_sid"))
       (if (nil? id) {} (table/get *rows* id {}))))
-  (session-write [store conn data]
+  (session-write (store conn data)
     ;; a fresh session with no cookie yet gets an id from the store's own field, so each
     ;; test can own one (the suite runs concurrently over a shared `*rows*`)
     (let (id (or (get-cookie conn "_sid") (table-store-fresh-id store)))

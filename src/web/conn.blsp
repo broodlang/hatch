@@ -34,7 +34,7 @@
 
 (impl Display
   web/conn/conn
-  (->string [connection]
+  (->string (connection)
     (str "#<conn " (conn-method connection) " " (conn-path connection) ">")))
 
 ;; The most a JSON body may be for `parse-body` to decode it into params. json/decode costs

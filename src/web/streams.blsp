@@ -59,7 +59,7 @@
 
 (impl Display
   web/streams/stream
-  (->string [s] (str "#<stream " (->string (stream-name s)) ">")))
+  (->string (s) (str "#<stream " (->string (stream-name s)) ">")))
 
 ;; Identity, not shape — the same argument web/upload/spec makes. A stream is found in the
 ;; app's own model, and a map that happens to have a `:name` and a `:pending` must not be

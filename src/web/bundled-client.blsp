@@ -22,7 +22,7 @@
 
 (impl Display
   web/bundled-client/client
-  (->string [c] (str "#<bundled-client " (client-file c) ">")))
+  (->string (c) (str "#<bundled-client " (client-file c) ">")))
 
 (defn from-package (file)
   "The bundled client `file` in hatch's package `static/` directory, its source read now.

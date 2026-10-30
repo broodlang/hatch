@@ -165,7 +165,7 @@
 
 (impl BucketStore
   web-ratelimit-test/recording-store
-  (take-tokens [store key cost config now]
+  (take-tokens (store key cost config now)
     (let (calls (recording-store-calls store))
       (table/put calls :key key)
       (table/put calls :cost cost)
