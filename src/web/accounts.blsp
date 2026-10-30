@@ -36,7 +36,9 @@
   (:alias encoding)
   (:alias web/form)
   (:alias web/env)
-  (:alias web/session))
+  (:alias web/session)
+  ; remember — the signed-in user, read once per request however many parts ask
+  (:alias web/request-memo))
 
 ;; ---- configuration ----------------------------------------------------------
 
@@ -290,11 +292,14 @@
 (defn current-user (conn)
   "The signed-in user, or nil: the session's `user_id`, loaded, provided the cookie's
   session version is the row's. A cookie issued before a password change or reset is
-  behind the row, and reads as signed out."
+  behind the row, and reads as signed out.
+
+  Read once per request that only reads (`web/request-memo`), however many parts of a page ask:
+  a request that writes reads it each time, since it may be changing it."
   (let (id (web/session/get-session conn "user_id"))
     (if (nil? id)
       nil
-      (let (found (user id))
+      (let (found (web/request-memo/remember [:web/accounts-user id] (fn () (user id))))
         (when (and found (= (session-version-of conn) (session-version found))) found)))))
 
 (defn session-version-of (conn)
@@ -342,10 +347,10 @@
   in the table forever."
   (let (now (os/now)
         latest (repo/one (conn)
-                 (-> (query/from :user_tokens)
-                   (query/where {:user_id (get user :id) :context context})
-                   (query/order-by :inserted_at :desc)
-                   (query/limit 1))))
+                 (query/from t
+                   :user_tokens :where
+                   (and (= t.user_id (get user :id)) (= t.context context))
+                   :order-by (desc t.inserted_at))))
     (repo/delete (conn) :user_tokens [:and [:= :context context] [:< :inserted_at (- now ttl-ms)]])
     (if (and latest
           (int? (get latest :inserted_at))
@@ -379,8 +384,9 @@
   old inbox, not the account."
   (let (row (if (string? raw)
               (repo/one (conn)
-                (-> (query/from :user_tokens)
-                  (query/where {:context context :token_hash (hash/sha256 raw)})))
+                (query/from t
+                  :user_tokens :where
+                  (and (= t.context context) (= t.token_hash (hash/sha256 raw)))))
               nil))
     (cond
       (nil? row) nil
@@ -504,7 +510,7 @@
   (`token-allows?`), or nil — unknown, expired, or no token at all. Records last-used."
   (let (row (if (string? raw-token)
               (repo/one (conn)
-                (-> (query/from :api_tokens) (query/where {:token_hash (hash/sha256 raw-token)})))
+                (query/from t :api_tokens :where (= t.token_hash (hash/sha256 raw-token))))
               nil))
     (cond
       (nil? row) nil
@@ -526,10 +532,11 @@
 (defn tokens (user-id)
   "`user-id`'s API tokens, newest first — metadata only, never the hash."
   (repo/all (conn)
-    (-> (query/from :api_tokens)
-      (query/select [:id :user_id :name :scopes :expires_at :last_used_at :inserted_at])
-      (query/where {:user_id user-id})
-      (query/order-by :inserted_at :desc))))
+    (query/from t
+      :api_tokens :where
+      (= t.user_id user-id)
+      :select [t.id t.user_id t.name t.scopes t.expires_at t.last_used_at t.inserted_at]
+      :order-by (desc t.inserted_at))))
 
 (defn revoke-token (id user-id)
   "Delete `user-id`'s token `id`. Scoped to the owner, so one user cannot revoke
@@ -544,21 +551,22 @@
 
 (defn user (id)
   "The user with `id`, or nil."
-  (repo/one (conn) (-> (query/from :users) (query/where {:id id}))))
+  (repo/one (conn) (query/from u :users :where (= u.id id))))
 
 (defn user-by-email (email)
   "The user with `email` (normalised the way sign-up stores it), or nil."
-  (repo/one (conn) (-> (query/from :users) (query/where {:email (normalize-email email)}))))
+  (repo/one (conn) (query/from u :users :where (= u.email (normalize-email email)))))
 
 (defn unconfirmed-before (cutoff &optional (limit 500))
   "Up to `limit` users registered before `cutoff` (epoch ms) who never confirmed their
   address, oldest first. An address nobody confirms is how a script registers by the hundred;
   on a site open to anyone those accounts otherwise pile up for good."
   (repo/all (conn)
-    (-> (query/from :users)
-      (query/where [:and [:is-nil :confirmed_at] [:< :inserted_at cutoff]])
-      (query/order-by :id)
-      (query/limit limit))))
+    (query/from u
+      :users :where
+      (and (nil? u.confirmed_at) (< u.inserted_at cutoff))
+      :order-by u.id
+      :limit limit)))
 
 (defn delete-user (user-id &optional (also nil))
   "Delete the user `user-id` and every token it holds, in one transaction. `also`, given, is

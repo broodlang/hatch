@@ -6,7 +6,8 @@
   (:use web/accounts)
   (:alias repo)
   (:alias web/conn)
-  (:alias web/session))
+  (:alias web/session)
+  (:alias web/request-memo))
 
 ;; Tests run concurrently and the configuration is global, so the fake answers per process:
 ;; each statement is sent to the process that ran it as `[:sql text params]`, and answers
@@ -82,7 +83,22 @@
       (assert= nil (current-user stale))
       (answer [{:id 7 :session_version 2}])
       (assert= 7 (get (current-user fresh) :id))
-      (assert= nil (current-user conn)))))
+      (assert= nil (current-user conn))))
+  (test "a request that reads asks for the user once, however many parts ask; one that writes each time"
+    (let (asked (fn (method)
+                  (statements ())
+                  (let (conn (-> (web/conn/build {:method method :path "/" :headers {} :body ""})
+                               (login-user {:id 7 :session_version 2})))
+                    (web/request-memo/request conn
+                      (fn (conn)
+                        (answer [{:id 7 :session_version 2}])
+                        (answer [{:id 7 :session_version 2}])
+                        (assert= 7 (get (current-user conn) :id))
+                        (assert= 7 (get (current-user conn) :id))))
+                    (receive ([:rows _] nil) (after 0 nil))
+                    (count (statements ())))))
+      (assert= 1 (asked "GET"))
+      (assert= 2 (asked "POST")))))
 
 (describe "API tokens"
   (test "a mint keeps only the configured scopes asked for"

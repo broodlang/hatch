@@ -31,7 +31,7 @@
 
 (defn all-messages ()
   "All messages, oldest first (id ASC)."
-  (repo/all *repo* (-> (query/from :messages) (query/order-by :id :asc))))
+  (repo/all *repo* (query/from m :messages :order-by m.id)))
 
 (defn insert-message (row)
   "Insert a `{:name ... :body ...}` row; return the inserted row with `:id`."
