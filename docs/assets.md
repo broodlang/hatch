@@ -196,6 +196,19 @@ the file twice). `(static/modulepreload "editor.js")` fetches a module the entry
 hint never names a URL the page does not use — which is the way a hand-written hint goes
 wrong, and the one that makes the page slower than no hint.
 
+**4. Font faces** — a font's fingerprint is known only after the stylesheet is built, so
+`(static/font-face-css faces)` writes the `@font-face` rules at render time, for an inline
+`<style>` in the head. A face may be split: a small subset (made at build time, e.g. with
+`hb-subset`) for the characters nearly every page uses, and the whole font for the rest. Give
+the subset `:unicode-range ranges` and the whole font `:unicode-range (static/unicode-range-outside
+ranges)`; the browser then downloads the whole font only for a page whose text needs it.
+
+**5. The next page before it is asked for** — `(web/speculation/rules {:exclude [...]})` is a
+`<script type="speculationrules">` that has Chromium prerender a page of the site while the
+pointer rests on its link, so following it shows the page at once. Leave out downloads and
+streams. A guessed request says so (`Sec-Purpose`), and `(web/speculation/speculative? conn)`
+tells it apart, for a page that counts a look.
+
 ---
 
 ## Switching tools

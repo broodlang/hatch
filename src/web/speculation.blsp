@@ -1,0 +1,47 @@
+(defmodule web/speculation
+  "Pages made before they are asked for: speculation rules, which Chromium's browsers read, and
+  the request they send for one.
+
+  `rules` gives a `<script type=\"speculationrules\">` for the layout. With `:prerender` the
+  browser fetches a page of the site while the pointer rests on its link (or a finger presses
+  it) and renders it out of sight, so following the link shows it at once; with `:prefetch` it
+  only fetches the document. Not every link should be: a download or a stream is fetched for
+  nothing and holds the server, and a link that changes something must never be followed by
+  a guess (a GET that writes is wrong anyway). `:exclude` names those.
+
+  A request made this way says so (`Sec-Purpose: prefetch`, or `prefetch;prerender`), and
+  `speculative?` tells it apart, for a page that counts or records a look: a guess is not one."
+  (:alias web/conn)
+  (:alias web/template))
+
+(defn rules (&optional (options {}))
+  "A `<script type=\"speculationrules\">` node, as Hiccup. `options`:
+  `:action` — `:prerender` (the default) or `:prefetch`;
+  `:eagerness` — `\"moderate\"` (the default: on a pointer resting on a link, about 200 ms, or
+    on pressing it), `\"conservative\"` (on pressing only) or `\"eager\"`;
+  `:match` — the URL pattern of links to take, `\"/*\"` (every link on the site) by default;
+  `:exclude` — URL patterns never to take (`\"/*/archive/*\"`);
+  `:exclude-selectors` — CSS selectors of links never to take (`\"[download]\"`, `\".no-guess\"`).
+
+  Hiccup escapes a script's text as it does any other, which would break the JSON, so the
+  rules go in raw; they are JSON encoded here, from the options, never from a request."
+  [:script
+    {:type "speculationrules"}
+    (web/template/raw (rules-json options))])
+
+(defn rules-json (&optional (options {}))
+  "The JSON text `rules` puts in its script."
+  (let (action (get options :action :prerender)
+        exclusions (append (map (get options :exclude [])
+                             (fn (pattern) {"not" {"href_matches" pattern}}))
+                     (map (get options :exclude-selectors [])
+                       (fn (selector) {"not" {"selector_matches" selector}}))))
+    (json/encode {(->string action) [{"where" {"and" (into [{"href_matches" (get options
+                                                                              :match "/*")}]
+                                                       exclusions)}
+                                      "eagerness" (get options :eagerness "moderate")}]})))
+
+(defn speculative? (conn)
+  "Whether the request is the browser's guess (a prefetch or a prerender) rather than someone
+  asking: its `Sec-Purpose` says `prefetch`. Not for refusing it, only for not counting it."
+  (includes? (or (web/conn/header conn :sec-purpose) "") "prefetch"))

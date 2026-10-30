@@ -564,6 +564,73 @@
      :crossorigin "anonymous"
      :href (asset-path logical dir)}])
 
+; ---- font faces: the @font-face rules, fingerprinted and split by unicode-range ----
+;
+; A font's URL is fingerprinted, and the fingerprint is known only once the files are hashed,
+; after any stylesheet is built; so the rules are made here, at render time, for an inline
+; `<style>` in the head. A face may also be split: a small subset for the characters nearly
+; every page uses, and the whole font for the rest. With disjoint `unicode-range`s the browser
+; downloads the whole font only on a page whose text needs one of those other characters.
+
+;; The highest code point, the end of the last range `unicode-range-outside` gives.
+(def- *last-code-point* 0x10FFFF)
+
+(defn- code-point-hex (code-point) (string/upper (string/number-> code-point 16)))
+
+(defn unicode-range (ranges)
+  "The CSS `unicode-range` value for `ranges`, a list of `[first last]` code points, inclusive:
+  `[[0x20 0x7E] [0x2212 0x2212]]` gives `\"U+20-7E,U+2212\"`."
+  (string/join (map ranges
+                 (fn (range)
+                   (let ([first-point last-point] range)
+                     (if (= first-point last-point)
+                       (str "U+" (code-point-hex first-point))
+                       (str "U+" (code-point-hex first-point) "-" (code-point-hex last-point))))))
+    ","))
+
+(defn unicode-range-outside (ranges)
+  "The code points `ranges` leaves out, as ranges of the same shape, up to U+10FFFF: what the
+  whole font answers for when a subset answers for `ranges`. `ranges` must be in order and
+  must not overlap."
+  (let (end (reduce ranges
+              {:next 0 :gaps []}
+              (fn (state range)
+                (let ([first-point last-point] range
+                      next-point (get state :next))
+                  {:next (+ last-point 1)
+                   :gaps (if (< next-point first-point)
+                           (conj (get state :gaps) [next-point (- first-point 1)])
+                           (get state :gaps))}))))
+    (if (<= (get end :next) *last-code-point*)
+      (conj (get end :gaps) [(get end :next) *last-code-point*])
+      (get end :gaps))))
+
+(defn font-face-css (faces &optional (dir "static"))
+  "The `@font-face` rules for `faces`, one string, each `src` resolved through `asset-path` so
+  it names the fingerprinted file (and a `preload-font` of the same name matches it). A face is
+  a map: `:family`, `:src` (a logical name), `:weight`, and optionally `:style` (\"normal\"),
+  `:display` (\"swap\": text shows in the fallback at once) and `:unicode-range` (ranges as
+  `unicode-range` takes them).
+
+  For a subset and the whole font, give the same family and weight twice, the subset with
+  its ranges and the whole font with `(unicode-range-outside ranges)`."
+  (apply str
+    (map faces
+      (fn (face)
+        (str "@font-face{font-family:\""
+          (get face :family)
+          "\";src:url(\""
+          (asset-path (get face :src) dir)
+          "\") format(\"woff2\");font-weight:"
+          (get face :weight)
+          ";font-style:"
+          (get face :style "normal")
+          ";font-display:"
+          (get face :display "swap")
+          (let (ranges (get face :unicode-range))
+            (if (nil? ranges) "" (str ";unicode-range:" (unicode-range ranges))))
+          "}")))))
+
 ; ---- hatch's own bundled assets ----
 
 ; Hatch ships three browser clients in its package `static/` dir — brood_live.js,

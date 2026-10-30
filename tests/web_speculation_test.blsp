@@ -1,0 +1,37 @@
+(defmodule web-speculation-test
+  (:use test)
+  (:alias web/speculation)
+  (:alias web/conn)
+  (:alias web/template))
+
+(defn conn-with-headers (headers)
+  (web/conn/build {:method "GET" :path "/" :query "" :params {} :headers headers :body ""}))
+
+(describe "rules-json"
+  (test "prerenders every link on the site, moderately, by default"
+    (assert= (json/decode (web/speculation/rules-json))
+      {:prerender [{:where {:and [{:href_matches "/*"}]} :eagerness "moderate"}]}))
+  (test "a prefetch, with patterns and selectors left out"
+    (assert= (json/decode (web/speculation/rules-json {:action :prefetch
+                                                       :eagerness "conservative"
+                                                       :exclude ["/*/archive/*" "/install.sh"]
+                                                       :exclude-selectors ["[download]"]}))
+      {:prefetch [{:where {:and [{:href_matches "/*"}
+                                  {:not {:href_matches "/*/archive/*"}}
+                                  {:not {:href_matches "/install.sh"}}
+                                  {:not {:selector_matches "[download]"}}]}
+                   :eagerness "conservative"}]})))
+
+(describe "rules"
+  (test "a speculationrules script whose text is the JSON, not escaped"
+    (let (html (web/template/html (web/speculation/rules {:exclude ["/a/*"]})))
+      (assert (includes? html "<script type=\"speculationrules\">{\""))
+      (assert (includes? html "\"href_matches\":\"/a/*\"")))))
+
+(describe "speculative?"
+  (test "a prefetch is"
+    (assert (web/speculation/speculative? (conn-with-headers {:sec-purpose "prefetch"}))))
+  (test "a prerender is"
+    (assert (web/speculation/speculative? (conn-with-headers {:sec-purpose "prefetch;prerender"}))))
+  (test "a request with no Sec-Purpose is not"
+    (assert (not (web/speculation/speculative? (conn-with-headers {}))))))

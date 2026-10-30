@@ -403,3 +403,22 @@
   (test "both honour a custom dir"
     (assert= (get (second (modulepreload "a.js" "assets")) :href) "/assets/a.js")
     (assert= (get (second (preload-font "a.woff2" "assets")) :href) "/assets/a.woff2")))
+
+(describe "font faces"
+  (test "unicode-range writes each range in hex, a single point alone"
+    (assert= (unicode-range [[0x20 0x7E] [0xA0 0xFF] [0x2212 0x2212]]) "U+20-7E,U+A0-FF,U+2212"))
+  (test "unicode-range-outside gives the gaps and the rest up to U+10FFFF"
+    (assert= (unicode-range-outside [[0x20 0x7E] [0x7F 0xFF] [0x2212 0x2212]])
+      [[0 0x1F] [0x100 0x2211] [0x2213 0x10FFFF]]))
+  (test "unicode-range-outside of ranges reaching the end gives no last range"
+    (assert= (unicode-range-outside [[0 0x10FFFF]]) []))
+  (test "a face: its family, its asset path, weight, style and swap"
+    (assert= (font-face-css [{:family "Hack" :src "fonts/hack.woff2" :weight "400"}])
+      (str "@font-face{font-family:\"Hack\";src:url(\"/static/fonts/hack.woff2\") format(\"woff2\");"
+        "font-weight:400;font-style:normal;font-display:swap}")))
+  (test "a face with ranges says them"
+    (assert (includes? (font-face-css [{:family "Hack"
+                                        :src "a.woff2"
+                                        :weight "700"
+                                        :unicode-range [[0x20 0x7E]]}])
+              ";unicode-range:U+20-7E}"))))
