@@ -17,7 +17,7 @@
     (cond
       (string/ends-with? url "/oauth/v2/token") (json-response token-status token-body)
       (string/ends-with? url "/oidc/v1/userinfo") (json-response userinfo-status claims)
-      :else {:status 404 :headers {} :body (string/->bytes "")})))
+      else {:status 404 :headers {} :body (string/->bytes "")})))
 
 (defn callback-conn (pending params)
   (signed-in (conn-for "GET" "/auth/callback" {:params params})

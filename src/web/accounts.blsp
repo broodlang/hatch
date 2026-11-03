@@ -55,7 +55,7 @@
       (not (empty? unknown)) (error "web/accounts/configure: unknown setting: " (first unknown))
       (not (fn? (get settings :repo)))
         (error "web/accounts/configure: :repo must be a function answering the repo")
-      :else (do (def *settings* (merge {:token-scopes []} settings)) nil))))
+      else (do (def *settings* (merge {:token-scopes []} settings)) nil))))
 
 (defn- setting (key)
   (if (nil? *settings*)
@@ -206,7 +206,7 @@
       ;; The cheap check first, so an address already taken costs no KDF run. It is not the
       ;; guarantee — two sign-ups can both pass it — the unique index below is.
       (user-by-email email) [:error *sign-up-refused*]
-      :else
+      else
         (let (now-ms (os/now)
               row (-> (changeset/change {}
                         (merge fields
@@ -266,7 +266,7 @@
       (not (verify-password current-password (get user :hashed_password)))
         [:error "current password is incorrect"]
       (not (changeset/valid? form)) [:error (first-error form)]
-      :else (set-password user new-password))))
+      else (set-password user new-password))))
 
 (defn- set-password (user new-password)
   "Store `new-password` for `user` and bump the session version, which signs every other
@@ -389,7 +389,7 @@
     (cond
       (nil? row) nil
       (email-token-expired? row ttl-ms) nil
-      :else
+      else
         (let (found (user (get row :user_id)))
           (when (and found (= (get found :email) (get row :sent_to))) found)))))
 
@@ -447,7 +447,7 @@
       (not (changeset/valid? form)) [:error (first-error form)]
       ;; One transaction: a new password whose old reset links still worked would be a
       ;; reset that could be undone by whoever else holds one.
-      :else
+      else
         (transaction (fn ()
                        (let (outcome (set-password user new-password))
                          (repo/delete (conn) :user_tokens [:= :user_id (get user :id)])
@@ -513,7 +513,7 @@
     (cond
       (nil? row) nil
       (token-expired? row) nil
-      :else
+      else
         (do
           (repo/update (conn)
             :api_tokens {:last_used_at (os/now)}

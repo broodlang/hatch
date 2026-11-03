@@ -39,7 +39,7 @@
     (cond
       (contains? params field) [:present (get params field)]
       (contains? params (->string field)) [:present (get params (->string field))]
-      :else [:absent])))
+      else [:absent])))
 
 (defn value (cs field)
   "The text an input for `field` should show: what was submitted (so a value that failed

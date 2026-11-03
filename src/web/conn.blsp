@@ -142,7 +142,7 @@
     (= (content-type-base headers) "multipart/form-data")
       (let (mp (http/multipart/parse body-bytes (content-type-param headers "boundary")))
         {:params (get mp :fields) :files (get mp :files)})
-    :else {:params (parse-body-params headers body-text) :files {}}))
+    else {:params (parse-body-params headers body-text) :files {}}))
 
 (defn parse-body-params (headers body)
   "Parse a request `body` into a string→value params map based on its Content-Type:
@@ -251,7 +251,7 @@
   (let (parsed (cond
                  (int? raw) raw
                  (string? raw) (string/->number raw)
-                 :else nil))
+                 else nil))
     (if (and (int? parsed) (>= parsed 0) (<= parsed *largest-whole-number*)) parsed nil)))
 
 (defn whole-number-param (conn key &optional (fallback nil))
@@ -291,7 +291,7 @@
     (cond
       (string? spool) (file/slurp-bytes spool)
       (nil? in-memory) (string/->bytes "")
-      :else in-memory)))
+      else in-memory)))
 
 (defn save-body (conn dest)
   "Persist a spooled request body to `dest` by moving the temp spool file — zero-copy (a

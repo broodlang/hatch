@@ -221,7 +221,7 @@
     (cond
       machine (if region (str machine " (" region ")") machine)
       (not (= (node/name) :nonode)) (str (node/name))
-      :else "this process")))
+      else "this process")))
 
 (defn- peer-label (nm)
   (let (key (str nm)

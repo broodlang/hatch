@@ -141,7 +141,7 @@
         [:error 403 "the state that came back is not the one this browser started with" cleared]
 
       (or (nil? code) (string/blank? code)) [:error 400 "no code came back" cleared]
-      :else
+      else
         (match (claims-for config transport code (get pending "verifier"))
           ([:error status why] [:error status why cleared])
           ([:ok claims] [:ok claims cleared])))))
@@ -171,7 +171,7 @@
 
       (not (string? (get token :access_token)))
         [:error 502 "the token endpoint sent no access token"]
-      :else
+      else
         (let (userinfo-response (transport "GET"
                                   (str (get config :issuer)
                                     (get config :userinfo-path (get *zitadel-paths* :userinfo-path)))
