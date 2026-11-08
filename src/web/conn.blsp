@@ -128,7 +128,10 @@
         :body-params body-params
         :files (get parsed :files)
         :body-parsed? true))))
-(sig parse-body (map -> map))
+;; a conn record from `build` / `build-unparsed`, or a conn written out as a map in a test.
+;; Qualified: at runtime a bare `conn` resolves to any module's `deftype conn` first (store-postgres
+;; has one), and that alias refuses this record.
+(sig parse-body ((or web/conn/conn map) -> (or web/conn/conn map)))
 
 (defn parse-conn-body (headers body-text body-bytes)
   "Parse the request body into `{:params <string→value> :files <name→file-map>}`.

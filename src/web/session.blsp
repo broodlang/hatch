@@ -279,7 +279,8 @@
   ;; `decode-session` is the built-in example), and a return type that cannot be satisfied is
   ;; a warning every implementor would have to work around rather than a contract.
   (session-read (self conn) :-> any)
-  (session-write (self conn data) :-> map))
+  ;; `session-write` answers the conn: a `web/conn/conn` record, or a map in a test that wrote one
+  (session-write (self conn data) :-> (or web/conn/conn map)))
 
 (defn session-cookie-name (opts)
   "The cookie a session is carried in — `:cookie` in `opts`, else `_hatch_session`."
