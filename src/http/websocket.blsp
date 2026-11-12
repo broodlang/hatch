@@ -366,12 +366,12 @@
 
 (defn- recv-frame-fill (sock buf pieces got need)
   "Gather socket reads (`bytes` `pieces`, newest-first; `got` bytes so far) until the current
-  frame's `need` more bytes are in hand, then `bytes/concat` once and re-enter `recv-frame`.
+  frame's `need` more bytes are in hand, then `bytes/append` once and re-enter `recv-frame`.
   `need` nil means re-parsing what we hold cannot make progress — the header is still arriving,
   or the first frame is complete but its message is not (see `frame-shortfall`) — so append one
   read and re-derive rather than looping on it.
 
-  Gathering into a list and joining once is what keeps this O(n): re-`bytes/concat`ing the
+  Gathering into a list and joining once is what keeps this O(n): re-`bytes/append`ing the
   whole buffer on every read was O(n²) up to the message-size cap."
   (if (and (not (nil? need)) (>= got need))
     (recv-frame sock (bytes/append buf (reverse pieces)))

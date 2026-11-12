@@ -202,7 +202,7 @@
   (let (hits (counter :hits)
         misses (counter :misses)
         asked (+ hits misses))
-    ;; `table/count`, not a count of a snapshot: a snapshot copies every stored value out of
+    ;; `count`, not a count of a snapshot: a snapshot copies every stored value out of
     ;; the table, megabytes of pages, to count them
     {:fragments (count *fragments*)
      :max-fragments *max-fragments*

@@ -64,7 +64,7 @@
   remaining input once per space — the same shape of quadratic `parse-text-at` had, and the
   parser calls this at seven points, several of them per element.
 
-  `string/span` and not `string/triml`: it measures the run against exactly the character set
+  `string/span` and not `string/trim-left`: it measures the run against exactly the character set
   `ws?` names, so there is no second definition of whitespace to keep in step, and a run of
   length zero — the common case, since an attribute list usually ends right at `>` — returns
   `s` itself instead of allocating a copy of it."

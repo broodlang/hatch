@@ -286,7 +286,7 @@
 (defn body-bytes (conn)
   "The request body as `bytes`, wherever the server put it: read back from the spool when
   it was streamed to disk (`spooled?`), else the in-memory `:body-bytes`. Empty bytes for a
-  request with no body, so a caller asks `(= (bytes/length …) 0)` rather than guessing
+  request with no body, so a caller asks `(= (count …) 0)` rather than guessing
   which of nil and empty it gets. Reads a spooled body into memory — to only store one,
   `save-body` moves the file instead."
   (let (spool (conn-body-file conn)

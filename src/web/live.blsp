@@ -620,7 +620,7 @@
   byte, and the length is read before it is trusted: a declared ref longer than the frame is
   refused rather than sliced past the end.
 
-  (hatch/web/live/parse-chunk-frame (bytes/concat [2 97 98 1 2 3])) ;=> [\"ab\" (bytes [1 2 3])]
+  (hatch/web/live/parse-chunk-frame (bytes/append [2 97 98 1 2 3])) ;=> [\"ab\" (bytes [1 2 3])]
   (hatch/web/live/parse-chunk-frame (bytes [9 97])) ;=> nil
   (hatch/web/live/parse-chunk-frame (bytes [])) ;=> nil"
   (let (total (count payload))
