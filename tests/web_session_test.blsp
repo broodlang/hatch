@@ -19,7 +19,7 @@
   "The session cookie's value from a response's first Set-Cookie line (drops attributes)."
   (let (sc (first (get (get r :headers) :set-cookie))
         eq (index-of sc "=")
-        tail (string/substring sc (+ eq 1) (string/length sc))
+        tail (string/substring sc (+ eq 1) (count sc))
         semi (index-of tail ";"))
     (string/substring tail 0 semi)))
 
@@ -285,7 +285,7 @@
           last-dot (string/last-index-of cookie ".")
           ciphertext (encoding/base64-url-decode-bytes (string/substring cookie
                                                          (+ last-dot 1)
-                                                         (string/length cookie)))
+                                                         (count cookie)))
           plaintext (string/->bytes (json/encode {"token" "super-secret-value"})))
       (is (not (includes? cookie "super-secret-value")))
       ;; compared as BYTES: the ciphertext is not text, which is the point — decoding it as
@@ -302,7 +302,7 @@
 
   (test "a tampered ciphertext does not open"
     (let (cookie (encode-session *sec* {"user_id" 7} {:encrypt true})
-          flipped (str (string/substring cookie 0 (- (string/length cookie) 2)) "AA"))
+          flipped (str (string/substring cookie 0 (- (count cookie) 2)) "AA"))
       (assert= {} (decode-session *sec* flipped))))
 
   (test "another secret does not open it"

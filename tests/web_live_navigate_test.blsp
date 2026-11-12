@@ -32,16 +32,16 @@
 
 ;; View B: a hand-built spec with nothing in it that beats.
 (defn- b-spec ()
-  {:mount (fn (params) {})
-   :render (fn (model &optional _components) [:p {} "b"])
+  {:mount (fn (_params) {})
+   :render (fn (_model &optional _components) [:p {} "b"])
    :render-static ["<p>b</p>"]
-   :render-dynamic (fn (model &optional _components) [])
-   :handle-event (fn (name params model) model)
-   :handle-tick (fn (key model) model)
-   :handle-info (fn (message model) model)
-   :unmount (fn (model) nil)
-   :mount-guard (fn (conn) nil)
-   :handle-params (fn (params model) model)
+   :render-dynamic (fn (_model &optional _components) [])
+   :handle-event (fn (_name _params model) model)
+   :handle-tick (fn (_key model) model)
+   :handle-info (fn (_message model) model)
+   :unmount (fn (_model) nil)
+   :mount-guard (fn (_conn) nil)
+   :handle-params (fn (_params model) model)
    :ticks []})
 
 (register-live "/navigate-test-b" b-spec nil)
@@ -50,7 +50,7 @@
 (defn masked-text-frame (s)
   "A masked client text frame (mask key zero, so the payload is the plaintext); < 126 bytes."
   (let (b (string/->bytes s))
-    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+    (bytes/append [129 (+ 128 (count b)) 0 0 0 0 b])))
 
 (defn- split-frame (buf)
   "`[text remainder]` once `buf` holds a whole unmasked server frame, else nil."
@@ -70,7 +70,7 @@
     (if split
       split
       (receive
-        ([:tcp ^sock chunk] (next-frame sock (bytes/concat buf chunk) wait-ms))
+        ([:tcp ^sock chunk] (next-frame sock (bytes/append buf chunk) wait-ms))
         ([:tcp-closed ^sock] :closed)
         (after wait-ms :timeout)))))
 
@@ -195,7 +195,7 @@
     (other other)))
 
 (defn- raising-spec ()
-  (assoc (b-spec) :mount (fn (params) (error "mount blew up"))))
+  (assoc (b-spec) :mount (fn (_params) (error "mount blew up"))))
 
 (register-live "/navigate-test-raises" raising-spec nil)
 

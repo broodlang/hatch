@@ -13,7 +13,7 @@
   {:status status :headers {} :body (string/->bytes (json/encode body))})
 
 (defn stub (token-body claims &optional (token-status 200) (userinfo-status 200))
-  (fn (method url opts)
+  (fn (_method url _opts)
     (cond
       (string/ends-with? url "/oauth/v2/token") (json-response token-status token-body)
       (string/ends-with? url "/oidc/v1/userinfo") (json-response userinfo-status claims)
@@ -63,7 +63,7 @@
 (describe "complete"
   (test "exchanges the code with the verifier, fetches the claims, clears the pending sign-in"
     (let (claims {:email "ada@x.y" :email_verified true :preferred_username "ada"}
-          seen (fn (method url opts)
+          seen (fn (_method url opts)
                  (if (string/ends-with? url "/oauth/v2/token")
                    (do
                      (assert= (includes? (get opts :body) "code_verifier=V1") true)
@@ -84,7 +84,7 @@
 
   (test "a confidential client sends its secret"
     (let (config (assoc *config* :client-secret "SHH")
-          seen (fn (method url opts)
+          seen (fn (_method url opts)
                  (if (string/ends-with? url "/oauth/v2/token")
                    (do
                      (assert= (includes? (get opts :body) "client_secret=SHH") true)
@@ -100,7 +100,7 @@
     (let (attempt (fn (pending params transport)
                     (match (oidc/complete (callback-conn pending params) *config* transport)
                       ([:error status why _] [status why])
-                      (other [:ok]))))
+                      (_other [:ok]))))
       (assert= (first (attempt {"state" "S1" "verifier" "V1"}
                         {"code" "C1" "state" "OTHER"}
                         (stub {} {})))

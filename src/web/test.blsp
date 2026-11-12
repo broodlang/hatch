@@ -325,10 +325,10 @@
 ; on that has nothing to do with what the view means.
 
 (defn- strip-quotes (s)
-  (if (and (>= (string/length s) 2)
+  (if (and (>= (count s) 2)
         (or (and (string/starts-with? s "\"") (string/ends-with? s "\""))
           (and (string/starts-with? s "'") (string/ends-with? s "'"))))
-    (string/substring s 1 (- (string/length s) 1))
+    (string/substring s 1 (- (count s) 1))
     s))
 
 (defn- take-attr-parts (s acc)
@@ -338,8 +338,7 @@
         close (index-of s "]"))
     (if (or (= open -1) (= close -1) (< close open))
       [s (reverse acc)]
-      (take-attr-parts (str (string/substring s 0 open)
-                         (string/substring s (+ close 1) (string/length s)))
+      (take-attr-parts (str (string/substring s 0 open) (string/substring s (+ close 1) (count s)))
         (cons (string/substring s (+ open 1) close) acc)))))
 
 (defn- parse-attr-part (part)
@@ -349,7 +348,7 @@
     (if (= i -1)
       [(keyword (string/trim part)) nil]
       [(keyword (string/trim (string/substring part 0 i)))
-        (strip-quotes (string/trim (string/substring part (+ i 1) (string/length part))))])))
+        (strip-quotes (string/trim (string/substring part (+ i 1) (count part))))])))
 
 (defn- explode (s delimiter)
   "Split `s` on `delimiter` and re-join with a space before each occurrence, so the pieces can
@@ -377,7 +376,7 @@
 
 (defn- drop-marker (token)
   "A `#id` or `.class` token without its leading marker."
-  (string/substring token 1 (string/length token)))
+  (string/substring token 1 (count token)))
 
 (defn parse-selector (selector)
   "A selector string as a list of compound selectors, outermost first. Public so the

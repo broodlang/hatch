@@ -27,7 +27,7 @@
 (defn body-of (resp)
   "The body (everything past the head terminator) of a raw response."
   (let (i (index-of resp "\r\n\r\n"))
-    (if (= i -1) "" (string/substring resp (+ i 4) (string/length resp)))))
+    (if (= i -1) "" (string/substring resp (+ i 4) (count resp)))))
 
 (defn unchunk (s acc)
   "Decode a chunked-transfer body string back to its payload (ASCII framing/payload — chunk
@@ -36,12 +36,12 @@
     (if (= nl -1)
       acc
       (let (size (parse-hex (string/substring s 0 nl))
-            after-size (string/substring s (+ nl 2) (string/length s)))
+            after-size (string/substring s (+ nl 2) (count s)))
         ;; `parse-hex` folds from 0, so it answers an int and never nil — the `nil?` arm
         ;; it used to carry could not fire (brood's impossible-predicate lint, ADR-313).
         (if (= size 0)
           acc
-          (unchunk (string/substring after-size (+ size 2) (string/length after-size))
+          (unchunk (string/substring after-size (+ size 2) (count after-size))
             (str acc (string/substring after-size 0 size))))))))
 
 (defn parse-hex (s)

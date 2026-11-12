@@ -214,4 +214,4 @@ but not an object (a bare string or array answers nothing an `(get … :field)` 
 (sig json-of (any -> (or nil map)))
 
 (defn- without-trailing-slash (text)
-  (if (string/ends-with? text "/") (string/substring text 0 (dec (string/length text))) text))
+  (if (string/ends-with? text "/") (string/substring text 0 (dec (count text))) text))

@@ -5,7 +5,7 @@
 
 (defn rtext (out)
   "Flatten a format-response iolist (or bytes) and decode to text for assertions."
-  (string/bytes-> (bytes/concat out)))
+  (string/bytes-> (bytes/append out)))
 
 (describe "capitalize-first"
   (test "lowercase word" (assert= (capitalize-first "content") "Content"))
@@ -34,14 +34,14 @@
   ; format-response returns an ADR-139 iolist of `bytes` leaves. Flattened, a multibyte body
   ; is single-encoded (not doubled) and Content-Length matches the bytes actually sent.
   (test "flattens to a bytes value"
-    (assert= (bytes? (bytes/concat (format-response {:status 200 :body "em dash — arrow → done"})))
+    (assert= (bytes? (bytes/append (format-response {:status 200 :body "em dash — arrow → done"})))
       true))
   (test "the body round-trips through UTF-8 decoding back to the original text"
     (let (out (format-response {:status 200 :body "em dash — arrow →"}))
       (assert= (includes? (rtext out) "em dash — arrow →") true)))
   (test "the multibyte body is encoded exactly once (no doubling)"
     ; the wire bytes must equal the single UTF-8 encoding of header + body, byte for byte
-    (let (out (bytes/concat (format-response {:status 200 :body "é"})))
+    (let (out (bytes/append (format-response {:status 200 :body "é"})))
       (assert= (string/ends-with? (rtext out) "é") true)
       ; last byte = 0xA9, the 2nd byte of é; preceding = 0xC3 — not a doubled C3 82…
       (assert= (bytes/at out (- (count out) 1)) 169)

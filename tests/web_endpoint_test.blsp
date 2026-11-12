@@ -134,7 +134,7 @@
     (let (resp (respond {:router long-html-router} {:accept-encoding "gzip"}))
       (assert= (get (get resp :headers) :content-encoding) "gzip")
       ;; the body is now bytes, and smaller than the string it came from
-      (assert= (< (bytes/length (get resp :body)) 700) true)))
+      (assert= (< (count (get resp :body)) 700) true)))
 
   (test "brotli is preferred when it is offered"
     (assert= (get (get (respond {:router long-html-router} {:accept-encoding "gzip, br"}) :headers)
@@ -233,7 +233,7 @@
           second-out (compress-response conn resp {}))
       (assert= (get (get first-out :headers) :content-encoding) "br")
       ;; identical bytes back, and one entry for this representation
-      (assert= (bytes/length (get first-out :body)) (bytes/length (get second-out :body)))
+      (assert= (count (get first-out :body)) (count (get second-out :body)))
       (assert= (count (entries-for tag)) 1)))
 
   (test "a different coding is a separate representation — RFC 9110 8.8.3"

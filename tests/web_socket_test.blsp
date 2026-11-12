@@ -22,7 +22,7 @@
 (defn- masked-frame (opcode text)
   "A masked client frame (mask key zero, so the payload is the plaintext); < 126 bytes."
   (let (b (string/->bytes text))
-    (bytes/concat [(+ 128 opcode) (+ 128 (count b)) 0 0 0 0 b])))
+    (bytes/append [(+ 128 opcode) (+ 128 (count b)) 0 0 0 0 b])))
 
 (defn- read-server-bytes (sock wait-ms)
   (receive ([:tcp ^sock chunk] chunk) (after wait-ms nil)))
@@ -63,7 +63,7 @@
 (describe "recv handles the plumbing itself"
   :isolated (test "a ping is answered with a pong and the read carries on to the next frame"
     (let ([client server listener] (loopback))
-      (tcp/send client (bytes/concat [(masked-frame 9 "p") (masked-frame 1 "after")]))
+      (tcp/send client (bytes/append [(masked-frame 9 "p") (masked-frame 1 "after")]))
       (match (recv server (bytes []) nil)
         ([:text payload _] (assert= (string/bytes-> payload) "after"))
         (other (assert= other :text)))
@@ -81,7 +81,7 @@
       (close-all (list client server listener))))
   :isolated (test "every client frame kicks the watchdog"
     (let ([client server listener] (loopback))
-      (tcp/send client (bytes/concat [(masked-frame 10 "") (masked-frame 1 "x")]))
+      (tcp/send client (bytes/append [(masked-frame 10 "") (masked-frame 1 "x")]))
       ;; this process stands in for the watchdog: a pong and a text frame, two kicks
       (recv server (bytes []) (self))
       (assert= (receive ([:alive] :kicked) (after 0 :none)) :kicked)

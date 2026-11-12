@@ -78,7 +78,7 @@
         ; nested string/bytes tree, ADR-139). Flatten it to `bytes` exactly once with
         ; `bytes-concat`: its byte count is the Content-Length, and it is the body leaf of
         ; the response iolist. `bodyless` skips it entirely (no body, no Content-Length).
-        body-bytes (if bodyless nil (bytes/concat (or (get resp :body) "")))
+        body-bytes (if bodyless nil (bytes/append (or (get resp :body) "")))
         headers (get resp :headers {})
         ; A 1xx/204/304 MUST NOT carry a body/Content-Length (RFC 7230 §3.3): strip any the
         ; handler set, or a stray Content-Length desyncs a keep-alive client (it reads that
@@ -132,7 +132,7 @@
   the payload's byte length in hex, CRLF, the payload bytes, CRLF — returned as an iolist that
   `tcp/send` flattens. An empty payload returns nil (a 0-length chunk would prematurely end the
   stream, so the caller skips a nil), keeping `last-chunk` the sole terminator."
-  (let (bs (bytes/concat data)
+  (let (bs (bytes/append data)
         n (count bs))
     (if (= n 0)
       nil
@@ -172,7 +172,7 @@
   returned as it came. The replaces still run when there IS something, so the guarantee is
   unchanged — this only stops paying for it on every header of every response."
   (let (text (str v))
-    (if (= (string/span-until text 0 "\r\n") (string/length text))
+    (if (= (string/span-until text 0 "\r\n") (count text))
       text
       (-> text
         (string/replace "\r" "")
@@ -207,10 +207,10 @@
   Bounded, like the template's name memos and for the same reason: a handler that derives a
   header name from request data must not be able to grow this without limit. Past the bound
   it still converts, just without remembering."
-  (if (table/has? *header-names* k)
+  (if (table/contains? *header-names* k)
     (table/get *header-names* k)
     (let (n (string/join (map (string/split (->string k) "-") capitalize-first) "-"))
-      (when (< (table/count *header-names*) *max-header-names*)
+      (when (< (count *header-names*) *max-header-names*)
         (table/put *header-names* k n))
       n)))
 
@@ -219,7 +219,7 @@
   `capitalize`, which lowercases the tail) — a header-name segment like `WWW` must survive."
   (if (string/blank? s)
     s
-    (str (string/upper (string/substring s 0 1)) (string/substring s 1 (string/length s)))))
+    (str (string/upper (string/substring s 0 1)) (string/substring s 1 (count s)))))
 
 (defn server-error-resp ()
   "A generic 500 that leaks no internals — http/server's default `:error-handler`. The

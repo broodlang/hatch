@@ -261,7 +261,7 @@
                  (fn (out) (not (fresh-sibling? out path)))))
     (if (empty? wanted)
       (log/info (str "[assets] precompress: " path " is already current, skipped"))
-      (let (raw (check-allow :discarded-catch (try (file/slurp-bytes path) (catch e :error))))
+      (let (raw (check-allow :discarded-catch (try (file/slurp-bytes path) (catch _e :error))))
         (if (= raw :error)
           (log/warn (str "[assets] precompress could not read " path "; serving uncompressed"))
           (do

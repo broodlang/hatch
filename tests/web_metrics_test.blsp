@@ -47,14 +47,14 @@
   (test "busiest route first"
     (reset)
     (record "GET" "/quiet" "/quiet" 200 1)
-    (for (i (range 5)) (record "GET" "/busy" "/busy" 200 1))
+    (for (_i (range 5)) (record "GET" "/busy" "/busy" 200 1))
     (assert= "GET /busy" (get (first (snapshot)) :route)))
 
   ;; Percentiles from stored samples need the samples, which is unbounded; a fixed
   ;; histogram trades exactness for constant memory, which is the trade worth making.
   (test "percentiles come from the histogram"
     (reset)
-    (for (i (range 99)) (record "GET" "/a" "/a" 200 5))
+    (for (_i (range 99)) (record "GET" "/a" "/a" 200 5))
     (record "GET" "/a" "/a" 200 4000)
     (let (row (first (snapshot)))
       (is (<= (get row :p50) 5))

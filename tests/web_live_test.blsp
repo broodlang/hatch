@@ -130,7 +130,7 @@
 (defn feed-tcp (sock frame chunk)
   "Post `frame` (bytes) to this process's mailbox as `[:tcp sock …]` reads of `chunk` bytes each,
   as the socket layer would deliver them."
-  (let (flen (bytes/length frame))
+  (let (flen (count frame))
     (fold (range (math/quot (math/floor (+ flen (- chunk 1))) chunk))
       nil
       (fn (_ k)
@@ -456,7 +456,7 @@
       (assert= (session-view-params view) {"a" "1"})
       (assert= (session-view-conn view) conn)
       ;; the component table is live and empty, ready for the first (component …) hole
-      (assert= (table/count (session-view-components view)) 0)))
+      (assert= (count (session-view-components view)) 0)))
 
   (test "two views never share a component table"
     (let (a (web/live/new-session-view (live-spec) live-spec nil {} nil)

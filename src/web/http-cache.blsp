@@ -350,7 +350,7 @@
   The manifest is needed even with a release name: a deploy that rebuilt only the stylesheet
   can keep the same image of `src/`, and a page tagged without it would be answered 304 to a
   client whose copy links a stylesheet the new machine no longer has."
-  (if (table/has? *build* :identity)
+  (if (table/contains? *build* :identity)
     (table/get *build* :identity)
     (let (stamp (str (or (web/env/text "HATCH_RELEASE") (web/env/text "FLY_IMAGE_REF") *loaded-at*)
                   "|"

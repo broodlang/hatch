@@ -127,8 +127,8 @@
 (defn valid-name? (name)
   "A tool name an agent can address: letters, digits, `_` or `-`, nothing else."
   (and (string? name)
-    (> (string/length name) 0)
-    (= (string/span name 0 *name-chars*) (string/length name))))
+    (> (count name) 0)
+    (= (string/span name 0 *name-chars*) (count name))))
 
 (defn object-schema? (schema)
   "Whether `schema` is the object JSON Schema the tool contract requires. A tool takes named

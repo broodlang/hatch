@@ -97,7 +97,7 @@
   `opts`: `:content-type` (default `application/octet-stream`), `:block-size`, and `:gzip` — when
   set and the request accepts gzip, the bytes are gzip-compressed once and streamed with
   `Content-Encoding: gzip` + `Vary: Accept-Encoding`. Returns a streaming conn."
-  (let (raw (bytes/concat data)
+  (let (raw (bytes/append data)
         gzip? (and (get opts :gzip false) (accepts-gzip? conn))
         body (if gzip? (zlib/gzip raw) raw)
         block-size (get opts :block-size 65536)

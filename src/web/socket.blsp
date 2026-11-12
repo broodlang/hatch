@@ -57,7 +57,7 @@
 
 (defn- json-clean? (s chars)
   "True when `s` contains no character from the set `chars` — one native scan."
-  (= (string/span-until s 0 chars) (string/length s)))
+  (= (string/span-until s 0 chars) (count s)))
 
 (defn json-str (s)
   "Encode a Brood string as a JSON string. Escapes `\\` and `\"`, then EVERY C0 control

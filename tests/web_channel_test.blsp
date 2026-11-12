@@ -197,8 +197,8 @@
   (let (b (string/->bytes s)
         n (count b))
     (if (<= n 125)
-      (bytes/concat [129 (+ 128 n) 0 0 0 0 b])
-      (bytes/concat [129 (+ 128 126) (bytes/int-> n 2) 0 0 0 0 b]))))
+      (bytes/append [129 (+ 128 n) 0 0 0 0 b])
+      (bytes/append [129 (+ 128 126) (bytes/int-> n 2) 0 0 0 0 b]))))
 
 ; A CLIENT-side frame reader: `parse-frame` is the server's parser and rejects an unmasked
 ; frame, which every server→client frame is by rule.
@@ -221,7 +221,7 @@
     ([:ok text remainder] [text remainder])
     ([:incomplete]
       (receive
-        ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+        ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
         ([:tcp-closed ^sock] [:closed (bytes [])])
         ;; 10s for the same reason web_live_conn_test uses it: this is a real socket round
         ;; trip through a spawned process, and 3s is occasionally not enough on a loaded
@@ -443,7 +443,7 @@
 
 (defn fill-opcode (sock buf deadline)
   (receive
-    ([:tcp ^sock chunk] (read-opcode sock (bytes/concat buf chunk) deadline))
+    ([:tcp ^sock chunk] (read-opcode sock (bytes/append buf chunk) deadline))
     ([:tcp-closed ^sock] :closed)
     (after deadline :timeout)))
 

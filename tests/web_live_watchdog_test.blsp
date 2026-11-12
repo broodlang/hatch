@@ -25,7 +25,7 @@
 
 (defn masked-text-frame (s)
   (let (b (string/->bytes s))
-    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+    (bytes/append [129 (+ 128 (count b)) 0 0 0 0 b])))
 
 (defn read-opcode (sock buf deadline)
   "The opcode of the next complete server frame, or `:timeout`. Server frames are unmasked, so
@@ -43,7 +43,7 @@
 
 (defn fill-frame (sock buf deadline)
   (receive
-    ([:tcp ^sock chunk] (read-opcode sock (bytes/concat buf chunk) deadline))
+    ([:tcp ^sock chunk] (read-opcode sock (bytes/append buf chunk) deadline))
     ([:tcp-closed ^sock] :closed)
     (after deadline :timeout)))
 

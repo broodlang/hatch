@@ -95,7 +95,7 @@
   `*max-fragment-bytes*` of string and byte values, the whole store is dropped and rebuilds on
   demand (see `keep-fragment`), so a caller that does key it by input costs recomputation, not
   the machine's memory."
-  (if (table/has? *fragments* key)
+  (if (table/contains? *fragments* key)
     (let (stored (table/get *fragments* key))
       (one-policy-per-key key stored false)
       (bump :hits)
@@ -124,7 +124,7 @@
   than a guess — see `one-policy-per-key`; it used to be a silent wrong-shape read.
 
   `invalidate` and `clear` still reach these entries, and still replicate to peers."
-  (let (stored (if (table/has? *fragments* key) (table/get *fragments* key) nil)
+  (let (stored (if (table/contains? *fragments* key) (table/get *fragments* key) nil)
         now (os/now))
     (when stored (one-policy-per-key key stored true))
     (if (and stored (< now (ttl-entry-deadline stored)))
@@ -160,8 +160,8 @@
   "What `value` counts against a byte cap: a string's length, a byte string's, the value inside
   a `fetch-ttl` wrapper; anything else nothing."
   (cond
-    (string? value) (string/length value)
-    (bytes? value) (bytes/length value)
+    (string? value) (count value)
+    (bytes? value) (count value)
     (ttl-entry? value) (size-of (ttl-entry-value value))
     else 0))
 
@@ -172,8 +172,8 @@
   (let (size (size-of value))
     (when (<= size *max-fragment-bytes*)
       (let (previous (table/get *fragment-sizes* key 0)
-            new-key? (not (table/has? *fragments* key)))
-        (when (or (and new-key? (>= (table/count *fragments*) *max-fragments*))
+            new-key? (not (table/contains? *fragments* key)))
+        (when (or (and new-key? (>= (count *fragments*) *max-fragments*))
                 (> (+ (- (table/get *totals* :fragments 0) previous) size) *max-fragment-bytes*))
           (local-clear))
         ;; read again: the drop just above took this key's own count back too
@@ -204,11 +204,11 @@
         asked (+ hits misses))
     ;; `table/count`, not a count of a snapshot: a snapshot copies every stored value out of
     ;; the table, megabytes of pages, to count them
-    {:fragments (table/count *fragments*)
+    {:fragments (count *fragments*)
      :max-fragments *max-fragments*
      :fragment-bytes (table/get *totals* :fragments 0)
      :max-fragment-bytes *max-fragment-bytes*
-     :compressed (table/count *compressed*)
+     :compressed (count *compressed*)
      :max-compressed *max-compressed*
      :compressed-bytes (table/get *totals* :compressed 0)
      :max-compressed-bytes *max-compressed-bytes*
@@ -338,13 +338,13 @@
 
   Do not use this for a response that varies per user: one entry serves everyone."
   (cond
-    (table/has? *compressed* key) (table/get *compressed* key)
+    (table/contains? *compressed* key) (table/get *compressed* key)
     else
       (let (value (build)
             size (size-of value))
         ;; one body over the cap alone is not kept, so it must not empty the store either
         (when (<= size *max-compressed-bytes*)
-          (when (or (>= (table/count *compressed*) *max-compressed*)
+          (when (or (>= (count *compressed*) *max-compressed*)
                   (> (+ (table/get *totals* :compressed 0) size) *max-compressed-bytes*))
             (clear-compressed))
           (table/put *compressed* key value)

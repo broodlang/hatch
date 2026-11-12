@@ -161,8 +161,8 @@
 (defn masked-text-frame (s)
   (let (b (string/->bytes s))
     (if (<= (count b) 125)
-      (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])
-      (bytes/concat [129 (+ 128 126) (bytes/int-> (count b) 2) 0 0 0 0 b]))))
+      (bytes/append [129 (+ 128 (count b)) 0 0 0 0 b])
+      (bytes/append [129 (+ 128 126) (bytes/int-> (count b) 2) 0 0 0 0 b]))))
 
 (defn frame-payload (buf)
   (if (< (count buf) 2)
@@ -180,7 +180,7 @@
   (match (frame-payload buf)
     ([:ok text remainder] [text remainder])
     ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+                     ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
                      ([:tcp-closed ^sock] [:closed (bytes [])])
                      (after 10000 [:timeout (bytes [])])))))
 

@@ -12,7 +12,7 @@
 
   (test "reports each route with its latency and error counts"
     (web/metrics/reset)
-    (for (i (range 3)) (web/metrics/record "GET" "/reference" "/reference" 200 12))
+    (for (_i (range 3)) (web/metrics/record "GET" "/reference" "/reference" 200 12))
     (web/metrics/record "POST" "/api/v1/publish" "/api/v1/publish" 500 300)
     (let (html (page "T"))
       (is (includes? html "GET /reference"))
@@ -66,7 +66,7 @@
 
   (test "the rendered page carries no ratio in a figure"
     (web/metrics/reset)
-    (for (i (range 3)) (web/metrics/record "GET" "/x" "/x" 200 5))
+    (for (_i (range 3)) (web/metrics/record "GET" "/x" "/x" 200 5))
     (let (html (page "T"))
       ;; `0/64` (compressed/max) is the one legitimate slash in a card body
       (is (not (includes? html "/10 MB")))

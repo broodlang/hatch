@@ -67,7 +67,7 @@
 
   (hatch/web/template/escape-html \"a<b&c\") ;=> \"a&lt;b&amp;c\""
   (let (text (str s))
-    (if (not (= (string/span-until text 0 "&<>\"'") (string/length text)))
+    (if (not (= (string/span-until text 0 "&<>\"'") (count text)))
       (string/replace (string/replace (string/replace (string/replace (string/replace text
                                                                         "&" "&amp;")
                                                         "<" "&lt;")
@@ -155,7 +155,7 @@
     (if (or (string/starts-with? text "/")
           (string/starts-with? text "#")
           (string/starts-with? text "?")
-          (= (string/span-until text 0 ":") (string/length text)))
+          (= (string/span-until text 0 ":") (count text)))
       false
       (let (s (string/lower (string/join (seq/filter (string/->list text)
                                            (fn (c) (not (url-scheme-noise? c))))
@@ -193,10 +193,10 @@
   set — 0.35us and 0.62us — against 0.55us for a lookup and a two-element destructure.
 
   Bounded like the attribute memo; past the bound it still answers, without remembering."
-  (if (table/has? *tag-names* tag)
+  (if (table/contains? *tag-names* tag)
     (table/get *tag-names* tag)
     (let (info [(->string tag) (contains? *void-tags* tag)])
-      (when (< (table/count *tag-names*) *max-memo-entries*)
+      (when (< (count *tag-names*) *max-memo-entries*)
         (table/put *tag-names* tag info))
       info)))
 
@@ -215,11 +215,11 @@
   have one, keyed by the name STRING — but this is now its only caller and reaches it only on
   a miss here, so that inner table cached an answer already computed at most once per keyword.
   Two tables and two bounds where one of each does the work."
-  (if (table/has? *attr-names* k)
+  (if (table/contains? *attr-names* k)
     (table/get *attr-names* k)
     (let (name (->string k)
           info [(if (safe-attr-name-scan? name) name nil) (contains? *url-attrs* k)])
-      (when (< (table/count *attr-names*) *max-memo-entries*)
+      (when (< (count *attr-names*) *max-memo-entries*)
         (table/put *attr-names* k info))
       info)))
 
@@ -228,7 +228,7 @@
   attribute list. Hiccup keys are normally compile-time literals; this guards the case where
   an app derives a key from untrusted input (e.g. `(keyword (str \"data-\" user))`), which the
   value path already defends but the name path otherwise emits verbatim."
-  (and (> (string/length n) 0)
+  (and (> (count n) 0)
     (not (any? (string/->list n) (fn (c) (unsafe-attr-name-cp? (string/char->int c)))))))
 
 (defn render-attr (kv)

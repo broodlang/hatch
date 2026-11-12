@@ -63,7 +63,7 @@
    :body-timeout-ms 60000
    :max-request-bytes 8388608
    :max-connections 1024
-   :error-handler (fn (request err) (server-error-resp))
+   :error-handler (fn (_request _err) (server-error-resp))
    :shutdown-grace-ms 5000
    :tls nil
    :check-origin true
@@ -322,7 +322,7 @@ port) still returns and lets the caller fail on its own terms."
     ; `head` includes the terminator; `rest` is whatever arrived past it (a pipelined
     ; request, or the start of this one's body). worker-dispatch parses the head out of the
     ; whole buffer and slices the body itself, so rejoin them and leave it unchanged.
-    ([head rest] (worker-dispatch sock handler ws-handler config (bytes/concat [head rest])))))
+    ([head rest] (worker-dispatch sock handler ws-handler config (bytes/append [head rest])))))
 
 (defn bad-request-close (sock msg)
   "Answer a generic 400 and close. Doesn't reflect the parser message (it echoes attacker-
@@ -419,7 +419,7 @@ port) still returns and lets the caller fail on its own terms."
                                            handler
                                            ws-handler
                                            config
-                                           (bytes/concat [buf chunk])))
+                                           (bytes/append [buf chunk])))
                      ([:tcp-closed ^sock] nil)
                      (after (get config :read-timeout-ms)
                        (do
@@ -606,7 +606,7 @@ port) still returns and lets the caller fail on its own terms."
   at `buffered-begin`). `deadline` is the absolute epoch-ms the whole body must arrive by.
   `prog` is the upload-progress state, or nil when this request doesn't report progress."
   (if (>= got clen)
-    (let (all (bytes/concat (reverse chunks))
+    (let (all (bytes/append (reverse chunks))
           body (bytes/slice all 0 clen)
           remainder (bytes/slice all clen (count all))
           request (assoc head :body body))
@@ -693,7 +693,7 @@ port) still returns and lets the caller fail on its own terms."
         ; be hundreds of megabytes, which must never sit in memory.
         (chunked-spool? config head dlen ws-handler)
           (let (path (spool-path config))
-            (spool-append path (bytes/concat (reverse decoded)))
+            (spool-append path (bytes/append (reverse decoded)))
             (chunked-spool-drain sock
               handler config head path tail dlen deadline))
         else
@@ -703,7 +703,7 @@ port) still returns and lets the caller fail on its own terms."
                                   ws-handler
                                   config
                                   head
-                                  (bytes/concat [tail chunk])
+                                  (bytes/append [tail chunk])
                                   decoded
                                   dlen
                                   deadline))
@@ -832,7 +832,7 @@ port) still returns and lets the caller fail on its own terms."
     ([:error msg] (do (spool-cleanup path) (bad-request-close sock msg)))
     ([:more tail decoded dlen] (let (written2 (+ written dlen))
                                  (when (> dlen 0)
-                                   (spool-append path (bytes/concat (reverse decoded))))
+                                   (spool-append path (bytes/append (reverse decoded))))
                                  (if (> (+ written2 (count tail)) (get config :max-request-bytes))
                                    (do
                                      (spool-cleanup path)
@@ -846,7 +846,7 @@ port) still returns and lets the caller fail on its own terms."
                                                            config
                                                            head
                                                            path
-                                                           (bytes/concat [tail chunk])
+                                                           (bytes/append [tail chunk])
                                                            written2
                                                            deadline))
                                      ([:tcp-closed ^sock] (do (spool-cleanup path) nil))

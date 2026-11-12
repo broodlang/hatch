@@ -15,7 +15,7 @@
 
 (defn multipart-request (boundary)
   "A raw multipart/form-data POST as bytes: one text field + one binary file part."
-  (let (body (bytes/concat (b (str "--"
+  (let (body (bytes/append (b (str "--"
                                 boundary "\r\n"
                                 "Content-Disposition: form-data; name=\"title\"\r\n\r\n"
                                 "hello world\r\n"))
@@ -25,13 +25,13 @@
                     "Content-Type: image/png\r\n\r\n"))
                file-bytes
                (b (str "\r\n--" boundary "--\r\n"))))
-    (bytes/concat (b (str "POST /upload HTTP/1.1\r\n"
+    (bytes/append (b (str "POST /upload HTTP/1.1\r\n"
                        "Host: localhost\r\n"
                        "Content-Type: multipart/form-data; boundary="
                        boundary
                        "\r\n"
                        "Content-Length: "
-                       (bytes/length body)
+                       (count body)
                        "\r\n"
                        "Connection: close\r\n\r\n"))
       body)))

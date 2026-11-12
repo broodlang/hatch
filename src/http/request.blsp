@@ -164,7 +164,7 @@
             (let (end (dechunk-trailers-bytes buf (+ eol 2) buflen))
               (if (= end -1)
                 [:more (bytes/slice buf pos buflen) decoded dlen]
-                [:ok (bytes/concat (reverse decoded)) (bytes/slice buf end buflen)]))
+                [:ok (bytes/append (reverse decoded)) (bytes/slice buf end buflen)]))
           else
             (let (data-start (+ eol 2)
                   data-end (+ data-start size)
@@ -202,7 +202,7 @@
 
   (hatch/http/request/parse-hex \"1f\") ;=> 31
   (hatch/http/request/parse-hex \"-5\") ;=> nil"
-  (if (and (> (string/length s) 0) (= (string/span s 0 *hex-digits*) (string/length s)))
+  (if (and (> (count s) 0) (= (string/span s 0 *hex-digits*) (count s)))
     ;; `int?` narrows what the checker sees: a radix parse is typed `number | failure`, and the
     ;; digit check above is what makes it an int
     (let (value (string/->number s 16)) (if (int? value) value nil))
@@ -217,7 +217,7 @@
   each through `char->int`, filter, and ask whether the result was empty — four allocations
   and a closure call per character, to answer a question `string/span` answers in one pass.
   This gates every `Content-Length`, so it runs on every request that has a body."
-  (and (not (string/blank? s)) (= (string/span s 0 *digits*) (string/length s))))
+  (and (not (string/blank? s)) (= (string/span s 0 *digits*) (count s))))
 
 (defn header-value-for (line lower-key)
   "The trimmed value of raw header `line` if its lowercased name equals `lower-key`,
@@ -225,7 +225,7 @@
   (let (ci (index-of line ":"))
     (if (and (not (= ci -1))
           (= (string/lower (trim-if-needed (string/substring line 0 ci))) lower-key))
-      (trim-if-needed (string/substring line (+ ci 1) (string/length line)))
+      (trim-if-needed (string/substring line (+ ci 1) (count line)))
       nil)))
 
 (defn obs-fold? (header-lines)
@@ -233,7 +233,7 @@
   RFC 7230 §3.2.4 says a server must reject in a request (it's a header-desync primitive)."
   (any? header-lines
     (fn (line)
-      (and (> (string/length line) 0)
+      (and (> (count line) 0)
         (let (c (string/substring line 0 1)) (or (= c " ") (= c "\t")))))))
 
 (defn ws-before-colon? (line)
@@ -263,7 +263,7 @@
   it (as a bare field, or by joining it to a neighbour) from disagreeing with us, the same
   desync posture as the other malformed-header rejections. Obs-fold continuation lines start
   with SP/HTAB and are caught by `obs-fold?` first, so this only fires on a non-folded line."
-  (any? header-lines (fn (line) (and (> (string/length line) 0) (= (index-of line ":") -1)))))
+  (any? header-lines (fn (line) (and (> (count line) 0) (= (index-of line ":") -1)))))
 
 (defn duplicate-transfer-encoding? (header-lines)
   "True if more than one `Transfer-Encoding` header line is present — ambiguous framing
@@ -303,7 +303,7 @@ the failure would reach the body read as a length."
   "Extract the numeric HTTP version ('1.1', '1.0') from a request-line version token like
   `HTTP/1.1`; defaults to '1.1' when the token is missing the `/version` suffix."
   (let (slash (index-of (str token) "/"))
-    (if (= slash -1) "1.1" (string/substring token (+ slash 1) (string/length token)))))
+    (if (= slash -1) "1.1" (string/substring token (+ slash 1) (count token)))))
 
 (defn parse-request-line (line)
   "Parse `'GET /path?query HTTP/1.1'` into `[:ok method path query version]` or
@@ -317,7 +317,7 @@ the failure would reach the body read as a length."
                                        [:ok
                                          (string/upper method)
                                          (string/substring target 0 qi)
-                                         (string/substring target (+ qi 1) (string/length target))
+                                         (string/substring target (+ qi 1) (count target))
                                          v])))
       (_ [:error (str "invalid request line: " line)]))))
 
@@ -368,7 +368,7 @@ the failure would reach the body read as a length."
         (if (= ci -1)
           m
           (let (k (keyword (string/lower (trim-if-needed (string/substring line 0 ci))))
-                v (trim-if-needed (string/substring line (+ ci 1) (string/length line))))
+                v (trim-if-needed (string/substring line (+ ci 1) (count line))))
             (assoc m k (cons v (get m k (list))))))))))
 
 (defn join-grouped-headers (grouped)

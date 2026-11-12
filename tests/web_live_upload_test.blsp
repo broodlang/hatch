@@ -336,7 +336,7 @@
 
 (describe "parse-chunk-frame"
   (test "splits the length-prefixed ref off the payload"
-    (assert= (parse-chunk-frame (bytes/concat [3 97 98 99 7 8])) ["abc" (bytes [7 8])]))
+    (assert= (parse-chunk-frame (bytes/append [3 97 98 99 7 8])) ["abc" (bytes [7 8])]))
   (test "an empty frame is refused"
     (assert= (parse-chunk-frame (bytes [])) nil))
   ; the length is read before it is trusted — a declared ref longer than the frame must not
@@ -369,8 +369,8 @@
   "A masked client frame (mask key all zeros, so the masked payload equals the plaintext)."
   (let (n (count payload))
     (if (<= n 125)
-      (bytes/concat [(+ 128 opcode) (+ 128 n) 0 0 0 0 payload])
-      (bytes/concat [(+ 128 opcode) (+ 128 126) (bytes/int-> n 2) 0 0 0 0 payload]))))
+      (bytes/append [(+ 128 opcode) (+ 128 n) 0 0 0 0 payload])
+      (bytes/append [(+ 128 opcode) (+ 128 126) (bytes/int-> n 2) 0 0 0 0 payload]))))
 
 (defn frame-payload (buf)
   (if (< (count buf) 2)
@@ -388,7 +388,7 @@
   (match (frame-payload buf)
     ([:ok text remainder] [text remainder])
     ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+                     ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
                      ([:tcp-closed ^sock] [:closed (bytes [])])
                      (after 10000 [:timeout (bytes [])])))))
 
@@ -436,7 +436,7 @@ failure, named."
                   ref (first refs)
                   ref-bytes (string/->bytes ref)
                   ; the binary channel: [refLength][ref][bytes]
-                  chunk (bytes/concat [(count ref-bytes) ref-bytes (bytes [7 8 9])])
+                  chunk (bytes/append [(count ref-bytes) ref-bytes (bytes [7 8 9])])
                   _ (tcp/send client (masked-frame 2 chunk))
                   chunk-diff (expect-frame client (second ready))
                   _2 (tcp/send client

@@ -156,7 +156,7 @@
   (test "a hand-built map spec still drives the harness"
     (let (spec {:mount (fn (params) {:n (or (get params "n") 1)})
                 :render (fn (model) [:b {} (str (get model :n))])
-                :handle-event (fn (name params model) (assoc model :n 99))})
+                :handle-event (fn (_name _params model) (assoc model :n 99))})
       (assert= (live-mount spec {"n" 4}) {:n 4})
       (assert= (live-render spec {:n 4}) "<b>4</b>")
       (assert= (live-event spec "anything" {} {:n 4}) {:n 99})))

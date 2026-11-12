@@ -120,9 +120,9 @@
   `<!DOCTYPE html>`, a hand-written document may say `<!doctype html>`, and lowercasing a
   400 KB page to find out would cost more than rendering it."
   (let (body (get resp :body)
-        n (string/length *doctype*))
+        n (count *doctype*))
     (and (string? body)
-      (>= (string/length body) n)
+      (>= (count body) n)
       (= (string/lower (string/substring body 0 n)) *doctype*))))
 
 (defn themed (resp &optional (opts {}))

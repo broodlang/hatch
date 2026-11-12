@@ -45,9 +45,7 @@
       ;; `base64-decode` answers a falsy `failure` on bad input rather than throwing
       ;; (brood ADR-310), so there is nothing to catch — normalise it to the `nil` this
       ;; function's contract promises.
-      (let (decoded (base64-decode (string/trim (string/substring raw
-                                                  (string/length prefix)
-                                                  (string/length raw)))))
+      (let (decoded (base64-decode (string/trim (string/substring raw (count prefix) (count raw)))))
         (if (failure? decoded) nil decoded))
       nil)))
 
@@ -83,9 +81,9 @@
   (let (raw (header conn :authorization)
         prefix "bearer ")
     (if (and raw
-          (>= (string/length raw) (string/length prefix))
-          (= (string/lower (string/substring raw 0 (string/length prefix))) prefix))
-      (let (token (string/trim (string/substring raw (string/length prefix) (string/length raw))))
+          (>= (count raw) (count prefix))
+          (= (string/lower (string/substring raw 0 (count prefix))) prefix))
+      (let (token (string/trim (string/substring raw (count prefix) (count raw))))
         (if (= token "") nil token))
       nil)))
 

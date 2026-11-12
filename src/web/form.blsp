@@ -76,10 +76,10 @@
   (let (at (index-of v "@"))
     (and (> at 0)
       (no-space-or-control? v)
-      (let (domain (string/substring v (+ at 1) (string/length v)))
+      (let (domain (string/substring v (+ at 1) (count v)))
         (and (= (index-of domain "@") -1)
           (> (index-of domain ".") 0)
-          (< (index-of domain ".") (- (string/length domain) 1)))))))
+          (< (index-of domain ".") (- (count domain) 1)))))))
 
 (defn validate-email (cs field &optional (message "must be a valid email address"))
   "`field`'s change must pass `email?`."

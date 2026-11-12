@@ -36,7 +36,7 @@
 
   (hatch/http/websocket/origin-host \"https://example.com:8080\") ;=> \"example.com:8080\""
   (let (i (index-of origin "://"))
-    (if (= i -1) origin (string/substring origin (+ i 3) (string/length origin)))))
+    (if (= i -1) origin (string/substring origin (+ i 3) (count origin)))))
 
 (defn origin-allowed? (request policy)
   "Whether a WebSocket upgrade's `Origin` is permitted — the cross-site-WebSocket-hijacking
@@ -81,9 +81,9 @@
   (let (body (string/->bytes payload)
         n (count body))
     (cond
-      (<= n 125) (bytes/concat [129 n body])
-      (<= n 65535) (bytes/concat [129 126 (bytes/int-> n 2) body])
-      else (bytes/concat [129 127 (bytes/int-> n 8) body]))))
+      (<= n 125) (bytes/append [129 n body])
+      (<= n 65535) (bytes/append [129 126 (bytes/int-> n 2) body])
+      else (bytes/append [129 127 (bytes/int-> n 8) body]))))
 
 (defn close-frame ()
   "Build a WebSocket connection-close frame (opcode 0x8, FIN=1, no payload)."
@@ -97,7 +97,7 @@
   echoed length that would overflow the single length byte into an extended-length marker."
   (let (raw (if (bytes? payload) payload (string/->bytes payload))
         body (if (> (count raw) 125) (bytes/slice raw 0 125) raw))
-    (bytes/concat [138 (count body) body])))
+    (bytes/append [138 (count body) body])))
 
 (defn ping-frame ()
   "Build an empty WebSocket ping frame (opcode 0x9, FIN=1) — used for server keepalive."
@@ -155,7 +155,7 @@
                                           (= fin 1)
                                             [:ok
                                               msg-opcode
-                                              (bytes/concat (reverse (cons payload pieces)))
+                                              (bytes/append (reverse (cons payload pieces)))
                                               remainder]
                                           else
                                             (reassemble remainder
@@ -374,16 +374,16 @@
   Gathering into a list and joining once is what keeps this O(n): re-`bytes/concat`ing the
   whole buffer on every read was O(n²) up to the message-size cap."
   (if (and (not (nil? need)) (>= got need))
-    (recv-frame sock (bytes/concat buf (reverse pieces)))
+    (recv-frame sock (bytes/append buf (reverse pieces)))
     (receive
       ; Binary-mode socket (see http/server's pre-101 tcp/set-binary): `chunk` is a
       ; first-class `bytes` value — the parser reads it directly, with no carrier hop.
       ([:tcp ^sock chunk] (if (nil? need)
-                            (recv-frame sock (bytes/concat buf chunk))
+                            (recv-frame sock (bytes/append buf chunk))
                             (recv-frame-fill sock
                               buf
                               (cons chunk pieces)
                               (+ got (count chunk))
                               need)))
       ([:tcp-closed ^sock] [:closed])
-      (other [:other other (bytes/concat buf (reverse pieces))]))))
+      (other [:other other (bytes/append buf (reverse pieces))]))))

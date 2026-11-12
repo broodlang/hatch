@@ -40,7 +40,7 @@
 (def raw-body (bytes [137 80 78 71 13 10 0 255 1 2 3 4 5 6 7 8 9 10 254 253]))
 
 (defn post-raw ()
-  (bytes/concat (b "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\nConnection: close\r\n\r\n")
+  (bytes/append (b "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\nConnection: close\r\n\r\n")
     raw-body))
 
 (defn spool-save-handler (dest reporter)
@@ -103,7 +103,7 @@
 ;; ---- a spooled multipart upload parses from disk ----
 
 (defn multipart-post (boundary file-bytes)
-  (let (body (bytes/concat (b (str "--"
+  (let (body (bytes/append (b (str "--"
                                 boundary "\r\n"
                                 "Content-Disposition: form-data; name=\"title\"\r\n\r\n"
                                 "hello world\r\n"))
@@ -113,12 +113,12 @@
                     "Content-Type: image/png\r\n\r\n"))
                file-bytes
                (b (str "\r\n--" boundary "--\r\n"))))
-    (bytes/concat (b (str "POST /upload HTTP/1.1\r\nHost: x\r\n"
+    (bytes/append (b (str "POST /upload HTTP/1.1\r\nHost: x\r\n"
                        "Content-Type: multipart/form-data; boundary="
                        boundary
                        "\r\n"
                        "Content-Length: "
-                       (bytes/length body)
+                       (count body)
                        "\r\nConnection: close\r\n\r\n"))
       body)))
 
@@ -157,10 +157,10 @@
 
 (defn chunked-post (path pieces)
   "A chunked POST to `path` whose body is `pieces` (a vector of bytes), one chunk each."
-  (bytes/concat (append [(b (str "POST "
+  (bytes/append (append [(b (str "POST "
                               path
                               " HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"))]
-                  (append (into [] (map pieces (fn (piece) (bytes/concat (response/chunk piece)))))
+                  (append (into [] (map pieces (fn (piece) (bytes/append (response/chunk piece)))))
                     [(response/last-chunk)]))))
 
 (defn spool-report-handler (reporter)
@@ -243,7 +243,7 @@
                                  (if (string/starts-with? (get head :path) "/git/")
                                    {:max-request-bytes 100000}
                                    nil))})
-          big (bytes/concat (into [] (seq/repeat 3 (b (string/repeat "x" 1000))))))
+          big (bytes/append (into [] (seq/repeat 3 (b (string/repeat "x" 1000))))))
       ; the git path takes 3000 bytes
       (let (client (tcp/connect "127.0.0.1" port))
         (tcp/set-binary client true)
@@ -265,14 +265,14 @@
   (test "only the three body limits can be overridden"
     (let (config {:max-request-bytes 10
                   :tls nil
-                  :body-limits (fn (head)
+                  :body-limits (fn (_head)
                                  {:max-request-bytes 99 :spool-threshold 5 :tls {:cert "c"}})}
           applied (server/request-config config {:path "/"}))
       (assert= (get applied :max-request-bytes) 99)
       (assert= (get applied :spool-threshold) 5)
       (assert= (get applied :tls) nil)))
   (test "nil from :body-limits keeps the listener's limits"
-    (assert= (get (server/request-config {:max-request-bytes 10 :body-limits (fn (head) nil)}
+    (assert= (get (server/request-config {:max-request-bytes 10 :body-limits (fn (_head) nil)}
                     {:path "/"})
                :max-request-bytes)
       10)))

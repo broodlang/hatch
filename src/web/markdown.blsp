@@ -30,7 +30,7 @@
   would otherwise be wrapped in, for a title or a heading's tail. A line that renders as
   something other than one paragraph (a list marker, a heading) is left as rendered."
   (let (html (safe-html text opts)
-        end (- (string/length html) 4))
+        end (- (count html) 4))
     (if (and (string/starts-with? html "<p>")
           (string/ends-with? html "</p>")
           (>= end 3)
@@ -99,11 +99,11 @@
 (defn- under-site? (lowered site-url)
   "Whether the lower-cased `lowered` is `site-url` itself or a path, query or fragment on it."
   (let (origin (string/lower (if (string/ends-with? site-url "/")
-                               (string/substring site-url 0 (- (string/length site-url) 1))
+                               (string/substring site-url 0 (- (count site-url) 1))
                                site-url))
-        length (string/length origin))
+        length (count origin))
     (and (string/starts-with? lowered origin)
-      (or (= (string/length lowered) length)
+      (or (= (count lowered) length)
         (includes? ["/" "?" "#"] (string/substring lowered length (+ length 1)))))))
 
 (defn unsafe-link? (url)

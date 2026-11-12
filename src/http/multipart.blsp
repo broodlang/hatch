@@ -38,8 +38,8 @@
   (let (first-at (bytes/index-of body delim 0))
     (if (< first-at 0)
       (list)
-      (let (crlf-delim (bytes/concat (string/->bytes "\r\n") delim))
-        (split-parts-loop body crlf-delim (+ first-at (bytes/length delim)) (list))))))
+      (let (crlf-delim (bytes/append (string/->bytes "\r\n") delim))
+        (split-parts-loop body crlf-delim (+ first-at (count delim)) (list))))))
 
 (defn- split-parts-loop (body crlf-delim pos acc)
   (let (next-at (bytes/index-of body crlf-delim pos))
@@ -47,7 +47,7 @@
       (reverse acc)
       (split-parts-loop body
         crlf-delim
-        (+ next-at (bytes/length crlf-delim))
+        (+ next-at (count crlf-delim))
         (cons (bytes/slice body pos next-at) acc)))))
 
 ; ---- one part ----
@@ -56,7 +56,7 @@
   "Strip the CRLF that follows the opening boundary line, leaving just the part (headers +
   body). The CRLF that precedes the next delimiter is already excluded from `seg` — it belongs
   to the `\r\n-boundary` split delimiter — so only the leading CRLF is removed here."
-  (let (n (bytes/length seg)
+  (let (n (count seg)
         start (if (crlf-at? seg 0) 2 0))
     (if (>= start n) (bytes/slice seg 0 0) (bytes/slice seg start n))))
 
@@ -68,7 +68,7 @@
     (if (< at 0)
       nil
       (let (hdrs (parse-part-headers (string/bytes-> (bytes/slice part 0 at)))
-            content (bytes/slice part (+ at 4) (bytes/length part))
+            content (bytes/slice part (+ at 4) (count part))
             disp (get hdrs "content-disposition" ""))
         {:name (cd-param disp "name")
          :filename (cd-param disp "filename")
@@ -86,7 +86,7 @@
           m
           (assoc m
             (string/lower (string/trim (string/substring line 0 ci)))
-              (string/trim (string/substring line (+ ci 1) (string/length line)))))))))
+              (string/trim (string/substring line (+ ci 1) (count line)))))))))
 
 (defn cd-param (disposition key)
   "The quoted value of a Content-Disposition parameter — `name` / `filename` — i.e. the text
@@ -97,7 +97,7 @@
         i (cd-param-find disposition needle 0))
     (if (< i 0)
       nil
-      (let (start (+ i (string/length needle))
+      (let (start (+ i (count needle))
             end (index-of disposition "\"" start))
         (if (= end -1) nil (string/substring disposition start end))))))
 

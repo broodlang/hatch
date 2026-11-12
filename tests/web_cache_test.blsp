@@ -245,7 +245,7 @@
     (let (calls (table/new)
           huge (string/repeat "x" (+ *max-fragment-bytes* 1))
           build (counting-build calls huge))
-      (assert= (string/length (fetch [:bound-huge] build)) (string/length huge))
+      (assert= (count (fetch [:bound-huge] build)) (count huge))
       (fetch [:bound-huge] build)
       (assert= (table/get calls :n) 2)
       (assert= (get (stats) :fragment-bytes) 0)))

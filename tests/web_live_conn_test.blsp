@@ -70,7 +70,7 @@
   "A masked client text frame carrying `s` (mask key all zeros, so the masked payload equals
   the plaintext). Payload assumed < 126 bytes, which every frame here is."
   (let (b (string/->bytes s))
-    (bytes/concat [129 (+ 128 (count b)) 0 0 0 0 b])))
+    (bytes/append [129 (+ 128 (count b)) 0 0 0 0 b])))
 
 ; A CLIENT-side frame reader. http/websocket's `parse-frame` is the server's parser and
 ; enforces that client frames are masked (RFC 6455), so it rejects a server->client frame,
@@ -95,7 +95,7 @@
     ([:ok text] text)
     ([:incomplete]
       (receive
-        ([:tcp ^sock chunk] (read-frame sock (bytes/concat buf chunk)))
+        ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
         ([:tcp-closed ^sock] :closed)
         ;; 10s, not 3s. This spawns a session process and does a real socket
         ;; round trip, and on a loaded machine 3s occasionally was not enough —

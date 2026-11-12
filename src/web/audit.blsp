@@ -645,7 +645,7 @@
   (hatch/web/audit/tag-name-of \"<li>\") ;=> \"li\"
   (hatch/web/audit/tag-name-of \"\") ;=> \"\""
   (let (rest-of (if (string/starts-with? tag "<")
-                  (string/substring tag 1 (string/length tag))
+                  (string/substring tag 1 (count tag))
                   tag)
         stop (seq/find [" " ">" "\n"]
                (fn (c) (>= (index-of rest-of c) 0))))

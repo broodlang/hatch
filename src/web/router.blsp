@@ -48,13 +48,13 @@
   (map (path-segments path)
     (fn (seg)
       (cond
-        (string/starts-with? seg ":") (keyword (string/substring seg 1 (string/length seg)))
+        (string/starts-with? seg ":") (keyword (string/substring seg 1 (count seg)))
         (string/starts-with? seg "*") [:splat (parse-pattern-splat-name seg)]
         else seg))))
 
 (defn- parse-pattern-splat-name (seg)
   "The capture name for a `*name` splat segment; bare `*` captures as `splat`."
-  (let (n (string/substring seg 1 (string/length seg)))
+  (let (n (string/substring seg 1 (count seg)))
     (if (string/blank? n) "splat" n)))
 
 ; ---- route table ----

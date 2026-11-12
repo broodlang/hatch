@@ -74,12 +74,12 @@
 
 ;; A router whose table the sitemap reads — fixed paths, a `:param` route, and a splat.
 (defrouter seo-test-router
-  (get "/" (fn (conn) "home"))
-  (get "/about" (fn (conn) "about"))
-  (get "/health" (fn (conn) "ok"))
-  (get "/widgets/:id" (fn (conn) "widget"))
-  (get "/static/*path" (fn (conn) "asset"))
-  (post "/widgets" (fn (conn) "created")))
+  (get "/" (fn (_conn) "home"))
+  (get "/about" (fn (_conn) "about"))
+  (get "/health" (fn (_conn) "ok"))
+  (get "/widgets/:id" (fn (_conn) "widget"))
+  (get "/static/*path" (fn (_conn) "asset"))
+  (post "/widgets" (fn (_conn) "created")))
 
 (describe "the sitemap reads the route table"
 
@@ -224,7 +224,7 @@
     (assert= (sitemap-date "yesterday") nil))
   (test "the result is a date, not a full instant — the precision the timestamp deserves"
     (let (formatted (or (sitemap-date 1757548800000) ""))
-      (assert= (string/length formatted) 10)
+      (assert= (count formatted) 10)
       ;; what "not a full instant" actually means: no time component survives
       (assert= (includes? formatted "T") false)))
   ;; A float reaches `epoch-ms->`, which takes an int — a caller that computed its timestamp

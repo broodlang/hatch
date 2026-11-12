@@ -138,8 +138,8 @@
       ;; nothing carries that to the `first`/`rest` chain that produces it.
       (let (h (first (rest (reverse parts))))
         (and h
-          (>= (string/length h) 8)
-          (= (string/span h 0 "0123456789abcdef") (string/length h)))))))
+          (>= (count h) 8)
+          (= (string/span h 0 "0123456789abcdef") (count h)))))))
 
 (defn relative-to (path dir)
   "`path` with a leading `dir/` removed — the form the fingerprint manifest keys and values
@@ -233,7 +233,7 @@
   (`\"1.5\"` → 1.5) — and a float offset would later blow up `substring` (int-only), turning a
   crafted `Range` header into a 500. So anything non-integer (floats, signs, hex, spaces) is
   rejected here and the range is ignored."
-  (if (and (not (string/blank? s)) (= (string/span s 0 "0123456789") (string/length s)))
+  (if (and (not (string/blank? s)) (= (string/span s 0 "0123456789") (count s)))
     ;; The span check above means this parse cannot fail — but `string/->number` answers
     ;; `number | failure`, a failure is TRUTHY, and every caller here guards with
     ;; `(nil? a)`. Say nil, as the docstring does, so the guards mean what they say.
@@ -248,7 +248,7 @@
   body). Forms: `bytes=a-b`, `bytes=a-` (a..end), `bytes=-n` (final n bytes)."
   (if (or (nil? spec) (not (string/starts-with? (string/trim spec) "bytes=")))
     nil
-    (let (r (string/substring (string/trim spec) 6 (string/length (string/trim spec))))
+    (let (r (string/substring (string/trim spec) 6 (count (string/trim spec))))
       (if (includes? r ",")
         ; multi-range: not worth it for text assets — fall back to a full 200
         nil
@@ -256,7 +256,7 @@
           (if (= dash -1)
             nil
             (let (lo (string/trim (string/substring r 0 dash))
-                  hi (string/trim (string/substring r (+ dash 1) (string/length r))))
+                  hi (string/trim (string/substring r (+ dash 1) (count r))))
               (cond
                 ; suffix: bytes=-n → final n bytes
                 (string/blank? lo)
@@ -464,7 +464,7 @@
         (if (= tab -1)
           m
           (assoc m
-            (string/substring line 0 tab) (string/substring line (+ tab 1) (string/length line))))))))
+            (string/substring line 0 tab) (string/substring line (+ tab 1) (count line))))))))
 
 ; Process-shared cache (ETS) of `dir → parsed manifest`. The manifest is immutable for a
 ; deployment's lifetime (a new build means a new process), so this is read once per dir and
@@ -482,7 +482,7 @@
   view, loaded when the router builds its route table) would otherwise pin `{}` for the
   life of the process and ship plain, `no-cache` URLs with a correct manifest sitting on
   disk beside them. A miss costs one failed `file/slurp`; only dev pays it repeatedly."
-  (if (table/has? *manifest-cache* dir)
+  (if (table/contains? *manifest-cache* dir)
     (table/get *manifest-cache* dir)
     (let (text (check-allow :discarded-catch (try (file/slurp (manifest-path dir)) (catch _ nil))))
       (if (nil? text)

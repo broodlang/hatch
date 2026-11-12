@@ -9,7 +9,7 @@
 ; matches: a character `string/trim` strips but this set omits would be silently left in place.
 (def *trim-chars* " \t\r\n")
 
-(defn trim-if-needed (s)
+(defn trim-if-needed (s:string)
   "`string/trim`, but only paying for it when there is something to trim.
 
   `string/trim` costs 3.15us whether or not it finds anything, because the cost is per CALL
@@ -19,7 +19,7 @@
   still runs whenever the answer is yes, so the result is identical either way.
 
   (hatch/http/util/trim-if-needed \"  a b  \") ;=> \"a b\""
-  (let (n (string/length s))
+  (let (n (count s))
     (if (= n 0)
       s
       (let (start (string/span s 0 *trim-chars*))
@@ -55,7 +55,7 @@
   like `hatch` or `packages`, an ordinary query value — paid per path param, per query param
   and per segment of a splat route, on every request. One `string/span-until` says whether any
   decoding is needed."
-  (if (= (string/span-until s 0 "%+") (string/length s))
+  (if (= (string/span-until s 0 "%+") (count s))
     s
     (let (spaced (string/replace s "+" " ")
           decoded (url/percent-decode spaced))
@@ -109,7 +109,7 @@
             (assoc m (url-decode pair) "")
             (assoc m
               (url-decode (string/substring pair 0 eq))
-                (url-decode (string/substring pair (+ eq 1) (string/length pair))))))))))
+                (url-decode (string/substring pair (+ eq 1) (count pair))))))))))
 
 (defn crlf-at? (b i)
   "True if the two bytes at index `i` of `b` are CR LF. False — not an error — when `i` or
@@ -122,7 +122,7 @@
   end of the buffer. The checked contract wins because it is the safe one to be wrong about,
   and the two comparisons it costs are per chunk boundary, not per byte."
   (and (>= i 0)
-    (>= (bytes/length b) (+ i 2))
+    (>= (count b) (+ i 2))
     (= (bytes/at b i) 13)
     (= (bytes/at b (+ i 1)) 10)))
 (sig crlf-at? (bytes int -> bool))
@@ -152,12 +152,12 @@
     (let (p (string/trim (first parts))
           eq (index-of p "="))
       (if (and (not (= eq -1)) (= (string/lower (string/trim (string/substring p 0 eq))) key))
-        (ct-param-unquote (string/trim (string/substring p (+ eq 1) (string/length p))))
+        (ct-param-unquote (string/trim (string/substring p (+ eq 1) (count p))))
         (ct-param-find (rest parts) key)))))
 
 (defn- ct-param-unquote (v)
-  (if (and (>= (string/length v) 2) (string/starts-with? v "\"") (string/ends-with? v "\""))
-    (string/substring v 1 (- (string/length v) 1))
+  (if (and (>= (count v) 2) (string/starts-with? v "\"") (string/ends-with? v "\""))
+    (string/substring v 1 (- (count v) 1))
     v))
 
 ;; ---- content coding ----

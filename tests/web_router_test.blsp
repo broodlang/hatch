@@ -86,7 +86,7 @@
       (assert= (get resp :status) 200)))
 
   (test "string handler result becomes a 200 body"
-    (let (routes [(make-route "GET" "/hi" (fn (conn) "hello"))]
+    (let (routes [(make-route "GET" "/hi" (fn (_conn) "hello"))]
           resp (dispatch routes (conn-for "GET" "/hi")))
       (assert= (get resp :status) 200)
       (assert= (get resp :resp-body) "hello")))
@@ -127,8 +127,8 @@
 (describe "defrouter live-session"
   (defrouter ls-router
     (live-session "admin"
-      (get "/admin/page" (fn (conn) "admin page"))
-      (get "/admin/info" (fn (conn) "admin info"))))
+      (get "/admin/page" (fn (_conn) "admin page"))
+      (get "/admin/info" (fn (_conn) "admin info"))))
   (test "a get inside a live-session is an ordinary route"
     (assert= (get (ls-router (conn-for "GET" "/admin/page")) :resp-body) "admin page"))
   (test "every clause in the block routes"
@@ -206,23 +206,23 @@
 ;; filtering the original list.
 (describe "route order survives the first-segment index"
   (defrouter order-router
-    (get "/:anything" (fn (conn) "dynamic"))
-    (get "/packages" (fn (conn) "literal")))
+    (get "/:anything" (fn (_conn) "dynamic"))
+    (get "/packages" (fn (_conn) "literal")))
 
   (test "a dynamic route declared FIRST still wins over a later literal"
     (assert= "dynamic" (get (order-router (conn-for "GET" "/packages")) :resp-body)))
 
   (defrouter order-router-2
-    (get "/packages" (fn (conn) "literal"))
-    (get "/:anything" (fn (conn) "dynamic")))
+    (get "/packages" (fn (_conn) "literal"))
+    (get "/:anything" (fn (_conn) "dynamic")))
 
   (test "and a literal declared first wins over a later dynamic"
     (assert= "literal" (get (order-router-2 (conn-for "GET" "/packages")) :resp-body))
     (assert= "dynamic" (get (order-router-2 (conn-for "GET" "/other")) :resp-body)))
 
   (defrouter splat-router
-    (get "/*rest" (fn (conn) "splat"))
-    (get "/named" (fn (conn) "named")))
+    (get "/*rest" (fn (_conn) "splat"))
+    (get "/named" (fn (_conn) "named")))
 
   (test "a splat first segment is a candidate for every path, including the root"
     (assert= "splat" (get (splat-router (conn-for "GET" "/named")) :resp-body))

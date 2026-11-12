@@ -91,7 +91,7 @@
   (test "the handler serves the actual client, not an empty 200"
     (let (resp (call (client-js-handler) (conn-for "GET" "/static/brood_webmcp.js")))
       (assert= 200 (status resp))
-      (is (> (string/length (or (get resp :resp-body) "")) 0))
+      (is (> (count (or (get resp :resp-body) "")) 0))
       (is (includes? (or (get resp :resp-body) "") "registerTool"))))
 
   ;; The API has moved between `navigator` and `document`, and shipped first on navigator.

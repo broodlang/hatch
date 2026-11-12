@@ -112,8 +112,8 @@
       [rendered ""]
       [(string/substring rendered 0 at)
         (string/substring rendered
-          (+ at (string/length *body-marker*))
-          (string/length rendered))])))
+          (+ at (count *body-marker*))
+          (count rendered))])))
 
 (defn with-shell (key build main)
   "The cached chrome for `key` with `main` rendered into it, as a `raw` node ready to hand

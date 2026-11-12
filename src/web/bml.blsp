@@ -69,7 +69,7 @@
   length zero — the common case, since an attribute list usually ends right at `>` — returns
   `s` itself instead of allocating a copy of it."
   (let (skipped (string/span s 0 *whitespace*))
-    (if (= skipped 0) s (string/substring s skipped (string/length s)))))
+    (if (= skipped 0) s (string/substring s skipped (count s)))))
 
 ;; Every character that can END a tag or attribute name: whitespace and the four delimiters.
 ;; A character SET, so the scan is one native call.
@@ -86,7 +86,7 @@
 
   `string/span-until` finds the first delimiter in one native scan, so a name is one slice."
   (let (stop (string/span-until s 0 *name-stops*))
-    [(string/substring s 0 stop) (string/substring s stop (string/length s))]))
+    [(string/substring s 0 stop) (string/substring s stop (count s))]))
 
 ; ---- source positions: report parse errors as bml:line:col ----
 ; Every string the parser holds is a suffix of the original source (we only ever
@@ -108,7 +108,7 @@
 
 (defn bml-error (s & parts)
   "Raise a `bml:line:col: …` error located at the start of suffix `s` in the source."
-  (let ([line col] (line-col (- (string/length *bml-source*) (string/length s))))
+  (let ([line col] (line-col (- (count *bml-source*) (count s))))
     (error (str "bml:" line ":" col ": " (apply str parts)))))
 
 ; ---- embedded Brood: read an expression, expanding the `@name` assign shorthand ----
@@ -123,7 +123,7 @@
 (defn ident-rest? (c) (includes? *ident-rest* c))
 
 (defn ident-run (s i)
-  (if (and (< i (string/length s)) (ident-rest? (string/char-at s i)))
+  (if (and (< i (count s)) (ident-rest? (string/char-at s i)))
     (ident-run s (+ i 1))
     i))
 
@@ -131,7 +131,7 @@
 (defn string-lit-end (s i)
   "Index of the closing `\"` of a string literal whose opening quote is just before `i`."
   (cond
-    (>= i (string/length s)) i
+    (>= i (count s)) i
     (= (string/char-at s i) "\\") (string-lit-end s (+ i 2))
     (= (string/char-at s i) "\"") i
     else (string-lit-end s (+ i 1))))
@@ -143,7 +143,7 @@
   (expand-assigns-at s 0 ""))
 
 (defn- expand-assigns-at (s i acc)
-  (if (>= i (string/length s))
+  (if (>= i (count s))
     acc
     (let (c (string/char-at s i))
       (cond
@@ -152,7 +152,7 @@
             (expand-assigns-at s (+ j 1) (str acc (string/substring s i (+ j 1)))))
         (and (= c "@")
           (not (and (> i 0) (= (string/char-at s (- i 1)) "~")))
-          (< (+ i 1) (string/length s))
+          (< (+ i 1) (count s))
           (ident-start? (string/char-at s (+ i 1))))
           (let (end (ident-run s
                       (+ i
@@ -178,7 +178,7 @@
 ; use braces too) and skipping string literals (a `}` inside `"…"` doesn't count).
 
 (defn interp-end (s i depth in-str esc)
-  (if (>= i (string/length s))
+  (if (>= i (count s))
     (bml-error s "unterminated { interpolation")
     (let (c (string/char-at s i)
           next (+ i 1))
@@ -195,10 +195,10 @@
 (defn brace-inner (s)
   "`s` begins with `{`; return `[inner-text rest]`, the raw text between the braces
   (balanced, strings respected)."
-  (let (body (string/substring s 1 (string/length s))
+  (let (body (string/substring s 1 (count s))
         end (interp-end body 0 0 false false)
         inner (string/substring body 0 end)
-        rest (string/substring body (+ end 1) (string/length body)))
+        rest (string/substring body (+ end 1) (count body)))
     [inner rest]))
 
 (defn parse-interp (s)
@@ -216,11 +216,11 @@
   regions (a `\"` inside `{…}` belongs to an embedded Brood string, not the attribute)
   and `\\`-escaped chars (so `\\{` doesn't open an interpolation)."
   (cond
-    (>= i (string/length s)) (bml-error s "unterminated attribute string")
+    (>= i (count s)) (bml-error s "unterminated attribute string")
     (= (string/char-at s i) "\\") (quote-end s (+ i 2))
     (= (string/char-at s i) "\"") i
     (= (string/char-at s i) "{")
-      (let (body (string/substring s (+ i 1) (string/length s))
+      (let (body (string/substring s (+ i 1) (count s))
             end (interp-end body 0 0 false false))
         (quote-end s (+ i end 2)))
     else (quote-end s (+ i 1))))
@@ -228,9 +228,9 @@
 (sig quote-end (string int -> int))
 (defn read-quoted (s)
   "`s` begins with `\"`; returns `[text rest]` (text excludes the quotes)."
-  (let (body (string/substring s 1 (string/length s))
+  (let (body (string/substring s 1 (count s))
         end (quote-end body 0))
-    [(string/substring body 0 end) (string/substring body (+ end 1) (string/length body))]))
+    [(string/substring body 0 end) (string/substring body (+ end 1) (count body))]))
 
 (defn brace-char? (c) (or (= c "{") (= c "}")))
 
@@ -238,9 +238,9 @@
   "Split an attribute string into literal-text and `{expr}` parts (forms), in order.
   `\\{`/`\\}` are literal braces."
   (cond
-    (= (string/length s) 0) (reverse (if (= lit "") acc (cons lit acc)))
-    (and (= (string/char-at s 0) "\\") (> (string/length s) 1) (brace-char? (string/char-at s 1)))
-      (attr-parts (string/substring s 2 (string/length s))
+    (= (count s) 0) (reverse (if (= lit "") acc (cons lit acc)))
+    (and (= (string/char-at s 0) "\\") (> (count s) 1) (brace-char? (string/char-at s 1)))
+      (attr-parts (string/substring s 2 (count s))
         acc
         (str lit
           (string/char-at s
@@ -249,7 +249,7 @@
       (let ([inner rest] (brace-inner s)
             acc2 (if (= lit "") acc (cons lit acc)))
         (attr-parts rest (cons (read-expr inner) acc2) ""))
-    else (attr-parts (string/substring s 1 (string/length s)) acc (str lit (string/char-at s 0)))))
+    else (attr-parts (string/substring s 1 (count s)) acc (str lit (string/char-at s 0)))))
 
 (defn attr-string-value (inner)
   "Compile a quoted attribute value (which may embed `{…}`) into a value form: a plain
@@ -282,7 +282,7 @@
     (if (< idx 0)
       (error "bml: :for needs `x <- coll`, got: " spec)
       [(read-expr (string/trim (string/substring spec 0 idx)))
-        (read-expr (string/trim (string/substring spec (+ idx 2) (string/length spec))))])))
+        (read-expr (string/trim (string/substring spec (+ idx 2) (count spec))))])))
 
 (defn- directive (directives key)
   "The text of directive `key`. `contains?` establishes it is there before every call below,
@@ -316,14 +316,14 @@
   "Consume an element's attributes; stop at `>` or `/`. Returns `[attrs directives rest]`.
   `:if`/`:for` are split off into `directives`; everything else becomes a Hiccup attr."
   (let (s (skip-ws s))
-    (if (or (= (string/length s) 0) (= (string/char-at s 0) ">") (= (string/char-at s 0) "/"))
+    (if (or (= (count s) 0) (= (string/char-at s 0) ">") (= (string/char-at s 0) "/"))
       [attrs directives s]
       (let ([k s1] (read-name s)
             s1 (skip-ws s1))
-        (if (and (> (string/length s1) 0) (= (string/char-at s1 0) "="))
-          (let (s2 (skip-ws (string/substring s1 1 (string/length s1))))
+        (if (and (> (count s1) 0) (= (string/char-at s1 0) "="))
+          (let (s2 (skip-ws (string/substring s1 1 (count s1))))
             (if (directive? k)
-              (if (and (> (string/length s2) 0) (= (string/char-at s2 0) "{"))
+              (if (and (> (count s2) 0) (= (string/char-at s2 0) "{"))
                 (let ([raw s3] (brace-inner s2))
                   (parse-attrs s3 attrs (assoc directives k raw)))
                 (bml-error s2 "directive " k " needs a brace value, e.g. " k "={…}"))
@@ -358,7 +358,7 @@
     (if (< idx 0)
       (bml-error after "unterminated <" tag "> (missing " close ">)")
       (let (content (string/substring after 0 idx)
-            rest (expect-close (string/substring after idx (string/length after)) tag))
+            rest (expect-close (string/substring after idx (count after)) tag))
         [(apply-directives (build-elem tag attrs (raw-children content)) directives) rest]))))
 
 ; ---- components: <.name attrs>children</.name> → (name {attrs :children (list …)}) ----
@@ -375,7 +375,7 @@
 
 (defn parse-component (s)
   "`s` begins with `<.`; returns `[form rest]` for a component call."
-  (let (s1 (string/substring s 2 (string/length s))
+  (let (s1 (string/substring s 2 (count s))
         [name s2] (read-name s1)
         [attrs directives s3] (parse-attrs s2 {} {}))
     (cond
@@ -383,9 +383,9 @@
         [(apply-directives (build-component name attrs nil) directives)
           (string/substring s3
             2
-            (string/length s3))]
+            (count s3))]
       (string/starts-with? s3 ">")
-        (let (after (string/substring s3 1 (string/length s3))
+        (let (after (string/substring s3 1 (count s3))
               [children s4] (parse-nodes after)
               s5 (expect-close-component s4 name))
           [(apply-directives (build-component name attrs children) directives) s5])
@@ -395,14 +395,14 @@
   "Consume the `</.name>` closing a component; returns the rest. Errors on a mismatch."
   (if (not (string/starts-with? s "</."))
     (bml-error s "expected </." name "> to close component <." name ">")
-    (let (s1 (string/substring s 3 (string/length s))
+    (let (s1 (string/substring s 3 (count s))
           [nm s2] (read-name s1)
           s2 (skip-ws s2))
       (cond
         (not (= nm name))
           (bml-error s
             "</." nm "> closes the wrong component, expected </." name ">")
-        (string/starts-with? s2 ">") (string/substring s2 1 (string/length s2))
+        (string/starts-with? s2 ">") (string/substring s2 1 (count s2))
         else (bml-error s2 "malformed component close </." name)))))
 
 (defn parse-element (s)
@@ -410,7 +410,7 @@
   starts with `.` (`<.name …>`), otherwise an ordinary element (directives applied)."
   (if (string/starts-with? s "<.")
     (parse-component s)
-    (let (s1 (string/substring s 1 (string/length s))
+    (let (s1 (string/substring s 1 (count s))
           [tag s2] (read-name s1)
           [attrs directives s3] (parse-attrs s2 {} {}))
       (cond
@@ -418,9 +418,9 @@
           [(apply-directives (build-elem tag attrs nil) directives)
             (string/substring s3
               2
-              (string/length s3))]
+              (count s3))]
         (string/starts-with? s3 ">")
-          (let (after (string/substring s3 1 (string/length s3)))
+          (let (after (string/substring s3 1 (count s3)))
             (cond
               (void-tag? tag)
                 [(apply-directives (build-elem tag attrs nil)
@@ -437,17 +437,17 @@
 
 (defn expect-close (s tag)
   "Consume the `</tag>` closing `tag`; returns the rest. Errors on a mismatch."
-  (let (s1 (string/substring s 2 (string/length s))
+  (let (s1 (string/substring s 2 (count s))
         [nm s2] (read-name s1)
         s2 (skip-ws s2))
     (cond
       (not (= nm tag)) (bml-error s "</" nm "> closes the wrong tag, expected </" tag ">")
-      (string/starts-with? s2 ">") (string/substring s2 1 (string/length s2))
+      (string/starts-with? s2 ">") (string/substring s2 1 (count s2))
       else (bml-error s2 "malformed close tag </" tag))))
 
 (defn skip-comment (s)
   (let (idx (index-of s "-->"))
-    (if (< idx 0) "" (string/substring s (+ idx 3) (string/length s)))))
+    (if (< idx 0) "" (string/substring s (+ idx 3) (count s)))))
 
 ; ---- node sequences ----
 
@@ -458,7 +458,7 @@
 
 (defn- parse-nodes-acc (s acc)
   (cond
-    (= (string/length s) 0) [(reverse acc) s]
+    (= (count s) 0) [(reverse acc) s]
     (string/starts-with? s "</") [(reverse acc) s]
     (string/starts-with? s "<!--") (parse-nodes-acc (skip-comment s) acc)
     (string/starts-with? s "<")
@@ -498,17 +498,17 @@
   AT a stop character — at most once per delimiter, never once per letter."
   (let (stop (string/span-until s 0 *text-stops*)
         acc (if (= stop 0) acc (str acc (string/substring s 0 stop)))
-        s (if (= stop 0) s (string/substring s stop (string/length s))))
+        s (if (= stop 0) s (string/substring s stop (count s))))
     (cond
-      (= (string/length s) 0) [acc s]
+      (= (count s) 0) [acc s]
       (= (string/char-at s 0) "<") [acc s]
       (= (string/char-at s 0) "{") [acc s]
       ;; `\{` / `\}` are literal braces; a backslash before anything else is ordinary text
       (and (= (string/char-at s 0) "\\")
-        (> (string/length s) 1)
+        (> (count s) 1)
         (brace-char? (string/char-at s 1)))
-        (parse-text-at (string/substring s 2 (string/length s)) (str acc (string/char-at s 1)))
-      else (parse-text-at (string/substring s 1 (string/length s)) (str acc (string/char-at s 0))))))
+        (parse-text-at (string/substring s 2 (count s)) (str acc (string/char-at s 1)))
+      else (parse-text-at (string/substring s 1 (count s)) (str acc (string/char-at s 0))))))
 
 ; ---- entry point ----
 

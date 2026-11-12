@@ -184,7 +184,7 @@
   (hatch/web/channel/topic-matches? \"room:lobby\" \"room:lobby\") ;=> true
   (hatch/web/channel/topic-matches? \"room:lobby\" \"room:other\") ;=> false"
   (if (string/ends-with? pattern "*")
-    (string/starts-with? topic (string/substring pattern 0 (- (string/length pattern) 1)))
+    (string/starts-with? topic (string/substring pattern 0 (- (count pattern) 1)))
     (= pattern topic)))
 
 (defn best-match (patterns topic)
@@ -202,7 +202,7 @@
       (empty? hits) nil
       ;; Among wildcards the longest prefix is the most specific — "room:admin:*" beats
       ;; "room:*" for "room:admin:1", which is the only ordering a reader would predict.
-      else (first (sort hits (fn (a b) (> (string/length a) (string/length b))))))))
+      else (first (sort hits (fn (a b) (> (count a) (count b))))))))
 
 ; ---- the channel registry: pattern → spec thunk ----
 ;

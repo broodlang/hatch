@@ -71,7 +71,7 @@
   known/short key makes them forgeable (full auth bypass), so we fail the boot loudly rather
   than ship it. Pure; `secret-from-env` supplies `v`/`dev?` from the environment."
   (cond
-    (and v (>= (string/length v) *min-secret-len*)) v
+    (and v (>= (count v) *min-secret-len*)) v
     dev? (or v *dev-secret*)
     (nil? v)
       (error "web/session: HATCH_SECRET_KEY_BASE is not set. Refusing to sign sessions "
@@ -132,8 +132,8 @@
   "Open a sealed cookie, or `{}` if it does not open — a bad cookie reads as an empty
   session, exactly as a bad signature does."
   (let (rest-of (string/substring cookie
-                  (string/length *encrypted-prefix*)
-                  (string/length cookie))
+                  (count *encrypted-prefix*)
+                  (count cookie))
         dot (index-of rest-of "."))
     (if (< dot 0)
       {}
@@ -143,9 +143,7 @@
       ;; verify — which is exactly what a tampered cookie produces. Checking the type is
       ;; what makes a bad cookie read as an empty session instead of raising out of a plug.
       (let (nonce (base64-url-decode-bytes (string/substring rest-of 0 dot))
-            sealed (base64-url-decode-bytes (string/substring rest-of
-                                              (+ dot 1)
-                                              (string/length rest-of)))
+            sealed (base64-url-decode-bytes (string/substring rest-of (+ dot 1) (count rest-of)))
             opened (when (and (bytes? nonce) (bytes? sealed))
                      (decrypt (session-key secret) nonce sealed)))
         (if (not (bytes? opened))
@@ -160,7 +158,7 @@
 
 (defn session-key (secret)
   "The AEAD key for `secret`, derived once and remembered."
-  (if (table/has? *session-keys* secret)
+  (if (table/contains? *session-keys* secret)
     (table/get *session-keys* secret)
     (let (key (pbkdf2 secret "hatch/web/session/encrypt" 600000 32))
       (table/put *session-keys* secret key)
@@ -186,7 +184,7 @@
       (if (= dot -1)
         {}
         (let (payload (string/substring cookie 0 dot)
-              sig (string/substring cookie (+ dot 1) (string/length cookie))
+              sig (string/substring cookie (+ dot 1) (count cookie))
               expected (hmac-sha256 secret payload))
           (if (constant-time-equal? (string/->bytes sig) (string/->bytes expected))
             (check-expiry (decode-payload payload))

@@ -1008,7 +1008,7 @@
   `/live/ws` + the page's `data-live` path, so `/live/ws/counter` → `/counter`."
   (let (prefix "/live/ws")
     (if (string/starts-with? req-path prefix)
-      (string/substring req-path (string/length prefix) (string/length req-path))
+      (string/substring req-path (count prefix) (count req-path))
       req-path)))
 
 (defn unrouted-live-message (req-path known)

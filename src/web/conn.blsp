@@ -187,7 +187,7 @@
               m
               (assoc m
                 (trim-if-needed (string/substring pair 0 eq))
-                  (trim-if-needed (string/substring pair (+ eq 1) (string/length pair)))))))))))
+                  (trim-if-needed (string/substring pair (+ eq 1) (count pair)))))))))))
 
 (defn assign (conn key val)
   "Put a value into the conn's assigns map."

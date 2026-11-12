@@ -126,7 +126,7 @@
   "Fold one request into the stats. Called by the telemetry handler; public so a test can
   drive it without a live server."
   (let (shape (route-key method route path)
-        key (if (or (table/has? *stats* shape)
+        key (if (or (table/contains? *stats* shape)
                   (< (count (keys (table/snapshot *stats*))) *max-routes*))
               shape
               "other")

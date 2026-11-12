@@ -187,7 +187,7 @@
   (hatch/web/upload/extension-of \"README\") ;=> \"\""
   (let (lowered (string/lower (or client-name ""))
         i (string/last-index-of lowered "."))
-    (if (= i -1) "" (string/substring lowered i (string/length lowered)))))
+    (if (= i -1) "" (string/substring lowered i (count lowered)))))
 
 (defn accept-matches? (rule client-name content-type)
   "Whether one `:accept` rule admits this file. A rule starting with `.` is an extension; a
@@ -200,7 +200,7 @@
     (cond
       (string/starts-with? rule ".") (= (string/lower rule) (extension-of client-name))
       (string/ends-with? rule "/*")
-        (string/starts-with? kind (string/substring rule 0 (- (string/length rule) 1)))
+        (string/starts-with? kind (string/substring rule 0 (- (count rule) 1)))
       else (= (string/lower rule) kind))))
 
 (defn accepted? (accept client-name content-type)

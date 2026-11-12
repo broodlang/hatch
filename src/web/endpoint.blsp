@@ -194,7 +194,7 @@
         coding (compress/chosen-encoding conn))
     (if (and coding
           (string? body)
-          (>= (string/length body) min-bytes)
+          (>= (count body) min-bytes)
           (nil? (get headers :content-encoding)))
       (assoc resp
         :body
@@ -322,7 +322,7 @@
   (hatch/web/endpoint/static-subpath \"/\" \"/static\") ;=> nil"
   (let (prefix (str at "/"))
     (if (string/starts-with? path prefix)
-      (string/substring path (string/length prefix) (string/length path))
+      (string/substring path (count prefix) (count path))
       nil)))
 
 (defn- bundled-client (subpath)

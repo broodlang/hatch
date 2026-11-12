@@ -12,7 +12,7 @@
 
 (describe "format-response — binary body"
   (test "a bytes body → raw body appended, byte-count Content-Length (flattened iolist)"
-    (let (resp (bytes/concat (response/format-response {:status 200
+    (let (resp (bytes/append (response/format-response {:status 200
                                                         :headers {:content-type "image/png"}
                                                         :body (bytes [137 80 255])}))
           n (count (seq resp)))
@@ -91,7 +91,7 @@
 (defn drain-bytes (sock acc)
   "Collect all response bytes until the server closes the connection."
   (receive
-    ([:tcp ^sock chunk] (drain-bytes sock (bytes/concat acc chunk)))
+    ([:tcp ^sock chunk] (drain-bytes sock (bytes/append acc chunk)))
     ([:tcp-closed ^sock] acc)
     (after 1500 acc)))
 
@@ -99,7 +99,7 @@
   (fn (request)
     ; serve the request path (minus the leading '/') from `dir`
     (let (p (get request :path)
-          rel (string/substring p 1 (string/length p)))
+          rel (string/substring p 1 (count p)))
       (conn->response (serve (build request) dir rel)))))
 
 (describe "binary asset end-to-end through the server"

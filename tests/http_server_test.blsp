@@ -28,7 +28,7 @@
     ([:incomplete]
       (receive
         ; binary-mode socket: `chunk` is a `bytes` value — the parser is bytes-native
-        ([:tcp ^sock chunk] (read-one-frame sock (bytes/concat buf chunk)))
+        ([:tcp ^sock chunk] (read-one-frame sock (bytes/append buf chunk)))
         ([:tcp-closed ^sock] :closed)
         (after 2000 :timeout)))
     ([:error _m] :error)))
@@ -216,7 +216,7 @@
 ; A masked client frame (zero mask key → payload bytes unchanged); fin 0/1, payload ≤125.
 (defn ws-frame (fin opcode payload)
   (let (body (string/->bytes payload))
-    (bytes/concat [(+ (* fin 128) opcode) (+ 128 (count body)) 0 0 0 0 body])))
+    (bytes/append [(+ (* fin 128) opcode) (+ 128 (count body)) 0 0 0 0 body])))
 
 ; Tier-2 end-to-end: a fragmented client message is reassembled across the real socket.
 ; Before reassembly, the server read loop saw only the first fragment ("Hel") and dropped
@@ -230,7 +230,7 @@
                  (echo-one-frame me))
           client (ws-client-connect port)
           _send (tcp/send client
-                  (bytes/concat [(ws-frame 0 1 "Hel") (ws-frame 0 0 "lo ") (ws-frame 1 0 "world")]))
+                  (bytes/append [(ws-frame 0 1 "Hel") (ws-frame 0 0 "lo ") (ws-frame 1 0 "world")]))
           payload (receive ([:got p] p) (after 3000 :timeout)))
       (tcp/close client)
       (server/stop port)
