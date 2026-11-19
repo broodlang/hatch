@@ -285,6 +285,10 @@
   (test "the worker supervisor is torn down when the server stops"
     (let (port 24772
           _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
+          ;; registered by the time `start` returns: the listener starts the workers' supervisor
+          ;; before it binds, and `start` waits for the bind. With the supervisor started after the
+          ;; bind this read nil about one run in thirteen under load (CI, 2026-11-19) — a fresh
+          ;; process's first `supervisor/start` loads the module, which widened the window.
           up? (pid? (proc/whereis (server/worker-supervisor-name port)))
           _ (server/stop port)
           ; POLL rather than sleeping a fixed 50ms: the teardown is async w.r.t. `stop`, so a
@@ -292,7 +296,17 @@
           ; Same shape as web_pubsub_test's wait-gone.
           down? (wait-unregistered (server/worker-supervisor-name port) 100))
       (assert= up? true)
-      (assert= down? true))))
+      (assert= down? true)))
+  (test "a port that will not bind leaves no worker supervisor registered"
+    (let (port 24774
+          holder (tcp/listen "0.0.0.0" port)
+          _ (server/start port (fn (_r) {:status 200 :headers {} :body "ok"}))
+          ;; every restart of the listener fails to bind; wait for its supervisor to give up
+          gave-up? (wait-unregistered (server/supervisor-name port) 1500)
+          left (proc/whereis (server/worker-supervisor-name port)))
+      (tcp/close holder)
+      (assert= gave-up? true)
+      (assert= left nil))))
 
 ; Slow-loris drip: :read-timeout-ms re-arms on every byte, so a client dribbling one byte per
 ; (timeout-1)s never trips it. :head-timeout-ms caps the TOTAL time the head may take. Here the

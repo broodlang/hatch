@@ -152,16 +152,24 @@ port) still returns and lets the caller fail on its own terms."
 
 (defn listen-and-serve (port handler ws-handler config)
   (let (tls (get config :tls)
-        lsock (bind-retry port 25 tls)
-        scheme (if tls "https" "http")
         ; Per-connection workers run under a dynamic supervisor as :temporary children —
         ; supervised and observable (registered by name, visible to `nest observe`), yet never
         ; restarted, since a crashed worker's socket/request context is gone and can't resume.
         ; The listener still monitors each worker itself (for the graceful drain and the
         ; max-connections cap), so the supervisor adds supervision/observability without changing
         ; the shutdown or back-pressure behaviour.
+        ;
+        ; Started BEFORE the socket binds. `start` returns once the port accepts a connection
+        ; (`await-listening`), and a bound socket accepts at once, so a supervisor started after
+        ; the bind could still be unregistered when `start` returned — a caller's `whereis` of
+        ; it read nil about one start in thirteen under load. A named spawn registers before it
+        ; returns, so with this order "the port accepts" implies "the workers' supervisor is
+        ; there".
         sup (supervisor/start []
-              {:name (worker-supervisor-name port) :strategy :one-for-one}))
+              {:name (worker-supervisor-name port) :strategy :one-for-one})
+        ; a port that will not bind leaves no workers' supervisor registered behind it
+        lsock (try (bind-retry port 25 tls) (catch e (do (gen/stop sup) (throw e))))
+        scheme (if tls "https" "http"))
     (io/puts (str "listening on " scheme "://localhost:" port))
     (listener-loop lsock handler ws-handler config (list) sup)))
 
