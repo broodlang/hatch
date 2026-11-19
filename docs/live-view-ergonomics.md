@@ -21,20 +21,19 @@ Adopt the Phoenix pattern: **wire live views in the router**, not in the view.
 
 The `(live path module)` clause does three things at module load:
 
-1. `(require 'module)` — loads the view module (so its `deflive`-generated `live-spec`
-   exists); `require` is load-once, so a hot reload just re-runs it harmlessly.
-2. Registers `module/live-spec` for WebSocket dispatch at `path`.
+1. `(require 'module)` — loads the view module (so its `deflive`-generated `live-view`
+   record exists); `require` is load-once, so a hot reload just re-runs it harmlessly.
+2. Registers the view's value, `(module/live-view)`, for WebSocket dispatch at `path`.
 3. Adds a `GET path` route serving the mount page.
 
-The view module then contains only imports + `:implements` + `deflive` + domain
-functions — no `show`, no `live-handler`, no `web/template`/`web/conn`/`web/layout`
-imports (they existed only for the `show` page, which the router now generates):
+The view module then contains only imports + `deflive` + domain functions — no `show`, no
+`live-handler`, no `web/template`/`web/conn`/`web/layout` imports (they existed only for the
+`show` page, which the router now generates):
 
 ```brood
 (defmodule web/views/counter
   "Click counter + fast/slow tickers."
-  (:use web/live)            ; deflive — the one import a view needs
-  (:implements LiveModule))
+  (:use web/live))           ; deflive — the one import a view needs
 
 (defn init (start) {:count start :fast 0 :slow 0})
 (defn increment (model) (assoc model :count (inc (get model :count))))
@@ -50,11 +49,13 @@ imports (they existed only for the `show` page, which the router now generates):
 
 ## How it fits together
 
-- **`deflive`** (`web/live`) generates `live-spec` (a 0-arg thunk →
-  `{:mount :render :handle-event :handle-tick :ticks}`). Unchanged — `ws-handler-for`
-  still exists for wiring a single view without the router.
+- **`deflive`** (`web/live`) generates a field-less record, `live-view` — the view's value
+  and dispatch identity — and an `impl` of the `LiveModule` ability for it, carrying the
+  clauses as its ops (`view-mount`, `view-render`, `view-handle-event`, and whichever optional
+  ones the view writes; the rest keep the ability's provided defaults). A view written by
+  hand is the same record and an impl of the three required ops.
 - **Live-route registry** (`web/live`) — a `defonce` global (`*live-routes*`) holding a
-  `path → live-spec` map. The router registers at load (`register-live`); the worker looks
+  `path → {:view :session}` map. The router registers at load (`register-live`); the worker looks
   paths up per connection (`lookup-live`). A global, not a process: globals are already
   shared across green processes, and load-time state has to survive a startup image, which
   no process does (see the 0.21.1 entry in `roadmap.md` — it was a process, and every live
@@ -86,13 +87,14 @@ the advisory type-checker / LSP — no macro-injected imports.
 
 ## Constraints worth remembering
 
-- `(:implements LiveModule)` must stay a **literal** `defmodule` clause — the checker
-  reads it from the un-expanded source (`head_is "defmodule"` in
-  `crates/lisp/src/types/check/protocol.rs`, `implements_claims`). Any wrapper macro
-  around `defmodule` would silently disable the behaviour-conformance check. The
-  `LiveModule` behaviour itself lives in `web/live` (`defbehaviour LiveModule`) — named
-  to avoid colliding with Phoenix's `LiveView`.
-- The `live` clause references `module/live-spec` and `layout` as bare/qualified
+- The view contract is the `LiveModule` ability in `web/live` (`defability LiveModule`) —
+  named to avoid colliding with Phoenix's `LiveView`. A view is a value with an impl of it,
+  so nothing in the view module's header claims anything.
+- Hot reload re-runs the view's top-level `deflive` form (it is a `def…` macro, which
+  `system/reload-defs` re-evaluates), and that re-registers the impl. A hand-written view's
+  bare top-level `impl` is not a `def…` form, so a reload skips it — edit such a view and
+  its sessions keep the old code until a restart.
+- The `live` clause references `module/live-view` and `layout` as bare/qualified
   symbols, never injected imports — so LSP and the type-checker see them.
 
 ## Rejected alternatives (and why)

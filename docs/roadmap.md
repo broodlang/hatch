@@ -102,6 +102,16 @@ ever set?" (`conn->response` was stamping `:route nil` onto every response), and
 not `=` to a map of the same fields. The session no longer merges a spec's keys over its view
 either — it carries the spec under `:spec`, so a spec field and a session field cannot collide.
 
+The two specs have since gone the way of the maps before them. A live view and a live component
+are now VALUES dispatched through an ability — `web/live/LiveModule` and
+`web/component/LiveComponentModule`, which replaced the two `defbehaviour` declarations nothing
+had ever claimed. `deflive` expands to a field-less record `live-view` and an `impl` for it; the
+router registers `(module/live-view)` and the session calls the ability's ops on that value. The
+optional hooks and the compiled render artifacts are provided ops whose defaults are what a view
+without them always meant, so a view written by hand is a record and three methods. Hot reload
+needs no thunk: a save re-runs the `deflive` form, which re-registers the impl, and the value
+the session holds dispatches to the new code on its next call.
+
 Two bugs fell out of declaring the fields. `web/conn/secure?` read a `:scheme` key nothing
 ever set, so its "the server terminated TLS itself" branch could not fire — an app serving its
 own HTTPS reported every request as insecure, which suppressed HSTS and cleared the session
