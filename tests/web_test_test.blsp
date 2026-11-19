@@ -131,20 +131,17 @@
   (view-render (_view model _components) [:b {} (str (get model :n))])
   (view-handle-event (_view _name _params model) (assoc model :n 99)))
 
-;; Only two of the three required ops: the runtime half of the contract — `satisfies?` asks
-;; whether every op resolves for a value — says no.
-;;
-;; `nest check` says nothing about this impl, and that is a brood gap rather than a choice: the
-;; checker verifies an impl's ops only against an ability declared in the SAME file, and
-;; `LiveModule` lives in web/live. A same-file ability gets "impl is missing op"; a hand-written
-;; view in its own module, the real case, gets no finding until the session calls the missing op
-;; and dispatch raises a no-impl.
+;; Only two of the three required ops, on purpose: the runtime half of the contract —
+;; `satisfies?` asks whether every op resolves for a value — says no. The static half is
+;; `nest check`'s "ability LiveModule: impl is missing op `view-handle-event`", reported for an
+;; impl of an ability declared in another module since brood ADR-761; this fixture allows it.
 (defrecord incomplete-view ())
 
-(impl LiveModule
-  incomplete-view
-  (view-mount (_view _params) {})
-  (view-render (_view _model _components) [:b {} "x"]))
+(check-allow :conformance
+  (impl LiveModule
+    incomplete-view
+    (view-mount (_view _params) {})
+    (view-render (_view _model _components) [:b {} "x"])))
 
 (describe "a live view is a value"
   (test "deflive defines a field-less record that satisfies LiveModule"
