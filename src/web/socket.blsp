@@ -323,7 +323,6 @@
     ; two pings went unanswered
     ([:reap] [:closed :reaped])
     ; queued by something other than a handler run from this loop — write it now
-    ([:push-effect pushed] (if (send-msg sock pushed)
-                             (recv-step sock buf watchdog)
-                             [:closed :closed]))
+    ([:push-effect pushed]
+      (if (send-msg sock pushed) (recv-step sock buf watchdog) [:closed :closed]))
     (_ [:control message buf])))

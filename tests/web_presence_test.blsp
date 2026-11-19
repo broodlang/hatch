@@ -67,9 +67,8 @@
 
 (defn relay-loop (parent)
   (receive
-    ([:info m] (do
-                 (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))])
-                 (relay-loop parent)))
+    ([:info m]
+      (do (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))]) (relay-loop parent)))
     (after 15000 nil)))
 
 (defn drain-roster ()
@@ -215,9 +214,10 @@
 (defn observer-loop (topic parent)
   "Forward each pushed roster's keys to parent; on `:stop-observing`, unobserve and idle."
   (receive
-    ([:info m] (do
-                 (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))])
-                 (observer-loop topic parent)))
+    ([:info m]
+      (do
+        (send parent [:roster (map (get m :presence) (fn (e) (get e :key)))])
+        (observer-loop topic parent)))
     (:stop-observing (do (unobserve topic) (snooze 100000)))
     (after 15000 nil)))
 

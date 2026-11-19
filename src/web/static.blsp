@@ -144,10 +144,9 @@
 (defn relative-to (path dir)
   "`path` with a leading `dir/` removed — the form the fingerprint manifest keys and values
   use. `serve` builds a path as `dir/rel`, so this recovers `rel`."
-  (let (prefix (str dir "/"))
-    (if (string/starts-with? path prefix)
-      (string/substring path (count prefix) (count path))
-      path)))
+  (match path
+    ((str ^dir "/" relative) relative)
+    (_ path)))
 
 (defn fingerprinted? (path dir)
   "True if `path` is an asset hatch actually content-fingerprinted — its path RELATIVE to
@@ -246,9 +245,8 @@
   `[start end]` (inclusive, satisfiable), `:unsatisfiable` (a syntactically valid range
   wholly past the end), or nil (absent/garbled/multi-range — ignore it and serve the whole
   body). Forms: `bytes=a-b`, `bytes=a-` (a..end), `bytes=-n` (final n bytes)."
-  (if (or (nil? spec) (not (string/starts-with? (string/trim spec) "bytes=")))
-    nil
-    (let (r (string/substring (string/trim spec) 6 (count (string/trim spec))))
+  (match (when spec (string/trim spec))
+    ((str "bytes=" r)
       (if (includes? r ",")
         ; multi-range: not worth it for text assets — fall back to a full 200
         nil
@@ -279,7 +277,8 @@
                         (> a b) nil
                         (>= a len) :unsatisfiable
                         else [a (math/min b (- len 1))])
-                      nil))))))))))
+                      nil))))))))
+    (_ nil)))
 
 (defn serve-range (conn content-type body tag cc)
   "Honour a `Range` request against `body` (a string or `bytes`): a 206 with the requested

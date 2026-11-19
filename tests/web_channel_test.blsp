@@ -135,9 +135,8 @@
         (o (assert= o :error)))))
   (test "join can answer a payload alongside the socket"
     (match (join "room:9" {"user" "ada"} (new-socket "room:9" nil))
-      ([:ok payload socket] (do
-                              (assert= (get payload :joined) "room:9")
-                              (assert= (assigned socket :user) "ada")))
+      ([:ok payload socket]
+        (do (assert= (get payload :joined) "room:9") (assert= (assigned socket :user) "ada")))
       (o (assert= o :ok))))
   (test "an `on` clause is selected by event name"
     (match (handle-in "echo" {"text" "hi"} (new-socket "t" nil))

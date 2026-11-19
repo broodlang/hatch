@@ -147,23 +147,18 @@
   (match (parse-one-frame buf maxf)
     ([:incomplete] [:incomplete])
     ([:error m] [:error m])
-    ([:ok fin opcode payload remainder] (cond
-                                          (not (= opcode 0))
-                                            [:error "websocket: expected continuation frame"]
-                                          (> (+ acclen (count payload)) maxm)
-                                            [:error "websocket: message too large"]
-                                          (= fin 1)
-                                            [:ok
-                                              msg-opcode
-                                              (bytes/append (reverse (cons payload pieces)))
-                                              remainder]
-                                          else
-                                            (reassemble remainder
-                                              msg-opcode
-                                              (cons payload pieces)
-                                              (+ acclen (count payload))
-                                              maxf
-                                              maxm)))))
+    ([:ok fin opcode payload remainder]
+      (cond
+        (not (= opcode 0)) [:error "websocket: expected continuation frame"]
+        (> (+ acclen (count payload)) maxm) [:error "websocket: message too large"]
+        (= fin 1) [:ok msg-opcode (bytes/append (reverse (cons payload pieces))) remainder]
+        else
+          (reassemble remainder
+            msg-opcode
+            (cons payload pieces)
+            (+ acclen (count payload))
+            maxf
+            maxm)))))
 
 (defn parse-one-frame (buf maxf)
   "Parse exactly one WebSocket frame from `buf`. Returns `[:ok fin opcode payload
@@ -378,12 +373,9 @@
     (receive
       ; Binary-mode socket (see http/server's pre-101 tcp/set-binary): `chunk` is a
       ; first-class `bytes` value — the parser reads it directly, with no carrier hop.
-      ([:tcp ^sock chunk] (if (nil? need)
-                            (recv-frame sock (bytes/append buf chunk))
-                            (recv-frame-fill sock
-                              buf
-                              (cons chunk pieces)
-                              (+ got (count chunk))
-                              need)))
+      ([:tcp ^sock chunk]
+        (if (nil? need)
+          (recv-frame sock (bytes/append buf chunk))
+          (recv-frame-fill sock buf (cons chunk pieces) (+ got (count chunk)) need)))
       ([:tcp-closed ^sock] [:closed])
       (other [:other other (bytes/append buf (reverse pieces))]))))

@@ -243,13 +243,14 @@
         pre-tagged? (and (not (nil? tag)) (not (http-cache/versioned-tag? tag))))
     (match (http-cache/conditional conn resp coding)
       ([:not-modified not-modified] (secured conn (as-response not-modified) config headers))
-      ([:send validated] (secured conn
-                           (let (response (as-response validated))
-                             (if (and compress-opts (not pre-tagged?))
-                               (compress-response conn response compress-opts)
-                               response))
-                           config
-                           headers)))))
+      ([:send validated]
+        (secured conn
+          (let (response (as-response validated))
+            (if (and compress-opts (not pre-tagged?))
+              (compress-response conn response compress-opts)
+              response))
+          config
+          headers)))))
 
 (defn freshen (conn resp config)
   "Apply the app's dynamic-HTML freshness policy, if it has one.
@@ -320,10 +321,9 @@
   (hatch/web/endpoint/static-subpath \"/staticky/app.css\" \"/static\") ;=> nil
   (hatch/web/endpoint/static-subpath \"/static\" \"/static\") ;=> nil
   (hatch/web/endpoint/static-subpath \"/\" \"/static\") ;=> nil"
-  (let (prefix (str at "/"))
-    (if (string/starts-with? path prefix)
-      (string/substring path (count prefix) (count path))
-      nil)))
+  (match path
+    ((str ^at "/" subpath) subpath)
+    (_ nil)))
 
 (defn- bundled-client (subpath)
   "The handler for one of hatch's own browser clients, or nil when `subpath` names neither —

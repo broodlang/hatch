@@ -67,21 +67,20 @@
   (if (<= tries 0)
     (reverse acc)
     (receive
-      ([:info payload] (let (up (get payload :upload)
-                             acc2 (if up (cons up acc) acc))
-                         (if (and up (get up :done?))
-                           (reverse acc2)
-                           (collect-progress acc2 (- tries 1)))))
+      ([:info payload]
+        (let (up (get payload :upload) acc2 (if up (cons up acc) acc))
+          (if (and up (get up :done?)) (reverse acc2) (collect-progress acc2 (- tries 1)))))
       (after 5000 (reverse acc)))))
 
 (defn collect-for-token (token ms)
   "Drain `:info` payloads for `ms`, returning only those carrying `token` — so an unrelated
     event from a concurrently-running case can't be mistaken for one about this upload."
   (receive
-    ([:info payload] (let (up (get payload :upload))
-                       (if (and up (= (get up :token) token))
-                         (cons up (collect-for-token token ms))
-                         (collect-for-token token ms))))
+    ([:info payload]
+      (let (up (get payload :upload))
+        (if (and up (= (get up :token) token))
+          (cons up (collect-for-token token ms))
+          (collect-for-token token ms))))
     (after ms (list))))
 
 (defn ok-handler (reporter)

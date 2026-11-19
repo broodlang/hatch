@@ -644,9 +644,7 @@
   (hatch/web/audit/tag-name-of \"<ul id=\\\"feed\\\">\") ;=> \"ul\"
   (hatch/web/audit/tag-name-of \"<li>\") ;=> \"li\"
   (hatch/web/audit/tag-name-of \"\") ;=> \"\""
-  (let (rest-of (if (string/starts-with? tag "<")
-                  (string/substring tag 1 (count tag))
-                  tag)
+  (let (rest-of (match tag ((str "<" after) after) (_ tag))
         stop (seq/find [" " ">" "\n"]
                (fn (c) (>= (index-of rest-of c) 0))))
     (if (nil? stop) "" (string/substring rest-of 0 (index-of rest-of stop)))))

@@ -144,10 +144,11 @@
           sock :sock
           _ (feed-tcp sock frame 50))
       (match (http/websocket/recv-frame sock (bytes []))
-        ([:ok opcode payload-out math/rem] (do
-                                             (assert= opcode 1)
-                                             (assert= (count math/rem) 0)
-                                             (assert= (into [] (seq payload-out)) payload)))
+        ([:ok opcode payload-out math/rem]
+          (do
+            (assert= opcode 1)
+            (assert= (count math/rem) 0)
+            (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok)))))
   (test "also reassembles when delivered one byte per read (header assembled incrementally)"
     (let (payload (into [] (map (range 200) (fn (i) (math/mod (+ i 7) 100))))
@@ -155,9 +156,8 @@
           sock :sock
           _ (feed-tcp sock frame 1))
       (match (http/websocket/recv-frame sock (bytes []))
-        ([:ok _opcode payload-out math/rem] (do
-                                              (assert= (count math/rem) 0)
-                                              (assert= (into [] (seq payload-out)) payload)))
+        ([:ok _opcode payload-out math/rem]
+          (do (assert= (count math/rem) 0) (assert= (into [] (seq payload-out)) payload)))
         (o (assert= o :ok))))))
 
 ; :isolated — registering writes a process-wide global, so running concurrently with other
@@ -528,9 +528,8 @@
     (do
       (web/live/push-title "Counter · 7")
       (receive
-        ([:push-effect msg] (do
-                              (assert= (get msg :event) "title")
-                              (assert= (get msg :title) "Counter · 7")))
+        ([:push-effect msg]
+          (do (assert= (get msg :event) "title") (assert= (get msg :title) "Counter · 7")))
         (after 500 (is false)))))
 
   (test "it answers nil, so a handler's last expression is still its model"
@@ -544,9 +543,10 @@
   (test "the effect encodes with the key the client branches on"
     (web/live/push-title "Tab")
     (receive
-      ([:push-effect msg] (let (json (web/socket/encode msg))
-                            (is (includes? json "\"event\":\"title\""))
-                            (is (includes? json "\"title\":\"Tab\""))))
+      ([:push-effect msg]
+        (let (json (web/socket/encode msg))
+          (is (includes? json "\"event\":\"title\""))
+          (is (includes? json "\"title\":\"Tab\""))))
       (after 500 (is false)))))
 
 ;; ---- a tick interval must be a literal ---------------------------------------

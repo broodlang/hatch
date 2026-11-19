@@ -258,12 +258,8 @@ port) still returns and lets the caller fail on its own terms."
           (monitor worker)
           (tcp/controlling-process client worker)
           (listener-loop lsock handler ws-handler config (cons worker workers) sup))))
-    ([:down _ pid _] (listener-loop lsock
-                       handler
-                       ws-handler
-                       config
-                       (listener-without workers pid)
-                       sup))
+    ([:down _ pid _]
+      (listener-loop lsock handler ws-handler config (listener-without workers pid) sup))
     ([:drain from]
       (do
         (tcp/close lsock)
@@ -308,15 +304,15 @@ port) still returns and lets the caller fail on its own terms."
             :deadline-ms (get config :head-timeout-ms)
             :max-bytes (get config :max-request-bytes)})
     ; idle timeout or the total head deadline — the peer never finished its head
-    ([:timeout _acc] (do
-                       (tcp/send sock
-                         (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-                       (tcp/close sock)))
+    ([:timeout _acc]
+      (do
+        (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+        (tcp/close sock)))
     ; the head grew past the request cap without a terminator
-    ([:too-large _acc] (do
-                         (tcp/send sock
-                           (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
-                         (tcp/close sock)))
+    ([:too-large _acc]
+      (do
+        (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+        (tcp/close sock)))
     ; peer hung up mid-head (or between keep-alive requests) — nothing to answer
     ([:closed _acc] nil)
     ; `head` includes the terminator; `rest` is whatever arrived past it (a pipelined
@@ -373,15 +369,10 @@ port) still returns and lets the caller fail on its own terms."
           else (dispatch-complete sock handler ws-handler config buf))))
     ; Chunked body → decode incrementally (only the newly-arrived bytes each read) instead of
     ; re-de-chunking the whole buffer on every read. Past :spool-threshold it moves to disk.
-    ([:chunked head body-start] (do
-                                  (maybe-continue sock head)
-                                  (chunked-begin sock
-                                    handler
-                                    ws-handler
-                                    (request-config config head)
-                                    buf
-                                    head
-                                    body-start)))
+    ([:chunked head body-start]
+      (do
+        (maybe-continue sock head)
+        (chunked-begin sock handler ws-handler (request-config config head) buf head body-start)))
     ; Malformed framing → 400 (mirrors `try-parse-bytes`'s :error path).
     ([:error msg] (bad-request-close sock msg))
     ; tcp/read-until only returns a head once the terminator has landed, so :incomplete
@@ -414,18 +405,14 @@ port) still returns and lets the caller fail on its own terms."
         (dispatch-buffered sock handler ws-handler config request remainder)))
     ; With the head complete and every incomplete-body case routed above, this is only reached
     ; with a complete request; keep the incomplete recursion as a safety net.
-    ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (worker-run sock
-                                           handler
-                                           ws-handler
-                                           config
-                                           (bytes/append [buf chunk])))
-                     ([:tcp-closed ^sock] nil)
-                     (after (get config :read-timeout-ms)
-                       (do
-                         (tcp/send sock
-                           (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
-                         (tcp/close sock)))))
+    ([:incomplete]
+      (receive
+        ([:tcp ^sock chunk] (worker-run sock handler ws-handler config (bytes/append [buf chunk])))
+        ([:tcp-closed ^sock] nil)
+        (after (get config :read-timeout-ms)
+          (do
+            (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+            (tcp/close sock)))))
     ([:error msg] (bad-request-close sock msg))))
 
 ; ---- buffered request dispatch (shared by the fast path and the O(n) body drain) ----
@@ -613,17 +600,18 @@ port) still returns and lets the caller fail on its own terms."
       (progress-finish prog clen)
       (dispatch-buffered sock handler ws-handler config request remainder))
     (receive
-      ([:tcp ^sock chunk] (let (got2 (+ got (count chunk)))
-                            (buffered-drain sock
-                              handler
-                              ws-handler
-                              config
-                              head
-                              (cons chunk chunks)
-                              got2
-                              clen
-                              deadline
-                              (progress-tick prog (math/min got2 clen)))))
+      ([:tcp ^sock chunk]
+        (let (got2 (+ got (count chunk)))
+          (buffered-drain sock
+            handler
+            ws-handler
+            config
+            head
+            (cons chunk chunks)
+            got2
+            clen
+            deadline
+            (progress-tick prog (math/min got2 clen)))))
       ([:tcp-closed ^sock] nil)
       (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
         (do
@@ -662,24 +650,17 @@ port) still returns and lets the caller fail on its own terms."
     ; The whole body was already here. It is still held to the same bounds as one that arrives
     ; over many reads: over the cap is a 413, and over :spool-threshold it goes to disk, so a
     ; handler sees the same `:body-file` however the bytes happened to be split across reads.
-    ([:ok body remainder] (cond
-                            (> (count body) (get config :max-request-bytes))
-                              (do
-                                (tcp/send sock
-                                  (format-response {:status 413
-                                                    :body "<h1>413 Payload Too Large</h1>"}))
-                                (tcp/close sock))
-                            (chunked-spool? config head (count body) ws-handler)
-                              (let (path (spool-path config))
-                                (spool-append path body)
-                                (spool-dispatch sock handler config head path (count body)))
-                            else
-                              (dispatch-buffered sock
-                                handler
-                                ws-handler
-                                config
-                                (assoc head :body body)
-                                remainder)))
+    ([:ok body remainder]
+      (cond
+        (> (count body) (get config :max-request-bytes))
+          (do
+            (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+            (tcp/close sock))
+        (chunked-spool? config head (count body) ws-handler)
+          (let (path (spool-path config))
+            (spool-append path body)
+            (spool-dispatch sock handler config head path (count body)))
+        else (dispatch-buffered sock handler ws-handler config (assoc head :body body) remainder)))
     ([:error msg] (bad-request-close sock msg))
     ([:more tail decoded dlen]
       (cond
@@ -698,15 +679,16 @@ port) still returns and lets the caller fail on its own terms."
               handler config head path tail dlen deadline))
         else
           (receive
-            ([:tcp ^sock chunk] (chunked-drain sock
-                                  handler
-                                  ws-handler
-                                  config
-                                  head
-                                  (bytes/append [tail chunk])
-                                  decoded
-                                  dlen
-                                  deadline))
+            ([:tcp ^sock chunk]
+              (chunked-drain sock
+                handler
+                ws-handler
+                config
+                head
+                (bytes/append [tail chunk])
+                decoded
+                dlen
+                deadline))
             ([:tcp-closed ^sock] nil)
             (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
               (do
@@ -772,21 +754,22 @@ port) still returns and lets the caller fail on its own terms."
       (progress-finish prog clen)
       (spool-dispatch sock handler config head path clen))
     (receive
-      ([:tcp ^sock chunk] (let (n (count chunk)
-                                take (math/min n (- clen written))
-                                piece (if (= take n) chunk (bytes/slice chunk 0 take))
-                                written2 (+ written take))
-                            (spool-append path piece)
-                            (spool-drain sock
-                              handler
-                              ws-handler
-                              config
-                              head
-                              path
-                              written2
-                              clen
-                              deadline
-                              (progress-tick prog written2))))
+      ([:tcp ^sock chunk]
+        (let (n (count chunk)
+              take (math/min n (- clen written))
+              piece (if (= take n) chunk (bytes/slice chunk 0 take))
+              written2 (+ written take))
+          (spool-append path piece)
+          (spool-drain sock
+            handler
+            ws-handler
+            config
+            head
+            path
+            written2
+            clen
+            deadline
+            (progress-tick prog written2))))
       ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
       (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
         (do
@@ -830,34 +813,30 @@ port) still returns and lets the caller fail on its own terms."
         (spool-append path body)
         (spool-dispatch sock handler config head path (+ written (count body)))))
     ([:error msg] (do (spool-cleanup path) (bad-request-close sock msg)))
-    ([:more tail decoded dlen] (let (written2 (+ written dlen))
-                                 (when (> dlen 0)
-                                   (spool-append path (bytes/append (reverse decoded))))
-                                 (if (> (+ written2 (count tail)) (get config :max-request-bytes))
-                                   (do
-                                     (spool-cleanup path)
-                                     (tcp/send sock
-                                       (format-response {:status 413
-                                                         :body "<h1>413 Payload Too Large</h1>"}))
-                                     (tcp/close sock))
-                                   (receive
-                                     ([:tcp ^sock chunk] (chunked-spool-drain sock
-                                                           handler
-                                                           config
-                                                           head
-                                                           path
-                                                           (bytes/append [tail chunk])
-                                                           written2
-                                                           deadline))
-                                     ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
-                                     (after (math/min (get config :read-timeout-ms)
-                                              (math/max 1 (- deadline (os/now))))
-                                       (do
-                                         (spool-cleanup path)
-                                         (tcp/send sock
-                                           (format-response {:status 408
-                                                             :body "<h1>408 Request Timeout</h1>"}))
-                                         (tcp/close sock)))))))))
+    ([:more tail decoded dlen]
+      (let (written2 (+ written dlen))
+        (when (> dlen 0) (spool-append path (bytes/append (reverse decoded))))
+        (if (> (+ written2 (count tail)) (get config :max-request-bytes))
+          (do
+            (spool-cleanup path)
+            (tcp/send sock (format-response {:status 413 :body "<h1>413 Payload Too Large</h1>"}))
+            (tcp/close sock))
+          (receive
+            ([:tcp ^sock chunk]
+              (chunked-spool-drain sock
+                handler
+                config
+                head
+                path
+                (bytes/append [tail chunk])
+                written2
+                deadline))
+            ([:tcp-closed ^sock] (do (spool-cleanup path) nil))
+            (after (math/min (get config :read-timeout-ms) (math/max 1 (- deadline (os/now))))
+              (do
+                (spool-cleanup path)
+                (tcp/send sock (format-response {:status 408 :body "<h1>408 Request Timeout</h1>"}))
+                (tcp/close sock)))))))))
 
 (defn- spool-dispatch (sock handler config head path clen)
   "Run the handler on a spooled request (body on disk as `:body-file`), send the response, and

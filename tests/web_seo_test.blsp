@@ -355,12 +355,8 @@
       302))
 
   (test "a request with no Host is left alone rather than guessed at"
-    (let (conn ((canonical-host *site*) (web/conn/build {:method "GET"
-                                                         :path "/"
-                                                         :query ""
-                                                         :params {}
-                                                         :headers {}
-                                                         :body ""})))
+    (let (conn ((canonical-host *site*)
+                 (web/conn/build {:method "GET" :path "/" :query "" :params {} :headers {} :body ""})))
       (assert= (web/conn/halted? conn) false)))
 
   (test "a site with no :url configured redirects nobody"

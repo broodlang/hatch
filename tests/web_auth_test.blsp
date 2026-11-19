@@ -131,7 +131,8 @@
   (test ":body and :content-type give an API a JSON rejection its client can parse"
     (let (conn ((bearer-auth tokens
                   {:body "{\"error\":\"authentication required\"}"
-                   :content-type "application/json"}) (conn-with-auth nil)))
+                   :content-type "application/json"})
+                 (conn-with-auth nil)))
       (assert= (get conn :resp-body) "{\"error\":\"authentication required\"}")
       (assert= (map/get-in conn [:resp-headers :content-type]) "application/json")))
 
@@ -142,12 +143,13 @@
 
 (describe "allow-ips-from-env"
   (test "an unset variable admits nobody — a gate with no list configured must close"
-    (let (conn ((allow-ips-from-env "HATCH_DEFINITELY_UNSET_9f3a") (build {:method "GET"
-                                                                           :path "/dashboard"
-                                                                           :query ""
-                                                                           :params {}
-                                                                           :headers {:fly-client-ip "1.2.3.4"}
-                                                                           :body ""})))
+    (let (conn ((allow-ips-from-env "HATCH_DEFINITELY_UNSET_9f3a")
+                 (build {:method "GET"
+                         :path "/dashboard"
+                         :query ""
+                         :params {}
+                         :headers {:fly-client-ip "1.2.3.4"}
+                         :body ""})))
       (assert= (halted? conn) true)
       ;; 404 and not 403: a 403 confirms the endpoint is there and worth attacking.
       (assert= (get conn :status) 404))))

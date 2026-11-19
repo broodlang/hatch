@@ -299,9 +299,9 @@
       (proc/sleep 100)
       (send child [:tcp :sock (frag-tail)])
       (receive
-        ([:done result] (match result
-                          ([:ok opcode payload _] (do
-                                                    (assert= opcode 1)
-                                                    (assert= (string/bytes-> payload) "abcdef")))
-                          (other (assert= other :ok))))
+        ([:done result]
+          (match result
+            ([:ok opcode payload _]
+              (do (assert= opcode 1) (assert= (string/bytes-> payload) "abcdef")))
+            (other (assert= other :ok))))
         (after 3000 (assert= "the reader never answered — it is spinning" false))))))

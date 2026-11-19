@@ -183,9 +183,9 @@
   (hatch/web/channel/topic-matches? \"room:*\" \"rooms\") ;=> false
   (hatch/web/channel/topic-matches? \"room:lobby\" \"room:lobby\") ;=> true
   (hatch/web/channel/topic-matches? \"room:lobby\" \"room:other\") ;=> false"
-  (if (string/ends-with? pattern "*")
-    (string/starts-with? topic (string/substring pattern 0 (- (count pattern) 1)))
-    (= pattern topic)))
+  (match pattern
+    ((str prefix "*") (string/starts-with? topic prefix))
+    (_ (= pattern topic))))
 
 (defn best-match (patterns topic)
   "The pattern in `patterns` that should serve `topic`, or nil. An exact pattern always wins
@@ -331,20 +331,19 @@
   Anything else is treated as `[:noreply socket]` with the socket unchanged — a handler that
   returns a bare socket, or nil, must not take the connection down."
   (match result
-    ([:reply payload socket] (do
-                               (when ref
-                                 (web/socket/send-msg sock (reply-frame topic ref "ok" payload)))
-                               (assoc joined topic (assoc (get joined topic) :socket socket))))
-    ([:noreply socket] (do
-                         (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
-                         (assoc joined topic (assoc (get joined topic) :socket socket))))
-    ([:stop reason socket] (do
-                             (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
-                             (web/socket/send-msg sock
-                               {:topic topic :event "close" :payload {:reason reason}})
-                             (leave-topic topic
-                               (assoc joined topic (assoc (get joined topic) :socket socket))
-                               reason)))
+    ([:reply payload socket]
+      (do
+        (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" payload)))
+        (assoc joined topic (assoc (get joined topic) :socket socket))))
+    ([:noreply socket]
+      (do
+        (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+        (assoc joined topic (assoc (get joined topic) :socket socket))))
+    ([:stop reason socket]
+      (do
+        (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+        (web/socket/send-msg sock {:topic topic :event "close" :payload {:reason reason}})
+        (leave-topic topic (assoc joined topic (assoc (get joined topic) :socket socket)) reason)))
     (_ (do (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {}))) joined))))
 
 ;; How many topics one connection may hold at once. A client chooses its own topics, and each
@@ -400,21 +399,20 @@
             (match result
               ; `[:ok socket]` / `[:ok payload socket]` — joined. Subscribe AFTER the channel
               ; has agreed to the join, so a refused join leaves no subscription behind.
-              ([:ok socket2] (do
-                               (pubsub/subscribe topic)
-                               (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
-                               (assoc joined topic {:spec spec :socket socket2})))
-              ([:ok payload socket2] (do
-                                       (pubsub/subscribe topic)
-                                       (when ref
-                                         (web/socket/send-msg sock
-                                           (reply-frame topic ref "ok" payload)))
-                                       (assoc joined topic {:spec spec :socket socket2})))
-              ([:error payload] (do
-                                  (when ref
-                                    (web/socket/send-msg sock
-                                      (reply-frame topic ref "error" payload)))
-                                  joined))
+              ([:ok socket2]
+                (do
+                  (pubsub/subscribe topic)
+                  (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+                  (assoc joined topic {:spec spec :socket socket2})))
+              ([:ok payload socket2]
+                (do
+                  (pubsub/subscribe topic)
+                  (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" payload)))
+                  (assoc joined topic {:spec spec :socket socket2})))
+              ([:error payload]
+                (do
+                  (when ref (web/socket/send-msg sock (reply-frame topic ref "error" payload)))
+                  joined))
               ;; A join that answers something else has not said yes, and the safe reading of
               ;; "not yes" on an authorization decision is no.
               (_ (do
@@ -434,9 +432,10 @@
         params (get frame :payload))
     (match event
       ("join" (do-join sock conn joined topic ref params))
-      ("leave" (do
-                 (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
-                 (leave-topic topic joined :left)))
+      ("leave"
+        (do
+          (when ref (web/socket/send-msg sock (reply-frame topic ref "ok" {})))
+          (leave-topic topic joined :left)))
       (_
         (let (entry (get joined topic))
           (if (nil? entry)
@@ -497,9 +496,10 @@
                        socket)
                      (catch e (channel-error "out" topic e [:noreply socket]))))
         (match result
-          ([:push event payload socket2] (do
-                                           (web/socket/send-msg sock (message topic event payload))
-                                           (assoc joined topic (assoc entry :socket socket2))))
+          ([:push event payload socket2]
+            (do
+              (web/socket/send-msg sock (message topic event payload))
+              (assoc joined topic (assoc entry :socket socket2))))
           ([:noreply socket2] (assoc joined topic (assoc entry :socket socket2)))
           (_ joined))))))
 
@@ -523,17 +523,11 @@
 
   A binary frame is liveness and nothing more — channels are a JSON protocol."
   (match (web/socket/recv sock buf watchdog)
-    ([:text payload remainder] (socket-loop sock
-                                 conn
-                                 (socket-dispatch sock conn joined payload)
-                                 remainder
-                                 watchdog))
+    ([:text payload remainder]
+      (socket-loop sock conn (socket-dispatch sock conn joined payload) remainder watchdog))
     ([:binary _ remainder] (socket-loop sock conn joined remainder watchdog))
-    ([:control msg remainder] (socket-loop sock
-                                conn
-                                (socket-control sock joined msg)
-                                remainder
-                                watchdog))
+    ([:control msg remainder]
+      (socket-loop sock conn (socket-control sock joined msg) remainder watchdog))
     ([:closed reason] (shutdown sock joined reason))))
 
 (defn start-socket (sock request &optional (connect nil))

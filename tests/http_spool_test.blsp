@@ -13,11 +13,12 @@
   (test "parses method + Content-Length + body offset without the body present"
     (let (buf "POST /u HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-a-fragment")
       (match (request/try-parse-head buf)
-        ([:head head body-start clen] (do
-                                        (assert= (get head :method) "POST")
-                                        (assert= (get head :path) "/u")
-                                        (assert= clen 100)
-                                        (assert= body-start (+ (index-of buf "\r\n\r\n") 4))))
+        ([:head head body-start clen]
+          (do
+            (assert= (get head :method) "POST")
+            (assert= (get head :path) "/u")
+            (assert= clen 100)
+            (assert= body-start (+ (index-of buf "\r\n\r\n") 4))))
         (other (assert= other :expected-head)))))
   (test "incomplete until the whole header block has arrived"
     (assert= (request/try-parse-head "POST /u HTTP/1.1\r\nContent-Len") [:incomplete]))

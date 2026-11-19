@@ -109,19 +109,18 @@
       (let (buflen (count buf))
         (match (try-parse-head (head-carrier (bytes/slice buf 0 (+ sep 4))))
           ([:error e] [:error e])
-          ([:head head body-start clen] (let (body-end (+ body-start clen))
-                                          (if (< buflen body-end)
-                                            [:incomplete]
-                                            [:ok
-                                              (assoc head
-                                                :body (bytes/slice buf body-start body-end))
-                                              (bytes/slice buf body-end buflen)])))
-          ([:chunked head body-start] (match (dechunk-step-bytes buf body-start (list) 0)
-                                        ([:more _tail _decoded _dlen] [:incomplete])
-                                        ([:error e] [:error e])
-                                        ([:ok body remainder] [:ok
-                                                                (assoc head :body body)
-                                                                remainder]))))))))
+          ([:head head body-start clen]
+            (let (body-end (+ body-start clen))
+              (if (< buflen body-end)
+                [:incomplete]
+                [:ok
+                  (assoc head :body (bytes/slice buf body-start body-end))
+                  (bytes/slice buf body-end buflen)])))
+          ([:chunked head body-start]
+            (match (dechunk-step-bytes buf body-start (list) 0)
+              ([:more _tail _decoded _dlen] [:incomplete])
+              ([:error e] [:error e])
+              ([:ok body remainder] [:ok (assoc head :body body) remainder]))))))))
 
 (defn try-parse-head-bytes (buf)
   "Bytes-native `try-parse-head`: parse a request's line + headers from a `bytes` buffer WITHOUT
@@ -310,15 +309,15 @@ the failure would reach the body read as a length."
   `[:error msg]`. `version` is the numeric HTTP version ('1.1'/'1.0')."
   (let (parts (string/split line " "))
     (match parts
-      ((method target version & _) (let (qi (index-of target "?")
-                                         v (http-version version))
-                                     (if (= qi -1)
-                                       [:ok (string/upper method) target "" v]
-                                       [:ok
-                                         (string/upper method)
-                                         (string/substring target 0 qi)
-                                         (string/substring target (+ qi 1) (count target))
-                                         v])))
+      ((method target version & _)
+        (let (qi (index-of target "?") v (http-version version))
+          (if (= qi -1)
+            [:ok (string/upper method) target "" v]
+            [:ok
+              (string/upper method)
+              (string/substring target 0 qi)
+              (string/substring target (+ qi 1) (count target))
+              v])))
       (_ [:error (str "invalid request line: " line)]))))
 
 (defn header-join-sep (k)

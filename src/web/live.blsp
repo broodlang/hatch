@@ -369,14 +369,12 @@
     ; a binary frame: one chunk of a live upload. Binary is the whole reason this arm exists —
     ; a file sent as JSON has to be base64'd, which costs a third more bytes on the wire and a
     ; decode per chunk, for a transport that already carries bytes natively.
-    ([:binary payload remainder] (session-step sock
-                                   remainder
-                                   (when-mounted view (fn () (session-chunk sock view payload)))))
+    ([:binary payload remainder]
+      (session-step sock remainder (when-mounted view (fn () (session-chunk sock view payload)))))
     ; anything in the mailbox that isn't socket bytes — a tick, an out-of-band message, a
     ; reload signal; this session's own vocabulary is in `session-control`
-    ([:control msg remainder] (session-step sock
-                                remainder
-                                (when-mounted view (fn () (session-control sock view msg)))))
+    ([:control msg remainder]
+      (session-step sock remainder (when-mounted view (fn () (session-control sock view msg)))))
     ([:closed _] (close-session sock view))))
 
 (defn- session-step (sock buf outcome)
@@ -690,46 +688,47 @@
       ; A generation-stamped beat. Drop it if it's from a view we've navigated away from
       ; (its ticker was killed, but this beat was already in the mailbox) — otherwise it'd
       ; fire the new view's handle-tick with the old view's interval key.
-      ([:tick key generation] (if (= generation (session-view-generation view))
-                                (push-update sock
-                                  view
-                                  "diff"
-                                  (try
-                                    (view-handle-tick (session-view-live view) key model)
-                                    (catch e (live-handler-error "tick" key e model))))
-                                [:continue view]))
+      ([:tick key generation]
+        (if (= generation (session-view-generation view))
+          (push-update sock
+            view
+            "diff"
+            (try
+              (view-handle-tick (session-view-live view) key model)
+              (catch e (live-handler-error "tick" key e model))))
+          [:continue view]))
       ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
       ; view's handle-info and push the resulting diff. A view without a handle-info clause
       ; (the provided default) or one that throws keeps its current model, so a stray message
       ; is harmless.
-      ([:info payload] (push-update sock
-                         view
-                         "diff"
-                         (try
-                           (view-handle-info (session-view-live view) payload model)
-                           (catch e (live-handler-error "info" :message e model)))))
+      ([:info payload]
+        (push-update sock
+          view
+          "diff"
+          (try
+            (view-handle-info (session-view-live view) payload model)
+            (catch e (live-handler-error "info" :message e model)))))
       ; a web/component/send-update push: merge into that component's stored state (a no-op
       ; if cid names no mounted component) and re-render — the parent's :model is untouched,
       ; but its next render-dynamic pass picks up the component's fresh state.
-      ([:update-component cid changes] (do
-                                         (try
-                                           (web/component/apply-update (session-view-components view)
-                                             cid changes)
-                                           (catch e
-                                             (live-handler-error "update-component" cid e nil)))
-                                         (push-update sock view "diff" model)))
+      ([:update-component cid changes]
+        (do
+          (try
+            (web/component/apply-update (session-view-components view) cid changes)
+            (catch e (live-handler-error "update-component" cid e nil)))
+          (push-update sock view "diff" model)))
       ; A component's own beat (web/component's `tick` clause): run that component's
       ; handle-tick over its stored state and re-render — what reaches the wire is the
       ; component's own inner-slot diff. NOT generation-stamped, unlike a view's beat: a
       ; navigate cancels every component beat in the outgoing table before it drains the
       ; mailbox, and a beat that still lands (cancellation races a fire in flight) is for an id
       ; the new table doesn't hold, so `apply-tick` answers false and nothing is rendered.
-      ([:tick-component cid ms] (if (try
-                                      (web/component/apply-tick (session-view-components view)
-                                        cid ms)
-                                      (catch e (live-handler-error "tick-component" cid e true)))
-                                  (push-update sock view "diff" model)
-                                  [:continue view]))
+      ([:tick-component cid ms]
+        (if (try
+              (web/component/apply-tick (session-view-components view) cid ms)
+              (catch e (live-handler-error "tick-component" cid e true)))
+          (push-update sock view "diff" model)
+          [:continue view]))
       ; A hot reload: re-render in full. Nothing is re-resolved here because nothing needs to
       ; be — the reload re-ran the view's `deflive` form, which re-registered its LiveModule
       ; impl, and every op called on the view value dispatches to the impl registered now.
@@ -822,20 +821,21 @@
       ; ancestor's data-cid) — route it to that component's own handle-event instead of
       ; the parent's, and re-render with the parent's :model unchanged (the component's
       ; slot picks up its fresh state on the next render-dynamic pass).
-      ("event" (let (name (get frame :name)
-                     cid (get frame :cid))
-                 (if cid
-                   (do
-                     (try
-                       (web/component/dispatch-event (session-view-components view) cid name params)
-                       (catch e (live-handler-error "event" name e nil)))
-                     (push-update sock view "diff" model))
-                   (push-update sock
-                     view
-                     "diff"
-                     (try
-                       (view-handle-event (session-view-live view) name params model)
-                       (catch e (live-handler-error "event" name e model)))))))
+      ("event"
+        (let (name (get frame :name)
+              cid (get frame :cid))
+          (if cid
+            (do
+              (try
+                (web/component/dispatch-event (session-view-components view) cid name params)
+                (catch e (live-handler-error "event" name e nil)))
+              (push-update sock view "diff" model))
+            (push-update sock
+              view
+              "diff"
+              (try
+                (view-handle-event (session-view-live view) name params model)
+                (catch e (live-handler-error "event" name e model)))))))
       ; ---- live uploads ----
       ;
       ; Three frames and one binary channel. `upload-init` offers the files the user picked
@@ -848,35 +848,38 @@
       ; `upload-init` is the only one that answers the client, because the refs it issues are
       ; the capability to write: a ref is unguessable and belongs to this session's model, so
       ; a client cannot invent one or reach another session's entry.
-      ("upload-init" (let (upload-name (get frame :name)
-                           result (try
-                                    (web/upload/offer model upload-name (get frame :files))
-                                    (catch e
-                                      (live-handler-error "upload-init"
-                                        upload-name
-                                        e
-                                        [model (list)])))
-                           [next-model refs] result)
-                       (queue-push {:event "upload-ready"
-                                    :name upload-name
-                                    :offer (get frame :offer)
-                                    :refs (vec refs)})
-                       (push-update sock view "diff" next-model)))
-      ("upload-done" (push-update sock
-                       view
-                       "diff"
-                       (try
-                         (web/upload/finish model (get frame :ref))
-                         (catch e (live-handler-error "upload-done" :ref e model)))))
+      ("upload-init"
+        (let (upload-name (get frame :name)
+              result (try
+                       (web/upload/offer model upload-name (get frame :files))
+                       (catch e
+                         (live-handler-error "upload-init"
+                           upload-name
+                           e
+                           [model (list)])))
+              [next-model refs] result)
+          (queue-push {:event "upload-ready"
+                       :name upload-name
+                       :offer (get frame :offer)
+                       :refs (vec refs)})
+          (push-update sock view "diff" next-model)))
+      ("upload-done"
+        (push-update sock
+          view
+          "diff"
+          (try
+            (web/upload/finish model (get frame :ref))
+            (catch e (live-handler-error "upload-done" :ref e model)))))
       ; Live-patch: the client already updated the URL/history itself (session.patch in
       ; brood_live.js); this just runs handle-params against the *current* view/model — no
       ; lookup-live, no unmount/remount, no ticker restart, the lightest possible update.
-      ("patch" (push-update sock
-                 view
-                 "diff"
-                 (try
-                   (view-handle-params (session-view-live view) params model)
-                   (catch e (live-handler-error "patch" :params e model)))))
+      ("patch"
+        (push-update sock
+          view
+          "diff"
+          (try
+            (view-handle-params (session-view-live view) params model)
+            (catch e (live-handler-error "patch" :params e model)))))
       ("navigate" (session-navigate sock view (get frame :path) params))
       (_ [:continue view]))))
 
@@ -1027,10 +1030,9 @@
 (defn- live-ws-path (req-path)
   "The app path a `/live/ws<path>` WebSocket URL targets. brood_live.js connects to
   `/live/ws` + the page's `data-live` path, so `/live/ws/counter` → `/counter`."
-  (let (prefix "/live/ws")
-    (if (string/starts-with? req-path prefix)
-      (string/substring req-path (count prefix) (count req-path))
-      req-path)))
+  (match req-path
+    ((str "/live/ws" path) path)
+    (_ req-path)))
 
 (defn unrouted-live-message (req-path known)
   "Why a live upgrade at `req-path` cannot be served, given the `known` registered paths —

@@ -82,9 +82,9 @@
   (map (string/split header ",")
     (fn (entry)
       (let (trimmed (trim-if-needed entry))
-        (if (string/starts-with? trimmed "W/")
-          (string/substring trimmed 2 (count trimmed))
-          trimmed)))))
+        (match trimmed
+          ((str "W/" opaque) opaque)
+          (_ trimmed))))))
 
 (defn not-modified? (conn tag)
   "True when the request's `If-None-Match` matches `tag` — an exact entity-tag among the
@@ -111,7 +111,7 @@
 
 (defn- opaque-tag (tag)
   "`tag` without a `W/` prefix — the part weak comparison looks at (RFC 9110 §8.8.3.2)."
-  (if (string/starts-with? tag "W/") (string/substring tag 2 (count tag)) tag))
+  (match tag ((str "W/" opaque) opaque) (_ tag)))
 
 ;; ---- freshness --------------------------------------------------------------
 
@@ -319,7 +319,9 @@
   (hatch/web/http-cache/versioned-tag? \"W/\\\"hv-0123456789abcdef-br\\\"\") ;=> true
   (hatch/web/http-cache/versioned-tag? \"\\\"0123456789abcdef\\\"\") ;=> false
   (hatch/web/http-cache/versioned-tag? nil) ;=> false"
-  (and (string? tag) (string/starts-with? tag *versioned-prefix*)))
+  (match tag
+    ((str ^*versioned-prefix* _) true)
+    (_ false)))
 
 ;; When this copy of the code was loaded. A `def`, so a startup image (ADR-218) carries it and
 ;; it changes exactly when the image is rebuilt — the stand-in for a release name when the

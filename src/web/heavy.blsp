@@ -59,23 +59,21 @@
   a watched holder's `:down` frees its slot; `[:count from r]` replies with how many each kind
   holds."
   (receive
-    ([:take kind limit from r] (let (taken (get held kind {}))
-                                 (if (>= (count taken) limit)
-                                   (do (send from [:take r nil]) (holders-loop held))
-                                   (let (watch (monitor from))
-                                     (send from [:take r watch])
-                                     (holders-loop (assoc held kind (assoc taken watch from)))))))
+    ([:take kind limit from r]
+      (let (taken (get held kind {}))
+        (if (>= (count taken) limit)
+          (do (send from [:take r nil]) (holders-loop held))
+          (let (watch (monitor from))
+            (send from [:take r watch])
+            (holders-loop (assoc held kind (assoc taken watch from)))))))
     ([:give kind watch] (holders-loop (assoc held kind (dissoc (get held kind {}) watch))))
-    ([:down watch _pid _reason] (holders-loop (into {}
-                                                (map held
-                                                  (fn (entry)
-                                                    [(first entry) (dissoc (second entry) watch)])))))
-    ([:count from r] (do
-                       (send from
-                         [:count
-                           r
-                           (into {} (map held (fn (entry) [(first entry) (count (second entry))])))])
-                       (holders-loop held)))))
+    ([:down watch _pid _reason]
+      (holders-loop (into {} (map held (fn (entry) [(first entry) (dissoc (second entry) watch)])))))
+    ([:count from r]
+      (do
+        (send from
+          [:count r (into {} (map held (fn (entry) [(first entry) (count (second entry))])))])
+        (holders-loop held)))))
 
 (defn- keeper ()
   (ensure-supervised :hatch-heavy-sup

@@ -179,10 +179,11 @@
 (defn read-frame (sock buf)
   (match (frame-payload buf)
     ([:ok text remainder] [text remainder])
-    ([:incomplete] (receive
-                     ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
-                     ([:tcp-closed ^sock] [:closed (bytes [])])
-                     (after 10000 [:timeout (bytes [])])))))
+    ([:incomplete]
+      (receive
+        ([:tcp ^sock chunk] (read-frame sock (bytes/append buf chunk)))
+        ([:tcp-closed ^sock] [:closed (bytes [])])
+        (after 10000 [:timeout (bytes [])])))))
 
 (defn expect-frame (sock buf)
   (let (result (read-frame sock buf))

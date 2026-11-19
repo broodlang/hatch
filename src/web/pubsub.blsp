@@ -62,14 +62,12 @@
 
 (defn- pubsub-loop (subs refs vault-ref)
   (receive
-    ([:subscribe topic pid] (pubsub-save (pubsub-add subs topic pid)
-                              (hold-monitor refs pid)
-                              vault-ref))
-    ([:unsubscribe topic pid] (let (subs2 (pubsub-remove subs topic pid)
-                                    refs2 (if (pubsub-subscribed? subs2 pid)
-                                            refs
-                                            (release-monitor refs pid)))
-                                (pubsub-save subs2 refs2 vault-ref)))
+    ([:subscribe topic pid]
+      (pubsub-save (pubsub-add subs topic pid) (hold-monitor refs pid) vault-ref))
+    ([:unsubscribe topic pid]
+      (let (subs2 (pubsub-remove subs topic pid)
+            refs2 (if (pubsub-subscribed? subs2 pid) refs (release-monitor refs pid)))
+        (pubsub-save subs2 refs2 vault-ref)))
     ; A broadcast. `origin` is `:local` (published on this node via the API) or `:remote`
     ; (replicated here from a peer node). Either way we fan out to this node's subscribers;
     ; only a *local*-origin broadcast is forwarded on to peer nodes, so a replicated message

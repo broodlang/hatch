@@ -20,12 +20,13 @@
                   (get opts :headers {})
                   (assoc (get opts :headers {})
                     :content-type "application/x-www-form-urlencoded")))
-    ((session/fetch-session (session/cookie-store secret {})) (build {:method method
-                                                                      :path "/x"
-                                                                      :query ""
-                                                                      :params (get opts :params {})
-                                                                      :headers headers
-                                                                      :body (form-encode bp)}))))
+    ((session/fetch-session (session/cookie-store secret {}))
+      (build {:method method
+              :path "/x"
+              :query ""
+              :params (get opts :params {})
+              :headers headers
+              :body (form-encode bp)}))))
 
 (describe "protect-from-forgery"
   (test "GET is never blocked and mints a session token"
@@ -80,14 +81,13 @@
 
 (describe "protect-from-forgery with a JSON body"
   (defn json-post (token-json)
-    (let (conn ((session/fetch-session (session/cookie-store secret {})) (build-unparsed {:method "POST"
-                                                                                          :path "/x"
-                                                                                          :query ""
-                                                                                          :params {}
-                                                                                          :headers {:content-type "application/json"}
-                                                                                          :body (str "{\"_csrf_token\":"
-                                                                                                  token-json
-                                                                                                  "}")})))
+    (let (conn ((session/fetch-session (session/cookie-store secret {}))
+                 (build-unparsed {:method "POST"
+                                  :path "/x"
+                                  :query ""
+                                  :params {}
+                                  :headers {:content-type "application/json"}
+                                  :body (str "{\"_csrf_token\":" token-json "}")})))
       conn))
   (test "a token that is not a string is a 403, not a type error"
     (assert= (get (protect-from-forgery (json-post "1")) :status) 403)

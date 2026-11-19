@@ -7,9 +7,8 @@
 (defn- try-parse (text)
   "`try-parse-bytes` over `text`, with the body and remainder of an `:ok` read back as text."
   (match (try-parse-bytes (string/->bytes text))
-    ([:ok request remainder] [:ok
-                               (assoc request :body (string/bytes-> (get request :body)))
-                               (string/bytes-> remainder)])
+    ([:ok request remainder]
+      [:ok (assoc request :body (string/bytes-> (get request :body))) (string/bytes-> remainder)])
     (other other)))
 
 (defn- dechunk-step (text pos decoded dlen)
@@ -184,11 +183,10 @@
       (o (assert= o :more))))
   (test "resuming from a :more tail completes the body without re-decoding the first chunk"
     (match (dechunk-step "5\r\nhello\r\n3\r\nab" 0 (list) 0)
-      ([:more tail decoded dlen] (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
-                                   ([:ok body math/rem] (do
-                                                          (assert= body "helloabc")
-                                                          (assert= math/rem "")))
-                                   (o (assert= o :ok))))
+      ([:more tail decoded dlen]
+        (match (dechunk-step (str tail "c\r\n0\r\n\r\n") 0 decoded dlen)
+          ([:ok body math/rem] (do (assert= body "helloabc") (assert= math/rem "")))
+          (o (assert= o :ok))))
       (o (assert= o :more))))
   (test "an incomplete size line yields :more (needs the rest of the line)"
     (match (dechunk-step "5\r\nhello\r\n1" 0 (list) 0)

@@ -29,14 +29,10 @@
   "`text` (one line of Markdown) as inline HTML — `safe-html` without the paragraph it
   would otherwise be wrapped in, for a title or a heading's tail. A line that renders as
   something other than one paragraph (a list marker, a heading) is left as rendered."
-  (let (html (safe-html text opts)
-        end (- (count html) 4))
-    (if (and (string/starts-with? html "<p>")
-          (string/ends-with? html "</p>")
-          (>= end 3)
-          (< (index-of (string/substring html 3 end) "<p>") 0))
-      (string/substring html 3 end)
-      html)))
+  (let (html (safe-html text opts))
+    (match html
+      ((str "<p>" inner "</p>") :when (< (index-of inner "<p>") 0) inner)
+      (_ html))))
 
 ;; Schemes that execute rather than fetch. A link carrying one runs script with the site's
 ;; origin — a signed-in visitor's session — the moment it is clicked.
@@ -98,13 +94,10 @@
 
 (defn- under-site? (lowered site-url)
   "Whether the lower-cased `lowered` is `site-url` itself or a path, query or fragment on it."
-  (let (origin (string/lower (if (string/ends-with? site-url "/")
-                               (string/substring site-url 0 (- (count site-url) 1))
-                               site-url))
-        length (count origin))
-    (and (string/starts-with? lowered origin)
-      (or (= (count lowered) length)
-        (includes? ["/" "?" "#"] (string/substring lowered length (+ length 1)))))))
+  (let (origin (string/lower (match site-url ((str stem "/") stem) (_ site-url))))
+    (match lowered
+      ((str ^origin (or "" (str "/" _) (str "?" _) (str "#" _))) true)
+      (_ false))))
 
 (defn unsafe-link? (url)
   "Whether `url` names a scheme that executes. Matched lower-cased and after trimming: a

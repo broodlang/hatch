@@ -143,10 +143,10 @@
                           (match (reference-dechunk-step buf body-start (list) 0)
                             ([:more _tail _decoded _dlen] [:incomplete])
                             ([:error e] [:error e])
-                            ([:ok body remainder] [:ok
-                                                    (reference-request method
-                                                      path query version headers body)
-                                                    remainder]))
+                            ([:ok body remainder]
+                              [:ok
+                                (reference-request method path query version headers body)
+                                remainder]))
                           [:error "unsupported transfer-encoding"])
                       ; Conflicting Content-Length values → ambiguous framing.
                       (content-length-conflict-grouped? grouped)
@@ -183,9 +183,10 @@
       ;; read under its own tag
       (= t1 :ok)
         (match [old new]
-          ([[:ok r1 rem1] [:ok r2 rem2]] (and (= (dissoc r1 :body) (dissoc r2 :body))
-                                           (= (carrier->bytes (get r1 :body)) (get r2 :body))
-                                           (= (carrier->bytes rem1) rem2)))
+          ([[:ok r1 rem1] [:ok r2 rem2]]
+            (and (= (dissoc r1 :body) (dissoc r2 :body))
+              (= (carrier->bytes (get r1 :body)) (get r2 :body))
+              (= (carrier->bytes rem1) rem2)))
           (_ false))
       else false)))
 

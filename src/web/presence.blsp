@@ -74,11 +74,11 @@
   (receive
     ; A local track: update local state, tell peers our new roster for the topic, and notify
     ; local members with the merged (local + peers) roster.
-    ([:track topic pid key meta] (let (refs2 (hold-monitor refs pid)
-                                       state2 (presence-put state topic pid key meta))
-                                   (presence-broadcast-sync state2 topic)
-                                   (presence-notify-merged state2 remotes topic)
-                                   (presence-save state2 refs2 remotes vault-ref)))
+    ([:track topic pid key meta]
+      (let (refs2 (hold-monitor refs pid) state2 (presence-put state topic pid key meta))
+        (presence-broadcast-sync state2 topic)
+        (presence-notify-merged state2 remotes topic)
+        (presence-save state2 refs2 remotes vault-ref)))
     ([:untrack topic pid]
       (let (state2 (presence-remove state topic pid)
             ; demonitor on the last untrack so monitors don't leak
@@ -93,34 +93,33 @@
     ([:down ^vault-ref _ _] (presence-loop state refs remotes (rewatch-vault vault-name state)))
     ; a tracked session died — drop it everywhere, resync + refresh each affected topic; its
     ; monitor already fired, so just drop the ref ([:down ref pid reason])
-    ([:down _ pid _] (let (affected (presence-topics-of state pid)
-                           state2 (presence-remove-pid state pid))
-                       (doseq (t affected)
-                         (presence-broadcast-sync state2 t)
-                         (presence-notify-merged state2 remotes t))
-                       (presence-save state2 (dissoc refs pid) remotes vault-ref)))
+    ([:down _ pid _]
+      (let (affected (presence-topics-of state pid) state2 (presence-remove-pid state pid))
+        (doseq (t affected)
+          (presence-broadcast-sync state2 t)
+          (presence-notify-merged state2 remotes t))
+        (presence-save state2 (dissoc refs pid) remotes vault-ref)))
     ; A peer reported its roster for `topic`. Record it, and if this is the first we've heard
     ; from that node, monitor it (for node-down) and reply with our full state so it learns our
     ; existing presences (a one-time bootstrap — converges without looping). Then notify local
     ; members with the refreshed merge. Peer state isn't vaulted, so recurse without a save.
-    ([:presence-sync from topic roster] (let (fresh (not (contains? remotes from))
-                                              remotes2 (presence-record-remote remotes
-                                                         from topic roster))
-                                          (when fresh
-                                            (node/monitor from)
-                                            (presence-sync-all-to state from))
-                                          (presence-notify-merged state remotes2 topic)
-                                          (presence-loop state refs remotes2 vault-ref)))
+    ([:presence-sync from topic roster]
+      (let (fresh (not (contains? remotes from))
+            remotes2 (presence-record-remote remotes from topic roster))
+        (when fresh (node/monitor from) (presence-sync-all-to state from))
+        (presence-notify-merged state remotes2 topic)
+        (presence-loop state refs remotes2 vault-ref)))
     ; A peer node went down — forget its presences and refresh every topic it was on.
-    ([:nodedown node] (let (topics (presence-remote-topics-of remotes node)
-                            remotes2 (dissoc remotes node))
-                        (doseq (t topics) (presence-notify-merged state remotes2 t))
-                        (presence-loop state refs remotes2 vault-ref)))
+    ([:nodedown node]
+      (let (topics (presence-remote-topics-of remotes node) remotes2 (dissoc remotes node))
+        (doseq (t topics) (presence-notify-merged state remotes2 t))
+        (presence-loop state refs remotes2 vault-ref)))
     ; reply with the merged roster, keyed by the caller's ref `r` so a late reply can't be
     ; mismatched to another call
-    ([:list topic from r] (do
-                            (send from [:list r (presence-merged state remotes topic)])
-                            (presence-loop state refs remotes vault-ref)))
+    ([:list topic from r]
+      (do
+        (send from [:list r (presence-merged state remotes topic)])
+        (presence-loop state refs remotes vault-ref)))
     ; A synchronous barrier — see web/pubsub's `[:sync …]`. Lets a live-navigate confirm its
     ; untrack is applied and any roster push queued before it has landed, before draining.
     ([:sync from r] (do (send from [:sync r]) (presence-loop state refs remotes vault-ref)))))

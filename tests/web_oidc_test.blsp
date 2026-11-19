@@ -14,10 +14,10 @@
 
 (defn stub (token-body claims &optional (token-status 200) (userinfo-status 200))
   (fn (_method url _opts)
-    (cond
-      (string/ends-with? url "/oauth/v2/token") (json-response token-status token-body)
-      (string/ends-with? url "/oidc/v1/userinfo") (json-response userinfo-status claims)
-      else {:status 404 :headers {} :body (string/->bytes "")})))
+    (match url
+      ((str _ "/oauth/v2/token") (json-response token-status token-body))
+      ((str _ "/oidc/v1/userinfo") (json-response userinfo-status claims))
+      (_ {:status 404 :headers {} :body (string/->bytes "")}))))
 
 (defn callback-conn (pending params)
   (signed-in (conn-for "GET" "/auth/callback" {:params params})
@@ -76,10 +76,11 @@
       (match (oidc/complete (callback-conn {"state" "S1" "verifier" "V1"}
                               {"code" "C1" "state" "S1"})
                *config* seen)
-        ([:ok got conn] (do
-                          (assert= (get got :email) "ada@x.y")
-                          (assert= (get got :id_token) "IDT")
-                          (assert= (session/get-session conn oidc/*session-key*) nil)))
+        ([:ok got conn]
+          (do
+            (assert= (get got :email) "ada@x.y")
+            (assert= (get got :id_token) "IDT")
+            (assert= (session/get-session conn oidc/*session-key*) nil)))
         (other (assert= (first other) :ok)))))
 
   (test "a confidential client sends its secret"

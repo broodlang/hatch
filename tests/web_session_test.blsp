@@ -172,8 +172,8 @@
       (assert= (includes? sc "Max-Age=0") true)
       (assert= (decode-session *secret* (session-cookie-value (conn->response conn))) {})))
   (test "rotate-session discards all prior keys (fixation defense) and marks dirty"
-    (let (conn (-> ((fetch-session (cookie-store *secret* {})) (conn-with (encode-session *secret*
-                                                                            {"_csrf" "leaked"})))
+    (let (conn (-> ((fetch-session (cookie-store *secret* {}))
+                     (conn-with (encode-session *secret* {"_csrf" "leaked"})))
                  (rotate-session)
                  (put-session "user_id" "42")))
       ; the pre-auth token is gone; only the freshly-set state remains
@@ -339,14 +339,16 @@
   (def *plug-secret* "a-strong-enough-secret-for-tests-0123456789")
 
   (test ":encrypt true seals the cookie the plug writes"
-    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with nil))
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:encrypt true}))
+                              (conn-with nil))
                  "role" "admin")
           cookie (session-cookie-value (conn->response conn)))
       ;; sealed, not signed — the E1. format, and the role is not readable in the cookie
       (is (string/starts-with? cookie "E1."))
       (is (not (includes? cookie "admin")))
       ;; and it reads back through the same plug
-      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with cookie))
+      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true}))
+                              (conn-with cookie))
                  "role")
         "admin")))
 
@@ -354,23 +356,26 @@
     ;; the reason the reader accepts both formats: turning :encrypt on must not sign out
     ;; everyone holding a cookie issued before it
     (let (signed (encode-session *plug-secret* {"role" "editor"}))
-      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true})) (conn-with signed))
+      (assert= (get-session ((fetch-session (cookie-store *plug-secret* {:encrypt true}))
+                              (conn-with signed))
                  "role")
         "editor")))
 
   (test ":cookie names the cookie the plug reads and writes"
-    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:cookie "_my_app"})) (build {:method "GET"
-                                                                                                      :path "/"
-                                                                                                      :query ""
-                                                                                                      :params {}
-                                                                                                      :headers {}
-                                                                                                      :body ""}))
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:cookie "_my_app"}))
+                              (build {:method "GET"
+                                      :path "/"
+                                      :query ""
+                                      :params {}
+                                      :headers {}
+                                      :body ""}))
                  "k" "v")
           line (first (get (get (conn->response conn) :headers) :set-cookie)))
       (is (string/starts-with? line "_my_app="))))
 
   (test ":max-age reaches the Set-Cookie the store writes"
-    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:max-age 60})) (conn-with nil))
+    (let (conn (put-session ((fetch-session (cookie-store *plug-secret* {:max-age 60}))
+                              (conn-with nil))
                  "k" "v")
           line (first (get (get (conn->response conn) :headers) :set-cookie)))
       (is (includes? line "Max-Age=60")))))

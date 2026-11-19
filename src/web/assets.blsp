@@ -75,12 +75,12 @@
   (receive
     ([:proc ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
     ([:proc-err ^handle data] (watcher-recv handle marker label (on-output (str buf data) marker)))
-    ([:stop] (do
-               (check-allow :discarded-catch (try (os/close handle) (catch _ nil)))
-               (log/info (str "[assets] stopped watching: " label))))
-    ([:proc-closed ^handle code] (do
-                                   (emit-line buf marker)
-                                   (log/warn (str "[assets] watcher exited (code " code "): " label))))))
+    ([:stop]
+      (do
+        (check-allow :discarded-catch (try (os/close handle) (catch _ nil)))
+        (log/info (str "[assets] stopped watching: " label))))
+    ([:proc-closed ^handle code]
+      (do (emit-line buf marker) (log/warn (str "[assets] watcher exited (code " code "): " label))))))
 
 (defn on-output (buf marker)
   "Log every COMPLETE line in `buf` (up to the last newline), hot-swapping CSS on a line that

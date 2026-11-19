@@ -34,9 +34,8 @@
     (let ([client server listener] (loopback))
       (tcp/send client (masked-frame 1 "hi"))
       (match (recv server (bytes []) nil)
-        ([:text payload remainder] (do
-                                     (assert= (string/bytes-> payload) "hi")
-                                     (assert= (count remainder) 0)))
+        ([:text payload remainder]
+          (do (assert= (string/bytes-> payload) "hi") (assert= (count remainder) 0)))
         (other (assert= other :text)))
       (close-all (list client server listener))))
   :isolated (test "a binary frame as :binary"

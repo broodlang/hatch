@@ -128,11 +128,12 @@
   "Serialize every bucket read-refill-spend. `[:take key cost config now from r]` replies
   `[:take r :ok]` or `[:take r [:deny retry-ms]]`; `[:reset from r]` clears all buckets (tests)."
   (receive
-    ([:take key cost config now from r] (let (result (spend (get buckets key {}) config cost now)
-                                              bucket (nth result 0)
-                                              decision (nth result 1))
-                                          (send from [:take r decision])
-                                          (ratelimit-loop (assoc buckets key bucket))))
+    ([:take key cost config now from r]
+      (let (result (spend (get buckets key {}) config cost now)
+            bucket (nth result 0)
+            decision (nth result 1))
+        (send from [:take r decision])
+        (ratelimit-loop (assoc buckets key bucket))))
     ([:reset from r] (do (send from [:reset r]) (ratelimit-loop {})))
     ;; How many keys are held. Worth being able to ask: the bucket table is keyed by
     ;; whatever `:key-fn` returns, so a key derived from user input grows without bound and
@@ -376,12 +377,10 @@
               spent (if (fn? cost) (cost conn) cost))
           (match (take-tokens store (bucket-key opts key) spent config (os/now))
             (:ok (do (bump :allowed) conn))
-            ([:deny retry-ms] (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
-                                (bump :denied)
-                                (telemetry/emit [:hatch :ratelimit :denied]
-                                  {:retry_after retry-after}
-                                  {:key key
-                                   :cost spent
-                                   :method (conn-method conn)
-                                   :path (conn-path conn)})
-                                (on-limit conn retry-after)))))))))
+            ([:deny retry-ms]
+              (let (retry-after (math/max 1 (math/ceil (/ retry-ms 1000.0))))
+                (bump :denied)
+                (telemetry/emit [:hatch :ratelimit :denied]
+                  {:retry_after retry-after}
+                  {:key key :cost spent :method (conn-method conn) :path (conn-path conn)})
+                (on-limit conn retry-after)))))))))

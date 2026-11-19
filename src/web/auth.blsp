@@ -39,15 +39,13 @@
   if the header is absent or not well-formed Basic auth. Malformed base64 (or bytes that
   aren't valid UTF-8) yields nil — never a thrown error — so a hostile Authorization header
   fails closed to a 401 instead of crashing the worker (a pre-auth DoS)."
-  (let (raw (header conn :authorization)
-        prefix "Basic ")
-    (if (and raw (string/starts-with? raw prefix))
-      ;; `base64-decode` answers a falsy `failure` on bad input rather than throwing
-      ;; (brood ADR-310), so there is nothing to catch — normalise it to the `nil` this
-      ;; function's contract promises.
-      (let (decoded (base64-decode (string/trim (string/substring raw (count prefix) (count raw)))))
-        (if (failure? decoded) nil decoded))
-      nil)))
+  (match (header conn :authorization)
+    ;; `base64-decode` answers a falsy `failure` on bad input rather than throwing
+    ;; (brood ADR-310), so there is nothing to catch — normalise it to the `nil` this
+    ;; function's contract promises.
+    ((str "Basic " encoded)
+      (let (decoded (base64-decode (string/trim encoded))) (if (failure? decoded) nil decoded)))
+    (_ nil)))
 
 (defn realm-safe (realm)
   "Strip characters that would break the `WWW-Authenticate` auth-param syntax or inject a

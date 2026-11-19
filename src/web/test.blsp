@@ -334,11 +334,9 @@
 ; on that has nothing to do with what the view means.
 
 (defn- strip-quotes (s)
-  (if (and (>= (count s) 2)
-        (or (and (string/starts-with? s "\"") (string/ends-with? s "\""))
-          (and (string/starts-with? s "'") (string/ends-with? s "'"))))
-    (string/substring s 1 (- (count s) 1))
-    s))
+  (match s
+    ((or (str "\"" inner "\"") (str "'" inner "'")) inner)
+    (_ s)))
 
 (defn- take-attr-parts (s acc)
   "Pull every `[…]` off `s`, returning `[remainder parts]`. Done before splitting on `#`/`.`

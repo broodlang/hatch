@@ -378,32 +378,24 @@
   (let (s1 (string/substring s 2 (count s))
         [name s2] (read-name s1)
         [attrs directives s3] (parse-attrs s2 {} {}))
-    (cond
-      (string/starts-with? s3 "/>")
-        [(apply-directives (build-component name attrs nil) directives)
-          (string/substring s3
-            2
-            (count s3))]
-      (string/starts-with? s3 ">")
-        (let (after (string/substring s3 1 (count s3))
-              [children s4] (parse-nodes after)
-              s5 (expect-close-component s4 name))
-          [(apply-directives (build-component name attrs children) directives) s5])
-      else (bml-error s3 "malformed component <." name " …"))))
+    (match s3
+      ((str "/>" after) [(apply-directives (build-component name attrs nil) directives) after])
+      ((str ">" after)
+        (let ([children s4] (parse-nodes after) s5 (expect-close-component s4 name))
+          [(apply-directives (build-component name attrs children) directives) s5]))
+      (_ (bml-error s3 "malformed component <." name " …")))))
 
 (defn expect-close-component (s name)
   "Consume the `</.name>` closing a component; returns the rest. Errors on a mismatch."
-  (if (not (string/starts-with? s "</."))
-    (bml-error s "expected </." name "> to close component <." name ">")
-    (let (s1 (string/substring s 3 (count s))
-          [nm s2] (read-name s1)
-          s2 (skip-ws s2))
-      (cond
-        (not (= nm name))
-          (bml-error s
-            "</." nm "> closes the wrong component, expected </." name ">")
-        (string/starts-with? s2 ">") (string/substring s2 1 (count s2))
-        else (bml-error s2 "malformed component close </." name)))))
+  (match s
+    ((str "</." s1)
+      (let ([nm s2] (read-name s1) s2 (skip-ws s2))
+        (cond
+          (not (= nm name))
+            (bml-error s "</." nm "> closes the wrong component, expected </." name ">")
+          (string/starts-with? s2 ">") (string/substring s2 1 (count s2))
+          else (bml-error s2 "malformed component close </." name))))
+    (_ (bml-error s "expected </." name "> to close component <." name ">"))))
 
 (defn parse-element (s)
   "`s` begins with `<`; returns `[form rest]` for one node — a component when the tag
@@ -413,27 +405,16 @@
     (let (s1 (string/substring s 1 (count s))
           [tag s2] (read-name s1)
           [attrs directives s3] (parse-attrs s2 {} {}))
-      (cond
-        (string/starts-with? s3 "/>")
-          [(apply-directives (build-elem tag attrs nil) directives)
-            (string/substring s3
-              2
-              (count s3))]
-        (string/starts-with? s3 ">")
-          (let (after (string/substring s3 1 (count s3)))
-            (cond
-              (void-tag? tag)
-                [(apply-directives (build-elem tag attrs nil)
-                   directives)
-                  after]
-              (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
-              else
-                (let ([children s4] (parse-nodes after)
-                      s5 (expect-close s4 tag))
-                  [(apply-directives (build-elem tag attrs children)
-                     directives)
-                    s5])))
-        else (bml-error s3 "malformed tag <" tag " …")))))
+      (match s3
+        ((str "/>" after) [(apply-directives (build-elem tag attrs nil) directives) after])
+        ((str ">" after)
+          (cond
+            (void-tag? tag) [(apply-directives (build-elem tag attrs nil) directives) after]
+            (raw-text-tag? tag) (parse-raw-element tag attrs directives after)
+            else
+              (let ([children s4] (parse-nodes after) s5 (expect-close s4 tag))
+                [(apply-directives (build-elem tag attrs children) directives) s5])))
+        (_ (bml-error s3 "malformed tag <" tag " …"))))))
 
 (defn expect-close (s tag)
   "Consume the `</tag>` closing `tag`; returns the rest. Errors on a mismatch."
@@ -457,21 +438,15 @@
   (parse-nodes-acc s nil))
 
 (defn- parse-nodes-acc (s acc)
-  (cond
-    (= (count s) 0) [(reverse acc) s]
-    (string/starts-with? s "</") [(reverse acc) s]
-    (string/starts-with? s "<!--") (parse-nodes-acc (skip-comment s) acc)
-    (string/starts-with? s "<")
-      (let ([el rest] (parse-element s))
-        (parse-nodes-acc rest (cons el acc)))
-    (string/starts-with? s "{")
-      (let ([form rest] (parse-interp s))
-        (parse-nodes-acc rest (cons form acc)))
-    else
-      (let ([txt rest] (parse-text s))
-        (if (string/blank? txt)
-          (parse-nodes-acc rest acc)
-          (parse-nodes-acc rest (cons txt acc))))))
+  (match s
+    ((or "" (str "</" _)) [(reverse acc) s])
+    ((str "<!--" _) (parse-nodes-acc (skip-comment s) acc))
+    ((str "<" _) (let ([el rest] (parse-element s)) (parse-nodes-acc rest (cons el acc))))
+    ((str "{" _) (let ([form rest] (parse-interp s)) (parse-nodes-acc rest (cons form acc))))
+    (_ (let ([txt rest] (parse-text s))
+         (if (string/blank? txt)
+           (parse-nodes-acc rest acc)
+           (parse-nodes-acc rest (cons txt acc)))))))
 
 (defn parse-text (s)
   "Consume text up to the next `<` or `{`; returns `[text rest]`. `\\{`/`\\}` are
