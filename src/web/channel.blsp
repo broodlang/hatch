@@ -415,11 +415,12 @@
                   joined))
               ;; A join that answers something else has not said yes, and the safe reading of
               ;; "not yes" on an authorization decision is no.
-              (_ (do
-                   (when ref
-                     (web/socket/send-msg sock
-                       (reply-frame topic ref "error" {:reason "join refused"})))
-                   joined))))))))
+              (_
+                (do
+                  (when ref
+                    (web/socket/send-msg sock
+                      (reply-frame topic ref "error" {:reason "join refused"})))
+                  joined))))))))
 
 (defn- socket-dispatch (sock conn joined payload)
   "Decode one client frame and route it: `join`/`leave` are the socket's own vocabulary,

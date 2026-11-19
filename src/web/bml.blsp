@@ -443,10 +443,9 @@
     ((str "<!--" _) (parse-nodes-acc (skip-comment s) acc))
     ((str "<" _) (let ([el rest] (parse-element s)) (parse-nodes-acc rest (cons el acc))))
     ((str "{" _) (let ([form rest] (parse-interp s)) (parse-nodes-acc rest (cons form acc))))
-    (_ (let ([txt rest] (parse-text s))
-         (if (string/blank? txt)
-           (parse-nodes-acc rest acc)
-           (parse-nodes-acc rest (cons txt acc)))))))
+    (_
+      (let ([txt rest] (parse-text s))
+        (if (string/blank? txt) (parse-nodes-acc rest acc) (parse-nodes-acc rest (cons txt acc)))))))
 
 (defn parse-text (s)
   "Consume text up to the next `<` or `{`; returns `[text rest]`. `\\{`/`\\}` are
