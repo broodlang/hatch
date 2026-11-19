@@ -12,6 +12,6 @@
 
 (describe "deflive-component's (template …) clause"
   (test "compiles and renders against `model`, not `state`"
-    (let (spec (live-component-spec))
-      (assert= (web/template/render ((web/component/component-spec-render spec) {:n 7}))
+    (let (component (live-component))
+      (assert= (web/template/render (component/component-render component {:n 7}))
         "<span class=\"widget\">7</span>"))))

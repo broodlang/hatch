@@ -24,7 +24,7 @@
 ;; ---- the accessors, with and without a connection ----
 
 (describe "live-conn outside a live session"
-  (test "is nil — a web/test driver calls spec functions directly, with no session"
+  (test "is nil — a web/test driver calls the view's ops directly, with no session"
     (assert= (live-conn) nil))
   (test "live-token is nil rather than throwing on the absent conn"
     (assert= (csrf/live-token secret) nil))
@@ -126,7 +126,7 @@
                      :params {}
                      :headers request-headers
                      :body ""}
-            entry {:spec (fn () (live-spec)) :session "customer"}
+            entry {:view (live-view) :session "customer"}
             pid (spawn (receive ([:go] (start-session server request entry)))))
         (tcp/controlling-process server pid)
         (send pid [:go])
@@ -150,7 +150,7 @@
       (assert= (includes? frame "\"s\":[") true)
       (assert= (includes? frame "\"f\":\"") true)))
   (test "a join claiming the current fingerprint gets the dynamics without the statics"
-    (let (fp (web/parts/statics-fingerprint render-static)
+    (let (fp (web/parts/statics-fingerprint (view-render-static (live-view)))
           frame (run-session {} fp))
       (assert= (includes? frame "\"s\":[") false)
       (assert= (includes? frame "\"d\":[") true)
@@ -160,7 +160,10 @@
       (assert= (includes? frame "\"s\":[") true)))
   (test "the fingerprint the server issues is the one for THIS view's statics"
     (let (frame (run-session {} nil))
-      (assert= (includes? frame (str "\"f\":\"" (web/parts/statics-fingerprint render-static) "\""))
+      (assert= (includes? frame
+                 (str "\"f\":\""
+                   (web/parts/statics-fingerprint (view-render-static (live-view)))
+                   "\""))
         true))))
 
 (describe "a real live session exposes its Conn to render"
@@ -180,7 +183,7 @@
                        :params {}
                        :headers {:cookie (str "_hatch_session=" signed)}
                        :body ""}
-              entry {:spec (fn () (live-spec)) :session "customer"})
+              entry {:view (live-view) :session "customer"})
           ; The session owns the server socket, so it must run in its own process — and it
           ; must not start reading until ownership has actually transferred, or the client's
           ; frames land in THIS process's mailbox and the session waits forever. So the

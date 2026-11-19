@@ -45,42 +45,47 @@
 
 ;; ---- a view to drive -------------------------------------------------------
 
-(deflive
-  (mount (params) {:count 0 :name "" :errors {} :saved nil})
+;; The check-allow is for a checker false positive, not for this view: with several modules in
+;; one file each defining a `live-view` record (every `deflive` does), the checker gives this
+;; module's constructor the return type of the LAST module's record, and reports the mismatch.
+;; Each module in its own file checks clean.
+(check-allow :type-mismatch
+  (deflive
+    (mount (params) {:count 0 :name "" :errors {} :saved nil})
 
-  (render (model)
-    [:div
-      {:class "page"}
-      [:h1 {:id "title"} "Counter"]
-      [:span {:id "count"} (str (get model :count))]
-      [:button {:id "increment" :data-event "increment"} "+"]
-      [:button {:id "add-five" :data-event "add" :data-params "{\"by\":5}"} "+5"]
-      [:button {:id "plain"} "not wired"]
-      [:ul
-        {:id "items"}
-        [:li {:class "item"} "one"]
-        [:li {:class "item selected"} "two"]]
-      [:form
-        {:id "signup" :data-event "save"}
-        [:input {:type "text" :name "name" :value (get model :name) :data-event "validate"}]
-        [:input {:type "hidden" :name "csrf" :value "tok-123"}]
-        [:input {:type "checkbox" :name "terms" :value "yes" :checked (get model :agreed?)}]
-        [:input {:type "submit" :name "commit" :value "Save"}]
-        [:input {:type "file" :name "photo"}]
-        [:textarea {:name "bio"} "about me"]
-        [:select
-          {:name "plan"}
-          [:option {:value "free"} "Free"]
-          [:option {:value "pro" :selected true} "Pro"]]
-        [:select {:name "tier"} [:option {:value "a"} "A"] [:option {:value "b"} "B"]]]
-      (if (get model :saved) [:p {:class "flash"} (str "saved " (get model :saved))] nil)])
+    (render (model)
+      [:div
+        {:class "page"}
+        [:h1 {:id "title"} "Counter"]
+        [:span {:id "count"} (str (get model :count))]
+        [:button {:id "increment" :data-event "increment"} "+"]
+        [:button {:id "add-five" :data-event "add" :data-params "{\"by\":5}"} "+5"]
+        [:button {:id "plain"} "not wired"]
+        [:ul
+          {:id "items"}
+          [:li {:class "item"} "one"]
+          [:li {:class "item selected"} "two"]]
+        [:form
+          {:id "signup" :data-event "save"}
+          [:input {:type "text" :name "name" :value (get model :name) :data-event "validate"}]
+          [:input {:type "hidden" :name "csrf" :value "tok-123"}]
+          [:input {:type "checkbox" :name "terms" :value "yes" :checked (get model :agreed?)}]
+          [:input {:type "submit" :name "commit" :value "Save"}]
+          [:input {:type "file" :name "photo"}]
+          [:textarea {:name "bio"} "about me"]
+          [:select
+            {:name "plan"}
+            [:option {:value "free"} "Free"]
+            [:option {:value "pro" :selected true} "Pro"]]
+          [:select {:name "tier"} [:option {:value "a"} "A"] [:option {:value "b"} "B"]]]
+        (if (get model :saved) [:p {:class "flash"} (str "saved " (get model :saved))] nil)])
 
-  (on "increment" (params model) (assoc model :count (+ 1 (get model :count))))
-  (on "add" (params model) (assoc model :count (+ (get model :count) (get params "by" 0))))
-  (on "validate" (params model) (assoc model :name (get params "value")))
-  (on "save" (params model) (assoc model :saved (get params "name") :submitted params)))
+    (on "increment" (params model) (assoc model :count (+ 1 (get model :count))))
+    (on "add" (params model) (assoc model :count (+ (get model :count) (get params "by" 0))))
+    (on "validate" (params model) (assoc model :name (get params "value")))
+    (on "save" (params model) (assoc model :saved (get params "name") :submitted params))))
 
-(defn view () (live-open (live-spec) {}))
+(defn view () (live-open (live-view) {}))
 
 ;; ---- finding and reading ---------------------------------------------------
 
@@ -220,7 +225,7 @@
 
 ;; ---- live-apply ------------------------------------------------------------
 
-(describe "live-apply bridges to the spec-level drivers"
+(describe "live-apply bridges to the op-level drivers"
   (test "a tick threads through a view like a click does"
     (let (v (live-apply (view) (fn (m) (assoc m :count 41)))
           v2 (live-click v "#increment"))
@@ -250,12 +255,12 @@
   ; The old-style test: it names the handler itself, so it passes — and would go on passing if
   ; the button were deleted outright.
   (test "passes when the test names the handler directly"
-    (let (spec (live-spec)
-          model (live-event spec "increment" {} (live-mount spec {})))
+    (let (view (live-view)
+          model (live-event view "increment" {} (live-mount view {})))
       (assert= (get model :count) 1)))
   ; The markup-driven test fires what the BUTTON says, which is the event that goes nowhere.
   (test "fails when the test goes through the button, which is the truth"
-    (let (v (live-click (live-open (live-spec) {}) "#inc"))
+    (let (v (live-click (live-open (live-view) {}) "#inc"))
       (assert= (live-text v "#count") "0"))))
 
 ;; ---- a rendered component is opaque, not debug output -----------------------
@@ -282,10 +287,10 @@
 
 (describe "live-text over a section containing a rendered component"
   (test "reads the view's own text and treats the component as opaque"
-    (let (v (live-open (live-spec) {}))
+    (let (v (live-open (live-view) {}))
       (assert= (live-text v "#panel") "Title")))
   (test "the raw markup is still in the rendered HTML — it is only invisible to selectors"
-    (let (v (live-open (live-spec) {}))
+    (let (v (live-open (live-view) {}))
       (assert= (includes? (live-markup v) "data-cid=\"like-1\"") true)
       (assert= (live-has? v "b") false))))
 
@@ -318,33 +323,33 @@
 
 (describe "live-click fires data-on-click"
   (test "a button wired with the explicit binding is clickable"
-    (let (v (live-click (live-open (live-spec) {}) "#bump"))
+    (let (v (live-click (live-open (live-view) {}) "#bump"))
       (assert= (live-text v "#n") "1"))))
 
 (describe "live-change accepts either input or change"
   (test "data-on-input"
-    (assert= (get (live-model (live-change (live-open (live-spec) {}) "#typed" "ada")) :text)
+    (assert= (get (live-model (live-change (live-open (live-view) {}) "#typed" "ada")) :text)
       "ada"))
   (test "data-on-change — the client binds a field's value to both, so the harness accepts both"
-    (assert= (get (live-model (live-change (live-open (live-spec) {}) "#changed" "grace")) :text)
+    (assert= (get (live-model (live-change (live-open (live-view) {}) "#changed" "grace")) :text)
       "grace")))
 
 (describe "live-submit fires data-on-submit"
   (test "a form wired with the explicit binding submits"
-    (assert= (get (live-model (live-submit (live-open (live-spec) {}) "#f")) :saved) "ada")))
+    (assert= (get (live-model (live-submit (live-open (live-view) {}) "#f")) :saved) "ada")))
 
 (describe "an element with no binding at all still fails loudly"
   (test "and the message names the spellings it looked for"
     (let (message (check-allow :discarded-catch
                     (try
-                      (do (live-click (live-open (live-spec) {}) "#inert") "")
+                      (do (live-click (live-open (live-view) {}) "#inert") "")
                       (catch e (error-message e)))))
       (assert= (includes? message "data-event") true)
       (assert= (includes? message "data-on-click") true)))
   (test "a miss names the wired elements, explicit bindings included"
     (let (message (check-allow :discarded-catch
                     (try
-                      (do (live-click (live-open (live-spec) {}) "#nope") "")
+                      (do (live-click (live-open (live-view) {}) "#nope") "")
                       (catch e (error-message e)))))
       (assert= (includes? message "data-on-click=bump") true))))
 
@@ -375,17 +380,17 @@
 
 (describe "live-fire drives any binding"
   (test "a keydown, with the params a keystroke carries"
-    (let (v (live-fire (live-open (live-spec) {}) "#search" :data-on-keydown {"key" "Enter"}))
+    (let (v (live-fire (live-open (live-view) {}) "#search" :data-on-keydown {"key" "Enter"}))
       (assert= (live-text v "#last") "search")
       (assert= (get (live-model v) :key) "Enter")))
   (test "a click-away, which has no value and no params"
-    (assert= (live-text (live-fire (live-open (live-spec) {}) "#menu" :data-on-click-away) "#last")
+    (assert= (live-text (live-fire (live-open (live-view) {}) "#menu" :data-on-click-away) "#last")
       "close"))
   (test "data-params on the element still reach the handler"
-    (assert= (live-text (live-fire (live-open (live-spec) {}) "#params" :data-on-focus) "#last")
+    (assert= (live-text (live-fire (live-open (live-view) {}) "#params" :data-on-focus) "#last")
       "markup"))
   (test "passed params merge over the markup's"
-    (assert= (live-text (live-fire (live-open (live-spec) {})
+    (assert= (live-text (live-fire (live-open (live-view) {})
                           "#params"
                           :data-on-focus {"source" "the test"})
                "#last")
@@ -394,12 +399,12 @@
   (test "an element without that binding raises"
     (let (message (check-allow :discarded-catch
                     (try
-                      (do (live-fire (live-open (live-spec) {}) "#bare" :data-on-keydown) "")
+                      (do (live-fire (live-open (live-view) {}) "#bare" :data-on-keydown) "")
                       (catch e (error-message e)))))
       (assert= (includes? message "data-on-keydown") true)))
   (test "a selector matching nothing raises too"
     (assert= (check-allow :discarded-catch
                (try
-                 (do (live-fire (live-open (live-spec) {}) "#nope" :data-on-keydown) :no-error)
+                 (do (live-fire (live-open (live-view) {}) "#nope" :data-on-keydown) :no-error)
                  (catch _ :raised)))
       :raised)))

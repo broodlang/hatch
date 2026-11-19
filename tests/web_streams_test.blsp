@@ -208,7 +208,7 @@
                        :params {}
                        :headers {}
                        :body ""}
-              entry {:spec (fn () (live-spec)) :session nil}
+              entry {:view (live-view) :session nil}
               pid (spawn (receive ([:go] (start-session server request entry)))))
           (tcp/controlling-process server pid)
           (send pid [:go])

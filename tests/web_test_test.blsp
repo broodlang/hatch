@@ -81,88 +81,109 @@
 
 (describe "live-view harness"
   (test "live-mount builds the initial model from params"
-    (assert= (live-mount (live-spec) {"start" "5"}) {:count 5}))
+    (assert= (live-mount (live-view) {"start" "5"}) {:count 5}))
   (test "live-event advances the model"
-    (let (spec (live-spec))
-      (assert= (live-event spec "inc" {} {:count 5}) {:count 6})))
+    (assert= (live-event (live-view) "inc" {} {:count 5}) {:count 6}))
   (test "live-tick advances the model"
-    (let (spec (live-spec))
-      (assert= (live-tick spec 1000 {:count 5}) {:count 15})))
+    (assert= (live-tick (live-view) 1000 {:count 5}) {:count 15}))
   (test "live-info applies an out-of-band message"
-    (let (spec (live-spec))
-      (assert= (live-info spec 7 {:count 5}) {:count 12})))
+    (assert= (live-info (live-view) 7 {:count 5}) {:count 12}))
   (test "live-unmount runs the view's cleanup (in the caller's process)"
     (do
-      (live-unmount (live-spec) {:count 9})
+      (live-unmount (live-view) {:count 9})
       (assert= (receive ([:unmounted n] n) (after 1000 :timeout)) 9)))
   (test "live-render lowers the view to HTML"
-    (assert= (includes? (live-render (live-spec) {:count 42}) "<span>42</span>") true))
+    (assert= (includes? (live-render (live-view) {:count 42}) "<span>42</span>") true))
   (test "live-html mounts then renders in one step"
-    (assert= (includes? (live-html (live-spec) {"start" "7"}) "<span>7</span>") true))
+    (assert= (includes? (live-html (live-view) {"start" "7"}) "<span>7</span>") true))
   (test "on-mount-guard vetoes without the guarded cookie"
-    (assert= (live-guard (live-spec) (conn-for "GET" "/")) "/login"))
+    (assert= (live-guard (live-view) (conn-for "GET" "/")) "/login"))
   (test "on-mount-guard allows the mount once its condition is met"
-    (assert= (live-guard (live-spec) (conn-for "GET" "/" {:headers {:cookie "session=1"}}))
+    (assert= (live-guard (live-view) (conn-for "GET" "/" {:headers {:cookie "session=1"}}))
       nil))
   (test "live-patch runs handle-params against the current model, keeping other fields"
-    (assert= (live-patch (live-spec) {"page" "3"} {:count 5}) {:count 5 :page 3})))
+    (assert= (live-patch (live-view) {"page" "3"} {:count 5}) {:count 5 :page 3})))
 
 (describe "static/dynamic parts (minimal diffs)"
   ; The invariant the wire protocol relies on: assembling the static skeleton with the
   ; rendered dynamic slots reproduces the full render exactly, for any model.
   (test "weave(static, dynamic(model)) == full render"
-    (let (spec (live-spec))
-      (assert= (web/parts/weave (view-spec-render-static spec)
-                 ((view-spec-render-dynamic spec) {:count 7}))
-        (live-render spec {:count 7}))
-      (assert= (web/parts/weave (view-spec-render-static spec)
-                 ((view-spec-render-dynamic spec) {:count -3}))
-        (live-render spec {:count -3})))))
+    (let (view (live-view))
+      (assert= (web/parts/weave (view-render-static view)
+                 (view-render-dynamic view {:count 7} (table/new)))
+        (live-render view {:count 7}))
+      (assert= (web/parts/weave (view-render-static view)
+                 (view-render-dynamic view {:count -3} (table/new)))
+        (live-render view {:count -3})))))
 
-;; ---- the specs are records ------------------------------------------------------------
+;; ---- a view is a value with a LiveModule impl ------------------------------------------
 ;;
-;; What that buys: a field read is a NAME. `(get spec :render-slots)` mistyped answers nil,
-;; and a nil there means "this view has no slots" — so change tracking quietly degrades to
-;; re-rendering everything, correctly, forever. `(view-spec-render-slot spec)` is an
-;; undefined function `nest check` reports before it ever runs.
+;; `deflive` expands to a field-less record, `live-view`, and an impl of `web/live/LiveModule`
+;; for it. The session, the router and these drivers all hold that value and call the ability's
+;; ops on it, so a view written by hand — a record and an impl, no macro — is a first-class
+;; view, with the ability's provided ops standing in for every clause it leaves out.
+
+(defrecord hand-written-view ())
+
+(impl LiveModule
+  hand-written-view
+  (view-mount (_view params) {:n (or (get params "n") 1)})
+  (view-render (_view model _components) [:b {} (str (get model :n))])
+  (view-handle-event (_view _name _params model) (assoc model :n 99)))
+
+;; Only two of the three required ops: the runtime half of the contract — `satisfies?` asks
+;; whether every op resolves for a value — says no.
 ;;
-;; What it must NOT cost: a hand-built spec. web/live has always accepted one (a module that
-;; never went through the `deflive` macro), and web/test documents passing any spec to these
-;; drivers. Accessors read a plain map, so both keep working.
+;; `nest check` says nothing about this impl, and that is a brood gap rather than a choice: the
+;; checker verifies an impl's ops only against an ability declared in the SAME file, and
+;; `LiveModule` lives in web/live. A same-file ability gets "impl is missing op"; a hand-written
+;; view in its own module, the real case, gets no finding until the session calls the missing op
+;; and dispatch raises a no-impl.
+(defrecord incomplete-view ())
 
-(describe "live-spec is a record"
-  (test "the thunk produces one"
-    (is (record? (live-spec)))
-    (assert= (->string (live-spec)) "#<live view-spec>"))
+(impl LiveModule
+  incomplete-view
+  (view-mount (_view _params) {})
+  (view-render (_view _model _components) [:b {} "x"]))
 
-  (test "every field the session reads is populated"
-    (let (spec (live-spec))
-      (is (fn? (view-spec-mount spec)))
-      (is (fn? (view-spec-render spec)))
-      (is (fn? (view-spec-render-dynamic spec)))
-      (is (fn? (view-spec-handle-event spec)))
-      (is (fn? (view-spec-handle-tick spec)))
-      (is (fn? (view-spec-handle-info spec)))
-      (is (fn? (view-spec-unmount spec)))
-      (is (fn? (view-spec-mount-guard spec)))
-      (is (fn? (view-spec-handle-params spec)))
-      (is (vector? (view-spec-render-static spec)))
-      (is (vector? (view-spec-render-slots spec)))
-      (is (vector? (view-spec-slot-deps spec)))
-      (is (vector? (view-spec-ticks spec)))))
+(describe "a live view is a value"
+  (test "deflive defines a field-less record that satisfies LiveModule"
+    (is (record? (live-view)))
+    (assert= (record-id (live-view)) :web-test-test/live-view)
+    (assert= (fields (live-view)) {})
+    (is (satisfies? 'LiveModule (live-view))))
 
-  ;; The seam stays open: a spec assembled by hand drives the harness exactly as one from
-  ;; the macro, because an accessor is a read and not a type check.
-  (test "a hand-built map spec still drives the harness"
-    (let (spec {:mount (fn (params) {:n (or (get params "n") 1)})
-                :render (fn (model) [:b {} (str (get model :n))])
-                :handle-event (fn (_name _params model) (assoc model :n 99))})
-      (assert= (live-mount spec {"n" 4}) {:n 4})
-      (assert= (live-render spec {:n 4}) "<b>4</b>")
-      (assert= (live-event spec "anything" {} {:n 4}) {:n 99})))
+  (test "every op the session calls answers for it, with the clauses deflive compiled"
+    (let (view (live-view))
+      (assert= (view-ticks view) [1000])
+      (assert= (count (view-render-static view)) 2)
+      (assert= (view-slot-deps view) [[:count]])
+      (assert= (view-render-slot view 0 {:count 3} (table/new)) "3")
+      (assert= (view-handle-info view 2 {:count 1}) {:count 3})))
 
-  (test "a hand-built spec missing a field reads as nil, as it did when it was a map"
-    (assert= (view-spec-ticks {:mount (fn (_p) {})}) nil)))
+  ;; The seam is open: a hand-written impl drives the harness exactly as one from the macro.
+  (test "a hand-written view drives the harness"
+    (let (view (hand-written-view))
+      (assert= (live-mount view {"n" 4}) {:n 4})
+      (assert= (live-render view {:n 4}) "<b>4</b>")
+      (assert= (live-event view "anything" {} {:n 4}) {:n 99})
+      (is (satisfies? 'LiveModule view))))
+
+  (test "a hand-written view gets every provided op as the default a missing clause means"
+    (let (view (hand-written-view))
+      (assert= (view-ticks view) [])
+      (assert= (view-slot-deps view) nil)
+      (assert= (view-render-static view) ["" ""])
+      (assert= (view-render-dynamic view {:n 4} (table/new)) ["<b>4</b>"])
+      (assert= (view-render-slot view 0 {:n 4} (table/new)) "<b>4</b>")
+      (assert= (live-tick view 1000 {:n 4}) {:n 4})
+      (assert= (live-info view :message {:n 4}) {:n 4})
+      (assert= (live-patch view {"page" "2"} {:n 4}) {:n 4})
+      (assert= (live-guard view (conn-for "GET" "/")) nil)
+      (assert= (live-unmount view {:n 4}) nil)))
+
+  (test "an impl missing a required op does not satisfy the ability"
+    (is (not (satisfies? 'LiveModule (incomplete-view))))))
 
 (describe "json-body"
   (defn- answering (text) (send-resp (conn-for "GET" "/") 200 text))

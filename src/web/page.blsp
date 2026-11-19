@@ -1,7 +1,7 @@
 ; html-resp
 (defmodule web/page
   "Plain (non-live) server-rendered pages — the counterpart to web/live. A live view is
-  stateful (deflive + the LiveModule behaviour + a session actor); a plain page is just
+  stateful (deflive + the LiveModule ability + a session actor); a plain page is just
   a handler that renders Hiccup to a response, so this module is a single thin helper."
   ; html
   (:use web/template)

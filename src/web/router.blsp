@@ -331,15 +331,15 @@
 
 (defn compile-live (clause session)
   "A `(live path module & opts)` clause → a GET mount-page route plus :setup that loads
-  the module and registers its `live-spec` for WebSocket dispatch in live-session group
-  `session` (an explicit `:session` opt overrides the enclosing group). The mount page
-  uses the in-scope `layout` and injects the live-view client chrome itself."
+  the module and registers its view value, `(module/live-view)`, for WebSocket dispatch in
+  live-session group `session` (an explicit `:session` opt overrides the enclosing group).
+  The mount page uses the in-scope `layout` and injects the live-view client chrome itself."
   (let (path (first (rest clause))
         module (first (rest (rest clause)))
         opts (rest (rest (rest clause)))
         session (or (plist-get opts :session) session)
         title (plist-get opts :title)
-        spec (symbol (str (->string module) "/live-spec"))
+        view (list (symbol (str (->string module) "/live-view")))
         body (vector :div {:data-live path} (vector :p {} "Connecting…"))
         handler (list 'fn
                   (list 'conn)
@@ -352,7 +352,7 @@
                         body)))))
     {:route (list 'make-route "GET" path handler)
      :setup (list (list 'require-one (list 'quote module))
-              (list 'web/live/register-live path spec session))}))
+              (list 'web/live/register-live path view session))}))
 
 (defn with-plugs (compiled ctx)
   "If `ctx` carries `through` plugs, wrap the route's handler so they run first
@@ -386,7 +386,7 @@
   string, which becomes a 200 response with that body: `(get \"/hi\" (fn (conn) \"hello\"))`.
 
   A `(live path module [:title t])` clause wires a live view: it loads `module`,
-  registers `module/live-spec` for WebSocket dispatch at `path` (served by
+  registers its view value `(module/live-view)` for WebSocket dispatch at `path` (served by
   `web/live/live-dispatcher`), and adds a `GET path` route serving the mount page.
   The page is built with the `layout` in scope in this module — a plain layout, since
   the clause injects the live-view client + status chrome itself (`live/live-chrome`),

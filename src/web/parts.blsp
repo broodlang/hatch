@@ -176,19 +176,15 @@
     (cons 'web/component/render-slot-html (rest f))))
 
 (defn component-slot-form (node)
-  "The generated call for a `(component module assigns)` hole: resolves `module` to its
-  `live-component-spec` thunk symbol at compile time — mirroring how web/router's
-  compile-live resolves `module/live-spec` — and threads the session's live component
-  table (`live-components`, a free variable deflive's generated render-dynamic binds as
-  an extra param) through to web/component/render-slot. Passes the quoted bare `module`
-  symbol too, alongside the resolved spec-thunk: render-slot stores it next to a mounted
-  component's state so a same-id-different-module collision can be detected by comparing
-  symbols (stable across a table round-trip) rather than the spec-thunk function value
-  (`table/put`/`table/get` deep-clone a stored function, so two 'equal' thunks are never `=` after
-  a round-trip — comparing those would report every render as a different component)."
+  "The generated call for a `(component module assigns)` hole: `module`'s component value,
+  `(module/live-component)` — mirroring how web/router's compile-live registers
+  `(module/live-view)` — handed to web/component/render-slot with the assigns and the
+  session's live component table (`live-components`, a free variable deflive's generated
+  render ops bind as a parameter). render-slot stores the value beside the mounted
+  component's state: it is plain data, so it survives the table's deep clone equal to itself,
+  which is how a same-id-different-module collision is told apart."
   (list 'web/component/render-slot
-    (list 'quote (nth node 1))
-    (symbol (str (->string (nth node 1)) "/live-component-spec"))
+    (list (symbol (str (->string (nth node 1)) "/live-component")))
     (nth node 2)
     *component-table-param*))
 

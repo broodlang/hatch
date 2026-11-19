@@ -41,12 +41,11 @@
     (let (p (compile-parts '[:div {} (component web/components/like-button {"id" "x"})]))
       (assert= (get p :statics) ["<div>" "</div>"])
       (assert= (count (get p :dynamics)) 1)))
-  (test "the hole resolves module/live-component-spec and threads live--components"
+  (test "the hole calls module/live-component for its value and threads live-components"
     (let (p (compile-parts '(component web/components/like-button assigns-var)))
       (assert= (get p :dynamics)
         (list (list 'web/component/render-slot
-                (list 'quote 'web/components/like-button)
-                'web/components/like-button/live-component-spec
+                (list 'web/components/like-button/live-component)
                 'assigns-var
                 'live-components))))))
 
@@ -133,7 +132,7 @@
 (describe "the component-table parameter is one name, not three"
   (test "component-slot-form passes the parameter deflive binds"
     (let (emitted (component-slot-form '(component web/views/like {"id" "a"})))
-      (assert= (nth emitted 4) *component-table-param*)))
+      (assert= (nth emitted 3) *component-table-param*)))
 
   (test "deps-of reads that same symbol as :all"
     (assert= (deps-of *component-table-param* 'model) :all))

@@ -3,10 +3,10 @@
 ;; not the parent's.
 ;;
 ;; The parent's side of this is exercised via `render-slot` + `web/parts`' diff directly
-;; rather than through a `deflive` view, because `deflive-component` and `deflive` both
-;; define `render`/`mount` in the enclosing module and would collide in one file (the same
-;; reason web_live_component_integration_test hand-writes its spec). What matters here is
-;; the slot value and how two of them diff, which is exactly what these call.
+;; rather than through a `deflive` view, because a parent view needs its own module to name a
+;; component in (the reason web_live_component_integration_test hand-writes its component).
+;; What matters here is the slot value and how two of them diff, which is exactly what these
+;; call.
 (defmodule web-component-diff-test
   (:use web/component)
   (:alias web/parts)
@@ -25,21 +25,20 @@
   (on "relabel" (params state) (assoc state :label (get params "text"))))
 
 (defn slot-for (t id)
-  (render-slot 'web-component-diff-test live-component-spec {"id" id} t))
+  (render-slot (live-component) {"id" id} t))
 
 (describe "deflive-component compiles its own static/dynamic split"
-  (test "the spec carries render-static and render-dynamic, like a view's"
-    (let (spec (live-component-spec))
-      (assert= (vector? (web/component/component-spec-render-static spec)) true)
-      (assert= (nil? (web/component/component-spec-render-dynamic spec)) false)))
+  (test "the component carries render-static and render-dynamic, like a view's"
+    (let (component (live-component))
+      ;; two holes, so three statics around them — not the provided one-slot default
+      (assert= (count (component-render-static component)) 3)
+      (assert= (count (component-render-dynamic component {:label "hi" :n 0})) 2)))
   (test "statics and dynamics satisfy the weave invariant against the plain render"
-    (let (spec (live-component-spec)
+    (let (component (live-component)
           state {:label "hi" :n 3})
-      (assert= (web/parts/weave (web/component/component-spec-render-static spec)
-                 ((web/component/component-spec-render-dynamic spec) state))
-        ; web/template/render qualified: deflive-component defines `render` in THIS module
-        ; (the component's own), which would shadow the template one
-        (web/template/render ((web/component/component-spec-render spec) state))))))
+      (assert= (web/parts/weave (component-render-static component)
+                 (component-render-dynamic component state))
+        (render (component-render component state))))))
 
 (describe "render-slot returns a diffable component slot"
   (test "it is a component slot tagged with the cid, not an opaque string"
@@ -56,7 +55,7 @@
     (let (t (table/new)
           t2 (table/new))
       (assert= (web/parts/slot->html (slot-for t "c1"))
-        (render-slot-html 'web-component-diff-test live-component-spec {"id" "c1"} t2))))
+        (render-slot-html (live-component) {"id" "c1"} t2))))
   (test "and to what the pre-split implementation produced"
     (let (t (table/new))
       (assert= (web/parts/slot->html (slot-for t "c1"))

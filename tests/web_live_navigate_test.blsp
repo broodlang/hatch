@@ -11,18 +11,17 @@
   (:use http/websocket)
   (:use test))
 
-;; A hand-built component spec — a plain map reads through `component-spec`'s accessors — so
-;; this module can hold a `deflive` too. It beats every 20ms and counts.
-(defn beat-mount (id assigns) {:n 0})
-(defn beat-render (state) [:span {} (str (get state :n))])
-(defn beat-handle-event (name params state) state)
-(defn beat-handle-tick (ms state) (assoc state :n (+ 1 (get state :n))))
-(defn live-component-spec ()
-  {:mount beat-mount
-   :render beat-render
-   :handle-event beat-handle-event
-   :handle-tick beat-handle-tick
-   :ticks [20]})
+;; A hand-written component — a record and an impl, under the name a `(component this-module …)`
+;; hole calls — so this module can hold a `deflive` too. It beats every 20ms and counts.
+(defrecord live-component ())
+
+(impl LiveComponentModule
+  live-component
+  (component-mount (_component _id _assigns) {:n 0})
+  (component-render (_component state) [:span {} (str (get state :n))])
+  (component-handle-event (_component _name _params state) state)
+  (component-handle-tick (_component _interval state) (assoc state :n (+ 1 (get state :n))))
+  (component-ticks (_component) [20]))
 
 ;; View A: embeds the beating component.
 (deflive
@@ -30,22 +29,19 @@
   (render (model)
     [:div {} [:h1 {} (get model :title)] (component web-live-navigate-test {"id" "beat"})]))
 
-;; View B: a hand-built spec with nothing in it that beats.
-(defn- b-spec ()
-  {:mount (fn (_params) {})
-   :render (fn (_model &optional _components) [:p {} "b"])
-   :render-static ["<p>b</p>"]
-   :render-dynamic (fn (_model &optional _components) [])
-   :handle-event (fn (_name _params model) model)
-   :handle-tick (fn (_key model) model)
-   :handle-info (fn (_message model) model)
-   :unmount (fn (_model) nil)
-   :mount-guard (fn (_conn) nil)
-   :handle-params (fn (_params model) model)
-   :ticks []})
+;; View B: a hand-written view with nothing in it that beats, and a render with no dynamic slot.
+(defrecord b-view ())
 
-(register-live "/navigate-test-b" b-spec nil)
-(register-live "/navigate-test-a" live-spec nil)
+(impl LiveModule
+  b-view
+  (view-mount (_view _params) {})
+  (view-render (_view _model _components) [:p {} "b"])
+  (view-handle-event (_view _name _params model) model)
+  (view-render-static (_view) ["<p>b</p>"])
+  (view-render-dynamic (_view _model _components) []))
+
+(register-live "/navigate-test-b" (b-view) nil)
+(register-live "/navigate-test-a" (live-view) nil)
 
 (defn masked-text-frame (s)
   "A masked client text frame (mask key zero, so the payload is the plaintext); < 126 bytes."
@@ -143,7 +139,7 @@
   :isolated (test "stops every beat the table's components started"
     (let (components (table/new))
       ;; mounting here starts the 20ms beat, aimed at this process
-      (web/component/render-slot 'web-live-navigate-test live-component-spec {"id" "x"} components)
+      (web/component/render-slot (live-component) {"id" "x"} components)
       (assert= (> (beats-within 60) 0) true)
       (web/component/cancel-ticks components)
       ;; `timer/cancel` races a beat already in flight, so let one land before counting
@@ -151,7 +147,7 @@
       (assert= (beats-within 80) 0)))
   :isolated (test "an update keeps the handles, so a component that changed state can still be stopped"
     (let (components (table/new))
-      (web/component/render-slot 'web-live-navigate-test live-component-spec {"id" "y"} components)
+      (web/component/render-slot (live-component) {"id" "y"} components)
       (web/component/apply-update components "y" {:n 5})
       (web/component/apply-tick components "y" 20)
       (assert= (count (get (table/get components "y") :tick-handles)) 1)
@@ -194,10 +190,15 @@
     ([_text remainder] (read-until-closed client remainder))
     (other other)))
 
-(defn- raising-spec ()
-  (assoc (b-spec) :mount (fn (_params) (error "mount blew up"))))
+(defrecord raising-view ())
 
-(register-live "/navigate-test-raises" raising-spec nil)
+(impl LiveModule
+  raising-view
+  (view-mount (_view _params) (error "mount blew up"))
+  (view-render (_view _model _components) [:p {} "unreachable"])
+  (view-handle-event (_view _name _params model) model))
+
+(register-live "/navigate-test-raises" (raising-view) nil)
 
 (describe "a live-navigate into a view whose mount raises"
   :isolated (test "emits [:hatch :live :exception] for the mount and ends the session"

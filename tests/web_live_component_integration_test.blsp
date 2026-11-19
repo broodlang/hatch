@@ -6,13 +6,16 @@
 ; render-expr for deflive's render and to any opaque-dynamic node in walk's else branch.
 (defmodule web-live-component-integration-test (:use web/live) (:use web/test) (:use test))
 
-; Hand-written LiveComponent spec (avoids a second deflive-component module + the
-; render/mount name collision a same-file deflive-component would cause with deflive).
-(defn widget-mount (id assigns) {:n (get assigns "start" 0)})
-(defn widget-render (state) [:span {} (str (get state :n))])
-(defn widget-handle-event (name params state) state)
-(defn live-component-spec ()
-  {:mount widget-mount :render widget-render :handle-event widget-handle-event})
+; A hand-written LiveComponent — a record and an impl, no macro — under the name a
+; `(component this-module …)` hole calls, so this one module is both the view and the
+; component it embeds.
+(defrecord live-component ())
+
+(impl LiveComponentModule
+  live-component
+  (component-mount (_component _id assigns) {:n (get assigns "start" 0)})
+  (component-render (_component state) [:span {} (str (get state :n))])
+  (component-handle-event (_component _name _params state) state))
 
 (deflive
   (mount (params)
@@ -28,35 +31,36 @@
 
 (describe "deflive's plain render with an embedded component"
   (test "live-render doesn't crash and doesn't double-escape the component's HTML"
-    (let (html (live-render (live-spec) {:authed true :n 5}))
+    (let (html (live-render (live-view) {:authed true :n 5}))
       (assert= (includes? html "data-cid=\"direct\"") true)
       (assert= (includes? html "&lt;div") false)
       (assert= (includes? html "&amp;lt;") false)))
   (test "live-html (mount + render in one step) also works"
-    (assert= (includes? (live-html (live-spec) {"authed" "1"}) "data-cid=\"direct\"") true)))
+    (assert= (includes? (live-html (live-view) {"authed" "1"}) "data-cid=\"direct\"") true)))
 
 (describe "a component nested inside (if …), not a direct child"
   (test "the true branch renders the component, not literal (component …) code"
-    (let (html (live-render (live-spec) {:authed true :n 5}))
+    (let (html (live-render (live-view) {:authed true :n 5}))
       (assert= (includes? html "data-cid=\"nested\"") true)
       (assert= (includes? html "(component") false)))
   (test "the false branch is unaffected"
-    (let (html (live-render (live-spec) {:authed false :n 5}))
+    (let (html (live-render (live-view) {:authed false :n 5}))
       (assert= (includes? html "not authed") true)
       (assert= (includes? html "data-cid=\"nested\"") false))))
 
 (describe "render-dynamic (the live-session path) still works the same way"
   (test "direct-child and nested components both appear in one full render"
-    (let (html (web/parts/weave render-static (render-dynamic {:authed true :n 5})))
+    (let (html (web/parts/weave (view-render-static (live-view))
+                 (view-render-dynamic (live-view) {:authed true :n 5} (table/new))))
       (assert= (includes? html "data-cid=\"direct\"") true)
       (assert= (includes? html "data-cid=\"nested\"") true))))
 
 (describe "handle-params defaults to identity"
   ; this view has no (handle-params …) clause — a live-patch should leave its model
-  ; completely unchanged, since deflive's generated default is just (fn (params model) model)
+  ; completely unchanged, since LiveModule's provided `view-handle-params` answers the model
   (test "a patch is a no-op on the model when the view doesn't opt in"
     (let (model {:authed true :n 5})
-      (assert= (live-patch (live-spec) {"page" "3"} model) model))))
+      (assert= (live-patch (live-view) {"page" "3"} model) model))))
 
 (describe "a component slot's change-tracking dependency is always :all"
   ; A LiveComponent's own state (send-update, or its own event handler) lives in the
@@ -66,21 +70,18 @@
   ; component-only state change (the parent's model never touched) would be wrongly
   ; skipped by recompute-dynamics and the client would keep showing stale component HTML.
   (test "the plain slot is pinned to its model key; the component slot is :all"
-    (assert= (view-spec-slot-deps (live-spec)) [[:n] :all :all]))
+    (assert= (view-slot-deps (live-view)) [[:n] :all :all]))
   (test "recompute-dynamics picks up a component-only state change with model unchanged"
-    (let (spec (live-spec)
-          components (table/new)
+    (let (components (table/new)
           model {:authed true :n 5}
-          dyn1 ((view-spec-render-dynamic spec) model components)
-          ;; a session carries the whole spec under `:spec`, not its keys splatted over
-          ;; the view's own
-          view {:spec spec
+          dyn1 (view-render-dynamic (live-view) model components)
+          ;; a session carries the view value under `:live`, not splatted over its own keys
+          view {:live (live-view)
                 :render-model model
                 :dynamics dyn1
                 :components components}
           entry (table/get components "direct")
-          bumped (web/component/component-entry (get entry :module)
-                   (get entry :spec-thunk)
+          bumped (web/component/component-entry (get entry :component)
                    (assoc (get entry :state) :n 99))
           _ (table/put components "direct" bumped)
           dyn2 (recompute-dynamics view dyn1 model))

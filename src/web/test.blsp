@@ -19,29 +19,28 @@
     (assert= (status (request r \"GET\" \"/dev\"
                        {:headers {:authorization \"Basic YWRtaW46YWRtaW4=\"}})) 200)
 
-  Live views (a `deflive` module's `live-spec` thunk):
+  Live views (a `deflive` module's value, `module/live-view`):
 
-    (let (spec (web/views/counter/live-spec)
-          m0   (live-mount spec {\"start\" \"5\"})
-          m1   (live-event spec \"increment\" {} m0))
+    (let (view (web/views/counter/live-view)
+          m0   (live-mount view {\"start\" \"5\"})
+          m1   (live-event view \"increment\" {} m0))
       (assert= (get m1 :count) 6)
-      (assert= (includes? (live-render spec m1) \"6\") true))
+      (assert= (includes? (live-render view m1) \"6\") true))
 
     ; a view with an `on-mount-guard`, with and without a session cookie:
-    (assert= (live-guard spec (conn-for \"GET\" \"/dashboard\")) \"/account\")
-    (assert= (live-guard spec (conn-for \"GET\" \"/dashboard\" {:headers {:cookie \"…\"}})) nil)
+    (assert= (live-guard view (conn-for \"GET\" \"/dashboard\")) \"/account\")
+    (assert= (live-guard view (conn-for \"GET\" \"/dashboard\" {:headers {:cookie \"…\"}})) nil)
 
-  Live components (a `deflive-component` module's `live-component-spec` thunk):
+  Live components (a `deflive-component` module's value, `module/live-component`):
 
-    (let (spec (web/components/like-button/live-component-spec)
-          s0   (component-mount spec \"like-1\" {\"id\" \"like-1\"})
-          s1   (component-event spec \"toggle\" {} s0))
+    (let (component (web/components/like-button/live-component)
+          s0        (live-component-mount component \"like-1\" {\"id\" \"like-1\"})
+          s1        (live-component-event component \"toggle\" {} s0))
       (assert= (get s1 :liked?) true)
-      (assert= (includes? (component-render spec s1) \"Liked\") true))"
+      (assert= (includes? (live-component-render component s1) \"Liked\") true))"
   ; build, html-resp — synthetic conns + string-return coercion
   (:use web/conn)
-  ; view-spec-* / component-spec-* — the drivers below read a spec through its accessors, so
-  ; a mistyped field is an undefined function rather than a nil that silently does nothing
+  ; view-* — the drivers below call a view's LiveModule ops, the ones a session calls
   (:alias web/live)
   ; json-decode — a recorded push is decoded with the wire codec the session encoded it with
   (:alias web/socket)
@@ -137,80 +136,90 @@
   (includes? (body resp) s))
 
 ; ---- live views ------------------------------------------------------------
-; A live `spec` is the `web/live/view-spec` value `deflive` produces via the module's
-; `live-spec` thunk. Pass `(some/view/live-spec)`. A hand-built map with the same keys works
-; too — the accessors read one as happily as a record.
+; A live `view` is a value with a `web/live/LiveModule` impl — what `deflive` defines as the
+; module's `live-view` record. Pass `(some/view/live-view)`; a hand-written record with an
+; impl works the same. Each driver calls the op a running session calls.
 
-(defn live-mount (spec params)
-  "The initial model for `spec` mounted with `params` (string-keyed, as the client sends
+(defn live-mount (view params)
+  "The initial model for `view` mounted with `params` (string-keyed, as the client sends
   on join)."
-  ((web/live/view-spec-mount spec) params))
+  (web/live/view-mount view params))
 
-(defn live-render (spec model)
-  "Render `spec` at `model` to an HTML string — the same lowering the live session does."
-  (web/template/render ((web/live/view-spec-render spec) model)))
+(defn live-render (view model)
+  "Render `view` at `model` to an HTML string — the same lowering the live session does."
+  (web/template/render (live-render-tree view model)))
 
-(defn live-html (spec params)
-  "Mount `spec` with `params` and render the result — the HTML a fresh session first
-  paints. Shorthand for `(live-render spec (live-mount spec params))`."
-  (live-render spec (live-mount spec params)))
+(defn- live-render-tree (view model)
+  "The Hiccup `view` renders at `model`, with a component table of its own — a render outside a
+  session has no session table to share, and dropping this one afterwards stops the beats any
+  component hole started when it mounted."
+  (let (components (table/new)
+        tree (web/live/view-render view model components))
+    (web/component/cancel-ticks components)
+    (table/drop components)
+    tree))
 
-(defn live-event (spec event-name params model)
-  "The model after event `event-name` (with `params`) fires on `spec` at `model`."
-  ((web/live/view-spec-handle-event spec) event-name params model))
+(defn live-html (view params)
+  "Mount `view` with `params` and render the result — the HTML a fresh session first
+  paints. Shorthand for `(live-render view (live-mount view params))`."
+  (live-render view (live-mount view params)))
 
-(defn live-tick (spec key model)
-  "The model after the ticker keyed `key` fires on `spec` at `model`."
-  ((web/live/view-spec-handle-tick spec) key model))
+(defn live-event (view event-name params model)
+  "The model after event `event-name` (with `params`) fires on `view` at `model`."
+  (web/live/view-handle-event view event-name params model))
 
-(defn live-info (spec msg model)
-  "The model after out-of-band message `msg` is handled by `spec` at `model` — the unit-test
+(defn live-tick (view key model)
+  "The model after the ticker keyed `key` fires on `view` at `model`."
+  (web/live/view-handle-tick view key model))
+
+(defn live-info (view msg model)
+  "The model after out-of-band message `msg` is handled by `view` at `model` — the unit-test
   view of what `handle-info` does when send-info (PubSub/Presence/a timer) delivers a
   message to a running session."
-  ((web/live/view-spec-handle-info spec) msg model))
+  (web/live/view-handle-info view msg model))
 
-(defn live-unmount (spec model)
-  "Run `spec`'s unmount cleanup for `model` — the unit-test view of what happens when a
+(defn live-unmount (view model)
+  "Run `view`'s unmount cleanup for `model` — the unit-test view of what happens when a
   session live-navigates away (it runs in the caller's process, so `(self)` stands in for
   the session pid that any pubsub/presence cleanup targets)."
-  ((web/live/view-spec-unmount spec) model))
+  (web/live/view-unmount view model))
 
-(defn live-guard (spec conn)
-  "Run `spec`'s `on-mount-guard` against `conn` (build one with `conn-for`) — `nil`/`false`
+(defn live-guard (view conn)
+  "Run `view`'s `on-mount-guard` against `conn` (build one with `conn-for`) — `nil`/`false`
   means the mount is allowed; any other value is the path the client would be redirected to.
   A view without an `on-mount-guard` clause always returns `nil` here."
-  ((web/live/view-spec-mount-guard spec) conn))
+  (web/live/view-mount-guard view conn))
 
-(defn live-patch (spec params model)
-  "The model after a live-patch delivers `params` to `spec` at `model` — the unit-test view
+(defn live-patch (view params model)
+  "The model after a live-patch delivers `params` to `view` at `model` — the unit-test view
   of what a session.patch(href) push does: handle-params runs against the *current* model,
   with no mount/remount involved (unlike live-mount, which starts a session fresh)."
-  ((web/live/view-spec-handle-params spec) params model))
+  (web/live/view-handle-params view params model))
 
 ; ---- live components --------------------------------------------------------
-; A component `spec` is the `web/component/component-spec` value `deflive-component`
-; produces via the module's `live-component-spec` thunk. Pass
-; `(some/component/live-component-spec)`. Drives the same functions a running session's
+; A `component` is a value with a `web/component/LiveComponentModule` impl — what
+; `deflive-component` defines as the module's `live-component` record. Pass
+; `(some/component/live-component)`. Drives the same ops a running session's
 ; web/component/render-slot and dispatch-event do, without a socket or a parent view.
 
-(defn component-mount (spec id assigns)
-  "The initial state for component `spec` mounted with `id` and `assigns` (string-keyed,
-  as a parent's `(component module assigns)` call supplies)."
-  ((web/component/component-spec-mount spec) id assigns))
+(defn live-component-mount (component id assigns)
+  "The initial state for `component` mounted with `id` and `assigns` (string-keyed, as a
+  parent's `(component module assigns)` call supplies)."
+  (web/component/component-mount component id assigns))
 
-(defn component-render (spec state)
-  "Render component `spec` at `state` to an HTML string — the same lowering
+(defn live-component-render (component state)
+  "Render `component` at `state` to an HTML string — the same lowering
   web/component/render-slot does (minus its `data-cid` wrapper)."
-  (web/template/render ((web/component/component-spec-render spec) state)))
+  (web/template/render (web/component/component-render component state)))
 
-(defn component-event (spec event-name params state)
-  "The state after event `event-name` (with `params`) fires on component `spec` at `state`."
-  ((web/component/component-spec-handle-event spec) event-name params state))
+(defn live-component-event (component event-name params state)
+  "The state after event `event-name` (with `params`) fires on `component` at `state`."
+  (web/component/component-handle-event component event-name params state))
 
 ; ---- driving a live view through its markup ---------------------------------
 ;
-; The drivers above call a spec's functions directly, which is the right way to unit-test a
-; handler and the wrong way to test a view. `(live-event spec "save" {} model)` passes whether
+; The drivers above call a view's ops directly, which is the right way to unit-test a
+; handler and the wrong way to test a view. `(live-event view "save" {} model)` passes whether
 ; or not anything in the rendered markup would ever send "save" — so a view whose button is
 ; wired to "sve", or which lost the button in a refactor, has a green test suite and a dead
 ; page. README's own counter example shipped that way for months: a `handle-event` clause no
@@ -224,7 +233,7 @@
 ; markup: `web/template/render` lowers it one-to-one, and matching the tree means no second
 ; HTML parser to keep correct. The one thing that is opaque is a LiveComponent's own markup —
 ; it reaches the parent's tree as a rendered string (`web/template/raw-node`), so selectors do
-; not descend into it. Drive a component with `component-event` and its own spec.
+; not descend into it. Drive a component with `live-component-event` and its own value.
 ;
 ; What `live-click` / `live-change` / `live-submit` send is deliberately what brood_live.js
 ; sends, field for field: click sends `data-event` with `data-params`; change and input send
@@ -232,43 +241,43 @@
 ; them. If that correspondence ever drifts, these tests stop telling the truth about the
 ; browser — so it is pinned by tests of its own in web_test_test.
 
-;; A live view under test: its spec and its current model. A plain value, threaded like
-;; everything else — `(live-click v "#inc")` returns the next view, and `(live-model v)` gets
-;; the model out for an ordinary assertion. There is no process and no socket, so nothing here
-;; needs tearing down.
-(defrecord live-view (spec model))
+;; A live view under test: the view value and its current model. A plain value, threaded like
+;; everything else — `(live-click driven "#inc")` returns the next harness, and
+;; `(live-model driven)` gets the model out for an ordinary assertion. There is no process and
+;; no socket, so nothing here needs tearing down.
+(defrecord harness (view model))
 
-(impl Display web/test/live-view (->string (_v) "#<live-view>"))
+(impl Display web/test/harness (->string (_driven) "#<live harness>"))
 
-(defn live-open (spec params)
-  "Mount `spec` with `params` and return a view to drive. The starting point for every
+(defn live-open (view params)
+  "Mount `view` with `params` and return a harness to drive it. The starting point for every
   function below:
 
-      (let (v (live-open (counter/live-spec) {})
-            v (live-click v \"#increment\")
-            v (live-click v \"#increment\"))
-        (assert= (live-text v \"#count\") \"2\"))"
-  (live-view spec (live-mount spec params)))
+      (let (driven (live-open (counter/live-view) {})
+            driven (live-click driven \"#increment\")
+            driven (live-click driven \"#increment\"))
+        (assert= (live-text driven \"#count\") \"2\"))"
+  (harness view (live-mount view params)))
 
-(defn live-model (v)
+(defn live-model (driven)
   "The view's current model — for assertions the markup cannot make."
-  (live-view-model v))
+  (harness-model driven))
 
-(defn live-tree (v)
+(defn live-tree (driven)
   "The Hiccup the view currently renders."
-  ((web/live/view-spec-render (live-view-spec v)) (live-view-model v)))
+  (live-render-tree (harness-view driven) (harness-model driven)))
 
-(defn live-markup (v)
+(defn live-markup (driven)
   "The view's current markup as an HTML string."
-  (web/template/render (live-tree v)))
+  (web/template/render (live-tree driven)))
 
-(defn live-apply (v f)
-  "The view with `f` applied to its model — the bridge back to the spec-level drivers, for
+(defn live-apply (driven f)
+  "The harness with `f` applied to its model — the bridge back to the op-level drivers, for
   anything that has no element behind it:
 
-      (live-apply v (fn (m) (live-tick (live-view-spec v) 1000 m)))
-      (live-apply v (fn (m) (live-info (live-view-spec v) {:from :pubsub} m)))"
-  (live-view (live-view-spec v) (f (live-view-model v))))
+      (live-apply driven (fn (m) (live-tick (harness-view driven) 1000 m)))
+      (live-apply driven (fn (m) (live-info (harness-view driven) {:from :pubsub} m)))"
+  (harness (harness-view driven) (f (harness-model driven))))
 
 ; ---- the Hiccup tree --------------------------------------------------------
 
@@ -580,8 +589,8 @@
         ": "
         (describe-node node)
         " is inside a data-cid wrapper, so the client "
-        "would route this event to that component — drive it with component-event and the "
-        "component's own spec"))))
+        "would route this event to that component — drive it with live-component-event and "
+        "the component's own value"))))
 
 (defn live-click (v selector)
   "Click the element matching `selector` and return the resulting view.
@@ -592,7 +601,7 @@
   (let ([node ancestors] (require-match v selector "live-click")
         _ (refuse-component ancestors node "live-click")
         event (require-event node :click "live-click"))
-    (live-apply v (fn (model) (live-event (live-view-spec v) event (element-params node) model)))))
+    (live-apply v (fn (model) (live-event (harness-view v) event (element-params node) model)))))
 
 (defn live-fire (v selector attr &optional (params {}))
   "Fire the binding `attr` on the element matching `selector`, with `params` merged over its
@@ -619,7 +628,7 @@
         " — it is not wired to that binding"))
     (live-apply v
       (fn (model)
-        (live-event (live-view-spec v)
+        (live-event (harness-view v)
           (->string handler)
           (merge (element-params node) (stringify-param-keys params))
           model)))))
@@ -634,7 +643,7 @@
         _ (refuse-component ancestors node "live-change")
         event (require-event node :change "live-change")
         params (merge {"value" (->string value)} (element-params node)))
-    (live-apply v (fn (model) (live-event (live-view-spec v) event params model)))))
+    (live-apply v (fn (model) (live-event (harness-view v) event params model)))))
 
 ;; Controls whose value a browser does NOT put in a FormData: the submit/reset buttons (only a
 ;; submitter's value is included, and hatch's client does not send one), and a file input,
@@ -708,7 +717,7 @@
         _ (refuse-component ancestors node "live-submit")
         event (require-event node :submit "live-submit")
         merged (merge (form-params node) (stringify-param-keys params)))
-    (live-apply v (fn (model) (live-event (live-view-spec v) event merged model)))))
+    (live-apply v (fn (model) (live-event (harness-view v) event merged model)))))
 
 (defn- stringify-param-keys (params)
   "Params with string keys, so a test may write `{:email \"…\"}` and still match what a form

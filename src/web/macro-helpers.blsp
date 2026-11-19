@@ -4,7 +4,9 @@
 
   All three read a body of `(tag …)` clauses, refuse a duplicate singular clause, turn
   repeatable `(on \"name\" (a b) …)` clauses into one `match` over the event name, and default
-  every optional hook to a no-op `defn`. The view and the component also share `(tick ms …)`
+  every optional hook — to a no-op `defn` for a channel, and for a view or a component by
+  leaving the op out of the generated `impl`, so the ability's provided default stands. The
+  view and the component also share `(tick ms …)`
   dispatch and the render clause — inline Hiccup or a `.bml` template — compiled into a
   static/dynamic split.
 
@@ -64,6 +66,21 @@
   (if found
     (list 'defn name (first (rest found)) (cons 'do (rest (rest found))))
     (list 'defn name default-args default-body)))
+
+(defn method (op self-symbol found)
+  "The impl method for ability op `op` from the clause `found` — `(tag args body…)` — with
+  `self-symbol` prepended to its args, since an ability op takes the dispatching value first.
+
+  (hatch/web/macro-helpers/method 'view-mount 'v '(mount (p) (inc p))) ;=> '(view-mount (v p) (do (inc p)))"
+  (list op (cons self-symbol (first (rest found))) (cons 'do (rest (rest found)))))
+
+(defn optional-method (op self-symbol found)
+  "`(method op self-symbol found)` in a list, or an empty list when the clause `found` is
+  absent — so the ability's provided default stands. For `append`ing into an impl body.
+
+  (hatch/web/macro-helpers/optional-method 'view-unmount 'v nil) ;=> nil
+  (hatch/web/macro-helpers/optional-method 'view-unmount 'v '(unmount (m) m)) ;=> '((view-unmount (v m) (do m)))"
+  (if found (list (method op self-symbol found)) (list)))
 
 ; ---- dispatch ----
 
@@ -160,12 +177,18 @@
 ; ---- deflive's expansion ----
 ;
 ;; Here rather than beside the macro in web/live, which is the session RUNTIME: this runs only
-;; at expansion. The expansion names `web/live/view-spec` and `web/live/notify-reload` as
-;; symbols, which the consuming module resolves — it already `(:use web/live)`s to call deflive.
+;; at expansion. The expansion names the `LiveModule` ability bare — an ability is registered
+;; under its bare name, and a qualified spelling in `impl` registers under a different one —
+;; and `web/live/notify-reload` qualified, which the consuming module resolves.
+
+;; The name the generated impl's methods bind the view value to. None of them reads it; it is
+;; spelled so that no clause body's own names can collide with it.
+(def- *view-self* 'deflive-view)
 
 (defn deflive-expansion (body)
-  "The `(do …)` form `web/live/deflive` expands its clause `body` into. See `deflive` for the
-  clauses and what each defines."
+  "The `(do …)` form `web/live/deflive` expands its clause `body` into: a field-less record
+  `live-view` and an `impl` of `web/live/LiveModule` for it, plus the hot-reload sentinel. See
+  `deflive` for the clauses and what each defines."
   (let (singular (fn (tag) (clause "deflive" tag body))
         mount-clause (singular 'mount)
         render-clause (singular 'render)
@@ -179,15 +202,13 @@
         ; Static/dynamic split for minimal-diff rendering (web/parts). On a malformed form
         ; the whole render falls back to one opaque dynamic — correct, just not granular.
         parts (compile-render expression)
-        ; Both render and render-dynamic take one extra, optional, framework-internal arg
-        ; beyond the user-facing render-dyn-args: the session's live component table (a
-        ; `table`), which a `(component …)` hole (web/parts' component-form? case, or
-        ; rewrite-components for a nested one) reads/writes via web/component/render-slot.
-        ; Optional + defaulted so every existing view (no component holes) is unaffected —
-        ; only component holes ever reference `live-components`.
-        render-with-components-args (list (first render-dyn-args)
-                                      '&optional
-                                      (list web/parts/*component-table-param* (list 'table/new)))
+        ; Every render op takes one framework-internal arg beyond the user-facing model: the
+        ; session's live component table (a `table`), which a `(component …)` hole (web/parts'
+        ; component-form? case, or rewrite-components for a nested one) reads/writes via
+        ; web/component/render-slot. It must be named `live-components` — the compiled holes
+        ; reference it as a free variable (see web/parts' component-slot-form).
+        render-params (list *view-self* (first render-dyn-args) web/parts/*component-table-param*)
+        dynamics (get parts :dynamics)
         ; Change tracking (Phoenix HEEx-style): a per-slot render fn plus, in parallel, the
         ; set of model keys each slot reads. `push-diff` re-renders only the slots whose
         ; dependencies changed and reuses the prior HTML for the rest — so a one-field update
@@ -199,74 +220,74 @@
                     (first render-dyn-args)
                     nil))
     (list 'do
-      ; a (component …) hole in the render compiles to a call on web/component/render-slot
-      ; (fully qualified — this module needn't :use web/component itself). No explicit
-      ; require needed here: every view already (:use web/live) before calling deflive,
-      ; and web/live now (:alias web/component) itself.
-      (list 'defn 'mount (first (rest mount-clause)) (cons 'do (rest (rest mount-clause))))
-      (list 'def 'render-static (get parts :statics))
-      (list 'defn 'render-dynamic render-with-components-args (cons 'vector (get parts :dynamics)))
-      ; Each slot fn takes render-with-components-args, not the bare render-dyn-args: a slot
-      ; compiled from a `(component …)` hole references `live-components` as a free variable
-      ; (see web/parts' component-slot-form), so it must be bound as a parameter here too.
-      (list 'def
-        'render-slots
-        (cons 'vector
-          (map (get parts :dynamics) (fn (d) (list 'fn render-with-components-args d)))))
-      (list 'def
-        'slot-deps
-        (apply vector
-          (map (get parts :dynamics)
-            (fn (d) (if (nil? model-sym) :all (web/parts/form-deps d model-sym))))))
-      ; `render`'s contract is to return Hiccup (callers — web/test's live-render — wrap it in
-      ; web/template/render themselves), so it can't just call render-dynamic, which returns an
-      ; already-rendered string. Instead every `(component module assigns)` sub-form becomes a
-      ; `(web/template/raw (web/component/render-slot …))` call, with a fresh, unshared
-      ; component table each call — correct for a one-off render outside a live session.
-      (list 'defn 'render render-with-components-args (web/parts/rewrite-components expression))
-      (list 'defn
-        'handle-event
-        (list 'event-name 'event-params 'event-model)
-        (dispatch-match 'event-name
-          (clauses 'on body)
-          'event-params
-          'event-model
-          'event-model))
-      ; one match arm per tick clause, keyed by its (literal) interval
-      (list 'defn
-        'handle-tick
-        (list 'tick-key 'tick-model)
-        (tick-match 'tick-key tick-clauses 'tick-model))
-      ; Optional `(handle-info (msg model) …)` — runs when send-info delivers an out-of-band
-      ; message (PubSub/Presence/timer). Absent → identity: the view ignores such messages.
-      (optional-defn (singular 'handle-info)
-        'handle-info
-        (list 'info-msg 'info-model)
-        'info-model)
-      ; Optional `(unmount (model) …)` — runs (in the session process) when the session leaves
-      ; this view via live-navigation, before the next view mounts: undo what mount did
-      ; (pubsub/unsubscribe, presence/untrack, a timer). Absent → a no-op.
-      (optional-defn (singular 'unmount) 'unmount (list 'unmount-model) nil)
-      ; Optional `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
-      ; live-navigate into this view). Absent → always allow.
-      (optional-defn (singular 'on-mount-guard) 'mount-guard (list 'guard-conn) nil)
-      ; Optional `(handle-params (params model) …)` — a live-patch on the *current* view, no
-      ; remount (Phoenix's handle_params). Absent → identity: the model is unchanged.
-      (optional-defn (singular 'handle-params)
-        'handle-params
-        (list 'patch-params 'patch-model)
-        'patch-model)
-      (list 'def 'live-ticks (tick-intervals tick-clauses))
-      ; A 0-arg thunk that re-resolves the view's functions by name each call, so a
-      ; session can pick up hot-reloaded code. The router's (live …) clause registers it.
-      ;; Positional, in `view-spec`'s declared field order — change one and change the other.
-      (list 'defn
-        'live-spec
-        (list)
-        (list 'web/live/view-spec
-          'mount 'render 'render-static 'render-dynamic 'render-slots 'slot-deps 'handle-event
-          'handle-tick 'handle-info 'unmount 'mount-guard 'handle-params 'live-ticks))
-      ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs
-      ; top-level defs), so a save signals open sessions to re-render. No-op at first
-      ; load (no registry yet).
+      ; The view's value and dispatch identity. Field-less: everything a view is lives in its
+      ; impl, which is what lets a hot reload reach a value the router registered long ago.
+      (list 'defrecord 'live-view (list))
+      (cons 'impl
+        (cons 'LiveModule
+          (cons 'live-view
+            (append
+              (list (method 'view-mount *view-self* mount-clause)
+                ; `view-render`'s contract is to return Hiccup (callers — web/test's
+                ; live-render — wrap it in web/template/render themselves), so it can't
+                ; just call render-dynamic, which returns an already-rendered string.
+                ; Instead every `(component module assigns)` sub-form becomes a
+                ; `(web/template/raw (web/component/render-slot-html …))` call against
+                ; the table it is handed.
+                (list 'view-render render-params (web/parts/rewrite-components expression))
+                (list 'view-handle-event
+                  (list *view-self* 'event-name 'event-params 'event-model)
+                  (dispatch-match 'event-name
+                    (clauses 'on body)
+                    'event-params
+                    'event-model
+                    'event-model))
+                (list 'view-render-static (list *view-self*) (get parts :statics))
+                (list 'view-render-dynamic render-params (cons 'vector dynamics))
+                (list 'view-slot-deps
+                  (list *view-self*)
+                  (apply vector
+                    (map dynamics
+                      (fn (dynamic)
+                        (if (nil? model-sym) :all (web/parts/form-deps dynamic model-sym)))))))
+              ; One slot alone, by index, for change tracking. Absent when the render has no
+              ; dynamic slot at all, since then there is no index to ask for.
+              (if (empty? dynamics)
+                (list)
+                (list (list 'view-render-slot
+                        (list *view-self*
+                          'slot-index
+                          (first render-dyn-args)
+                          web/parts/*component-table-param*)
+                        (cons 'case (cons 'slot-index (append (slot-cases dynamics) (list nil)))))))
+              ; one match arm per tick clause, keyed by its (literal) interval, and the
+              ; intervals themselves; absent, the provided defaults are no ticks at all
+              (if (empty? tick-clauses)
+                (list)
+                (list (list 'view-handle-tick
+                        (list *view-self* 'tick-key 'tick-model)
+                        (tick-match 'tick-key tick-clauses 'tick-model))
+                  (list 'view-ticks (list *view-self*) (tick-intervals tick-clauses))))
+              ; `(handle-info (msg model) …)` — runs when send-info delivers an out-of-band
+              ; message (PubSub/Presence/timer). Absent → identity: the view ignores such messages.
+              (optional-method 'view-handle-info *view-self* (singular 'handle-info))
+              ; `(unmount (model) …)` — runs (in the session process) when the session leaves
+              ; this view via live-navigation, before the next view mounts: undo what mount did
+              ; (pubsub/unsubscribe, presence/untrack, a timer). Absent → a no-op.
+              (optional-method 'view-unmount *view-self* (singular 'unmount))
+              ; `(on-mount-guard (conn) …)` — runs before mount (initial connect and every
+              ; live-navigate into this view). Absent → always allow.
+              (optional-method 'view-mount-guard *view-self* (singular 'on-mount-guard))
+              ; `(handle-params (params model) …)` — a live-patch on the *current* view, no
+              ; remount (Phoenix's handle_params). Absent → identity: the model is unchanged.
+              (optional-method 'view-handle-params *view-self* (singular 'handle-params))))))
+      ; Sentinel: re-evaluated on every (re)load of this module (reload-defs re-runs a
+      ; top-level `deflive` whole, the impl above included), so a save signals open sessions
+      ; to re-render. No-op at first load (no registry yet).
       (list 'def 'live-reloaded (list 'web/live/notify-reload)))))
+
+(defn slot-cases (dynamics)
+  "The `case` arms selecting one of `dynamics` by its index: `0 first-form 1 second-form …`.
+
+  (hatch/web/macro-helpers/slot-cases '((get m :a) (get m :b))) ;=> '(0 (get m :a) 1 (get m :b))"
+  (mapcat (range (count dynamics)) (fn (index) (list index (nth dynamics index)))))

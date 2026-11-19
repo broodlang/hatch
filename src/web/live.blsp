@@ -16,7 +16,7 @@
   ; apply-update / dispatch-event / apply-tick / cancel-ticks — this module's own session
   ; runtime calls these fully-qualified (web/component/…); declaring the dependency here —
   ; rather than relying entirely on deflive-expanded consumers to have loaded it — means it
-  ; resolves even for a hand-built LiveModule spec that never goes through the deflive macro.
+  ; resolves even for a hand-written LiveModule impl that never goes through the deflive macro.
   (:alias web/component)
   ; from-package / handler — brood_live.js, served straight out of the package
   (:alias web/bundled-client)
@@ -27,60 +27,85 @@
   ; emit — surface a raising view handler as a [:hatch :live :exception] event
   (:alias telemetry))
 
-; ---- the view spec ----
+; ---- the LiveModule ability ----
 ;
-;; What a `deflive` module exposes, as a value. It was a thirteen-key map, and every read of
-;; it — a `(get spec :render-dynamic)` or a `(get view :slot-deps)` — was a keyword one character
-;; away from a silent nil. A nil there is not a crash: `render-slots` nil means "no slots",
-;; so a mistyped read degrades a view to re-rendering everything, correctly, forever, with
-;; nothing to see. The accessors below turn each of those into a name `nest check` knows.
+;; A live view is a VALUE with an impl of this ability. `deflive` expands, inside the view's
+;; module, to a field-less record `live-view` (the view's dispatch identity) and an `impl` of
+;; LiveModule for it carrying the clauses the author wrote. The router registers
+;; `(module/live-view)` per path; the session holds that value and calls these ops on it.
 ;;
-;; The generated accessors read a plain MAP as happily as a record, so a hand-built spec —
-;; which this module has always accepted, and `web/test` documents — keeps working unchanged;
-;; a spec that predates a field simply answers nil for it, exactly as `get` did.
+;; Three ops are required, the three every view writes. The rest are provided, and each default
+;; is what a view without that clause has always meant: a handler that leaves the model alone,
+;; an unmount that does nothing, a guard that always allows, no ticks, and the whole render as
+;; one opaque dynamic slot with no change tracking. `deflive` overrides the render ops with the
+;; static/dynamic split it compiles, and the handlers with the clauses that are present.
 ;;
-;; REORDERING THESE FIELDS MEANS EDITING `deflive` TOO. The macro builds the value with the
-;; positional constructor, so the field order here and the argument order there are one
-;; contract in two places. What keeps that honest is that every field is pinned by a
-;; behavioural test (`web_test_test`'s drivers, `web_change_tracking_test`'s slot deps), so a
-;; swap fails the suite rather than shipping a view whose ticks run its event handler.
-(defrecord view-spec
-  (mount render
-    render-static
-    render-dynamic
-    render-slots
-    slot-deps
-    handle-event
-    handle-tick
-    handle-info
-    unmount
-    mount-guard
-    handle-params
-    ticks))
+;; The compiled render artifacts are ops rather than fields of the value, for hot reload. A
+;; save re-runs the `deflive` form, which re-registers the impl, so the next call through any
+;; op reaches the new code: the session and the route table keep holding the same value and
+;; nothing re-fetches it. A field would be a copy taken at registration, stale after the save.
+;;
+;; Named LiveModule, not LiveView, to avoid colliding with Phoenix's `LiveView`. The ops carry a
+;; `view-` prefix because each is a generic function bound in this module, and a view module that
+;; `(:use web/live)` and `(:use web/template)` would otherwise see two `render`s.
+(defability LiveModule
+  "A live view: build a model from params, render it, and handle client events.
 
-(impl Display web/live/view-spec (->string (_spec) "#<live view-spec>"))
+  `deflive` writes the value and the impl. By hand it is a record and an impl of the three
+  required ops, under the name the router's `(live path module)` clause calls,
+  `module/live-view`:
+
+      (defrecord live-view ())
+      (impl LiveModule live-view
+        (view-mount (_view _params) {:n 0})
+        (view-render (_view model _components) [:p {} (str (get model :n))])
+        (view-handle-event (_view _name _params model) (assoc model :n (inc (get model :n)))))
+
+  `components` is the session's component table, which a `(component …)` hole renders into;
+  a view with no component holes ignores it."
+  (view-mount (self params))
+  (view-render (self model components))
+  (view-handle-event (self name params model))
+  (view-handle-tick (_self _interval model) model)
+  (view-handle-info (_self _message model) model)
+  (view-handle-params (_self _params model) model)
+  (view-unmount (_self _model) nil)
+  (view-mount-guard (_self _conn) nil)
+  ;; the statics and dynamics a join sends: by default one empty skeleton around one slot
+  ;; holding the whole render
+  (view-render-static (_self) ["" ""])
+  (view-render-dynamic (self model components)
+    [(web/template/render (view-render self model components))])
+  ;; one dynamic slot alone, for change tracking; only reached when `view-slot-deps` is not nil
+  (view-render-slot (self index model components)
+    (nth (view-render-dynamic self model components) index))
+  ;; per slot, the model keys it reads (or `:all`); nil turns change tracking off
+  (view-slot-deps (_self) nil)
+  ;; the intervals the view beats on, one timer each
+  (view-ticks (_self) []))
 
 ; ---- the session view ----
 ;
 ;; One live connection's whole state: which view is mounted, its model, and the bookkeeping
 ;; the loop keeps around it. It was a bare map that grew a key wherever one was first needed,
-;; and reading it was the same hazard the spec was — `(get view :mounted)` without the `?` is
-;; nil, which reads as "not yet mounted", so every out-of-band arm silently drops its message
+;; and every read of it was a keyword one character away from a silent nil — `(get view
+;; :mounted)` without the `?` is nil, which reads as "not yet mounted", so every out-of-band arm silently drops its message
 ;; and a live view simply stops updating with nothing logged.
 ;;
-;; The fields divide in two. `spec`/`spec-fn`/`session`/`params`/`conn`/`components` are fixed
-;; when the socket connects (and replaced wholesale on a live-navigate); `model` through
-;; `client-sfp` are what the loop accumulates. `generation` starts at 0 rather than nil
-;; because a declared field is always present — `(session-view-generation view)` would answer nil,
-;; and the tick arm compares it against a ticker's stamp.
+;; The fields divide in two. `live`/`session`/`params`/`conn`/`components` are fixed when the
+;; socket connects (and replaced wholesale on a live-navigate); `model` through `client-sfp`
+;; are what the loop accumulates. `live` is the view value, the one every LiveModule op is
+;; called on. `generation` starts at 0 rather than nil because a declared field is always
+;; present — `(session-view-generation view)` would answer nil, and the tick arm compares it
+;; against a ticker's stamp.
 ;;
-;; Built through `new-session-view` below, never positionally at a call site: fourteen
+;; Built through `new-session-view` below, never positionally at a call site: thirteen
 ;; positional arguments is a swap waiting to happen, and the two places that make one care
 ;; about different halves of the list.
 (defrecord session-view
-  (spec spec-fn
-    session params conn components model mounted? generation ticker-handles watchdog dynamics
-    render-model client-sfp))
+  (live session
+    params conn components model mounted? generation ticker-handles watchdog dynamics render-model
+    client-sfp))
 
 (impl Display
   web/live/session-view
@@ -91,12 +116,12 @@
       (session-view-generation view)
       ">")))
 
-(defn- new-session-view (spec spec-fn session params conn)
-  "A freshly connected session's view: what the connection settles at connect time, with
-  everything the loop accumulates starting empty. `mounted?` is false because mount waits for
-  the client's `join` frame (which carries the real URL params) — see `session-dispatch`."
-  (session-view spec
-    spec-fn
+(defn- new-session-view (live session params conn)
+  "A freshly connected session's view of the view value `live`: what the connection settles at
+  connect time, with everything the loop accumulates starting empty. `mounted?` is false
+  because mount waits for the client's `join` frame (which carries the real URL params) — see
+  `session-dispatch`."
+  (session-view live
     session
     params
     conn
@@ -195,8 +220,7 @@
 ;; rewrite.
 ;;
 ;; Rather than widen `mount`/`render`'s signature — a breaking change to every existing view,
-;; for something most views never touch, and one the `LiveModule` behaviour already had to be
-;; contorted for once (see the `&optional` arity wart) — the Conn is exposed as a dynamic
+;; for something most views never touch — the Conn is exposed as a dynamic
 ;; binding, bound ONCE around the whole session loop in `start-session`. It is therefore in
 ;; scope for every hook the session ever runs (`mount`, `render`, `handle-event`,
 ;; `handle-info`, `handle-tick`, `handle-params`, `unmount`) with no per-call-site plumbing,
@@ -213,7 +237,7 @@
   connected) and carried unchanged across live-navigations, which reuse the same socket.
 
   Callable from any live-view hook. Returns nil outside a live session — including in a
-  `web/test` driver, which calls a spec's functions directly rather than running a session —
+  `web/test` driver, which calls the view's ops directly rather than running a session —
   so a view that reads it must tolerate nil rather than assume a connection.
 
   It is deliberately a *read-only* view of the connection: a WebSocket has no response to
@@ -407,7 +431,7 @@
       (assoc view :model (web/streams/flush model))
       view)))
 
-(defn- audit-live-render (spec model)
+(defn- audit-live-render (live model)
   "Run `web/audit`'s live-markup rules over this view's rendered document. Dev only, and on a
   FULL render only — a join, not every diff — so the cost is one extra render per connection
   rather than one per event.
@@ -428,7 +452,7 @@
     (let (scratch (table/new))
       (check-allow :discarded-catch
         (try
-          (web/audit/warn-live-markup! (web/template/render ((view-spec-render spec) model scratch)))
+          (web/audit/warn-live-markup! (web/template/render (view-render live model scratch)))
           (catch _ nil)))
       ;; Mounting into the scratch table starts each component's own beats, aimed at this
       ;; session — stop them, or every dev join leaks a set of timers nothing can cancel.
@@ -450,18 +474,18 @@
   stops re-downloading its own markup on every drop. A mismatch (a first connect, a
   live-navigate to a different view, a hot-reloaded template) sends them as usual, so the
   client can never be left weaving against a stale skeleton."
-  (let (spec (session-view-spec view)
-        statics (view-spec-render-static spec)
+  (let (live (session-view-live view)
+        statics (view-render-static live)
         model (session-view-model view)
         ; Guard the render like every other view hook: a template that throws (a nil deref, a
         ; bad `get`) fails to an isolated, logged `[:hatch :live :exception]` and ends the
         ; session, rather than crashing the whole session process with no telemetry.
         dynamics (try
-                   ((view-spec-render-dynamic spec) model (session-view-components view))
+                   (view-render-dynamic live model (session-view-components view))
                    (catch e (live-handler-error "render" :render e nil))))
     (if (nil? dynamics)
       [:close view]
-      (let (_audit (audit-live-render spec model)
+      (let (_audit (audit-live-render live model)
             fingerprint (web/parts/statics-fingerprint statics)
             frame (if (= fingerprint (session-view-client-sfp view))
                     {:event "join" :d dynamics :f fingerprint}
@@ -490,24 +514,24 @@
 (defn recompute-dynamics (view old model)
   "The new dynamic slot values, re-rendering only the slots whose model dependencies changed
   since `old` was rendered and reusing the prior value for the rest (Phoenix HEEx-style
-  change tracking). Falls back to a full re-render when the tracking metadata is absent (an
-  older spec) or no prior model was recorded. `components` (the session's live component
-  table) is threaded through every slot call, same as `push-full` — a component-holding
-  slot's dependency is always `:all` (see web/parts' `deps-of`), so it's never skipped here,
-  but it still needs the table to actually render."
-  (let (spec (session-view-spec view)
-        slots (view-spec-render-slots spec)
-        deps (view-spec-slot-deps spec)
+  change tracking). Falls back to a full re-render when the view tracks no dependencies (its
+  `view-slot-deps` is nil, as a hand-written view's is by default) or no prior model was
+  recorded. `components` (the session's live component table) is threaded through every slot
+  call, same as `push-full` — a component-holding slot's dependency is always `:all` (see
+  web/parts' `deps-of`), so it's never skipped here, but it still needs the table to actually
+  render."
+  (let (live (session-view-live view)
+        deps (view-slot-deps live)
         old-model (session-view-render-model view)
         components (session-view-components view))
-    (if (or (nil? slots) (nil? deps) (nil? old-model))
-      ((view-spec-render-dynamic spec) model components)
+    (if (or (nil? deps) (nil? old-model))
+      (view-render-dynamic live model components)
       (into []
         (map (range (count old))
-          (fn (i)
-            (if (slot-dirty? (nth deps i) old-model model)
-              ((nth slots i) model components)
-              (nth old i))))))))
+          (fn (index)
+            (if (slot-dirty? (nth deps index) old-model model)
+              (view-render-slot live index model components)
+              (nth old index))))))))
 
 (defn- push-diff (sock view)
   "Re-render the dynamic slots that a state change actually touched and send only those that
@@ -671,21 +695,19 @@
                                   view
                                   "diff"
                                   (try
-                                    ((view-spec-handle-tick (session-view-spec view)) key model)
+                                    (view-handle-tick (session-view-live view) key model)
                                     (catch e (live-handler-error "tick" key e model))))
                                 [:continue view]))
       ; an out-of-band message delivered via send-info (PubSub/Presence/timer) → run the
       ; view's handle-info and push the resulting diff. A view without a handle-info clause
-      ; (or one that throws) keeps its current model, so a stray message is harmless.
+      ; (the provided default) or one that throws keeps its current model, so a stray message
+      ; is harmless.
       ([:info payload] (push-update sock
                          view
                          "diff"
-                         (let (handle-info (view-spec-handle-info (session-view-spec view)))
-                           (if handle-info
-                             (try
-                               (handle-info payload model)
-                               (catch e (live-handler-error "info" :message e model)))
-                             model))))
+                         (try
+                           (view-handle-info (session-view-live view) payload model)
+                           (catch e (live-handler-error "info" :message e model)))))
       ; a web/component/send-update push: merge into that component's stored state (a no-op
       ; if cid names no mounted component) and re-render — the parent's :model is untouched,
       ; but its next render-dynamic pass picks up the component's fresh state.
@@ -708,11 +730,11 @@
                                       (catch e (live-handler-error "tick-component" cid e true)))
                                   (push-update sock view "diff" model)
                                   [:continue view]))
-      ; a hot reload re-resolves the view's functions; swap the whole spec in rather than
-      ; merging its keys over the view's own
-      ([:reload] (let (spec (check-allow :discarded-catch
-                              (try ((session-view-spec-fn view)) (catch _ nil))))
-                   (push-update sock (if spec (assoc view :spec spec) view) "render" model)))
+      ; A hot reload: re-render in full. Nothing is re-resolved here because nothing needs to
+      ; be — the reload re-ran the view's `deflive` form, which re-registered its LiveModule
+      ; impl, and every op called on the view value dispatches to the impl registered now.
+      ; The value itself (a field-less record) is unchanged by a reload.
+      ([:reload] (push-update sock view "render" model))
       ; CSS-only rebuild: tell the client to re-stamp its stylesheet links — no
       ; re-render, so the live model (form state, scroll, focus) is preserved.
       ([:reload-css] (sent sock view {:event "reload-css"}))
@@ -775,9 +797,9 @@
   re-mount is what `navigate` is for."
   (if (session-view-mounted? view)
     [:continue view]
-    (let (spec (session-view-spec view)
+    (let (live (session-view-live view)
           model (try
-                  ((view-spec-mount spec) (get frame :params))
+                  (view-mount live (get frame :params))
                   (catch e (live-handler-error "mount" :mount e :hatch/mount-error))))
       (if (= model :hatch/mount-error)
         [:close view]
@@ -787,7 +809,7 @@
             ; what statics this client says it still holds (nil on a first connect) —
             ; push-full drops them from the frame if they match
             :client-sfp (get frame :sfp)
-            :ticker-handles (start-tickers (view-spec-ticks spec) (session-view-generation view)))
+            :ticker-handles (start-tickers (view-ticks live) (session-view-generation view)))
           "render"
           model)))))
 
@@ -812,7 +834,7 @@
                      view
                      "diff"
                      (try
-                       ((view-spec-handle-event (session-view-spec view)) name params model)
+                       (view-handle-event (session-view-live view) name params model)
                        (catch e (live-handler-error "event" name e model)))))))
       ; ---- live uploads ----
       ;
@@ -853,7 +875,7 @@
                  view
                  "diff"
                  (try
-                   ((view-spec-handle-params (session-view-spec view)) params model)
+                   (view-handle-params (session-view-live view) params model)
                    (catch e (live-handler-error "patch" :params e model)))))
       ("navigate" (session-navigate sock view (get frame :path) params))
       (_ [:continue view]))))
@@ -865,29 +887,32 @@
   socket can't cross the boundary on its own.
 
   The target's on-mount-guard runs first, against the Conn built once at connect time. A veto
-  redirects there and stays on the current view. A throwing guard (or spec thunk) has no
-  sensible redirect target to fall back to — redirecting to the very path that just threw
-  could loop — so it fails closed: the session ends."
+  redirects there and stays on the current view. A throwing guard has no sensible redirect
+  target to fall back to — redirecting to the very path that just threw could loop — so it
+  fails closed: the session ends.
+
+  The target is the view value the route table holds for `path`, the same value every session
+  on that path calls its ops on; a hot reload since registration is already in its impl."
   (let (entry (lookup-live path))
     (if (and entry (= (get entry :session) (session-view-session view)))
-      (let (resolved (try
-                       (let (spec ((get entry :spec)))
-                         [spec ((view-spec-mount-guard spec) (session-view-conn view))])
-                       (catch e (live-handler-error "mount-guard" path e nil))))
+      (let (target (get entry :view)
+            verdict (try
+                      (view-mount-guard target (session-view-conn view))
+                      (catch e (live-handler-error "mount-guard" path e :hatch/guard-error))))
         (cond
-          (nil? resolved) [:close view]
-          (nth resolved 1) (redirect-and-continue sock view (nth resolved 1))
-          else (swap-view sock view entry (nth resolved 0) params)))
+          (= verdict :hatch/guard-error) [:close view]
+          verdict (redirect-and-continue sock view verdict)
+          else (swap-view sock view entry params)))
       (redirect-and-continue sock view path))))
 
-(defn- swap-view (sock view entry spec params)
-  "Unmount and tear down the current view, then mount `spec` (the target of a live-navigate)
-  over the same connection and push its full render."
+(defn- swap-view (sock view entry params)
+  "Unmount and tear down the current view, then mount the view value in the route-table
+  `entry` (the target of a live-navigate) over the same connection and push its full render."
   ; let the OLD view clean up (pubsub/unsubscribe, presence/untrack, …) before it's replaced —
   ; the session process lives on across a navigate, so the monitor-based cleanup never fires
   ; for it. Runs here in the session process, so (self) is the pid mount subscribed/tracked.
   (try
-    ((view-spec-unmount (session-view-spec view)) (session-view-model view))
+    (view-unmount (session-view-live view) (session-view-model view))
     (catch e (live-handler-error "unmount" :unmount e nil)))
   ; its uploads, tickers, component beats and component table — before the drain below, so
   ; no beat can land after it for a table that is about to be gone
@@ -902,47 +927,43 @@
   ; view's. The generation is bumped so a beat still queued from the OLD view's ticker
   ; (stopped above, but a message already sent lingers) is dropped rather than dispatched into
   ; the new view's handle-tick.
-  (let (generation (+ 1 (session-view-generation view))
-        fresh (assoc (new-session-view spec
-                       (get entry :spec)
-                       (get entry :session)
-                       params
-                       (session-view-conn view))
+  (let (target (get entry :view)
+        generation (+ 1 (session-view-generation view))
+        fresh (assoc (new-session-view target (get entry :session) params (session-view-conn view))
                 :generation generation
                 :watchdog (session-view-watchdog view))
         ; guarded like `join`'s mount, so a raising mount reaches telemetry rather than
         ; vanishing; the old view is already gone, so the session ends on the fresh one
         model (try
-                ((view-spec-mount spec) params)
+                (view-mount target params)
                 (catch e (live-handler-error "mount" :mount e :hatch/mount-error))))
     (if (= model :hatch/mount-error)
       [:close fresh]
       (push-update sock
         (assoc fresh
           :mounted? true
-          :ticker-handles (start-tickers (view-spec-ticks spec) generation))
+          :ticker-handles (start-tickers (view-ticks target) generation))
         "render"
         model))))
 
 ; ---- session start ----
 
 (defn start-session (sock request entry)
-  "Run a live session for the registry `entry` (`{:spec :session}`) on a freshly-upgraded
+  "Run a live session for the registry `entry` (`{:view :session}`) on a freshly-upgraded
   socket: build a read-only Conn from `request` (cookies parsed, so an `on-mount-guard` can
-  read a session) and run the target spec's guard. A veto sends a redirect and closes the
+  read a session) and run the target view's guard. A veto sends a redirect and closes the
   socket, never entering the session loop. Otherwise enter the per-connection event loop,
   unmounted until the client's `join`. The session remembers its `:session` group, so live
   navigation can refuse to cross into another group (forcing a full reload that re-runs that
   group's auth); the Conn is carried in the view so live-navigate can re-run a guard too."
-  (let (spec-fn (get entry :spec)
+  (let (live (get entry :view)
         params (get request :params {})
-        spec (spec-fn)
         conn (build request)
         ; a throwing guard has no session yet to fail into and no sensible redirect
         ; target, so it fails closed — the raw socket is just closed, no session ever
         ; starts — rather than crashing, matching how every other optional hook
         ; (handle-info/tick/unmount) is guarded against a user-code exception
-        guard-result (try ((view-spec-mount-guard spec) conn) (catch _ :hatch/guard-error)))
+        guard-result (try (view-mount-guard live conn) (catch _ :hatch/guard-error)))
     (cond
       (= guard-result :hatch/guard-error)
         (check-allow :discarded-catch (try (tcp/close sock) (catch _ nil)))
@@ -964,13 +985,13 @@
           ; render and the view's tickers wait for `join`.
           (live-register (self))
           (session-loop sock
-            (assoc (new-session-view spec spec-fn (get entry :session) params conn)
+            (assoc (new-session-view live (get entry :session) params conn)
               :watchdog (start-watchdog (self) sock))
             ; the bytes-native frame parser reads a `bytes` buffer — start empty
             (bytes []))))))
 
-; ---- live-route registry: path → live-spec thunk, for router-driven WS dispatch ----
-; `(live path module)` in `defrouter` registers a view's spec thunk here at load; the
+; ---- live-route registry: path → view value, for router-driven WS dispatch ----
+; `(live path module)` in `defrouter` registers the view's value here at load; the
 ; server's single ws-handler (`live-dispatcher`) looks the path up per connection. A global
 ; rather than a process, so it survives a startup image — see web/route-table. `defonce`, so
 ; hot-reloading THIS module keeps the routes an app already registered.
@@ -988,19 +1009,19 @@
    :miss-lead "no live view registered at"
    :known "registered paths"})
 
-(defn register-live (path spec-fn session)
-  "Register live view `spec-fn` (a 0-arg spec thunk) for WebSocket dispatch at `path`,
-  in live-session group `session` (any value; nil = the default group). Views in the
-  same group can live-navigate between each other; crossing groups forces a full
-  reload — the auth boundary. `(live path module …)` calls this at load; idempotent,
+(defn register-live (path view session)
+  "Register the live `view` (a value with a `LiveModule` impl — `module/live-view`'s record) for
+  WebSocket dispatch at `path`, in live-session group `session` (any value; nil = the default
+  group). Views in the same group can live-navigate between each other; crossing groups forces
+  a full reload — the auth boundary. `(live path module …)` calls this at load; idempotent,
   so a hot reload just re-puts. Returns nil."
   (web/route-table/register live-routes-global-name
     (fn () *live-routes*)
     path
-    {:spec spec-fn :session session}))
+    {:view view :session session}))
 
 (defn lookup-live (path)
-  "The registry entry `{:spec :session}` for `path`, or nil if no live view is there."
+  "The registry entry `{:view :session}` for `path`, or nil if no live view is there."
   (get *live-routes* path))
 
 (defn- live-ws-path (req-path)
@@ -1034,26 +1055,16 @@
                                             (keys *live-routes*)))
           (tcp/close sock))))))
 
-; ---- the LiveModule behaviour ----
-; The contract a live-view module satisfies — exactly what `deflive` generates.
-; A module that says `(:implements web/live/LiveModule)` is checked (at edit time, by
-; the advisory type-checker) to define each of these at the right arity. Named
-; LiveModule, not LiveView, to avoid colliding with Phoenix's `LiveView`.
-
-(defbehaviour LiveModule
-  "A live view: build a model from params, render it, and handle client events."
-  (mount (params))
-  (render (model &optional (live-components (table/new))))
-  (handle-event (name params model)))
-
 ; ---- deflive macro ----
 
 (defmacro deflive (& clauses)
   "Define a live view in the current module.
 
-  Expands to `mount`, `render`, `handle-event`, `handle-tick`, `live-ticks`, and the
-  `live-spec` thunk. Wire it into the router with `(live path module)`, whose
-  `live-dispatcher` routes WebSocket connections to this view by path.
+  Expands to a field-less record `live-view` — the view's value and its dispatch identity —
+  and an `impl` of `LiveModule` for it, carrying the clauses below as its ops (each absent
+  optional clause keeps the ability's default). Wire it into the router with
+  `(live path module)`, which registers `(module/live-view)` and whose `live-dispatcher`
+  routes WebSocket connections to this view by path.
 
   Multiple `(tick ms …)` clauses are allowed — each runs its own ticker at its own
   interval (use distinct ms values), so a view can update at several frequencies.

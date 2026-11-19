@@ -31,7 +31,7 @@
   ;; They apply to this repo too: a project's own `:format-headers` sit on top of its
   ;; plugins' rules, so hatch's sources and tests are formatted the way a consumer's are.
   ;; The rules match on head symbol alone, so a data list that happens to start with one of
-  ;; these names — `view-spec`'s field list starts with `mount` — is laid out one per line.
+  ;; these names is laid out one per line too.
   :format-headers
     {deflive 0
      deflive-component 0

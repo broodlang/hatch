@@ -1,9 +1,9 @@
 (defmodule web-parts-for-test
-  ; deflive + live-spec for a comprehension view
+  ; deflive, and the view-render-static / view-render-dynamic ops of the view it defines
   (:use web/live)
   ; weave / diff-dynamics / comp? — the runtime split helpers
   (:use web/parts)
-  ; live-render / live-spec drivers
+  ; the live-render driver
   (:use web/test)
   (:use test))
 
@@ -14,22 +14,23 @@
   (render (model) [:ul {} (for (x (get model :items)) [:li {:data-key x} x])])
   (on "noop" (params model) model))
 
+(defn- dynamics-at (model)
+  "The view's dynamic slots at `model`, as a session's join renders them."
+  (view-render-dynamic (live-view) model (table/new)))
+
 (describe "comprehension view — invariant"
   ; weave(static, dynamic(model)) must still reproduce the full render exactly, now
   ; that the `(for …)` slot renders per-item and weave joins the items.
   (test "weave(static, dynamic) == full render, for several item lists"
-    (let (spec (live-spec))
-      (assert= (weave (view-spec-render-static spec)
-                 ((view-spec-render-dynamic spec) {:items ["a" "b" "c"]}))
-        (live-render spec {:items ["a" "b" "c"]}))
-      (assert= (weave (view-spec-render-static spec) ((view-spec-render-dynamic spec) {:items []}))
-        (live-render spec {:items []}))
-      (assert= (weave (view-spec-render-static spec)
-                 ((view-spec-render-dynamic spec) {:items ["only"]}))
-        (live-render spec {:items ["only"]}))))
+    (let (view (live-view))
+      (assert= (weave (view-render-static view) (dynamics-at {:items ["a" "b" "c"]}))
+        (live-render view {:items ["a" "b" "c"]}))
+      (assert= (weave (view-render-static view) (dynamics-at {:items []}))
+        (live-render view {:items []}))
+      (assert= (weave (view-render-static view) (dynamics-at {:items ["only"]}))
+        (live-render view {:items ["only"]}))))
   (test "the for slot renders as a comprehension slot, not one opaque string"
-    (let (spec (live-spec)
-          dyn ((view-spec-render-dynamic spec) {:items ["a" "b"]}))
+    (let (dyn (dynamics-at {:items ["a" "b"]}))
       (assert= (count dyn) 1)
       (assert= (comp? (nth dyn 0)) true)
       (assert= (count (comp-items (nth dyn 0))) 2))))
@@ -37,9 +38,8 @@
 (describe "comprehension view — per-item diff"
   ; Editing one item's data must ship a per-item cdiff for that item only, not the list.
   (test "changing one item yields a single-item cdiff"
-    (let (spec (live-spec)
-          old ((view-spec-render-dynamic spec) {:items ["a" "b" "c"]})
-          new ((view-spec-render-dynamic spec) {:items ["a" "X" "c"]})
+    (let (old (dynamics-at {:items ["a" "b" "c"]})
+          new (dynamics-at {:items ["a" "X" "c"]})
           d (diff-dynamics old new))
       ; one slot (index 0) changed, and its cdiff carries only item index 1
       (assert= (count d) 1)
@@ -48,17 +48,15 @@
         (assert= (count (get cdiff :__cdiff__)) 1)
         (assert= (includes? (get (get cdiff :__cdiff__) 1) ">X</li>") true))))
   (test "appending an item reports just the new item with the grown count"
-    (let (spec (live-spec)
-          old ((view-spec-render-dynamic spec) {:items ["a" "b"]})
-          new ((view-spec-render-dynamic spec) {:items ["a" "b" "c"]})
+    (let (old (dynamics-at {:items ["a" "b"]})
+          new (dynamics-at {:items ["a" "b" "c"]})
           cdiff (get (diff-dynamics old new) 0))
       (assert= (get cdiff :n) 3)
       (assert= (count (get cdiff :__cdiff__)) 1)
       (assert= (includes? (get (get cdiff :__cdiff__) 2) ">c</li>") true)))
   (test "no change yields no diff"
-    (let (spec (live-spec)
-          old ((view-spec-render-dynamic spec) {:items ["a" "b"]})
-          new ((view-spec-render-dynamic spec) {:items ["a" "b"]}))
+    (let (old (dynamics-at {:items ["a" "b"]})
+          new (dynamics-at {:items ["a" "b"]}))
       (assert= (diff-dynamics old new) {}))))
 
 ;; Regression: a LiveComponent nested inside a (for …) must be compiled to a render-slot

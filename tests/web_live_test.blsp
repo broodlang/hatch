@@ -182,14 +182,18 @@
       (is (includes? message "/feed"))
       (is (includes? message "/live/ws/typo")))))
 
+;; A view value to register. The table only stores it, so it needs no impl — and it is defined
+;; here, above the `:isolated` tests that use it, because those run as this file loads.
+(defrecord routed-view ())
+
 (describe "live-route registry"
   :isolated (test "register, look up, and miss"
     (do
-      (register-live "/reg-test" (fn () {:ok true}) :admin)
+      (register-live "/reg-test" (routed-view) :admin)
       ; its live-session group
       (let (e (lookup-live "/reg-test"))
-        ; the registered spec thunk
-        (assert= ((get e :spec)) {:ok true})
+        ; the registered view value
+        (assert= (get e :view) (routed-view))
         (assert= (get e :session) :admin))
       (assert= (lookup-live "/never-registered-xyz") nil))))
 
@@ -201,7 +205,7 @@
 (describe "the live-route table is not held by a process"
   :isolated (test "no process owns it, so none can take it down"
     (do
-      (register-live "/crash-test" (fn () {:ok true}) :customer)
+      (register-live "/crash-test" (routed-view) :customer)
       (assert= (proc/whereis :hatch-live-routes) nil)
       (assert= (proc/whereis :hatch-live-routes-vault) nil)
       ; The lookup does not message anything: it answers from inside a process that was
@@ -209,10 +213,13 @@
       (let (parent (self))
         (spawn (send parent [:saw (lookup-live "/crash-test")]))
         (receive
-          ([:saw e] (do
-                      (assert= (nil? e) false)
-                      (assert= ((get e :spec)) {:ok true})
-                      (assert= (get e :session) :customer)))
+          ([:saw e]
+            (do
+              (assert= (nil? e) false)
+              ;; the view value crossed into another process as plain data, still
+              ;; the same view
+              (assert= (get e :view) (routed-view))
+              (assert= (get e :session) :customer)))
           (after 2000 (assert= :no-reply :a-reply))))))
 
   ; What an image restore replays: the module's globals come back, and nothing re-runs. A
@@ -220,7 +227,7 @@
   ; carries. `*live-routes*` is that global — read it directly, with no registrar in sight.
   :isolated (test "the entries live in the module global an image would carry"
     (do
-      (register-live "/image-test" (fn () {:ok true}) :customer)
+      (register-live "/image-test" (routed-view) :customer)
       (assert= (get (get *live-routes* "/image-test") :session) :customer))))
 
 (describe "reload broadcast"
@@ -228,8 +235,9 @@
   ; reload registry — the code-hot-reload sibling of notify-reload-css. A `deflive`
   ; sentinel (`(def live--reloaded (notify-reload))`) fires it on every module (re)load,
   ; and `nest run --watch src/` drives that reload on each save; the session's [:reload]
-  ; handler then re-resolves fresh code via spec-fn and re-renders. Register this test
-  ; process as a stand-in session, fire the notify, and confirm the message arrives.
+  ; handler then re-renders, its view value dispatching to the impl the reload just
+  ; re-registered (see "a held view value reaches re-registered code" below). Register this
+  ; test process as a stand-in session, fire the notify, and confirm the message arrives.
   ; Unregister after so we don't leak into other tests.
   (test "notify-reload is a safe no-op before any session registers"
     (assert= (notify-reload) nil))
@@ -240,6 +248,34 @@
       (let (got (receive ([:reload] :got) (after 1000 :timeout)))
         (web/live/live-unregister (self))
         (assert= got :got)))))
+
+;; What a hot reload changes, and what it does not. A save re-runs the view's `deflive` form,
+;; which re-registers its LiveModule impl under the same record id; the session and the route
+;; table go on holding the value they were given at connect and at registration. Nothing
+;; re-fetches it, so the value they hold must reach the new code on its next call — re-running
+;; the `impl` here is the part of a reload that matters.
+(defrecord reloaded-view ())
+
+(impl LiveModule
+  reloaded-view
+  (view-mount (_view _params) {})
+  (view-render (_view _model _components) [:p {} "before"])
+  (view-handle-event (_view _name _params model) model))
+
+(describe "hot reload re-registers the impl, not the value"
+  :isolated (test "a held view value reaches re-registered code"
+    (let (held (reloaded-view)
+          route-table-copy (do
+                             (register-live "/reloaded-test" held nil)
+                             (get (lookup-live "/reloaded-test") :view)))
+      (assert= (view-render held {} (table/new)) [:p {} "before"])
+      (impl LiveModule
+        reloaded-view
+        (view-mount (_view _params) {})
+        (view-render (_view _model _components) [:p {} "after"])
+        (view-handle-event (_view _name _params model) model))
+      (assert= (view-render held {} (table/new)) [:p {} "after"])
+      (assert= (view-render route-table-copy {} (table/new)) [:p {} "after"]))))
 
 (describe "reload-css broadcast"
   ; notify-reload-css fans a [:reload-css] out to every registered session via the
@@ -437,7 +473,7 @@
 
 (describe "session-view"
   (test "new-session-view starts unmounted at generation 0"
-    (let (view (web/live/new-session-view (live-spec) live-spec nil {} nil))
+    (let (view (web/live/new-session-view (live-view) nil {} nil))
       (assert= (session-view-mounted? view) false)
       ;; 0 and not nil: the tick arm compares a ticker's stamp against this, and a declared
       ;; field is always present — so a `(get view :generation 0)` style default would not
@@ -448,10 +484,10 @@
       (assert= (session-view-dynamics view) nil)))
 
   (test "the connection-time fields are the ones it was given"
-    (let (spec (live-spec)
+    (let (live (live-view)
           conn (build {:method "GET" :path "/x" :query "" :params {} :headers {} :body ""})
-          view (web/live/new-session-view spec live-spec :admin {"a" "1"} conn))
-      (assert= (session-view-spec view) spec)
+          view (web/live/new-session-view live :admin {"a" "1"} conn))
+      (assert= (session-view-live view) live)
       (assert= (session-view-session view) :admin)
       (assert= (session-view-params view) {"a" "1"})
       (assert= (session-view-conn view) conn)
@@ -459,29 +495,27 @@
       (assert= (count (session-view-components view)) 0)))
 
   (test "two views never share a component table"
-    (let (a (web/live/new-session-view (live-spec) live-spec nil {} nil)
-          b (web/live/new-session-view (live-spec) live-spec nil {} nil))
+    (let (a (web/live/new-session-view (live-view) nil {} nil)
+          b (web/live/new-session-view (live-view) nil {} nil))
       (table/put (session-view-components a) "id" :only-in-a)
       (assert= (table/get (session-view-components b) "id") nil)))
 
   (test "it prints as what it is"
-    (assert= (->string (web/live/new-session-view (live-spec) live-spec nil {} nil))
+    (assert= (->string (web/live/new-session-view (live-view) nil {} nil))
       "#<live session unmounted gen=0>")
-    (assert= (->string (assoc (web/live/new-session-view (live-spec) live-spec nil {} nil)
+    (assert= (->string (assoc (web/live/new-session-view (live-view) nil {} nil)
                          :mounted? true
                          :generation 3))
       "#<live session mounted gen=3>"))
 
-  ;; The spec is carried whole under one field rather than merged over the view's own keys.
-  ;; Merged, a spec field and a session field could collide silently — and merging a RECORD
-  ;; would have dragged its `:__id__` across, retyping the view as a view-spec.
-  (test "the spec is nested, not splatted"
-    (let (view (web/live/new-session-view (live-spec) live-spec nil {} nil))
-      (assert= (record-id view)
-        (record-id (web/live/new-session-view (live-spec) live-spec nil {} nil)))
-      (is (not (= (record-id view) (record-id (live-spec)))))
-      ;; reaching a spec function goes through the spec, so nothing can shadow it
-      (is (fn? (view-spec-mount (session-view-spec view)))))))
+  ;; The view value is carried whole under one field rather than merged over the session's
+  ;; own keys: merging a RECORD would drag its id across, retyping the session as the view.
+  (test "the view value is nested, not splatted"
+    (let (view (web/live/new-session-view (live-view) nil {} nil))
+      (assert= (record-id view) (record-id (web/live/new-session-view (live-view) nil {} nil)))
+      (is (not (= (record-id view) (record-id (live-view)))))
+      ;; the ops dispatch on the nested value, so nothing the session holds can shadow them
+      (assert= (view-ticks (session-view-live view)) [1000]))))
 
 ;; Q10, answered: head updates are an EFFECT, not a diffable region of the layout.
 ;;

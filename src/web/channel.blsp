@@ -73,8 +73,8 @@
 ; ---- the values a channel handler sees ----
 
 ;; `socket` is to a channel what `model` is to a live view: the one thing every callback
-;; takes and returns. It is a record rather than a map for the reason web/live's specs are —
-;; `(get socket :assigns)` mistyped is a silent nil, and a silent nil in the assigns is an
+;; takes and returns. It is a record rather than a map for the reason web/live's session view
+;; is — `(get socket :assigns)` mistyped is a silent nil, and a silent nil in the assigns is an
 ;; authenticated channel quietly forgetting who it belongs to.
 (defrecord channel-socket (topic assigns conn))
 
@@ -82,7 +82,7 @@
   web/channel/channel-socket
   (->string (s) (str "#<channel-socket " (channel-socket-topic s) ">")))
 
-;; What `defchannel` produces, by the same argument as `web/live/view-spec`.
+;; What `defchannel` produces, a record by the same argument as the socket.
 (defrecord channel-spec (join handle-in handle-info handle-out terminate))
 
 (impl Display web/channel/channel-spec (->string (_spec) "#<channel-spec>"))
