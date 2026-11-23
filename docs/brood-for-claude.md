@@ -17,7 +17,8 @@ A small, dynamic Lisp implemented in Rust.
   list *comprehension* that returns a value). Iterate with recursion — proper
   tail calls are guaranteed (including calls to *other* functions), so it's O(1)
   stack — or the combinators `fold` / `reduce` / `map` / `seq/filter`. A *local*,
-  self-contained loop is a `letrec`-bound closure called by name.
+  self-contained loop is a named `fn` (`(fn go (n acc) … (go …))`, ADR-785) or a `letrec`-bound
+  closure, called by name.
 - **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `[]`, `{}`,
   `#{}` are *truthy*. **The one trap: an empty *list* is falsy**, because `()` ≡
   `nil` — so `(if [] …)`/`(if "" …)`/`(if {} …)` take the `then` branch but
@@ -149,8 +150,8 @@ Two rules that keep Brood code uniform and unambiguous. The first is
 alternative spelling (ADR-149); the second is idiom.
 
 **1. Code uses `( )`; vectors `[ ]` are for data.** Every parameter list is a
-*list* — `defn`, `fn`, a `defmethod`, an ability op spec, an `impl` method, a
-`defbehaviour` op (ADR-512) — and so are the binding forms of `let` / `letrec` /
+*list* — `defn`, `fn`, a `defmethod`, an ability op spec, an `impl` method
+(ADR-512) — and so are the binding forms of `let` / `letrec` /
 `binding` / `for` / `doseq` / `when-let` / `if-let`. Writing the vector is a clean
 error with a hint. Vectors are reserved for data: tuple values (`[x y]`), sequence
 literals (`[1 2 3]`), tuple **patterns** that match against tuple values inside
@@ -212,15 +213,14 @@ name is the thing readers look up later. Confining the rule there preserves
 the ergonomic `(map … (fn ([k v]) …))` idiom, which reads locally and never
 gets looked up by name.
 
-**Reserved names: you cannot redefine what Brood ships.** `(def get …)`,
-`(defn map …)`, `(defmacro when …)`, `(def set/union …)` are all errors (ADR-166) —
-the prelude, the builtins and the embedded std modules are reserved. Your own globals
-and your packages stay fully redefinable, which is what hot reload is for. If a name
-you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
-define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
-Inside that module your definition wins every bare call, even over a prelude **macro**
-(`(defn when …)` → `(when x)` calls yours; `/when` reaches the macro). Defining a prelude
-macro's name warns at load unless the header says `(:shadow when)` (ADR-423).
+**Shadowing a name Brood ships is fine inside a module.** In a `(defmodule your/mod …)`,
+`(defn drop …)`, `(defn update …)` or `(defn when …)` just works, with no declaration (ADR-784):
+it makes `your/mod/drop`, every bare `drop` in that module calls yours, even over a prelude
+**macro** (`(defn when …)` → `(when x)` calls yours), and `/drop` reaches the language's. A local
+binding shadows too (`(let (get …) …)`). Do not rename a function just because its natural name
+is taken. What stays reserved (ADR-166) is redefining the language's OWN binding: a top-level
+`(def get …)` in a file with no `defmodule`, or `(def set/union …)`, is an error. Your own
+globals and packages stay fully redefinable, which is what hot reload is for.
 The rule reserves shipped **functions**; a dynamic variable is never reserved whatever it
 holds. Inside a module, set a root one with the `/name` root escape —
 `(def /*print-length* 3)`, `(def /*out* my-port)` redirects output permanently; a bare
@@ -419,12 +419,12 @@ Other things worth knowing:
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
-- `defbehaviour` is the *other* seam — a contract a **module** satisfies by defining
-  plain functions, claimed with `(:implements Name)` in the header. It is core (bare,
-  no `require`/`:use`). No value dispatch. Use it when the implementor is a namespace,
-  not a value.
-- **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
-  write one, write an ability.
+- **A module contract is an ability too** (ADR-761). When a module must supply a set of
+  functions (a live view's `mount`/`render`), declare them as a `defability`, have the
+  module define a value (`(defrecord view ())`) and `impl` the ability for it; the caller
+  holds the value. Bodyless ops are required, and `nest check` reports a missing one.
+- **`defprotocol`/`defimpl`, `defbehaviour` and `(:implements …)` no longer exist**
+  (ADR-168, ADR-761). If you were about to write one, write an ability.
 
 ### The abilities `std/` already ships (ADR-177)
 
@@ -500,11 +500,12 @@ x                bind x; a repeated x is an equality constraint (non-linear)
     (sum-to (- n 1) (+ acc n))))         ; tail-recursive: O(1) stack
 ```
 
-For a *self-contained* loop, use a `letrec`-bound closure called by name — it stays
-inline instead of forcing a top-level helper, and threads only the *changing* state
-(it closes over the rest):
+For a *self-contained* loop, use a named `fn` (ADR-785) or a `letrec`-bound closure, called by
+name — it stays inline instead of forcing a top-level helper, and threads only the *changing*
+state (it closes over the rest):
 
 ```lisp
+((fn go (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))) 100000 0)   ;=> 5000050000
 (letrec (go (fn (n acc)
               (if (= n 0) acc (go (- n 1) (+ acc n)))))
   (go 100000 0))                                   ;=> 5000050000   ; O(1) stack
@@ -742,7 +743,7 @@ and registers the new pid. The name is auto-reaped on death.
     (receive
       ([:down ^ref _ :normal] :ok)
       ([:down ^ref _ reason]
-        (io/puts "child died: " (pr-str reason) " — restarting")
+        (io/puts "child died:" (pr-str reason) "— restarting")
         (supervise worker-fn)))))
 ```
 
@@ -784,7 +785,7 @@ a node link (ADR-073). The whole model in one example:
 ;; --- on node "bob" -----------------------------------------------------------
 (node/start "bob")
 (proc/register :inbox (self))
-(receive ([:hi from] (io/puts "hi from " from)))       ; => hi from :alice@host
+(receive ([:hi from] (io/puts "hi from" from)))        ; => hi from :alice@host
 ```
 
 The three pieces and how they relate:
@@ -962,7 +963,14 @@ code paints to a terminal or a GUI window unchanged.
   build): `[:quad x y w h color rot]` and `[:sprite tex x y w h uv tint
   rot]`, physical pixels from the window's corner. Build them with `gui/line` and
   `gui/sprite` over a `gui/texture` handle; open the window with `{:input :pixels}` so
-  mouse messages carry pixels. The engine above them is the `b2d` package (ADR-374).
+  mouse messages carry pixels. A texture samples nearest by default (pixel art stays
+  crisp); upload a painted or photographic one with `{:filter :smooth}` so it stays clean
+  drawn scaled or turned (ADR-783). The engine above them is the `b2d` package (ADR-374).
+- **3D (games)** = `[:scene x y w h spec]`: meshes uploaded once with `gui/mesh` (glTF-style
+  attribute bytes) drawn into a pixel rect with a camera matrix, directional lights, the
+  skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
+  `:blend`), composited in op order — 2D before it is behind, after it in front (ADR-786).
+  Both window painters draw it; the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
   bytes in a cell block, painted at full pixel resolution by both window painters and in
   half-block cells by a terminal (pixels through the kitty graphics protocol where the terminal
@@ -1063,7 +1071,7 @@ To run a one-off entry point without editing the manifest's `:main`, pass
 (try
   (work)
   (catch e
-    (io/puts "failed: " e)))
+    (io/puts "failed:" e)))
 
 (try (work)                              ; `finally` runs on success, on a raise,
   (catch e (cleanup-failed e))           ;   and on a raise inside `catch` (ADR-306);
@@ -1095,7 +1103,8 @@ such as `(catch {:kind :type} …)` one kind; `(error-message e)` reads whatever
 
 First tell your program's failure from the runtime's. A process that raises is
 reported by the default crash reporter (pid, reason, trace) under `brood file` /
-`nest run`, and deep recursion is a catchable `recursion too deep` error — both are
+`nest run`, and a recursion past its call-stack ceiling is a catchable `recursion too
+deep` error — both are
 *your* code. A Rust **panic** (a use-after-GC tripwire, a heap index, a runtime
 invariant) is the runtime's: it is appended to **`.brood_crash_dump`** in the working
 directory (read the **last** `=== brood crash dump ===` block; at 16 MiB it rotates to
@@ -1145,7 +1154,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-522), so a cache exists only at a definition (`(:use memo)`, then
   `(defmemo rows-of 8 (rope width) …)`: a `defn` that remembers its last N calls compared
   by `=` — bounded, and immediate for the same big value: each process keeps its store
-  uncopied, so the caller's own vector or map hits by identity, ADR-670) ·
+  uncopied, so the caller's own vector or map hits by identity, ADR-670); `(defmemo-by name
+  256 (id) (table) …)` keeps ONE answer per key (hashed: keep it small) while that key's input
+  is `=` to the one it was worked out from — for more keys read in turn than a recent-calls
+  memo could hold (ADR-741) ·
   `registry` for tables your modules fill as they load (`(registry/put :app/hooks :save
   'app/on-save)`, read with `registry/entries` / `registry/lookup` / `registry/ranked` — by an
   entry's `:rank`): atomic across processes and carried by the image, which a `defonce` + `def`
@@ -1426,7 +1438,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-227 follow-up), for any module, so naming where something comes from loads
   it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
   `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
-  `(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:implements …)` and `(:load a b …)`
+  `(:use-internals …)`, `(:alias …)`, `(:check-allow …)` and `(:load a b …)`
   (load now, refer nothing — the eager request, since a plain reference loads on first
   use, ADR-335); **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
@@ -1455,12 +1467,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   — handles lists, vectors, strings (substring), and maps (looks at values; use
   `contains?` for keys).
 - **`nest check` is the loop's other half.** It reports unbound names (and `nest run`
-  refuses to start over one), non-tail self-recursion, provable type misuse, a
+  refuses to start over one), provable type misuse, a
   `(catch e nil)` that discards an error unread, and always-true conditions; `nest check
   --strict` adds values merely wider than the parameter. A finding you mean — a
-  deliberately non-tail test helper, a catch whose nothing is the answer — is
-  acknowledged in code with `(check-allow :category form…)`: `:non-tail-recursion`,
-  `:discarded-catch`, `:cross-module-def`, `:constant-condition`, `:unreachable-clause`,
+  catch whose nothing is the answer — is acknowledged in code with
+  `(check-allow :category form…)`: `:discarded-catch`, `:cross-module-def`, `:constant-condition`, `:unreachable-clause`,
   `:type-mismatch`, `:unbound`, `:deprecated`, `:trusted`, `:list-truthiness`,
   `:single-dispatch` (see `docs/type-annotations.md`).
 
