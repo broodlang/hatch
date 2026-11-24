@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "brood": {
+      "args": [
+        "mcp"
+      ],
+      "command": "nest"
+    }
+  }
+}
