@@ -24,6 +24,20 @@
   (:alias web/env)
   (:alias log))
 
+(defn watched (opts)
+  "`opts` with the pool's watchdog (store-postgres's `pool/watch`) set to exit the process
+  outside dev: a pool whose checks fail for minutes is first restarted, and if that does
+  not bring the database back the process exits with code 1, so the platform (Fly's restart
+  policy) starts it afresh, rather than serving 503s for days as mur.fly.dev did in
+  2026-11. An app's own `:watchdog` settings win; `:watchdog false` turns it off. An
+  adaptor without a watchdog ignores the key.
+
+    (watched {:size 2 :watchdog false})   ;=> {:size 2 :watchdog false}"
+  (let (settings (get opts :watchdog {}))
+    (if (= settings false)
+      opts
+      (assoc opts :watchdog (merge {:exit? (web/env/prod?)} settings)))))
+
 ; Upper bound (ms) on waiting for a single warmup probe to answer. A probe that never
 ; replies (its worker was killed, or the connection wedged) can't pin startup past this.
 (def *warmup-timeout-ms* 5000)
@@ -42,8 +56,11 @@
   `:verify`, a pending migration — is raised with context, and if *every* warmup probe
   fails (database unreachable or rejecting queries) `start` raises rather than hand back a
   pool that only errors on the first real request. Warmup collection is bounded by
-  `*warmup-timeout-ms*` so a wedged connection can't hang startup forever."
-  (let (r (repo/open adaptor opts)
+  `*warmup-timeout-ms*` so a wedged connection can't hang startup forever.
+
+  The pool is opened `watched` (see there): outside dev, a pool that stays unreachable
+  ends the process, for the platform to restart it."
+  (let (r (repo/open adaptor (watched opts))
         size (get opts :size 5))
     (bring-up r migrations (get config :migrations (default-mode)))
     (warmup r size)

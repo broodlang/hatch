@@ -1,0 +1,13 @@
+(defmodule web-repo-test (:use test))
+
+;; `web/repo/watched` is how every hatch app's pool gets its watchdog's exit: on outside dev,
+;; never over an app's own setting. The suite runs in dev (no $HATCH_ENV).
+
+(describe "watched"
+  (test "in dev the watchdog restarts the pool but never exits the process"
+    (assert= (get (web/repo/watched {:size 2}) :watchdog) {:exit? false}))
+  (test "an app's own settings win"
+    (assert= (get (web/repo/watched {:watchdog {:exit? true :check-ms 5000}}) :watchdog)
+      {:exit? true :check-ms 5000}))
+  (test ":watchdog false is kept, for no watchdog at all"
+    (assert= (web/repo/watched {:watchdog false}) {:watchdog false})))
